@@ -266,6 +266,25 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   return 0
 }
 
+# A task's optional linked issue is the number of the issue its pull request
+# closes. It is only ever given explicitly, never inferred, and only a
+# no-mistakes delivery that opens a pull request carries it: the pipeline adds
+# the closing reference itself, or the worker writes it under pr=manual.
+fm_closes_issue_valid() {  # <issue> <mode> <forge> <caller>
+  local issue=$1 mode=$2 forge=$3 caller=$4
+  [ -n "$issue" ] || return 0
+  case "$issue" in
+    *[!0-9]* | 0*)
+      echo "error: $caller: linked issue '$issue' is not an issue number" >&2
+      return 1 ;;
+  esac
+  if [ "$mode" != no-mistakes ] || [ "$forge" = gerrit ]; then
+    echo "error: $caller: a linked issue ships only mode=no-mistakes with a pull request, not mode=$mode forge=$forge" >&2
+    return 1
+  fi
+  return 0
+}
+
 # Print the value of every "Base branch: <name>" line that directly follows the
 # base-variant Setup sentence bin/fm-brief.sh writes; return 1 when there is
 # none. Any other "Base branch:" line is prose and ignored.
@@ -539,12 +558,13 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<closes>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto} closes=${8:-}
+  local branch=${3:-fm/$id} pr_base='' nm_base='' nm_closes='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   fm_pr_text_valid "$pr" "$mode" "$forge" fm_dod_block || return 1
+  fm_closes_issue_valid "$closes" "$mode" "$forge" fm_dod_block || return 1
   if [ -n "$consent" ]; then
     if [ "$mode" = local-only ]; then
       echo "error: fm_dod_block: upstream consent authorizes a publication that local-only never performs; drop it" >&2
@@ -675,9 +695,15 @@ EOF
       if [ "$pr" = manual ]; then
         [ -z "$nm_base" ] || nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto that branch, and open the PR against it with \`--base $base_q\`.
 "
-        fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent" "$nm_base" "$pr_base"
+        # no-mistakes refuses --closes together with --skip pr, so the worker writes the reference.
+        [ -z "$closes" ] || nm_closes="This task's PR closes issue #$closes: put a plain \`Closes #$closes\` line in the PR body you write.
+"
+        fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent" "$nm_base$nm_closes" "$pr_base"
         return
       fi
+      # A later run started without --closes drops the reference, so every start carries it.
+      [ -z "$closes" ] || nm_closes="This task's PR closes issue #$closes: pass \`--closes $closes\` on every \`no-mistakes axi run\` that starts a run, so the PR body keeps its closing reference.
+"
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$contract_forge$contract_consent
@@ -686,7 +712,7 @@ The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
-${nm_base}
+${nm_base}${nm_closes}
 EOF
       fm_nm_driving_block "$forge"
       cat <<EOF

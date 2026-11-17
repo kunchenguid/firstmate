@@ -1465,6 +1465,64 @@ test_base_branch_is_rendered_and_bounded() {
   pass "fm-brief.sh: --base-branch records the base, targets the PR at it, and is refused where no PR carries it"
 }
 
+# --closes names the issue a ship's PR closes. A no-mistakes brief passes it to
+# every run that starts, a pr=manual brief asks for a plain closing line in the
+# hand-written body, and a brief without it gains no closing text at all.
+test_closes_issue_is_rendered_only_when_set() {
+  local home brief unset_brief args out rc id
+  home="$TMP_ROOT/closes-home"
+  brief="$home/data/brief-closes/brief.md"
+  unset_brief="$TMP_ROOT/closes-unset-brief.md"
+  mkdir -p "$home/data"
+
+  for args in "--mode no-mistakes" "--mode no-mistakes --pr manual"; do
+    # shellcheck disable=SC2086 # args is an intentional word-split arg list
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-closes some-proj $args >/dev/null 2>&1 \
+      || fail "'$args' without --closes should scaffold"
+    assert_no_grep '--closes' "$brief" "'$args' without --closes passed --closes"
+    assert_no_grep 'Closes #' "$brief" "'$args' without --closes rendered a closing line"
+    mv "$brief" "$unset_brief"
+    rm -rf "$home/data/brief-closes"
+    # shellcheck disable=SC2086
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-closes some-proj $args --closes 8504 >/dev/null 2>&1 \
+      || fail "'$args' with --closes should scaffold"
+    # The issue adds exactly one line; everything else stays as the unset brief.
+    out=$(diff "$unset_brief" "$brief" | grep -c '^[<>]')
+    [ "$out" = 1 ] || fail "'$args' with --closes changed $out lines, not exactly one added line"
+    # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+    case "$args" in
+      *manual*)
+        assert_grep 'put a plain `Closes #8504` line in the PR body you write' "$brief" \
+          "the pr=manual brief does not ask for a closing line"
+        assert_no_grep '--closes' "$brief" \
+          "the pr=manual brief passes --closes, which no-mistakes refuses with --skip pr" ;;
+      *)
+        assert_grep 'pass `--closes 8504` on every `no-mistakes axi run` that starts a run' "$brief" \
+          "the no-mistakes brief does not pass --closes to every run" ;;
+    esac
+    rm -rf "$home/data/brief-closes"
+  done
+
+  id=0
+  while IFS='|' read -r args expect; do
+    [ -n "$args" ] || continue
+    id=$((id + 1))
+    # shellcheck disable=SC2086
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-closes-bad-$id" some-proj $args 2>&1); rc=$?
+    expect_code 1 "$rc" "'$args' must be refused"
+    assert_contains "$out" "$expect" "'$args' was refused without its reason"
+    assert_absent "$home/data/brief-closes-bad-$id" "'$args' left a brief behind"
+  done <<'ROWS'
+--mode direct-PR --closes 12|ships only mode=no-mistakes
+--mode local-only --closes 12|ships only mode=no-mistakes
+--mode no-mistakes --forge gerrit --closes 12|ships only mode=no-mistakes
+--scout --closes 12|apply only to ship briefs
+--mode no-mistakes --closes #12|is not an issue number
+--mode no-mistakes --closes 012|is not an issue number
+ROWS
+  pass "fm-brief.sh: --closes reaches every no-mistakes run or the hand-written PR body, and adds nothing when unset"
+}
+
 # (a) An unregistered/default project - no --branch-prefix passed at all - must
 # keep every generated ship mode's branch on the legacy "fm/<task-id>" name, byte
 # for byte, so every existing firstmate installation is unaffected.
@@ -1726,6 +1784,7 @@ test_wait_no_turns_absent_keeps_the_previous_brief
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
+test_closes_issue_is_rendered_only_when_set
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes
 test_ship_branch_prefix_empty_override_yields_bare_task_id
