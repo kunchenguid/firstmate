@@ -578,7 +578,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-138 tests across eight files: the budget, the census, the guards, the agent
+139 tests across eight files: the budget, the census, the guards, the agent
 reclaim, the guarded delete, the big-entry take-down, the tick, and the weekly
 review. They are
 hermetic — no tmux, no network, no live fleet state — and registered as
