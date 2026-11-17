@@ -40,6 +40,14 @@
 # state/<id>.busy-state reads busy is working too, even with a quiet process,
 # and so is a task with an armed state/<id>.check.sh: something still monitors
 # it, and stopping its agent would leave that monitor's next result unowned.
+# A task with an unread steering message (state/<id>.inbox/*.msg) is kept, so
+# an instruction is never stranded on a stopped agent, and so is a task whose
+# branch has a no-mistakes validation that is not finished: the worker owns that
+# run's gates. The validation read is one bounded `no-mistakes runs --limit 200`
+# per repository, and the branch's newest row alone decides because older rows
+# are history. A repository no-mistakes does not manage has no validation, and a
+# read that fails any other way - including no usable no-mistakes binary - keeps
+# every task in that repository, because it cannot prove none is running.
 # Cap stops take tasks whose last report is done or failed before quiet live
 # ones.
 # A task listed in $AK47_CONFIG/reclaim-keep (one id per line) or whose record
@@ -97,6 +105,7 @@
 #   reclaim_worktree_roots   colon list (default ~/.treehouse:~/orca/workspaces)
 # AK47_RECLAIM_SCOPE (tests only) restricts the census to agents working under
 # one directory, so a test never sees the box's real agents.
+# AK47_NO_MISTAKES (tests only) points the validation read at a fake binary.
 #
 # Exit: 0 the run completed (a finding or a stop that did not take is not a
 # failure), 1 a step failed, 2 bad usage or a malformed knob.
@@ -424,6 +433,45 @@ for i in "${!A_PID[@]}"; do
 done
 
 # ---- working veto ----------------------------------------------------------------
+# validation_state <worktree> <cwd> sets VSTATE to none | running | unknown for
+# the branch checked out there. `no-mistakes runs` lists every run of the
+# repository; one read per repository is cached for the run, which is why this
+# sets a global instead of printing (a command substitution would lose the cache).
+declare -A NM_RUNS=() NM_RC=()
+validation_state() {
+  local dir=$1 branch key out rc nm status
+  VSTATE=none
+  [ -d "$dir" ] || dir=$2
+  [ -d "$dir" ] || return 0
+  branch=$(git -C "$dir" branch --show-current 2>/dev/null) || branch=
+  [ -n "$branch" ] || return 0
+  if [ -n "${AK47_NO_MISTAKES:-}" ] && [ -x "$AK47_NO_MISTAKES" ]; then
+    nm=$AK47_NO_MISTAKES
+  elif nm=$(command -v no-mistakes 2>/dev/null) && [ -n "$nm" ]; then
+    :
+  elif [ -x "$HOME/.no-mistakes/bin/no-mistakes" ]; then
+    nm=$HOME/.no-mistakes/bin/no-mistakes
+  else
+    VSTATE=unknown
+    return 0
+  fi
+  key=$(cd "$dir" && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || key=$dir
+  if [ -z "${NM_RC[$key]+x}" ]; then
+    out=$(cd "$dir" && timeout 30 "$nm" runs --limit 200 2>&1); rc=$?
+    NM_RUNS[$key]=$out; NM_RC[$key]=$rc
+  fi
+  out=${NM_RUNS[$key]}; rc=${NM_RC[$key]}
+  if [ "$rc" != 0 ]; then
+    case "$out" in *"not initialized"*) ;; *) VSTATE=unknown ;; esac
+    return 0
+  fi
+  status=$(printf '%s\n' "$out" | awk -v b="$branch" '
+    $2 == b && $1 ~ /^[a-z_]+$/ { print $1; exit }')
+  case "$status" in
+    ''|completed|failed|cancelled|passed) ;;
+    *) VSTATE=running ;;
+  esac
+}
 # Sample CPU only for agents an action could reach.
 declare -A WORKING=() T0=() KEEP=()
 if [ -r "$AK47_CONFIG/reclaim-keep" ]; then
@@ -451,6 +499,14 @@ for j in "${cand[@]}"; do
     if [ -e "${C_HOME[$j]}/state/${C_ID[$j]}.check.sh" ]; then
       WORKING[$j]="armed check: still monitored"; continue
     fi
+    if compgen -G "${C_HOME[$j]}/state/${C_ID[$j]}.inbox/*.msg" >/dev/null; then
+      WORKING[$j]="unread steering message"; continue
+    fi
+    validation_state "$(sed -n 's/^worktree=//p' "${C_HOME[$j]}/state/${C_ID[$j]}.meta" 2>/dev/null | head -1)" "${C_CWD[$j]}"
+    case "$VSTATE" in
+      running) WORKING[$j]="validation running"; continue ;;
+      unknown) WORKING[$j]="validation state unreadable"; continue ;;
+    esac
   fi
   T0[$j]=$(cputicks "${C_PID[$j]}" || echo "")
 done

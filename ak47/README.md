@@ -286,7 +286,9 @@ stops an orphan (no task record in any home), an idle task (no report for a
 day), and the oldest excess over `agent_count` or a home's `home_children` cap,
 finished work first.
 A working agent, a chair, a secondmate's own agent, a task whose `*.check.sh` is
-armed, and anything on `~/.config/ak47/reclaim-keep` is never stopped.
+armed, a task with an unread steering message, a task whose branch has an
+unfinished no-mistakes validation, and anything on `~/.config/ak47/reclaim-keep`
+is never stopped.
 It never deletes a worktree, tears down a task, or sends `SIGKILL`; every stop
 is one `reap.log` line with its revert, and what it cannot settle is a finding.
 The script's header (`--help`) owns the exact classes, vetoes, knobs, and exit
@@ -570,7 +572,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-135 tests across eight files: the budget, the census, the guards, the agent
+136 tests across eight files: the budget, the census, the guards, the agent
 reclaim, the guarded delete, the big-entry take-down, the tick, and the weekly
 review. They are
 hermetic — no tmux, no network, no live fleet state — and registered as
