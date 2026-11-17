@@ -994,7 +994,7 @@ A drain that holds such a result with no queued wake still prints that acknowled
 An acknowledgement from an earlier generation retires no result.
 An acknowledgement whose sequence stops below a presented wake row consumes its rows and retires no result.
 Supervision-branch drains neither add nor retire these results.
-The receipt keeps each result's text, so a replaced status log neither changes nor loses it.
+The receipt keeps each result's text, cut to 219 characters, so a replaced status log neither changes nor loses it.
 It keeps the four newest results per task, and the drain names the count of any older result it drops.
 A drain repeats at most 4000 bytes of results and names the rest as omitted, and an omitted result stays pending through that acknowledgement.
 Notes, decisions, and other status lines keep their one-shot presentation.
