@@ -312,7 +312,7 @@ make_watcher_lock() {  # <home> <pid>
   echo "$h" >"$lock/fm-home"
   echo "$h/bin/fm-watch.sh" >"$lock/watcher-path"
   (
-    # shellcheck source=../bin/fm-wake-lib.sh
+    # shellcheck source=/dev/null # production module, resolved at runtime from $ROOT.
     . "$ROOT/bin/fm-wake-lib.sh" >/dev/null 2>&1
     fm_pid_identity "$pid"
   ) >"$lock/pid-identity"
@@ -400,7 +400,7 @@ test_health_line_and_children_metric() {
   grep -q '^VERDICT: test' "$AK47_STATE/health-latest.md" || fail "health-latest.md lost its other lines"
   [ "$(cat "$AK47_STATE/agent-reclaim.children")" = 2 ] || fail "children metric not written"
   (
-    # shellcheck source=../ak47/lib/common.sh
+    # shellcheck source=/dev/null # production module, resolved at runtime from $ROOT.
     . "$ROOT/ak47/lib/common.sh"
     [ "$(ak47_metric home_children)" = 2 ] || exit 1
   ) || fail "the home_children budget metric does not read the reclaim's count"
