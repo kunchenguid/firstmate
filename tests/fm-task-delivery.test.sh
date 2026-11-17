@@ -553,6 +553,76 @@ EOF
   pass "fm-merge-local: a registry change cannot redirect an in-flight local-only task"
 }
 
+# A task that recorded a base branch lands on that branch, read from the task
+# record alone: the clone's origin/HEAD record names the default branch and is
+# ignored, the default branch is left untouched, a checkout on any other branch
+# is refused by name rather than landed there, and a recorded base the project
+# no longer carries is refused rather than guessed around.
+test_local_merge_lands_on_the_recorded_base_branch() {
+  local home proj id main main_tip base_tip fix out rc
+  home="$TMP_ROOT/local-merge-base/home"
+  proj="$TMP_ROOT/local-merge-base/proj"
+  id=local-merge-base-e3
+  mkdir -p "$home/state" "$home/data" "$proj"
+  git -C "$proj" init -q || fail "could not initialize local-merge base fixture"
+  git -C "$proj" config user.email test@example.com
+  git -C "$proj" config user.name test
+  printf 'base\n' > "$proj/base"
+  git -C "$proj" add base || fail "could not stage local-merge base fixture"
+  git -C "$proj" commit -qm base || fail "could not commit local-merge base fixture"
+  main=$(git -C "$proj" branch --show-current)
+  main_tip=$(git -C "$proj" rev-parse HEAD)
+  git -C "$proj" checkout -qb feature/hub || fail "could not create the base branch fixture"
+  printf 'hub\n' > "$proj/hub"
+  git -C "$proj" add hub || fail "could not stage the base branch fixture"
+  git -C "$proj" commit -qm hub || fail "could not commit the base branch fixture"
+  base_tip=$(git -C "$proj" rev-parse HEAD)
+  git -C "$proj" checkout -qb "fm/$id" || fail "could not create the ship branch fixture"
+  printf 'change\n' > "$proj/change"
+  git -C "$proj" add change || fail "could not stage the ship branch fixture"
+  git -C "$proj" commit -qm change || fail "could not commit the ship branch fixture"
+  fix=$(git -C "$proj" rev-parse HEAD)
+  # The clone's default-branch record names the default branch, as a fresh
+  # clone's does; the landing must not consult it.
+  git -C "$proj" update-ref "refs/remotes/origin/$main" "$main_tip"
+  git -C "$proj" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$main"
+  git -C "$proj" checkout -q "$main" || fail "could not restore the fixture default branch"
+  cat > "$home/data/projects.md" <<EOF
+- $(basename "$proj") [local-only] - based work (added 2026-01-01)
+EOF
+  printf 'project=%s\nmode=local-only\nbranch=fm/%s\nbase_branch=feature/hub\nlocal_done_head=%s\n' "$proj" "$id" "$fix" > "$home/state/$id.meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "local merge landed a based task while the checkout was on $main: $out"
+  assert_contains "$out" "recorded base branch 'feature/hub'" \
+    "the wrong-branch refusal did not name the recorded base"
+  assert_contains "$out" "check out feature/hub" \
+    "the wrong-branch refusal did not say what to do"
+  [ "$(git -C "$proj" rev-parse "$main")" = "$main_tip" ] \
+    || fail "a refused local merge moved the default branch"
+  [ "$(git -C "$proj" rev-parse feature/hub)" = "$base_tip" ] \
+    || fail "a refused local merge moved the base branch"
+
+  git -C "$proj" checkout -q feature/hub || fail "could not check out the base branch"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1) \
+    || fail "local merge did not land on the recorded base branch: $out"
+  [ "$(git -C "$proj" rev-parse feature/hub)" = "$fix" ] \
+    || fail "local merge did not fast-forward the recorded base branch to the ship branch"
+  [ "$(git -C "$proj" rev-parse "$main")" = "$main_tip" ] \
+    || fail "local merge onto the base branch moved the default branch"
+  assert_contains "$out" "merged fm/$id into local feature/hub" \
+    "local merge did not report the base branch it landed on"
+
+  printf 'project=%s\nmode=local-only\nbranch=fm/%s\nbase_branch=feature/gone\nlocal_done_head=%s\n' "$proj" "$id" "$fix" > "$home/state/$id-gone.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id-gone" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "local merge landed a task whose recorded base the project does not carry: $out"
+  assert_contains "$out" "no local branch of that name" \
+    "the missing-base refusal did not explain itself"
+  [ "$(git -C "$proj" rev-parse feature/hub)" = "$fix" ] && [ "$(git -C "$proj" rev-parse "$main")" = "$main_tip" ] \
+    || fail "a missing-base refusal moved a branch"
+  pass "fm-merge-local: a recorded base branch is the landing branch, never the clone's default-branch record"
+}
+
 # A registered name may contain spaces, and the lookup must match the whole
 # name rather than only its first whitespace-delimited token (issue #1977).
 # The longer "foo bar" row is listed before the "foo" row so a leading-prefix
@@ -1986,6 +2056,7 @@ test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
+test_local_merge_lands_on_the_recorded_base_branch
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally

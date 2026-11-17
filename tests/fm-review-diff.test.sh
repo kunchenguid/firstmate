@@ -44,6 +44,11 @@
 #   (s) a branch merging both diverged default branches -> the unrelated merge
 #       bases are reported rather than picked silently
 #   (t) meta records base_branch= -> base stays origin/<base_branch>
+#   (u) mode=local-only with base_branch=, rebased onto that local base after
+#       another landing there -> base is the local <base_branch> it lands on,
+#       so no other task's landing appears
+#   (v) as (u) with a tag of the same name on the stale base -> the review
+#       still anchors on the local branch, not the tag
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -571,6 +576,53 @@ test_opted_in_base_branch_stays_on_origin() {
   pass "fm-review-diff keeps an opted-in named base branch on origin's copy"
 }
 
+# A local-only ship lands on its local base branch, so the opt-in anchors it
+# there the same way it anchors the local default.
+test_opted_in_local_only_base_branch_reviews_against_the_local_base() {
+  local case_dir out
+  case_dir=$(seed_case opted-in-local-only-base)
+  opt_in_review_anchor "$case_dir"
+  git -C "$case_dir/project" checkout -q -b feature main
+  git -C "$case_dir/project" push -q origin feature
+  plant_task_branch "$case_dir" origin/feature
+  write_task_meta "$case_dir" "kind=ship" "mode=local-only" "base_branch=feature"
+  land_locally "$case_dir" 1
+  git -C "$case_dir/project" checkout -q main
+  git -C "$case_dir/wt" rebase --quiet feature >/dev/null 2>&1 \
+    || fail "local-only-base: the fixture could not perform the rebase the mode orders"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: feature' "local-only-base: the base must be the local base branch the task lands on"
+  assert_not_contains "$out" 'diff base: origin/' "local-only-base: the base must not stay on origin's copy"
+  assert_contains "$out" 'task-change.txt' "local-only-base: the task's own change must be in the diff"
+  assert_not_contains "$out" 'landed-1.txt' "local-only-base: another task's local landing must not enter the review"
+  pass "fm-review-diff anchors an opted-in local-only base branch on the local branch it lands on"
+}
+
+# A tag that shares the local base's name must not become the review anchor.
+test_opted_in_local_only_base_branch_ignores_a_same_named_tag() {
+  local case_dir out
+  case_dir=$(seed_case opted-in-local-only-base-tag)
+  opt_in_review_anchor "$case_dir"
+  git -C "$case_dir/project" checkout -q -b feature main
+  git -C "$case_dir/project" push -q origin feature
+  plant_task_branch "$case_dir" origin/feature
+  write_task_meta "$case_dir" "kind=ship" "mode=local-only" "base_branch=feature"
+  land_locally "$case_dir" 1
+  git -C "$case_dir/project" checkout -q main
+  git -C "$case_dir/wt" rebase --quiet feature >/dev/null 2>&1 \
+    || fail "local-only-base-tag: the fixture could not perform the rebase the mode orders"
+  git -C "$case_dir/project" tag feature main
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: feature' "local-only-base-tag: the base must be the local base branch the task lands on"
+  assert_contains "$out" 'task-change.txt' "local-only-base-tag: the task's own change must be in the diff"
+  assert_not_contains "$out" 'landed-1.txt' "local-only-base-tag: a same-named tag must not pull another task's landing into the review"
+  pass "fm-review-diff anchors an opted-in local-only base on the branch, not a same-named tag"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -591,3 +643,5 @@ test_opted_in_diverged_defaults_anchor_where_the_task_was_planted
 test_opted_in_landed_branch_reports_an_empty_review
 test_opted_in_unrelated_merge_bases_are_reported
 test_opted_in_base_branch_stays_on_origin
+test_opted_in_local_only_base_branch_reviews_against_the_local_base
+test_opted_in_local_only_base_branch_ignores_a_same_named_tag
