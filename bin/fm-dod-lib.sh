@@ -277,6 +277,15 @@ fm_brief_base_branches() {  # <brief>
   ' "$1"
 }
 
+# Shared by fresh ship/scout briefs and promoted ship instructions. Spawn's
+# header owns reservation mechanics; this is the worker-facing location rule.
+fm_worker_scratch_rule() {
+  cat <<'EOF'
+Keep all disposable scratch, lab homes and test output in the worktree's `.fm-scratch/` directory, which Firstmate creates and excludes from Git, or in the system temporary directory.
+Keep deliverable files outside that scratch root; scratch is removed during teardown and must never be force-added to Git.
+EOF
+}
+
 fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-}
   local branch=${3:-fm/$id} target='the default branch'
