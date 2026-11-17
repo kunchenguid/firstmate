@@ -719,8 +719,12 @@ SH
 chmod +x "$FAKEBIN/claude"
 U="$TMP_ROOT/up-lab"
 (
+  # Wait for the registration up just wrote, then drop it once. The drop must
+  # follow the entry it removes: fired on a timer instead, it could land inside
+  # up's own read-modify-write or its presence re-check, and the retry budget
+  # would be spent before the primary ever launched.
   end=$(( $(date +%s) + 120 ))
-  until node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.exit(j.projects?.[process.argv[2]]?1:0)' "$HOME/.claude.json" "$U/home" 2>/dev/null; do
+  until node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8"));process.exit(j.projects?.[process.argv[2]]?0:1)' "$HOME/.claude.json" "$U/home" 2>/dev/null; do
     [ "$(date +%s)" -lt "$end" ] || exit 1
     sleep 0.05
   done
