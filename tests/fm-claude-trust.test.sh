@@ -738,6 +738,8 @@ test_secondmate_standalone_clone_home_is_trusted() {
   expect_code 0 $? "a claude secondmate spawn into a standalone-clone home must succeed: $out"
   assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its standalone-clone home"
+  assert_trust_only_no_import_consent "$case_dir/claude-config/.claude.json" "$case_dir/primary/state/nomistakes-n1.inbox" "secondmate inbox was not trusted"
+  assert_not_trusted "$case_dir/claude-config/.claude.json" "$case_dir/primary" "parent home was trusted"
   assert_present "$case_dir/launch.log" "the claude secondmate spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$case_dir/launch.log" \
     "the launch command was not the claude secondmate launch"

@@ -6231,15 +6231,15 @@ spawn_assert_agent_worktree
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
+  # Resolve/create the channels before trust registration so the trust store
+  # and launch flags describe the same paths, including on a relaunch.
+  CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {
+    echo "error: could not resolve the task-channel directories for $ID's claude --add-dir grant" >&2
+    exit 1
+  }
   if [ "$KIND" = secondmate ]; then
-    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID" --inbox-state "$STATE")
   else
-    # Resolve/create the channels before trust registration so the trust store
-    # and launch flags describe the same paths, including on a relaunch.
-    CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {
-      echo "error: could not resolve the task-channel directories for $ID's claude --add-dir grant" >&2
-      exit 1
-    }
     spawn_trust_args=("$WT" "$PROJ_ABS" --task-channels "$STATE" "$DATA" "$FM_ROOT" "$ID")
   fi
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
@@ -7680,12 +7680,6 @@ case "$LAUNCH" in
 esac
 case "$LAUNCH" in
 *__CLAUDEADDDIRS__*)
-  if [ "$KIND" = secondmate ]; then
-    CLAUDE_ADD_DIRS=$(claude_add_dirs_flag "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {
-      echo "error: could not resolve the task-channel directories for $ID's claude --add-dir grant" >&2
-      exit 1
-    }
-  fi
   LAUNCH=${LAUNCH//__CLAUDEADDDIRS__/$CLAUDE_ADD_DIRS}
   ;;
 esac

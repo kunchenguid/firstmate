@@ -9,12 +9,13 @@
 # on rather than answered on the human's behalf.
 #
 # Usage: fm-claude-trust.sh <worktree> <project> [--task-channels <state> <data> <code-root> <id>]
-#        fm-claude-trust.sh --secondmate-home <home> <id>
+#        fm-claude-trust.sh --secondmate-home <home> <id> [--inbox-state <state>]
 #        fm-claude-trust.sh --lab-home <home>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
 #   <home>      the seeded secondmate home this spawn launches into
 #   <id>        the secondmate id that home must already be marked for
+#   --inbox-state also trust only <state>/<id>.inbox for a secondmate.
 #   --lab-home  the disposable lab home bin/fm-live-lab.sh launches a lab
 #               primary in
 #   --task-channels  also trust exactly the ship/scout --add-dir channels:
@@ -170,9 +171,8 @@
 # path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a regular
 # file this uid owns; every unrelated key and project entry is preserved, and
 # both entries and any task-channel trust entries land in one atomic replacement.
-# In secondmate-home and lab-home
-# mode: the single projects entry for the registered home path, same store,
-# same atomic replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the
+# In secondmate-home and lab-home mode the home entry and any secondmate inbox
+# entry use the same store and atomic replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the
 # claude launch verbatim rather than resolving it, and the pane starts in the
 # registered directory, so only an absolute value names the same store on both sides; a
 # relative one is refused below rather than guessed at.
@@ -207,7 +207,12 @@ CHANNEL_ARGS=()
 CHANNELS_REQUESTED=0
 case "${1:-}" in
   --secondmate-home)
-    [ "$#" -eq 3 ] || usage
+    if [ "$#" -eq 5 ] && [ "$4" = --inbox-state ]; then
+      CHANNEL_ARGS=("$5" "" "" "$3")
+      CHANNELS_REQUESTED=2
+    elif [ "$#" -ne 3 ]; then
+      usage
+    fi
     MODE=secondmate-home
     TARGET_ARG=$2
     SUB_ID=$3
@@ -472,19 +477,24 @@ fi
 # Refuse symlink escapes instead of registering an unrelated directory, and do
 # not expose a generic arbitrary-directory trust switch.
 CHANNEL_DIRS=()
-if [ "$CHANNELS_REQUESTED" = 1 ]; then
+if [ "$CHANNELS_REQUESTED" != 0 ]; then
   channel_id=${CHANNEL_ARGS[3]}
   case "$channel_id" in
     '' | *[!a-zA-Z0-9._-]* | . | ..) refuse "invalid task-channel id '$channel_id'" ;;
   esac
   channel_state=$(real_dir "${CHANNEL_ARGS[0]}") || refuse "task-channel state root is inaccessible"
-  channel_data=$(real_dir "${CHANNEL_ARGS[1]}") || refuse "task-channel data root is inaccessible"
-  channel_code=$(real_dir "${CHANNEL_ARGS[2]}") || refuse "task-channel code root is inaccessible"
-  for channel_root in "$channel_state" "$channel_data" "$channel_code"; do
-    [ "$channel_root" != / ] || refuse "task-channel root cannot be the filesystem root"
-  done
-  for channel_dir in "$channel_state/operational-inbox" "$channel_state/$channel_id.inbox" \
-    "$channel_data/$channel_id" "$channel_code/.agents/skills"; do
+  if [ "$CHANNELS_REQUESTED" = 1 ]; then
+    channel_data=$(real_dir "${CHANNEL_ARGS[1]}") || refuse "task-channel data root is inaccessible"
+    channel_code=$(real_dir "${CHANNEL_ARGS[2]}") || refuse "task-channel code root is inaccessible"
+    for channel_root in "$channel_state" "$channel_data" "$channel_code"; do
+      [ "$channel_root" != / ] || refuse "task-channel root cannot be the filesystem root"
+    done
+    channel_candidates=("$channel_state/operational-inbox" "$channel_state/$channel_id.inbox" "$channel_data/$channel_id" "$channel_code/.agents/skills")
+  else
+    [ "$channel_state" != / ] || refuse "task-channel root cannot be the filesystem root"
+    channel_candidates=("$channel_state/$channel_id.inbox")
+  fi
+  for channel_dir in "${channel_candidates[@]}"; do
     channel_real=$(real_dir "$channel_dir") || refuse "task channel '$channel_dir' is inaccessible"
     [ "$channel_real" = "$channel_dir" ] || refuse "task channel '$channel_dir' resolves outside its declared path"
     [ "$channel_real" != "$CONFIG_DIR_REAL" ] || refuse "task channel '$channel_dir' is the Claude config directory"
