@@ -4209,6 +4209,22 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    # Structural: run EVERY *.check.sh in this sweep, durable-append each reason,
+    # then wake once at the end. A chatty early check must not exit the cycle and
+    # starve later checks (e.g. vimline-consumer-rebuild as last alpha name).
+    # wake() still exits the process; only the final combined call uses it here.
+    check_wake_reasons=
+    queue_check_wake() {
+      # $1 = reason line(s); append for one end-of-sweep wake
+      if [ -n "${1:-}" ]; then
+        if [ -n "$check_wake_reasons" ]; then
+          check_wake_reasons="$check_wake_reasons"$'
+'"$1"
+        else
+          check_wake_reasons=$1
+        fi
+      fi
+    }
     rejected_checks=
     contribution_check_output=
     # Record each PR a task reported but nobody recorded, so its merge poll
@@ -4339,7 +4355,7 @@ EOF
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          wake "$reason"
+          queue_check_wake "$reason"
         elif [ "$is_pr_poll" -eq 1 ] \
           && { [ "$out" = ontrain ] || [ "${out%% *}" = degraded ]; } \
           && [ "$PR_DEGRADED_WATCH_ENABLED" != 1 ]; then
@@ -4406,12 +4422,12 @@ EOF
           fi
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
-          wake "$reason"
+          queue_check_wake "$reason"
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
-        wake "$reason"
+        queue_check_wake "$reason"
       fi
       pr_poll_control_release || exit 1
     done
@@ -4419,7 +4435,7 @@ EOF
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
       touch "$STATE/.last-check"
-      wake "$reason"
+      queue_check_wake "$reason"
     fi
     # Parked-on-review lanes, close detection, opt-in automatic parking, and
     # the outcomes of detached park, relaunch, and cleanup actions
@@ -4430,12 +4446,15 @@ EOF
     if [ -n "$park_out" ]; then
       reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
       touch "$STATE/.last-check"
-      wake "$reason"
+      queue_check_wake "$reason"
     fi
     touch "$STATE/.last-check"
-    [ -z "$pr_register_reason" ] || wake "$pr_register_reason"
+    [ -z "$pr_register_reason" ] || queue_check_wake "$pr_register_reason"
     if [ -n "$contribution_check_output" ]; then
-      wake "$contribution_check_output"
+      queue_check_wake "$contribution_check_output"
+    fi
+    if [ -n "$check_wake_reasons" ]; then
+      wake "$check_wake_reasons"
     fi
   fi
 
