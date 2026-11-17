@@ -15,9 +15,14 @@
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
-# Long socket paths use a private short directory and an alias to the same
-# Herdr configuration, so fleet discovery continues to see the live sessions.
-# Names that cannot fit even through that alias are refused.
+# Socket paths exceeding the 103-byte sun_path limit automatically use an
+# owned mode-0700 /tmp/fmh.XXXXXX directory with a herdr symlink to the same
+# configuration, so fleet discovery continues to see the live sessions.
+# The helper routes lab calls and the viewer through that alias; callers keep
+# the original configuration environment unchanged through teardown.
+# Names that cannot fit even through the short alias are refused.
+# Teardown removes the alias directory and its <session>.socket-dir state
+# record only after confirming lab removal and an unchanged fleet tripwire.
 # The herdr config root is $XDG_CONFIG_HOME/herdr when XDG_CONFIG_HOME is set,
 # otherwise $HOME/.config/herdr, the same root herdr resolves.
 # The length is counted in bytes, not characters.
