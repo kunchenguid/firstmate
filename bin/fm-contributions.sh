@@ -649,14 +649,14 @@ SWEEP_SKEW=120
 
 search_updated() { # since-iso: our PRs and issues updated since, one url<TAB>updatedAt per line
   FORGE_ERR="$TMP/search.err" forge search issues --include-prs --author @me --updated ">=$1" \
-    --limit "$SWEEP_LIMIT" --json url,updatedAt --jq '.[] | [.url,.updatedAt] | @tsv'
+    --sort updated --limit "$SWEEP_LIMIT" --json url,updatedAt --jq '.[] | [.url,.updatedAt] | @tsv'
 }
 
-sweep_since() { # last stored sweep time, widened by the clock skew; an hour back when none is stored
+sweep_since() { # last stored sweep time, widened by the clock skew; at most an hour back
   local since=''
   [ ! -f "$SWEEP_FILE" ] || [ -L "$SWEEP_FILE" ] || IFS= read -r since < "$SWEEP_FILE" || true
   jq -nr --arg since "$since" --argjson epoch "$EPOCH" --argjson skew "$SWEEP_SKEW" '
-    (try ($since | fromdateiso8601 | select(. <= $epoch)) // ($epoch - 3600)) - $skew | todateiso8601'
+    ((try ($since | fromdateiso8601 | select(. <= $epoch)) // ($epoch - 3600)) | [., $epoch - 3600] | max) - $skew | todateiso8601'
 }
 
 store_sweep() {
@@ -730,9 +730,8 @@ poll() {
       | [inputs | split("\t") | {url:.[0],at:.[1]} | select(.url as $u | $live | index($u) != null)
         | . as $c | [$saved[0][] | .records[] | select(.url == $c.url)] as $r
         | ($r | length == 0 or any($r[]; (.checked_at // "") < $c.at)) as $stale
-        | select($stale or any($r[]; .error != null))
-        | . + {stale:$stale}]
-      | sort_by([(.stale | not), .at]) | .[].url' < "$TMP/updated.txt" > "$TMP/updated-live.txt"
+        | select($stale)]
+      | sort_by(.at) | .[].url' < "$TMP/updated.txt" > "$TMP/updated-live.txt"
     { awk -F'\t' 'FILENAME == ARGV[1] { if (!($0 in o)) o[$0] = ++n; next } $1 in o { print o[$1] "\t" $0 }' "$TMP/updated-live.txt" "$TMP/known.tsv" \
         | sort -n -s -t"$(printf '\t')" -k1,1 | cut -f2-
       awk -F'\t' 'FILENAME == ARGV[1] { u[$0]; next } !($1 in u)' "$TMP/updated-live.txt" "$TMP/known.tsv"; } > "$TMP/ordered.tsv"
@@ -743,8 +742,8 @@ poll() {
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
+    [ "$observed" -ne 0 ] && [ "$BUDGET_EXHAUSTED" -eq 0 ] || printf '%s\n' "$url" >> "$TMP/attempted.txt"
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
-    [ "$observed" -ne 0 ] || printf '%s\n' "$url" >> "$TMP/attempted.txt"
     why='no failing step recorded'
     [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
     # Wake once per failure episode: only when no owner has a prior error.
