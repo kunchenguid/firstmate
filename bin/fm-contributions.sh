@@ -129,7 +129,7 @@
 # poll appends ordinary durable check wakes through fm-wake-lib and emits only
 # newly durable signals for the authenticated check to surface.
 # ack removes only the named pending token. It refuses any token that is not pending
-# for that task and URL, including one already acknowledged, and marks nothing.
+# for that task and URL, including one no longer pending, and marks nothing.
 # A crash after enqueue can duplicate a wake but cannot consume the pending signal.
 #
 # Re-raising unanswered review threads is opt-in. Unless
@@ -831,7 +831,7 @@ case "${1:-}" in
       [ "$#" -eq 1 ] || fail 'ack needs one exact event token'
       if ! jq -e --arg token "$1" 'any(.pending[]; .token == $token)' "$TMP/row.json" >/dev/null; then
         if jq -e --arg token "$1" '.seen | index($token) != null' "$TMP/row.json" >/dev/null; then
-          fail "ack token was already acknowledged for task $task and $url; run 'pending' to list the valid tokens"
+          fail "ack token is no longer pending (already acknowledged or cleared) for task $task and $url; run 'pending' to list the valid tokens"
         fi
         fail "ack token matches no pending signal for task $task and $url; run 'pending' to list the valid tokens"
       fi
