@@ -18,9 +18,12 @@ PR=https://github.com/o/r/pull/1
 test_keys_of_every_writer_are_known() {
   local key
   # One key per writer group: launch record, relaunch marker, delivery
-  # identity, review record, Relay link, completion attestation, legacy stamp.
+  # identity, review record, Relay link, completion attestation, legacy stamp,
+  # remote-secondmate route record, Orca cleanup recovery record.
   for key in window endpoint_task_id backend polytoken_credential control_relaunch_tx \
-    pr pr_head review review_head x_request x_reply_max_chars decisions_reviewed decision_keys spawn_gen; do
+    pr pr_head review review_head x_request x_reply_max_chars decisions_reviewed decision_keys spawn_gen \
+    remote_host remote_root remote_backend remote_herdr_session remote_rex_session_id remote_rex_server \
+    remote_target cleanup_recovery; do
     fm_meta_key_known "$key" || fail "a firstmate writer records '$key' but the vocabulary does not know it"
   done
   pass "fm-meta-lib: every writer's keys are known"

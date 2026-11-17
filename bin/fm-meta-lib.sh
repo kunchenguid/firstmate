@@ -3,7 +3,8 @@
 #
 # A task record (state/<id>.meta) is a flat key=value file that several tracked
 # bin/ scripts write: fm-spawn.sh writes the launch record and rewrites it on a
-# relaunch (adding control_relaunch_tx), fm-remote-secondmate-relaunch.sh
+# relaunch (adding control_relaunch_tx), plus the remote-secondmate route
+# record (remote_*) and the Orca cleanup recovery record, fm-remote-secondmate-relaunch.sh
 # refreshes harness/model/effort, fm-pr-check.sh records pr/pr_head,
 # fm-review-check.sh records review/review_head, fm-x-lib.sh records the x_*
 # relay link, fm-captain-hold.sh records decisions_reviewed/decision_keys, and
@@ -43,6 +44,11 @@ fm_meta_key_known() {
     x_request|x_request_ts|x_followups|x_platform|x_reply_max_chars) return 0 ;;
     # bin/fm-captain-hold.sh: the completion attestation
     decisions_reviewed|decision_keys) return 0 ;;
+    # bin/fm-spawn.sh: the remote-secondmate route record
+    remote_host|remote_root|remote_backend|remote_herdr_session|\
+    remote_rex_session_id|remote_rex_server|remote_target) return 0 ;;
+    # bin/fm-spawn.sh: the Orca worktree cleanup recovery record
+    cleanup_recovery) return 0 ;;
     *) return 1 ;;
   esac
 }
