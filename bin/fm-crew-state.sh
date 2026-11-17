@@ -505,6 +505,9 @@ mr_read_record_bounded() {  # <host> <path> <number>
 
 forgejo_read_record_bounded() {  # <host> <path> <number>
   local record state merged
+  # A binding the registry parser refuses leaves this read on `auto`, as it
+  # always has here: this reports what the pull request already is, not the
+  # arming or merge decision that refuses such a binding.
   fm_pr_forgejo_cli_preference "$META"
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
   if ! record=$(fm_run_timed 5 bash -c '
