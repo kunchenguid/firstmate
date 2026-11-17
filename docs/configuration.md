@@ -904,7 +904,7 @@ The file is a home-local site choice and is not inherited by secondmate homes; `
 ## Lane capacity (config/lane-capacity)
 
 The optional local, gitignored `config/lane-capacity` file says how many ship and scout lanes this home should run at once, and when it should stop taking more.
-`bin/fm-capacity.sh` reads it to report how many lanes are open for queued work, alongside running lanes, the 5-minute load average against logical cores, free memory, and free disk.
+`bin/fm-capacity.sh` reads it to report how many lanes are open for queued work, alongside running lanes, the 1- and 5-minute load averages against logical cores, free memory, and free disk.
 The cpu hold reads the 5-minute average rather than the 1-minute one, which spikes past the core count whenever a burst of short processes starts, such as a CI job's tests on the same host, while the CPU is mostly idle.
 With the file absent nothing changes: the report prints counts and host figures only, never invents a target, never advises holding dispatch, and nothing is published; a malformed value is reported as invalid rather than guessed.
 Persistent secondmates hold no lane.
