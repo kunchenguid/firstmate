@@ -79,8 +79,8 @@
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
 # reads are sorted by URL and rotated by the current five-minute epoch bucket
-# modulo their count, without stored scheduling state or freshness-based
-# reordering. Terminal URLs settle separately before the forge budget starts
+# modulo their count, without stored scheduling state or per-URL freshness
+# tracking. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
 # With any live URL, poll makes one forge search before the first read for the authenticated
 # user's PRs and issues updated since the last completed sweep (stored in
