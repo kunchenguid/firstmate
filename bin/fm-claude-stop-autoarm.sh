@@ -81,9 +81,13 @@
 #     its wake lines keep the arm's eight-line cap. A "supervision-host stood
 #     down:" close exits 0 silently, and a host that died without a close is
 #     retried instead of being judged by the healthy-watcher predicate
-#     (docs/supervision-host.md). On a home that opted out nothing below
+#     (docs/supervision-host.md). A "supervision-host: branch-outcome:"
+#     hand-back still needs main after the supervision need vanished, because
+#     the handled turn that recorded its captain outcomes is often the one
+#     that cleaned up the last task. On a home that opted out nothing below
 #     changes.
-#   - Translation: while supervision is still needed and AFK remains inactive,
+#   - Translation: while supervision is still needed (or a branch-outcome
+#     hand-back needs main, above) and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
 #     ("Stop hook feedback"). The irrevocable commit point is the EXIT STATUS:
@@ -117,8 +121,8 @@
 #     recorded by state/.claude-autoarm-stopfailure-rewake at its committed
 #     write: a firing inside the window holds its open claim, waits out the
 #     remainder, and only then commits and delivers - unless AFK appeared or
-#     the supervision need vanished meanwhile, which ends it silently exactly
-#     as those gates do before the arm. Otherwise the continuation is
+#     main's need vanished meanwhile, which ends it silently exactly as those
+#     gates do after the arm. Otherwise the continuation is
 #     delayed, never dropped, because after an error end it is the only thing
 #     that guarantees another hook firing; a newer generation that supersedes
 #     the waiting claim owns continuity instead.
@@ -273,6 +277,14 @@ need_supervision() {
 }
 need_supervision || exit 0
 
+# After the arm: main is needed while supervision is, or when the host handed
+# back captain outcomes (header "Supervision host").
+need_main() {
+  need_supervision && return 0
+  [ "${HOST_MODE:-0}" -eq 1 ] && [ -n "${OUT:-}" ] \
+    && grep -q '^supervision-host: branch-outcome:' "$OUT" 2>/dev/null
+}
+
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
@@ -358,7 +370,7 @@ autoarm_record() {  # <outcome>
 # committed one so the next is paced in turn (header "StopFailure storm
 # bound"). A Stop firing is never paced. The wait is interruptible so the
 # signal traps still run promptly, and a firing that waited goes silent when
-# AFK appeared or the supervision need vanished meanwhile.
+# AFK appeared or main's need vanished meanwhile.
 stopfailure_pace() {
   local m remaining
   [ "$HOOK_EVENT_NAME" = StopFailure ] || return 0
@@ -370,7 +382,7 @@ stopfailure_pace() {
   wait "$!" 2>/dev/null || true
   if [ -e "$STATE/.afk" ]; then
     autoarm_record afk
-  elif ! need_supervision; then
+  elif ! need_main; then
     autoarm_record clean
   else
     return 0
@@ -707,7 +719,7 @@ done
 
 # The need may have vanished mid-cycle (fleet torn down, X opted out): nothing
 # left to supervise, so close quietly instead of waking the model.
-if ! need_supervision; then
+if ! need_main; then
   autoarm_record clean
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
