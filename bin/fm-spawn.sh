@@ -6002,9 +6002,10 @@ EOF
 }
 
 # Rewrite <meta> into <out> without the <owned keys>, placing <line>... ahead
-# of the first pr= line so the PR region stays the record's tail that
-# fm_pr_metadata_identity_parse requires. Preserved PR metadata must remain
-# the record tail or the armed merge poll stops validating relaunched lanes.
+# of the first pr= line so the PR region stays the record's tail. That order is
+# kept for the record's readability: fm_pr_metadata_identity_parse
+# (bin/fm-pr-lib.sh) accepts every key firstmate records (bin/fm-meta-lib.sh)
+# after pr=, so the armed merge poll does not depend on it.
 spawn_meta_rewrite_before_pr() {  # <meta> <out> <owned keys> <line>...
   local meta=$1 out=$2 keys=$3
   shift 3
@@ -7432,9 +7433,10 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-  # Preserved lines go last so an armed pr= identity block stays last, as
-  # fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) requires; otherwise the
-  # armed merge poll stops validating relaunched lanes.
+  # Preserved lines go last so the record keeps the shape its other writers
+  # left, with an armed pr= identity block at the tail. The merge poll does not
+  # depend on that order: fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh)
+  # accepts every key firstmate records (bin/fm-meta-lib.sh) after pr=.
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
   fi

@@ -1704,7 +1704,7 @@ test_github_enterprise_config_resolution() {
   code_root="$TMP_ROOT/github-enterprise-code-root"
   url=https://leadsonline.ghe.com/Org/repo/pull/7
   mkdir -p "$code_root/bin" "$code_root/config" "$code_root/home/config" "$code_root/override"
-  cp "$ROOT/bin/fm-pr-lib.sh" "$code_root/bin/"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-meta-lib.sh" "$code_root/bin/"
   printf 'leadsonline.ghe.com\n' > "$code_root/config/github-hosts"
   printf 'home.ghe.com\n' > "$code_root/home/config/github-hosts"
   printf 'override.ghe.com\n' > "$code_root/override/github-hosts"
@@ -5372,6 +5372,54 @@ SH
   pass "registered generations survive template updates and relaunch metadata without executing sidecar code or trusting forged bytes"
 }
 
+# Firstmate's own writers record their keys after pr= in their own order: a
+# relaunch (control_relaunch_tx), a review record (review, review_head), a Relay
+# link (x_*), a completion attestation (decisions_reviewed, decision_keys), a
+# legacy teardown stamp (spawn_gen), and a remote relaunch (harness, model,
+# effort). None of them may stop an armed poll from authenticating or from
+# detecting its merge, while a key firstmate never records stays refused there.
+test_registered_poll_accepts_firstmate_fields_after_pr() {
+  local dir state rc
+  dir=$(make_case registered-poll-firstmate-fields)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "firstmate-fields fixture did not authenticate before the trailing fields"
+  printf '%s\n' \
+    pr_head=0123456789abcdef0123456789abcdef01234567 \
+    control_relaunch_tx=114614.20261024T230110Z.26328 \
+    review=https://review.example.test/r/7 \
+    review_head=0123456789abcdef0123456789abcdef01234567 \
+    x_request=req-1 x_request_ts=1700000000 x_followups=0 x_platform=x x_reply_max_chars=280 \
+    decisions_reviewed=1 decision_keys=cap-1 \
+    spawn_gen=s1700000000.1.1 \
+    harness=claude model=default effort=default \
+    >> "$state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "firstmate's own fields after pr= stopped the armed poll authenticating"
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "firstmate's own fields after pr= kept the watcher from capturing the poll"
+  rc=0
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "firstmate-fields watcher failed: $(cat "$dir/watch.err")"
+  grep -F 'task-a.check.sh: merged' "$dir/watch.out" >/dev/null \
+    || fail "firstmate's own fields after pr= hid the merge: $(cat "$dir/watch.out")"
+  awk -F'\t' -v prefix="check: merge landed: task-a https://github.com/o/r/pull/1" \
+    'index($5, prefix) == 1 { found=1 } END { exit !found }' "$state/.wake-queue" \
+    || fail "firstmate's own fields after pr= lost the merge notification: $(merged_ledger_row "$state" task-a)"
+  assert_poll_absent "$state" task-a
+  # Re-arm the same record: a foreign key after firstmate's fields is still refused.
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "firstmate-fields fixture did not authenticate after re-arming"
+  printf 'injected=value\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a foreign key after firstmate's own fields was accepted"
+  pass "an armed poll authenticates and detects its merge through every key firstmate records after pr=, and still refuses a foreign one"
+}
+
 test_device_renumbered_poll_stays_armed() {
   local dir state out rc original
   dir=$(make_case device-renumber-merged)
@@ -5738,6 +5786,7 @@ test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_registered_poll_survives_template_update_and_relaunch
+test_registered_poll_accepts_firstmate_fields_after_pr
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
 test_device_rerecord_serializes_direct_rearm
