@@ -52,10 +52,11 @@
 # stop is now permanent (see Actions): a keyed needs-decision or blocked line
 # with no later resolved line for that key; a last status line that is
 # needs-decision, blocked, waiting, or paused, or that says it awaits a review,
-# approval, decision, or merge; a PR (the record's pr= or a PR URL in the last
-# status line) that `gh pr view` reads as open, or cannot read at all; and a
-# worktree whose HEAD has commits on no pushed branch, or uncommitted changes to
-# tracked files, or whose git state cannot be read.
+# approval, decision, or merge; a GitHub PR (the record's pr= or a PR URL in the
+# last status line) that `gh pr view` reads as open, or cannot read at all, or a
+# PR on another forge, which is kept unread; and a worktree whose HEAD has
+# commits on no pushed branch (skipped once the PR reads merged), or uncommitted
+# changes to tracked files, or whose git state cannot be read.
 # Cap stops take tasks whose last report is done or failed before quiet live
 # ones.
 # A task listed in $AK47_CONFIG/reclaim-keep (one id per line) or whose record
@@ -495,7 +496,7 @@ validation_state() {
 # to nothing. Every unreadable answer keeps the task.
 declare -A PR_STATE=()
 held_work() {
-  local home=$1 id=$2 cwd=$3 st=$1/state/$2.status meta=$1/state/$2.meta wt pr out n
+  local home=$1 id=$2 cwd=$3 st=$1/state/$2.status meta=$1/state/$2.meta wt pr out n merged=0
   HELD=
   if [ -f "$st" ]; then
     if ! out=$(awk '
@@ -519,11 +520,16 @@ held_work() {
   pr=$(sed -n 's/^pr=//p' "$meta" 2>/dev/null | head -1)
   [ -n "$pr" ] || pr=$(tail -n 1 "$st" 2>/dev/null | grep -Eo 'https://github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+' | head -1)
   if [ -n "$pr" ]; then
+    case "$pr" in
+      https://github.com/*/pull/*) ;;
+      *) HELD="PR on a forge the reclaim cannot read"; return 0 ;;
+    esac
     if [ -z "${PR_STATE[$pr]+x}" ]; then
       PR_STATE[$pr]=$(timeout 20 "$GH" pr view "$pr" --json state -q .state 2>/dev/null) || PR_STATE[$pr]=
     fi
     case "${PR_STATE[$pr]}" in
-      MERGED|CLOSED) ;;
+      MERGED) merged=1 ;;
+      CLOSED) ;;
       OPEN) HELD="PR open, awaiting review"; return 0 ;;
       *) HELD="PR state unreadable"; return 0 ;;
     esac
@@ -540,8 +546,10 @@ held_work() {
     return 0
   fi
   [ -n "$out" ] || return 0
-  n=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { HELD="git state unreadable"; return 0; }
-  [ "$n" -gt 0 ] && { HELD="$n commit(s) on no pushed branch"; return 0; }
+  if [ "$merged" != 1 ]; then
+    n=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { HELD="git state unreadable"; return 0; }
+    [ "$n" -gt 0 ] && { HELD="$n commit(s) on no pushed branch"; return 0; }
+  fi
   out=$(git -C "$wt" status --porcelain --untracked-files=no 2>/dev/null) || { HELD="git state unreadable"; return 0; }
   [ -n "$out" ] && HELD="uncommitted changes"
   return 0

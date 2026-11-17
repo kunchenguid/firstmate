@@ -71,8 +71,10 @@ chmod +x "$BIN/fake-leave-stopped"
 export AK47_LEAVE_STOPPED=$BIN/fake-leave-stopped
 # A fake gh: `pr view <url>` prints the state stored for that PR number under
 # $SANDBOX/gh, and fails when none is stored, as an unreachable gh does.
+GH_LOG=$SANDBOX/gh.log
 cat >"$BIN/fake-gh" <<EOF
 #!/usr/bin/env bash
+printf '%s\\n' "\$*" >>"$GH_LOG"
 n=\${3##*/}
 [ -f "$SANDBOX/gh/\$n" ] || exit 1
 cat "$SANDBOX/gh/\$n"
@@ -84,7 +86,7 @@ reset() {
   local p
   for p in "${PIDS[@]}"; do { kill -KILL "$p"; wait "$p"; } 2>/dev/null; done
   PIDS=()
-  rm -rf "$AK47_STATE" "$AK47_CONFIG" "$SANDBOX/homes" "$WT" "$CONTROL_LOG" "$MARK_LOG" "$SANDBOX/gh"
+  rm -rf "$AK47_STATE" "$AK47_CONFIG" "$SANDBOX/homes" "$WT" "$CONTROL_LOG" "$MARK_LOG" "$GH_LOG" "$SANDBOX/gh"
   mkdir -p "$SANDBOX/gh"
   mkdir -p "$AK47_STATE" "$AK47_CONFIG" "$WT"
   cat >"$AK47_CONFIG/devops.conf" <<EOF
@@ -522,7 +524,7 @@ test_unfinished_work_vetoes_a_stop() {
   reset
   local t s
   declare -A A=()
-  local kept="open-decision last-blocked awaits-review ready-to-merge captain-approval pr-open pr-unreadable unpushed dirty"
+  local kept="open-decision last-blocked awaits-review ready-to-merge captain-approval pr-open pr-unreadable pr-gitlab unpushed dirty"
   local unreadable=
   local stopped="resolved-decision pr-merged already-merged pushed"
   for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
@@ -543,8 +545,10 @@ test_unfinished_work_vetoes_a_stop() {
   fi
   echo 'pr=https://github.com/o/r/pull/1' >>"$s/pr-open.meta"; echo OPEN >"$SANDBOX/gh/1"
   echo 'pr=https://github.com/o/r/pull/2' >>"$s/pr-merged.meta"; echo MERGED >"$SANDBOX/gh/2"
+  echo 'pr=https://gitlab.example.com/group/proj/-/merge_requests/7' >>"$s/pr-gitlab.meta"
   printf 'done: PR https://github.com/o/r/pull/3\n' >"$s/pr-unreadable.status"
   commit_task unpushed
+  commit_task pr-merged
   commit_task pushed yes
   commit_task dirty yes; echo y >>"$WT/dirty/f"
   for t in $kept $stopped; do touch -d '-30 hours' "$s/$t.status"; spawn_agent "$WT/$t"; A[$t]=$AGENT; done
@@ -560,7 +564,8 @@ test_unfinished_work_vetoes_a_stop() {
   if [ -n "$unreadable" ]; then
     grep -qF 'status unreadable' "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the unreadable status veto"
   fi
-  for r in 'open decision k1' 'last status blocked' 'awaits review' 'PR open' 'PR state unreadable' 'commit(s) on no pushed branch' 'uncommitted changes'; do
+  grep -q gitlab "$GH_LOG" && fail "a GitLab merge request was handed to gh"
+  for r in 'open decision k1' 'last status blocked' 'awaits review' 'PR open' 'PR state unreadable' 'PR on a forge the reclaim cannot read' 'commit(s) on no pushed branch' 'uncommitted changes'; do
     grep -qF "$r" "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the veto '$r'"
   done
   pass "an open decision, a waiting or review-bound last status, an open or unreadable PR, and unpushed or uncommitted work each veto a stop"
