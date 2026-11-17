@@ -32,8 +32,8 @@ make_home() {
   printf '%s\n' "$home"
 }
 
-# make_probes <dir> <load1> <mem-free-pct> <cores> <avail-kb>: fake Darwin
-# probes. An empty value makes that probe fail.
+# make_probes <dir> <load1> <mem-free-pct> <cores> <avail-kb> [load5]: fake
+# Darwin probes; load5 defaults to load1. An empty value makes that probe fail.
 make_probes() {
   local fakebin
   fakebin=$(fm_fakebin "$1")
@@ -41,7 +41,7 @@ make_probes() {
   cat > "$fakebin/sysctl" <<SH
 #!/usr/bin/env bash
 case "\$2" in
-  vm.loadavg) [ -n "$2" ] && echo "{ $2 1.00 1.00 }" ;;
+  vm.loadavg) [ -n "$2" ] && echo "{ $2 ${6:-$2} 1.00 }" ;;
   kern.memorystatus_level) [ -n "$3" ] && echo "$3" ;;
   hw.logicalcpu) [ -n "$4" ] && echo "$4" ;;
   hw.memsize) [ -f "$fakebin/memsize" ] && cat "$fakebin/memsize" ;;
@@ -70,7 +70,7 @@ test_no_target_prints_counts_only() {
   out=$(run_capacity "$home" "$fakebin"); rc=$?
   expect_code 0 "$rc" "absent target"
   assert_contains "$(printf '%s\n' "$out" | head -1)" \
-    'capacity: free_lanes=unknown reason=no-target lanes=3 target=none secondmates=1 load1=0.50 cores=8 mem_free_pct=60 disk_free_mb=20480' \
+    'capacity: free_lanes=unknown reason=no-target lanes=3 target=none secondmates=1 load1=0.50 load5=0.50 cores=8 mem_free_pct=60 disk_free_mb=20480' \
     "absent target must report counts without inventing one"
   pass "absent config/lane-capacity reports counts and no target"
 }
@@ -123,6 +123,37 @@ test_host_constraints_close_lanes() {
   pass "cpu, memory, and disk pressure close every lane and are named"
 }
 
+# The cpu hold reads the 5-minute load: a 1-minute spike over the core count
+# (a CI job's tests starting) holds nothing while load5 is under it. max-load1
+# stays judged on the 1-minute load.
+test_cpu_hold_reads_five_minute_load() {
+  local home fakebin out
+  home=$(make_home load5 2 0)
+  printf '10\n' > "$home/config/lane-capacity"
+  fakebin=$(make_probes "$TMP_ROOT/p-load1-spike" 14.00 60 10 20971520 6.00)
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'capacity: free_lanes=8 reason=ok lanes=2 target=10 secondmates=0 load1=14.00 load5=6.00 cores=10 ' \
+    "a 1-minute spike over the cores with load5 under them must not hold"
+  assert_contains "$out" 'Host: load 14.00 (1 min), 6.00 (5 min) on 10 cores' "the summary must show both averages"
+  fakebin=$(make_probes "$TMP_ROOT/p-load5-at-cores" 4.00 60 10 20971520 10.00)
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=0 reason=cpu ' "load5 at the core count must hold"
+  assert_contains "$out" 'Constrained: cpu' "the hold line must name cpu"
+  fakebin=$(make_probes "$TMP_ROOT/p-load5-over" 4.00 60 10 20971520 12.50)
+  out=$(run_capacity_jq "$home" "$fakebin" --json 2>/dev/null)
+  assert_equals '["cpu: 5-minute load 12.50 on 10 cores"]|0.4|4' \
+    "$(printf '%s\n' "$out" | jq -c '.verdict.reasons')|$(printf '%s\n' "$out" | jq -r '.pressure.runq_per_core')|$(printf '%s\n' "$out" | jq -r '.pressure.load1')" \
+    "load5 over the cores must hold while the published probe pressure keeps its 1-minute meaning"
+  printf '10\nmax-load1 8\n' > "$home/config/lane-capacity"
+  fakebin=$(make_probes "$TMP_ROOT/p-max-load1-over" 9.00 60 16 20971520 2.00)
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=0 reason=load ' "max-load1 must still hold on the 1-minute load"
+  fakebin=$(make_probes "$TMP_ROOT/p-max-load1-under" 2.00 60 16 20971520 9.00)
+  out=$(run_capacity "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=8 reason=ok ' "a 5-minute load over max-load1 must not trip it"
+  pass "the cpu hold judges the 5-minute load, and max-load1 still judges the 1-minute load"
+}
+
 test_unavailable_probes_degrade() {
   local home fakebin out rc
   home=$(make_home degrade 1 0)
@@ -130,7 +161,7 @@ test_unavailable_probes_degrade() {
   fakebin=$(make_probes "$TMP_ROOT/p-none" "" "" "" "")
   out=$(run_capacity "$home" "$fakebin"); rc=$?
   expect_code 0 "$rc" "unavailable probes"
-  assert_contains "$out" 'capacity: free_lanes=3 reason=ok lanes=1 target=4 secondmates=0 load1=unknown cores=unknown mem_free_pct=unknown disk_free_mb=unknown' \
+  assert_contains "$out" 'capacity: free_lanes=3 reason=ok lanes=1 target=4 secondmates=0 load1=unknown load5=unknown cores=unknown mem_free_pct=unknown disk_free_mb=unknown' \
     "unavailable probes must print unknown and not constrain"
   pass "unavailable probes print unknown and do not constrain"
 }
@@ -165,7 +196,7 @@ test_real_host_smoke() {
   out=$(FM_HOME="$home" "$CAPACITY" 2>&1); rc=$?
   expect_code 0 "$rc" "real host"
   case "$(printf '%s\n' "$out" | head -1)" in
-    'capacity: free_lanes=unknown reason=no-target lanes=0 target=none secondmates=0 load1='*' cores='*' mem_free_pct='*' disk_free_mb='*) : ;;
+    'capacity: free_lanes=unknown reason=no-target lanes=0 target=none secondmates=0 load1='*' load5='*' cores='*' mem_free_pct='*' disk_free_mb='*) : ;;
     *) fail "real host line malformed: $out" ;;
   esac
   pass "real host probes produce a well-formed report"
@@ -248,7 +279,7 @@ test_fresh_beat_replaces_probes() {
   write_beat "$home/beat.json" ok 13.5 25.2 0.29 24.7 false
   printf '4\npressure-file %s\n' "$home/beat.json" > "$home/config/lane-capacity"
   out=$(run_capacity_jq "$home" "$fakebin")
-  assert_contains "$out" 'capacity: free_lanes=3 reason=ok lanes=1 target=4 secondmates=0 load1=9.00 cores=8 ' \
+  assert_contains "$out" 'capacity: free_lanes=3 reason=ok lanes=1 target=4 secondmates=0 load1=9.00 load5=9.00 cores=8 ' \
     "a fresh ok beat must replace the raw load probe"
   assert_contains "$out" 'Pressure: ok from beat.' "the summary must name the beat basis"
   doc=$(capacity_doc "$home" "$fakebin")
@@ -411,7 +442,7 @@ test_fixed_cap_scenarios() {
   printf '14\nmin-avail-gb 4\nmin-disk-gb 20\nmax-load1 24\n' > "$home/config/lane-capacity"
   out=$(run_capacity "$home" "$fakebin"); rc=$?
   expect_code 0 "$rc" "a cap with room"
-  assert_equals 'capacity: free_lanes=11 reason=ok lanes=3 target=14 secondmates=0 load1=6.50 cores=18 mem_free_pct=41 disk_free_mb=204800' \
+  assert_equals 'capacity: free_lanes=11 reason=ok lanes=3 target=14 secondmates=0 load1=6.50 load5=6.50 cores=18 mem_free_pct=41 disk_free_mb=204800' \
     "$(printf '%s\n' "$out" | head -1)" "a cap of 14 with room under its floors must open 11 lanes"
   assert_contains "$out" 'Lanes: 3 running of 14 target, 11 open.' "the summary must count the open lanes"
   assert_not_contains "$out" 'Constrained:' "a cap with room must print no hold line"
@@ -424,7 +455,7 @@ test_fixed_cap_scenarios() {
   printf '2\nmin-avail-gb 30\nmin-disk-gb 250\nmax-load1 6\n' > "$home/config/lane-capacity"
   out=$(run_capacity "$home" "$fakebin"); rc=$?
   expect_code 0 "$rc" "a full cap over its floors"
-  assert_equals 'capacity: free_lanes=0 reason=memory,disk,load lanes=3 target=2 secondmates=0 load1=6.50 cores=18 mem_free_pct=41 disk_free_mb=204800' \
+  assert_equals 'capacity: free_lanes=0 reason=memory,disk,load lanes=3 target=2 secondmates=0 load1=6.50 load5=6.50 cores=18 mem_free_pct=41 disk_free_mb=204800' \
     "$(printf '%s\n' "$out" | head -1)" "a full cap of 2 with every floor breached must name the floors"
   assert_contains "$out" 'Constrained: memory,disk,load - hold new dispatch until it clears.' "the hold line must name every breached floor"
   out=$(run_capacity_jq "$home" "$fakebin" --admit); rc=$?
@@ -562,6 +593,7 @@ test_no_target_prints_counts_only
 test_no_target_never_prints_constrained_line
 test_target_yields_open_lanes_and_full
 test_host_constraints_close_lanes
+test_cpu_hold_reads_five_minute_load
 test_unavailable_probes_degrade
 test_invalid_target_is_reported
 test_config_keys_parse_and_refuse_guessing
