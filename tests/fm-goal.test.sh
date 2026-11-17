@@ -278,5 +278,243 @@ test_quiet_status() {
   pass 'goal status is recognized, quiet and never the latest event'
 }
 
+# --- schema v2: project, target, stage marks, limits, ladders, probes -------
+
+ladder() {  # <project> <line...> - write the home-local ladder for <project>
+  local project=$1; shift
+  mkdir -p "$H/config/stage-ladders"
+  printf '%s\n' "$@" > "$H/config/stage-ladders/$project"
+}
+v2_items() {
+  printf '%s\n' \
+    'item [id=a] [owner=terp] [task=child] [project=miko] [target=deployed] [stop-on=prod-deploy-failed,spend]: ship it' \
+    'item [id=b] [owner=main] [after=a]: verify' > "$ITEMS"
+}
+
+test_v2_schema() {
+  fixture; v2_items; start >/dev/null
+  assert_grep 'version: 2' "$H/state/goals/I1.goal" 'v2 fields write a version 2 record'
+  assert_grep 'item [id=a] [owner=terp] [task=child] [project=miko] [target=deployed] [stop-on=prod-deploy-failed,spend]: ship it' \
+    "$H/state/goals/I1.goal" 'v2 item line is stored normalized'
+  assert_contains "$(goal show I1)" 'item a [owner=terp class=drive task=child project=miko]: ship it' 'show names the project'
+  assert_contains "$(goal show I1)" 'stage: none yet, target: deployed' 'show prints the target before any stage'
+  assert_contains "$(goal show I1)" 'limits: stop on prod-deploy-failed,spend' 'show carries stop-on'
+  assert_contains "$(project)" 'item a project=miko stage=- target=deployed' 'projection carries the v2 fields'
+  assert_not_contains "$(project)" 'item b project' 'a v1 item has no extra projection line'
+  # a v1 record, written by hand as the old script wrote it, still works
+  fixture
+  mkdir -p "$H/state/goals"
+  printf '%s\n' 'version: 1' 'id: OLD' 'title: old' 'state: active' 'started: 2026-01-01T00:00:00Z' \
+    'started_epoch: 1767225600' 'named_by: me' 'plan: p' 'done_when: d' 'items:' \
+    '  item [id=a] [owner=main]: only' > "$H/state/goals/OLD.goal"
+  assert_contains "$(goal show OLD)" 'item a [owner=main class=drive]: only' 'a version 1 record still shows'
+  assert_contains "$(goal startable)" 'OLD	a	main' 'a version 1 record still lists startable items'
+  goal mark OLD a stage=merged -- 'late stage' >/dev/null
+  assert_contains "$(goal show OLD)" 'stage: merged' 'a version 1 item can still carry a stage mark'
+  fixture
+  printf '%s\n' 'item [id=a] [owner=main] [target=live]: target without project' > "$ITEMS"
+  expect_rc 2 start
+  printf '%s\n' 'item [id=a] [owner=main] [project=p] [until=soon]: bad until' > "$ITEMS"
+  expect_rc 2 start
+  printf '%s\n' 'item [id=a] [owner=main] [project=p] [project=q]: duplicate project' > "$ITEMS"
+  expect_rc 2 start
+  printf '%s\n' 'item [id=a] [owner=main] [project=../p]: unsafe project' > "$ITEMS"
+  expect_rc 2 start
+  printf '%s\n' 'item [id=a] [owner=main] [project=p] [stop-on=a,,b]: bad stop-on' > "$ITEMS"
+  expect_rc 2 start
+  assert_absent "$H/state/goals/I1.goal" 'invalid v2 fields publish no record'
+  pass 'schema v2 fields round-trip, v1 records keep working, malformed v2 fields fail closed'
+}
+
+test_stage_marks() {
+  fixture; v2_items; start >/dev/null
+  local now; now=$(date +%s)
+  goal mark I1 a running -- 'on it' >/dev/null
+  goal mark I1 a stage=merged -- 'PR merged' >/dev/null
+  assert_grep 'goal [goal=I1] [item=a] [stage=merged] [at=' "$H/state/goals/I1.marks" 'a stage-only mark carries no state'
+  assert_contains "$(project)" 'item a owner=terp class=drive state=running' 'a stage mark leaves the state alone'
+  assert_contains "$(project)" 'item a project=miko stage=merged target=deployed' 'the stage folds into the projection'
+  assert_contains "$(goal show I1)" 'stage: merged since' 'show prints the stage'
+  assert_contains "$(goal show I1)" ', target: deployed' 'show prints the target beside the stage'
+  assert_not_contains "$(goal show I1)" '(reached)' 'a stage short of target is not reached'
+  goal mark I1 a 'done' --stage deployed -- 'live on dev' >/dev/null
+  assert_grep 'goal [goal=I1] [item=a] [state=done] [stage=deployed] [at=' "$H/state/goals/I1.marks" 'state and stage in one mark'
+  assert_contains "$(goal show I1)" '(reached)' 'the target is reached when the stage equals it'
+  mark_line a 'running' "$((now + 5))" > "$H/state/goals/I1.marks"
+  printf 'goal [goal=I1] [item=a] [stage=later] [at=%s]: newest\ngoal [goal=I1] [item=a] [stage=earlier] [at=%s]: older\n' \
+    "$((now + 20))" "$((now + 10))" >> "$H/state/goals/I1.marks"
+  assert_contains "$(project)" 'stage=later' 'the newest stage mark wins'
+  assert_contains "$(project)" 'state=running' 'the state folds on its own clock'
+  expect_rc 2 goal mark I1 a stage=bad/stage -- x
+  expect_rc 2 goal mark I1 a stage=x --stage y -- x
+  expect_rc 2 goal mark I1 a bogus -- x
+  expect_rc 1 goal mark I1 nope stage=merged -- x
+  printf 'goal [goal=I1] [item=a] [at=%s]: neither\n' "$now" >> "$H/state/goals/I1.marks"
+  assert_contains "$(goal show I1)" 'ignored marks: 1' 'a mark with neither state nor stage is ignored'
+  fixture; v2_items; start >/dev/null; local_mate
+  mate_goal mark I1 a stage=merged -- 'landed' >/dev/null
+  assert_grep 'goal [goal=I1] [item=a] [stage=merged]' "$H/state/terp.status" 'a mate stage mark routes through the parent channel'
+  assert_contains "$(project)" 'stage=merged' 'the parent folds a routed stage mark'
+  pass 'stage marks fold on their own clock, validate their shape, and route from a secondmate'
+}
+
+test_ladder_targets() {
+  fixture; v2_items
+  start >/dev/null
+  assert_contains "$(goal show I1)" 'target: deployed' 'with no ladder a target is a free word'
+  ladder miko 'stage merged: true' 'stage deployed: true' 'stage live: true'
+  start I2 >/dev/null
+  assert_contains "$(goal show I2)" 'target: deployed' 'a target on the ladder is accepted'
+  printf '%s\n' 'item [id=a] [owner=terp] [project=miko] [target=nowhere]: off the ladder' > "$ITEMS"
+  expect_rc 2 start
+  assert_contains "$(cat "$TMP_ROOT/out")" 'is not a stage of project miko (stages: merged deployed live)' 'the refusal names the ladder'
+  ladder miko 'stage merged: true' 'stage merged: true'
+  expect_rc 2 start
+  assert_contains "$(cat "$TMP_ROOT/out")" 'duplicate stage merged' 'a duplicate rung fails the list closed'
+  ladder miko 'stage merged' 
+  expect_rc 2 start
+  ladder miko 'stage merged: '
+  expect_rc 2 start
+  ladder miko 'stage ../x: true'
+  expect_rc 2 start
+  rm -f "$H/config/stage-ladders/miko"; printf 'stage nowhere: true\n' > "$H/real-ladder"
+  ln -s "$H/real-ladder" "$H/config/stage-ladders/miko"
+  expect_rc 2 start
+  assert_contains "$(cat "$TMP_ROOT/out")" 'ladder is a symlink' 'a symlinked ladder is refused'
+  rm -f "$H/config/stage-ladders/miko"
+  expect_rc 0 start I3
+  pass 'a target is checked against the project ladder, and a damaged ladder fails closed'
+}
+
+# shellcheck disable=SC2016  # the probes expand in the probe's own shell
+probe_fixture() {  # a miko ladder whose probes read flag files in the home
+  fixture; v2_items
+  ladder miko \
+    'stage merged: test -e "$FM_GOAL_HOME/merged.flag" && echo "https://example.test/pull/${FM_GOAL_TASK}"' \
+    'stage deployed: test -e "$FM_GOAL_HOME/deployed.flag"' \
+    'stage live: test -e "$FM_GOAL_HOME/live.flag"'
+  start >/dev/null
+}
+
+test_probe() {
+  probe_fixture
+  local out
+  out=$(goal probe I1)
+  assert_contains "$out" 'probe I1/a [miko]: stage none, merged not reached (probe exit 1)' 'no rung reached, nothing marked'
+  assert_absent "$H/state/goals/I1.marks" 'a failing probe writes no mark'
+  : > "$H/merged.flag"
+  out=$(goal probe I1 --dry-run)
+  assert_contains "$out" 'would move none -> merged (dry run)' 'dry run reports the move'
+  assert_absent "$H/state/goals/I1.marks" 'dry run writes no mark'
+  out=$(goal probe I1)
+  assert_contains "$out" 'probe I1/a [miko]: stage none -> merged (https://example.test/pull/child)' 'a passing probe moves the stage'
+  assert_grep 'goal [goal=I1] [item=a] [stage=merged]' "$H/state/goals/I1.marks" 'the stage mark is recorded'
+  assert_grep 'probe passed for merged: https://example.test/pull/child' "$H/state/goals/I1.marks" 'the mark note carries the evidence'
+  assert_contains "$(goal show I1)" 'stage: merged since' 'show reads the probed stage'
+  out=$(goal probe I1)
+  assert_contains "$out" 'stage merged, deployed not reached' 'the next probe starts above the current stage'
+  : > "$H/deployed.flag"; : > "$H/live.flag"
+  out=$(goal probe)
+  assert_contains "$out" 'stage merged -> deployed' 'a sweep with no id probes every active goal'
+  assert_not_contains "$out" 'live' 'probing stops at the target'
+  assert_contains "$(goal show I1)" '(reached)' 'the target is reached'
+  out=$(goal probe I1)
+  assert_contains "$out" 'nothing above it to probe' 'at the target there is nothing left to probe'
+  expect_rc 1 goal probe I1 b
+  expect_rc 1 goal probe I1 nope
+  expect_rc 1 goal probe nope
+  expect_rc 2 goal probe I1 a extra
+  pass 'probe moves the stage mark rung by rung to the target and is idempotent'
+}
+
+test_probe_bounds() {
+  probe_fixture
+  ladder miko 'stage merged: sleep 5'
+  local out
+  out=$(FM_GOAL_PROBE_TIMEOUT=1 goal probe I1)
+  assert_contains "$out" 'merged not reached (probe exit 124)' 'a probe past its bound is not reached'
+  assert_absent "$H/state/goals/I1.marks" 'a timed-out probe writes no mark'
+  ladder miko 'stage merged: echo skipped-line; exit 3'
+  out=$(goal probe I1)
+  assert_contains "$out" '(probe exit 3)' 'a probe error is reported with its exit code'
+  assert_absent "$H/state/goals/I1.marks" 'a probe error writes no mark'
+  ladder miko 'stage merged: not a ladder line'
+  rm -f "$H/config/stage-ladders/miko"
+  out=$(goal probe I1)
+  assert_contains "$out" 'no stage ladder for the project, skipped' 'a project with no ladder is skipped'
+  expect_rc 1 goal probe I1 a
+  ladder miko 'garbage'
+  expect_rc 1 goal probe I1
+  local_mate
+  expect_rc 1 mate_goal probe I1
+  pass 'probe bounds a slow probe, reports errors without marking, and skips ladder-less projects'
+}
+
+test_probe_authority() {
+  probe_fixture
+  : > "$H/merged.flag"
+  FM_SUPERVISION_ACTOR=branch expect_rc 0 goal probe I1
+  assert_grep 'stage=merged' "$H/state/goals/I1.marks" 'the supervision branch may probe'
+  pass 'probe is open to main and the supervision branch'
+}
+
+test_probe_pr_merged() {
+  fixture; v2_items
+  mkdir -p "$H/bin"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'case "$*" in *"number=7"*) printf "state=MERGED\nmerged=true\n" ;; *"number=8"*) printf "state=OPEN\nmerged=false\n" ;; *) exit 1 ;; esac' > "$H/bin/gh"
+  chmod +x "$H/bin/gh"
+  local probe="$ROOT/bin/fm-goal-probe-pr-merged.sh" out rc
+  out=$(PATH="$H/bin:$PATH" bash "$probe" https://github.com/example/fixture/pull/7) || fail 'merged PR is reached'
+  assert_equals https://github.com/example/fixture/pull/7 "$out" 'the probe prints the PR url as evidence'
+  rc=0; PATH="$H/bin:$PATH" bash "$probe" https://github.com/example/fixture/pull/8 >/dev/null 2>&1 || rc=$?
+  assert_equals 1 "$rc" 'an open PR is not reached'
+  rc=0; PATH="$H/bin:$PATH" bash "$probe" https://github.com/example/fixture/pull/9 >/dev/null 2>&1 || rc=$?
+  assert_equals 2 "$rc" 'an unreadable answer is unknown, never merged'
+  rc=0; PATH="$H/bin:$PATH" bash "$probe" not-a-url >/dev/null 2>&1 || rc=$?
+  assert_equals 2 "$rc" 'a non-PR argument is unknown'
+  rc=0; FM_GOAL_HOME="$H" bash "$probe" >/dev/null 2>&1 || rc=$?
+  assert_equals 2 "$rc" 'no PR and no task is unknown'
+  printf 'pr=https://github.com/example/fixture/pull/7\n' > "$H/state/child.meta"
+  out=$(FM_GOAL_HOME="$H" FM_GOAL_TASK=child PATH="$H/bin:$PATH" bash "$probe") || fail 'the task PR is found'
+  assert_equals https://github.com/example/fixture/pull/7 "$out" 'the PR is read from the task record'
+  # the whole path: a ladder whose merged rung is this probe moves the stage on a merged PR
+  ladder miko "stage merged: bash $probe" 'stage deployed: false'
+  start >/dev/null
+  out=$(PATH="$H/bin:$PATH" goal probe I1)
+  assert_contains "$out" 'probe I1/a [miko]: stage none -> merged (https://github.com/example/fixture/pull/7)' 'a merged PR moves the stage mark'
+  assert_contains "$(goal show I1)" 'stage: merged since' 'show prints the stage the probe set'
+  pass 'the PR-merged probe answers merged, open and unknown exactly, and drives a stage mark end to end'
+}
+
+test_limits() {
+  fixture
+  printf '%s\n' 'item [id=a] [owner=terp] [project=p] [until=1000]: expired' 'item [id=b] [owner=main] [project=p] [until=99999999999]: open' > "$ITEMS"
+  start >/dev/null
+  assert_not_contains "$(goal startable)" 'I1	a	' 'an item past its until is not startable'
+  assert_contains "$(goal startable)" 'I1	b	main' 'an item before its until is startable'
+  assert_contains "$(goal show I1)" 'limits: until 1970-01-01T00:16:40Z (passed: not startable)' 'show says the limit passed'
+  pass 'until stops an item from being startable once it passes'
+}
+
+test_target_close_and_brief() {
+  probe_fixture
+  goal mark I1 a 'done' -- 'merged and done' >/dev/null
+  goal mark I1 b 'done' -- verified >/dev/null
+  assert_contains "$(goal brief)" 'short of target: a at no stage, target deployed' 'the brief names an item short of target'
+  expect_rc 1 goal close I1 --done
+  assert_contains "$(cat "$TMP_ROOT/out")" 'short of their target stage: a' 'close --done refuses short of target'
+  goal mark I1 a stage=deployed -- 'live on dev' >/dev/null
+  assert_not_contains "$(goal brief)" 'short of target' 'the brief clears once the target is reached'
+  expect_rc 0 goal close I1 --done
+  fixture; v2_items; start >/dev/null
+  goal mark I1 a dropped -- 'not needed' >/dev/null
+  goal mark I1 b 'done' -- verified >/dev/null
+  expect_rc 0 goal close I1 --done
+  pass 'close --done and the brief hold an item to its target; a dropped item owes none'
+}
+
 fm_test_run test_start test_validation test_marks test_local_mate test_remote_mate \
-  test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status
+  test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
+  test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
+  test_probe_pr_merged test_limits test_target_close_and_brief

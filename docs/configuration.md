@@ -1130,6 +1130,17 @@ Pass them in the watcher's environment, or export them in `config/watch.env` for
 The flag is home-local and is not inherited by secondmate homes.
 `bin/fm-watch.sh`'s `drive_floor_tick` owns the scan and its repeats, which persist across watcher restarts; `tests/fm-watch-drive-floor.test.sh` and `tests/fm-watch-goal-stall.test.sh` are its regressions.
 
+## Stage ladders (config/stage-ladders/<project>)
+
+An optional local, gitignored `config/stage-ladders/<project>` file says how far a project's work can travel after its PR merges, and how to tell that each rung is reached.
+Each line is `stage <name>: <probe command>`, lowest rung first, for example `merged`, then `deployed`, then `live`.
+A goal item that names `project=<project>` and `target=<stage>` is driven to that rung, and `bin/fm-goal.sh probe` runs the probes above the item's current stage and records the highest rung reached as a stage mark on the goal record.
+With a ladder present, a goal's `start` and `edit` refuse a target that is not on it, and `close --done` refuses while an item is short of its target.
+Without one, the target stays a free word and nothing probes.
+A probe is a trusted shell command from this home's own configuration, so a ladder is never committed and never read from a project checkout; a symlinked or malformed ladder is refused.
+Probes run with a bound of `FM_GOAL_PROBE_TIMEOUT` seconds (default `60`), and `bin/fm-goal-probe-pr-merged.sh` is the shared probe for a "PR merged" rung.
+`bin/fm-stage-ladder-lib.sh` owns the file format and probe contract, `bin/fm-goal.sh` owns the stage mark and `probe`, and `tests/fm-goal.test.sh` is their regression.
+
 ## Validating-run deferral (config/wedge-defer-validating)
 
 The optional local, gitignored `config/wedge-defer-validating` presence flag opts this home into a default-off deferral in the watcher's wedge timer.

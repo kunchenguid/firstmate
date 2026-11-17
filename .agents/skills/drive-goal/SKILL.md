@@ -23,6 +23,8 @@ Then run `bin/fm-goal.sh start <id> --title <t> --done-when <t> --named-by "<his
 
 Write items so a cold reader can act on each line: one item names its owner and its next step on that one line, `after` orders the dependencies, and `task` names the child task so a landing is detected mechanically.
 Make the last item the done-when check itself, with explicit evidence, because closing requires every item done or dropped.
+When the plan names where an item must end up, give it `project=<project>` and `target=<stage>`, where the stage is a rung of that project's home-local ladder (`config/stage-ladders/<project>`), so the drive carries it past the merge.
+`until=<epoch>` stops an item being startable after that time, and `stop-on=<words>` carries the plan's stop conditions to whoever drives it.
 Class each item honestly: `drive` is the default for reversible in-plan steps, and `captain` marks anything that needs the captain: money, a real architecture deviation, or credentials and logins.
 A destructive, irreversible, or security-sensitive step is `drive` only behind the away limits' written analyse-first gate (an analysis recorded before the action, showing nothing crucial breaks) and `captain` whenever that gate cannot clear - anything shared by other lanes, unpushed or unmerged work, credentials, and production data are always crucial.
 A `captain` item is never advanced while the captain is away; when one is reached, hold it for the captain under the captain-hold lifecycle with its category named in the hold reason.
@@ -33,6 +35,10 @@ When the plan changes later, `bin/fm-goal.sh edit <id> --items-file <path>` keep
 Attended or away, the drain's GOAL section is the live state and its GOAL DUTY line is the standing duty: start or advance every startable item nobody is on.
 Steer the owning second mate with `bin/fm-send.sh`, or, for an item this home owns, dispatch it within the spend cap from a backlog item filed for exactly that step.
 When `/afk` words name a goal, the afk skill's entry carries the id through `--drive-goal`; every active goal drives while away whether or not the record names it, and the entry output lists the goals that will drive.
+
+A merged PR is not the end of an item with a target: the GOAL section lists it as short of target until its stage mark reaches the target.
+At each drive turn run `bin/fm-goal.sh probe <id>` so the stage marks follow the world; a probe marks only what its ladder proves, and a rung no probe can prove (a captain-only click) stays for the captain.
+`close <id> --done` refuses while an item is short of its target, so a goal is never closed on a merge alone.
 
 ## Marks and the secondmate duty
 

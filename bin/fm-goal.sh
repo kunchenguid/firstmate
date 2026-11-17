@@ -17,7 +17,7 @@
 # written by exactly one script: this one.
 #
 # THE RECORD (state/goals/<id>.goal; written only by this script):
-#   version: 1
+#   version: 1 (or 2: see SCHEMA V2 below)
 #   id: I1
 #   title: <one line>
 #   state: active
@@ -30,13 +30,13 @@
 #     item [id=node-refresh] [owner=terp] [class=drive] [task=miko-node-refresh]: refresh control-1 node bundle
 #     item [id=grafana-secret] [owner=main] [class=captain]: rotate the grafana secret
 #
-# Item grammar: `item [id=<id>] [owner=<owner>] [after=<ids>] [class=<drive|captain>] [task=<task-id>]: <title>`.
+# Item grammar: `item [id=<id>] [owner=<owner>] [after=<ids>] [class=<drive|captain>] [task=<task-id>] [project=<p>] [target=<stage>] [until=<epoch>] [stop-on=<words>]: <title>`.
 # id and owner are required; after lists item ids (comma separated) that must
 # reach done or dropped first; class defaults to drive (a captain item is a
 # decision or action only the captain can take, and is never startable); task
 # names the landing item when the item is "merge task X's PR". Every id,
-# owner, and task must be path-safe: no empty value, leading dot, slash, or
-# character outside [A-Za-z0-9._-]. A closed record appends:
+# owner, task, project, and target must be path-safe: no empty value, leading
+# dot, slash, or character outside [A-Za-z0-9._-]. A closed record appends:
 #   closed: <UTC ISO 8601>
 #   closed_epoch: <seconds>
 #   closed_reason: done | captain
@@ -44,15 +44,31 @@
 #   projection:
 #     <the item projection lines as fm_goal_project printed them at close>
 #
+# SCHEMA V2. The four trailing item fields are optional and independent of
+# version 1 items: a record whose items use none of them is written as version
+# 1 and stays readable by a version 1 reader, and every version 1 record this
+# script reads keeps working unchanged. project names the project the item's
+# work lands in; target is the stage (a rung of that project's ladder, see
+# bin/fm-stage-ladder-lib.sh) the drive carries the item to, and needs a
+# project; until is an epoch after which the item stops being startable;
+# stop-on is a comma list of words the driver stops on (for example
+# prod-deploy-failed, spend) that `show` carries to it verbatim. When the
+# project has a ladder file, `start` and `edit` refuse a target that is not on
+# it, and `close --done` refuses while a non-dropped item has not reached its
+# target. The stage is not a state: an item marked done at stage merged is
+# still short of target deployed, which `show` and `brief` say.
+#
 # MARKS. Progress is append-only lines in two places, folded by this script
 # into one state per item:
 #   - state/goals/<id>.marks, appended by `mark` in the parent home;
 #   - each owner's stream (state/<owner>.status, or data/<owner>/status.log
 #     once the state file is gone), where a secondmate's marks arrive through
 #     the parent channel (bin/fm-parent-channel-lib.sh).
-# Mark grammar: `goal [goal=<id>] [item=<item>] [state=<s>] [task=<task>] [at=<epoch>]: <note>`
+# Mark grammar: `goal [goal=<id>] [item=<item>] [state=<s>] [stage=<stage>] [task=<task>] [at=<epoch>]: <note>`
 # with states open|running|waiting|blocked|done|dropped. `open` resets an item
-# to unstarted. A secondmate runs `mark` in its own home; the command routes
+# to unstarted. A mark carries a state, a stage, or both; the stage folds on
+# its own newest-wins clock, so a stage-only mark never changes the item's
+# state or since. A secondmate runs `mark` in its own home; the command routes
 # the line through fm_parent_channel_report (stamped, deduplicated,
 # appended), and on a local route validates the item against the parent's
 # record read-only first. The fold keeps, per item, the mark with the newest
@@ -101,7 +117,9 @@
 #   fm-goal.sh start <id> --title <text> --done-when <text> --named-by <text> \
 #                      --plan <path-or-url> --items-file <path>
 #   fm-goal.sh edit <id> --items-file <path> [--title <text>] [--done-when <text>]
-#   fm-goal.sh mark <id> <item> <state> [--task <task-id>] -- <note>
+#   fm-goal.sh mark <id> <item> <state> [--stage <stage>] [--task <task-id>] -- <note>
+#   fm-goal.sh mark <id> <item> stage=<stage> [--task <task-id>] -- <note>
+#   fm-goal.sh probe [<id> [<item>]] [--dry-run]
 #   fm-goal.sh close <id> --done | --captain --words <text>
 #   fm-goal.sh show [<id>]
 #   fm-goal.sh brief
@@ -109,6 +127,17 @@
 #   fm-goal.sh startable
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
+#
+# `probe` runs each item's project stage ladder (<config>/stage-ladders/<project>,
+# home-local, owned by bin/fm-stage-ladder-lib.sh) from the rung above its
+# stage up to its target, stops at the first rung whose probe is not reached
+# (a probe is one command; exit 0 reached, bound FM_GOAL_PROBE_TIMEOUT seconds,
+# default 60), and records the highest rung reached as a stage mark whose note
+# carries the probe's first output line. It marks nothing when no probe passes,
+# prints one line per probed item, takes no goal lock while a probe runs, and
+# is main or supervision-branch only. With no id it probes every active goal;
+# --dry-run prints what it would mark. bin/fm-goal-probe-pr-merged.sh is the
+# shared probe for a "PR merged" rung.
 #
 # `startable` prints one tab-separated row per startable item of every active
 # goal - goal, item, owner, task (- when none), since (the folded mark epoch, or
@@ -127,6 +156,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_GOAL_DIR/.." && pwd)}"
 FM_GOAL_HOME="${FM_HOME:-$FM_ROOT}"
 FM_GOAL_STATE="${FM_STATE_OVERRIDE:-$FM_GOAL_HOME/state}"
 FM_GOAL_DATA="${FM_DATA_OVERRIDE:-$FM_GOAL_HOME/data}"
+FM_GOAL_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_GOAL_HOME/config}"
 
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$FM_GOAL_DIR/fm-parent-channel-lib.sh"
@@ -136,6 +166,10 @@ FM_GOAL_DATA="${FM_DATA_OVERRIDE:-$FM_GOAL_HOME/data}"
 . "$FM_GOAL_DIR/fm-lease-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$FM_GOAL_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-stage-ladder-lib.sh
+. "$FM_GOAL_DIR/fm-stage-ladder-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$FM_GOAL_DIR/fm-timeout-lib.sh"
 
 _FM_GOAL_LOCK_TIMEOUT=30
 _FM_GOAL_MARK_FUTURE_TOLERANCE=300
@@ -288,12 +322,17 @@ _fm_goal_clean_field() {  # <text> -> single line, bounded
 # fm_goal_item_parse <line>: 0 iff <line> is a valid item line; sets
 # FM_GOAL_ITEM_ID, FM_GOAL_ITEM_OWNER, FM_GOAL_ITEM_AFTER (comma list, or ''),
 # FM_GOAL_ITEM_CLASS (drive when absent), FM_GOAL_ITEM_TASK (or ''),
+# FM_GOAL_ITEM_PROJECT, FM_GOAL_ITEM_TARGET, FM_GOAL_ITEM_UNTIL,
+# FM_GOAL_ITEM_STOPON (each '' when absent; the schema v2 fields),
 # FM_GOAL_ITEM_TITLE.
 fm_goal_item_parse() {  # <line>
   local line=$1 head rest token key value title
   local seen_id=0 seen_owner=0 seen_after=0 seen_class=0 seen_task=0
+  local seen_project=0 seen_target=0 seen_until=0 seen_stopon=0
   FM_GOAL_ITEM_ID=''; FM_GOAL_ITEM_OWNER=''; FM_GOAL_ITEM_AFTER=''
   FM_GOAL_ITEM_CLASS=''; FM_GOAL_ITEM_TASK=''; FM_GOAL_ITEM_TITLE=''
+  FM_GOAL_ITEM_PROJECT=''; FM_GOAL_ITEM_TARGET=''; FM_GOAL_ITEM_UNTIL=''
+  FM_GOAL_ITEM_STOPON=''
   case "$line" in
     'item '*) ;;
     *) return 1 ;;
@@ -349,10 +388,33 @@ fm_goal_item_parse() {  # <line>
         fm_goal_id_valid "$value" || return 1
         FM_GOAL_ITEM_TASK=$value
         ;;
+      project)
+        [ "$seen_project" -eq 0 ] || return 1; seen_project=1
+        fm_goal_id_valid "$value" || return 1
+        FM_GOAL_ITEM_PROJECT=$value
+        ;;
+      target)
+        [ "$seen_target" -eq 0 ] || return 1; seen_target=1
+        fm_goal_id_valid "$value" || return 1
+        FM_GOAL_ITEM_TARGET=$value
+        ;;
+      until)
+        [ "$seen_until" -eq 0 ] || return 1; seen_until=1
+        case "$value" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+        [ "${#value}" -le 12 ] || return 1
+        FM_GOAL_ITEM_UNTIL=$value
+        ;;
+      stop-on)
+        [ "$seen_stopon" -eq 0 ] || return 1; seen_stopon=1
+        _fm_goal_after_list_valid "$value" || return 1
+        FM_GOAL_ITEM_STOPON=$value
+        ;;
       *) return 1 ;;
     esac
   done
   [ "$seen_id" -eq 1 ] && [ "$seen_owner" -eq 1 ] || return 1
+  # a target names a rung of a project's ladder, so it needs the project
+  [ -z "$FM_GOAL_ITEM_TARGET" ] || [ -n "$FM_GOAL_ITEM_PROJECT" ] || return 1
   [ -n "$FM_GOAL_ITEM_CLASS" ] || FM_GOAL_ITEM_CLASS=drive
   FM_GOAL_ITEM_TITLE=$(printf '%s' "$title" | cut -c1-$FM_GOAL_ITEM_TITLE_MAX)
   return 0
@@ -376,6 +438,10 @@ _fm_goal_item_line() {  # <idx>
   [ -z "${FM_GOAL_ITEMS_AFTERS[$i]}" ] || out="$out [after=${FM_GOAL_ITEMS_AFTERS[$i]}]"
   [ "${FM_GOAL_ITEMS_CLASSES[$i]}" = drive ] || out="$out [class=${FM_GOAL_ITEMS_CLASSES[$i]}]"
   [ -z "${FM_GOAL_ITEMS_TASKS[$i]}" ] || out="$out [task=${FM_GOAL_ITEMS_TASKS[$i]}]"
+  [ -z "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] || out="$out [project=${FM_GOAL_ITEMS_PROJECTS[$i]}]"
+  [ -z "${FM_GOAL_ITEMS_TARGETS[$i]}" ] || out="$out [target=${FM_GOAL_ITEMS_TARGETS[$i]}]"
+  [ -z "${FM_GOAL_ITEMS_UNTILS[$i]}" ] || out="$out [until=${FM_GOAL_ITEMS_UNTILS[$i]}]"
+  [ -z "${FM_GOAL_ITEMS_STOPONS[$i]}" ] || out="$out [stop-on=${FM_GOAL_ITEMS_STOPONS[$i]}]"
   printf '%s: %s' "$out" "${FM_GOAL_ITEMS_TITLES[$i]}"
 }
 
@@ -388,8 +454,34 @@ FM_GOAL_REC_CLOSED_EPOCH='' FM_GOAL_REC_CLOSED_REASON='' FM_GOAL_REC_CLOSED_WORD
 FM_GOAL_ITEM_COUNT=0
 FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
 FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
+FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
+FM_GOAL_ITEMS_STOPONS=()
 _FM_GOAL_READ_ERROR=''
 FM_GOAL_PROJECTION=()
+
+# Empty every loaded item array (the record loader and the items-file loader).
+_fm_goal_items_reset() {
+  FM_GOAL_ITEM_COUNT=0
+  FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
+  FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
+  FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
+  FM_GOAL_ITEMS_STOPONS=()
+}
+
+# Append the item fm_goal_item_parse just parsed to the loaded arrays.
+_fm_goal_items_append() {
+  FM_GOAL_ITEMS_IDS[${#FM_GOAL_ITEMS_IDS[@]}]=$FM_GOAL_ITEM_ID
+  FM_GOAL_ITEMS_OWNERS[${#FM_GOAL_ITEMS_OWNERS[@]}]=$FM_GOAL_ITEM_OWNER
+  FM_GOAL_ITEMS_AFTERS[${#FM_GOAL_ITEMS_AFTERS[@]}]=$FM_GOAL_ITEM_AFTER
+  FM_GOAL_ITEMS_CLASSES[${#FM_GOAL_ITEMS_CLASSES[@]}]=$FM_GOAL_ITEM_CLASS
+  FM_GOAL_ITEMS_TASKS[${#FM_GOAL_ITEMS_TASKS[@]}]=$FM_GOAL_ITEM_TASK
+  FM_GOAL_ITEMS_TITLES[${#FM_GOAL_ITEMS_TITLES[@]}]=$FM_GOAL_ITEM_TITLE
+  FM_GOAL_ITEMS_PROJECTS[${#FM_GOAL_ITEMS_PROJECTS[@]}]=$FM_GOAL_ITEM_PROJECT
+  FM_GOAL_ITEMS_TARGETS[${#FM_GOAL_ITEMS_TARGETS[@]}]=$FM_GOAL_ITEM_TARGET
+  FM_GOAL_ITEMS_UNTILS[${#FM_GOAL_ITEMS_UNTILS[@]}]=$FM_GOAL_ITEM_UNTIL
+  FM_GOAL_ITEMS_STOPONS[${#FM_GOAL_ITEMS_STOPONS[@]}]=$FM_GOAL_ITEM_STOPON
+  FM_GOAL_ITEM_COUNT=$((FM_GOAL_ITEM_COUNT + 1))
+}
 
 _fm_goal_read_error() {  # <reason> - records why and fails the load
   _FM_GOAL_READ_ERROR=$1
@@ -403,9 +495,7 @@ _fm_goal_load_record() {  # <path>
   local named_by='' plan='' done_when='' closed='' closed_epoch='' closed_reason='' closed_words=''
   local have_version=0 have_id=0 have_state=0 have_started=0 have_started_epoch=0
   local have_title=0 have_named_by=0 have_plan=0 have_done_when=0
-  FM_GOAL_ITEM_COUNT=0
-  FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
-  FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
+  _fm_goal_items_reset
   FM_GOAL_PROJECTION=()
   _FM_GOAL_READ_ERROR=''
   if ! { [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ]; }; then
@@ -478,13 +568,7 @@ _fm_goal_load_record() {  # <path>
             _fm_goal_read_error "malformed item line: $line"
             return 1
           }
-          FM_GOAL_ITEMS_IDS[${#FM_GOAL_ITEMS_IDS[@]}]=$FM_GOAL_ITEM_ID
-          FM_GOAL_ITEMS_OWNERS[${#FM_GOAL_ITEMS_OWNERS[@]}]=$FM_GOAL_ITEM_OWNER
-          FM_GOAL_ITEMS_AFTERS[${#FM_GOAL_ITEMS_AFTERS[@]}]=$FM_GOAL_ITEM_AFTER
-          FM_GOAL_ITEMS_CLASSES[${#FM_GOAL_ITEMS_CLASSES[@]}]=$FM_GOAL_ITEM_CLASS
-          FM_GOAL_ITEMS_TASKS[${#FM_GOAL_ITEMS_TASKS[@]}]=$FM_GOAL_ITEM_TASK
-          FM_GOAL_ITEMS_TITLES[${#FM_GOAL_ITEMS_TITLES[@]}]=$FM_GOAL_ITEM_TITLE
-          FM_GOAL_ITEM_COUNT=$((FM_GOAL_ITEM_COUNT + 1))
+          _fm_goal_items_append
           ;;
         '  '*)
           _fm_goal_read_error "indented non-item line in the items section: $line"; return 1
@@ -515,7 +599,10 @@ _fm_goal_load_record() {  # <path>
     fi
   done < "$path"
   [ "$have_version" -eq 1 ] || { _FM_GOAL_READ_ERROR='no version'; return 1; }
-  [ "$version" = 1 ] || { _FM_GOAL_READ_ERROR="unsupported version: $version"; return 1; }
+  case "$version" in
+    1|2) ;;
+    *) _FM_GOAL_READ_ERROR="unsupported version: $version"; return 1 ;;
+  esac
   [ "$have_id" -eq 1 ] || { _FM_GOAL_READ_ERROR='no id'; return 1; }
   fm_goal_id_valid "$id" || { _FM_GOAL_READ_ERROR="unsafe id: $id"; return 1; }
   [ "$have_title" -eq 1 ] && [ -n "$title" ] || { _FM_GOAL_READ_ERROR='no title'; return 1; }
@@ -565,7 +652,7 @@ _fm_goal_load_record() {  # <path>
 }
 
 # fm_goal_validate <path> [<expected-id>]: 0 iff the record at <path> parses
-# as a valid version 1 record; with <expected-id>, its id field must match and
+# as a valid version 1 or 2 record; with <expected-id>, its id field must match and
 # its file name must be <id>.goal or <id>-<epoch>.goal.
 fm_goal_validate() {  # <path> [expected-id]
   local path=$1 expected=${2-} base
@@ -701,7 +788,10 @@ _FM_GOAL_FOLD_NOW=0
 _fm_goal_fold_reset() {
   local i=0
   FM_GOAL_M_STATES=(); FM_GOAL_M_ATS=(); FM_GOAL_M_NOTES=(); FM_GOAL_M_TASKS=()
+  FM_GOAL_S_STAGES=(); FM_GOAL_S_ATS=()
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+    FM_GOAL_S_STAGES[${#FM_GOAL_S_STAGES[@]}]=''
+    FM_GOAL_S_ATS[${#FM_GOAL_S_ATS[@]}]=''
     FM_GOAL_M_STATES[${#FM_GOAL_M_STATES[@]}]=open
     FM_GOAL_M_ATS[${#FM_GOAL_M_ATS[@]}]=''
     FM_GOAL_M_NOTES[${#FM_GOAL_M_NOTES[@]}]=''
@@ -718,19 +808,27 @@ _fm_goal_fold_reset() {
 
 # Apply one parsed mark to the fold. rc 1 = invalid (counted by the caller),
 # rc 2 = a mark for another goal (skipped silently).
-_fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now> <owner>
-  local item=$2 state=$3 at=$4 task=$5 note=$6 now=$7 owner=$8
+# A mark carries a state, a stage, or both; each folds on its own newest-wins
+# clock, so a stage-only mark never touches the item's state, since or note.
+_fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now> <owner> <stage>
+  local item=$2 state=$3 at=$4 task=$5 note=$6 now=$7 owner=$8 stage=${9-}
   local idx u known=0
-  fm_goal_state_valid "$state" || return 1
+  [ -z "$state" ] || fm_goal_state_valid "$state" || return 1
+  [ -n "$state" ] || [ -n "$stage" ] || return 1
+  [ -z "$stage" ] || fm_stage_name_valid "$stage" || return 1
   case "$at" in ''|*[!0-9]*) return 1 ;; esac
   [ "$at" -le $((now + _FM_GOAL_MARK_FUTURE_TOLERANCE)) ] || return 1
   FM_GOAL_PROGRESS_ATS[${#FM_GOAL_PROGRESS_ATS[@]}]=$at
   if idx=$(_fm_goal_index_of "$item"); then
-    if [ -z "${FM_GOAL_M_ATS[$idx]}" ] || [ "$at" -ge "${FM_GOAL_M_ATS[$idx]}" ]; then
+    if [ -n "$state" ] && { [ -z "${FM_GOAL_M_ATS[$idx]}" ] || [ "$at" -ge "${FM_GOAL_M_ATS[$idx]}" ]; }; then
       FM_GOAL_M_STATES[idx]=$state
       FM_GOAL_M_ATS[idx]=$at
       FM_GOAL_M_NOTES[idx]=$note
       FM_GOAL_M_TASKS[idx]=$task
+    fi
+    if [ -n "$stage" ] && { [ -z "${FM_GOAL_S_ATS[$idx]}" ] || [ "$at" -ge "${FM_GOAL_S_ATS[$idx]}" ]; }; then
+      FM_GOAL_S_STAGES[idx]=$stage
+      FM_GOAL_S_ATS[idx]=$at
     fi
   else
     for u in ${FM_GOAL_UNPLANNED_IDS[@]+"${FM_GOAL_UNPLANNED_IDS[@]}"}; do
@@ -738,7 +836,7 @@ _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now
     done
     if [ "$known" -eq 0 ]; then
       FM_GOAL_UNPLANNED_IDS[${#FM_GOAL_UNPLANNED_IDS[@]}]=$item
-      FM_GOAL_UNPLANNED_STATES[${#FM_GOAL_UNPLANNED_STATES[@]}]=$state
+      FM_GOAL_UNPLANNED_STATES[${#FM_GOAL_UNPLANNED_STATES[@]}]=${state:-stage $stage}
       FM_GOAL_UNPLANNED_ATS[${#FM_GOAL_UNPLANNED_ATS[@]}]=$at
     fi
   fi
@@ -752,7 +850,7 @@ _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now
 # Parse one `goal [...]` line and hand it to _fm_goal_fold_apply_mark.
 _fm_goal_fold_goal_line() {  # <line> <goal-id> <now> <owner>
   local line=$1 goal=$2 now=$3 owner=$4
-  local head verb token key value item='' state='' task='' at='' note seen_goal=0
+  local head verb token key value item='' state='' task='' at='' stage='' note seen_goal=0
   verb=${line%% *}
   [ "$verb" = goal ] || return 2
   case "$line" in *:*) head=${line%%:*}; note=${line#*:} ;; *) return 1 ;; esac
@@ -778,16 +876,17 @@ _fm_goal_fold_goal_line() {  # <line> <goal-id> <now> <owner>
       item) [ -z "$item" ] || return 1; item=$value ;;
       state) [ -z "$state" ] || return 1; state=$value ;;
       task) [ -z "$task" ] || return 1; task=$value ;;
+      stage) [ -z "$stage" ] || return 1; stage=$value ;;
       at) [ -z "$at" ] || return 1; at=$value ;;
       *) return 1 ;;
     esac
   done
-  [ "$seen_goal" -eq 1 ] && [ -n "$item" ] && [ -n "$state" ] && [ -n "$at" ] || return 1
+  [ "$seen_goal" -eq 1 ] && [ -n "$item" ] && { [ -n "$state" ] || [ -n "$stage" ]; } && [ -n "$at" ] || return 1
   fm_goal_id_valid "$item" || return 1
   [ -z "$task" ] || fm_goal_id_valid "$task" || return 1
   case "$at" in *[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "${#at}" -le 12 ] || return 1
-  _fm_goal_fold_apply_mark "$goal" "$item" "$state" "$at" "$task" "${note# }" "$now" "$owner"
+  _fm_goal_fold_apply_mark "$goal" "$item" "$state" "$at" "$task" "${note# }" "$now" "$owner" "$stage"
 }
 
 # Track a done [key=merged-<task>] landing line in an owner stream.
@@ -939,9 +1038,36 @@ _fm_goal_item_waiting() {  # <idx>
   return 0
 }
 
+# 0 iff item <idx> carries an `until=` limit that has passed.
+_fm_goal_item_expired() {  # <idx>
+  local until=${FM_GOAL_ITEMS_UNTILS[$1]}
+  [ -n "$until" ] && [ "$_FM_GOAL_FOLD_NOW" -gt "$until" ]
+}
+
+# The folded stage of item <idx>, or '' when no stage mark exists.
+_fm_goal_item_stage() {  # <idx>
+  printf '%s' "${FM_GOAL_S_STAGES[$1]}"
+}
+
+# 0 iff item <idx> has a target and its stage has reached it: the same rung,
+# or a higher rung of the project's ladder when the ladder file is readable.
+_fm_goal_item_target_reached() {  # <idx>
+  local idx=$1 target stage cur want
+  target=${FM_GOAL_ITEMS_TARGETS[$idx]}
+  [ -n "$target" ] || return 1
+  stage=${FM_GOAL_S_STAGES[$idx]}
+  [ -n "$stage" ] || return 1
+  [ "$stage" != "$target" ] || return 0
+  fm_stage_ladder_load "$FM_GOAL_CONFIG" "${FM_GOAL_ITEMS_PROJECTS[$idx]}" || return 1
+  cur=$(fm_stage_ladder_rank "$stage") || return 1
+  want=$(fm_stage_ladder_rank "$target") || return 1
+  [ "$cur" -ge "$want" ]
+}
+
 _fm_goal_item_startable() {  # <idx>
   [ "${FM_GOAL_ITEMS_CLASSES[$1]}" = drive ] || return 1
   [ "${FM_GOAL_M_STATES[$1]}" = open ] || return 1
+  ! _fm_goal_item_expired "$1" || return 1
   _fm_goal_item_waiting "$1"
   [ -z "$FM_GOAL_WAITING" ] || return 1
   return 0
@@ -1015,6 +1141,10 @@ fm_goal_project() {  # <id> [state-dir] [data-dir] [now]
       "${FM_GOAL_ITEMS_IDS[$i]}" "${FM_GOAL_ITEMS_OWNERS[$i]}" "${FM_GOAL_ITEMS_CLASSES[$i]}" \
       "${FM_GOAL_M_STATES[$i]}" "${FM_GOAL_M_ATS[$i]:--}" "${FM_GOAL_ITEMS_TASKS[$i]:--}" \
       "$startable" "${FM_GOAL_WAITING:--}" "$landing"
+    # a v2 item appends its stage fields; a v1 item's line is unchanged
+    [ -z "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] || printf 'item %s project=%s stage=%s target=%s\n' \
+      "${FM_GOAL_ITEMS_IDS[$i]}" "${FM_GOAL_ITEMS_PROJECTS[$i]}" \
+      "${FM_GOAL_S_STAGES[$i]:--}" "${FM_GOAL_ITEMS_TARGETS[$i]:--}"
     i=$((i + 1))
   done
   if [ -n "$FM_GOAL_FOLD_LAST_AT" ]; then
@@ -1126,6 +1256,28 @@ _fm_goal_note_bounded() {  # <text> -> note cut for one indented line
   printf '%s' "$1" | LC_ALL=C tr '\t' ' ' | cut -c1-120
 }
 
+# The stage, target and limits lines of one item in `show` (nothing for a v1
+# item that carries none of them).
+_fm_goal_show_stage_lines() {  # <idx> <now>
+  local idx=$1 now=$2 stage target line
+  stage=${FM_GOAL_S_STAGES[$idx]}
+  target=${FM_GOAL_ITEMS_TARGETS[$idx]}
+  if [ -n "$stage" ] || [ -n "$target" ]; then
+    line="    stage: ${stage:-none yet}"
+    [ -z "${FM_GOAL_S_ATS[$idx]}" ] || line="$line since ${FM_GOAL_S_ATS[$idx]} ($(fm_goal_age $((now - FM_GOAL_S_ATS[idx]))) ago)"
+    [ -z "$target" ] || line="$line, target: $target"
+    if _fm_goal_item_target_reached "$idx"; then line="$line (reached)"; fi
+    printf '%s\n' "$line"
+  fi
+  line=''
+  if [ -n "${FM_GOAL_ITEMS_UNTILS[$idx]}" ]; then
+    line="until $(fm_goal_epoch_iso "${FM_GOAL_ITEMS_UNTILS[$idx]}")"
+    ! _fm_goal_item_expired "$idx" || line="$line (passed: not startable)"
+  fi
+  [ -z "${FM_GOAL_ITEMS_STOPONS[$idx]}" ] || line="${line:+$line, }stop on ${FM_GOAL_ITEMS_STOPONS[$idx]}"
+  [ -z "$line" ] || printf '    limits: %s\n' "$line"
+}
+
 fm_goal_render_show() {  # <id> [state-dir] [data-dir]
   local id=$1 state=${2:-$FM_GOAL_STATE} data=${3:-$FM_GOAL_DATA}
   local now i startable landing line
@@ -1148,8 +1300,10 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
     if _fm_goal_item_landing "$i" "$state"; then landing=yes; else landing=no; fi
     line="  item ${FM_GOAL_ITEMS_IDS[$i]} [owner=${FM_GOAL_ITEMS_OWNERS[$i]} class=${FM_GOAL_ITEMS_CLASSES[$i]}"
     [ -z "${FM_GOAL_ITEMS_TASKS[$i]}" ] || line="$line task=${FM_GOAL_ITEMS_TASKS[$i]}"
+    [ -z "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] || line="$line project=${FM_GOAL_ITEMS_PROJECTS[$i]}"
     line="$line]: ${FM_GOAL_ITEMS_TITLES[$i]}"
     printf '%s\n' "$line"
+    _fm_goal_show_stage_lines "$i" "$now"
     if [ -n "${FM_GOAL_M_ATS[$i]}" ]; then
       printf '    state: %s since %s (%s ago) - %s\n' \
         "${FM_GOAL_M_STATES[$i]}" "${FM_GOAL_M_ATS[$i]}" \
@@ -1193,7 +1347,7 @@ _fm_goal_brief_print_lines() {  # <accumulated>
 _fm_goal_brief_block() {  # <id> <state> <data> <away>
   local id=$1 state=$2 data=$3 away=$4
   local now i line startable_n=0 more=0 startable_list=''
-  local running='' waiting='' blocked='' captain='' landing=''
+  local running='' waiting='' blocked='' captain='' landing='' short=''
   now=$(date +%s)
   _fm_goal_open_record "$id" "$state" || return 1
   fm_goal_fold "$id" "$state" "$data" "$now"
@@ -1255,6 +1409,9 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
     if _fm_goal_item_landing "$i" "$state"; then
       landing="$landing  unrecorded landing: ${FM_GOAL_ITEMS_TASKS[$i]} merged (item ${FM_GOAL_ITEMS_IDS[$i]}), no goal update since$FM_GOAL_BRIEF_SEP"
     fi
+    if [ -n "${FM_GOAL_ITEMS_TARGETS[$i]}" ] && [ "${FM_GOAL_M_STATES[$i]}" != dropped ] && ! _fm_goal_item_target_reached "$i"; then
+      short="$short  short of target: ${FM_GOAL_ITEMS_IDS[$i]} at ${FM_GOAL_S_STAGES[$i]:-no stage}, target ${FM_GOAL_ITEMS_TARGETS[$i]}$FM_GOAL_BRIEF_SEP"
+    fi
     i=$((i + 1))
   done
   if [ "$startable_n" -gt 0 ]; then
@@ -1267,6 +1424,7 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
   _fm_goal_brief_print_lines "$blocked"
   _fm_goal_brief_print_lines "$captain"
   _fm_goal_brief_print_lines "$landing"
+  _fm_goal_brief_print_lines "$short"
   return 0
 }
 
@@ -1481,11 +1639,33 @@ _fm_goal_usage_error() {  # <message>
 # Load an items file into the FM_GOAL_ITEMS_* arrays. rc 2 with a message on
 # any malformed line, duplicate id, unknown after id, or cycle. Blank lines
 # and #-comments are ignored.
+# Refuse an items list whose `target=` is not a rung of its project's ladder.
+# A project with no ladder file has nothing to check against, so its target
+# stays a free word; a malformed ladder file fails the list closed.
+_fm_goal_check_targets() {  # <path-for-messages>
+  local i=0 rc
+  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+    if [ -n "${FM_GOAL_ITEMS_TARGETS[$i]}" ]; then
+      rc=0
+      fm_stage_ladder_load "$FM_GOAL_CONFIG" "${FM_GOAL_ITEMS_PROJECTS[$i]}" || rc=$?
+      case "$rc" in
+        0)
+          fm_stage_ladder_rank "${FM_GOAL_ITEMS_TARGETS[$i]}" >/dev/null || {
+            fm_goal_log "item ${FM_GOAL_ITEMS_IDS[$i]} in $1: target ${FM_GOAL_ITEMS_TARGETS[$i]} is not a stage of project ${FM_GOAL_ITEMS_PROJECTS[$i]} (stages: ${FM_STAGE_LADDER_NAMES[*]})"
+            return 2
+          }
+          ;;
+        2) fm_goal_log "item ${FM_GOAL_ITEMS_IDS[$i]} in $1: $FM_STAGE_LADDER_ERROR"; return 2 ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
 _fm_goal_load_items_file() {  # <path>
   local path=$1 line
-  FM_GOAL_ITEM_COUNT=0
-  FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
-  FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
+  _fm_goal_items_reset
   if ! { [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ]; }; then
     fm_goal_log "items file is missing, unreadable, or a symlink: $path"
     return 2
@@ -1498,13 +1678,7 @@ _fm_goal_load_items_file() {  # <path>
       fm_goal_log "malformed item line in $path: $line"
       return 2
     fi
-    FM_GOAL_ITEMS_IDS[${#FM_GOAL_ITEMS_IDS[@]}]=$FM_GOAL_ITEM_ID
-    FM_GOAL_ITEMS_OWNERS[${#FM_GOAL_ITEMS_OWNERS[@]}]=$FM_GOAL_ITEM_OWNER
-    FM_GOAL_ITEMS_AFTERS[${#FM_GOAL_ITEMS_AFTERS[@]}]=$FM_GOAL_ITEM_AFTER
-    FM_GOAL_ITEMS_CLASSES[${#FM_GOAL_ITEMS_CLASSES[@]}]=$FM_GOAL_ITEM_CLASS
-    FM_GOAL_ITEMS_TASKS[${#FM_GOAL_ITEMS_TASKS[@]}]=$FM_GOAL_ITEM_TASK
-    FM_GOAL_ITEMS_TITLES[${#FM_GOAL_ITEMS_TITLES[@]}]=$FM_GOAL_ITEM_TITLE
-    FM_GOAL_ITEM_COUNT=$((FM_GOAL_ITEM_COUNT + 1))
+    _fm_goal_items_append
   done < "$path"
   [ "$FM_GOAL_ITEM_COUNT" -ge 1 ] || {
     fm_goal_log "no items in $path"
@@ -1514,13 +1688,29 @@ _fm_goal_load_items_file() {  # <path>
     fm_goal_log "invalid items in $path: $_FM_GOAL_READ_ERROR"
     return 2
   }
+  _fm_goal_check_targets "$path" || return 2
   return 0
+}
+
+# The version a record is written at: 2 when any loaded item carries a schema
+# v2 field (project, target, until, stop-on), else 1, so a goal that uses none
+# stays byte-compatible with a v1 reader.
+_fm_goal_record_version() {
+  local i=0
+  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+    if [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}${FM_GOAL_ITEMS_TARGETS[$i]}${FM_GOAL_ITEMS_UNTILS[$i]}${FM_GOAL_ITEMS_STOPONS[$i]}" ]; then
+      printf 2
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  printf 1
 }
 
 # Render a full record from the loaded arrays + the meta globals.
 _fm_goal_render_record() {
   local i=0
-  printf 'version: 1\n'
+  printf 'version: %s\n' "$(_fm_goal_record_version)"
   printf 'id: %s\n' "$FM_GOAL_REC_ID"
   printf 'title: %s\n' "$FM_GOAL_REC_TITLE"
   printf 'state: %s\n' "$FM_GOAL_REC_STATE"
@@ -1617,7 +1807,7 @@ cmd_start() {
   fm_goal_lock_release
   printf 'started goal %s at %s with %s item%s\n' "$id" "$started" "$FM_GOAL_ITEM_COUNT" "$([ "$FM_GOAL_ITEM_COUNT" -gt 1 ] && printf s)"
   printf 'record: %s\n' "$path"
-  printf 'mark with: fm-goal.sh mark %s <item> <state> -- <note>\n' "$id"
+  printf 'mark with: fm-goal.sh mark %s <item> <state|stage=<stage>> -- <note>\n' "$id"
   return 0
 }
 
@@ -1683,21 +1873,26 @@ cmd_edit() {
 
 # Build the unstamped mark line head `goal [goal=..] [item=..] [state=..]` and
 # cap the full line so the stamped form stays within the status line cap.
-_fm_goal_mark_line() {  # <id> <item> <state> <task> <note> -> printed
-  local head="goal [goal=$1] [item=$2] [state=$3]" cap
-  [ -n "$4" ] && head="$head [task=$4]"
+_fm_goal_mark_line() {  # <id> <item> <state> <task> <note> [stage] -> printed
+  local head="goal [goal=$1] [item=$2]" cap
+  [ -z "$3" ] || head="$head [state=$3]"
+  [ -z "${6-}" ] || head="$head [stage=$6]"
+  [ -z "$4" ] || head="$head [task=$4]"
   cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
   [ $((${#head} + 3)) -lt "$cap" ] || { fm_goal_log 'mark tags exceed the status line cap'; return 2; }
   printf '%s: %s' "$head" "$5" | cut -c1-$cap
 }
 
 cmd_mark() {
-  local id item state task='' note='' dash_seen=0 flag
+  local id item state='' task='' stage='' note='' dash_seen=0 flag what
   local rc=0 line stamped path
-  [ "$#" -ge 3 ] || _fm_goal_usage_error 'mark needs <goal> <item> <state> -- <note>'
+  [ "$#" -ge 3 ] || _fm_goal_usage_error 'mark needs <goal> <item> <state|stage=<stage>> -- <note>'
   id=$1
   item=$2
-  state=$3
+  case "$3" in
+    stage=*) stage=${3#stage=} ;;
+    *) state=$3 ;;
+  esac
   shift 3
   while [ "$#" -gt 0 ]; do
     flag=$1
@@ -1705,6 +1900,12 @@ cmd_mark() {
       --task)
         [ "$#" -ge 2 ] && [ -n "${2-}" ] || _fm_goal_usage_error '--task needs a value'
         task=$2
+        shift 2
+        ;;
+      --stage)
+        [ -z "$stage" ] || _fm_goal_usage_error 'the stage is given once'
+        [ "$#" -ge 2 ] && [ -n "${2-}" ] || _fm_goal_usage_error '--stage needs a value'
+        stage=$2
         shift 2
         ;;
       --)
@@ -1719,7 +1920,10 @@ cmd_mark() {
   note=$(printf '%s' "$*" | LC_ALL=C tr '\t\r\n' '   ')
   fm_goal_id_valid "$id" || _fm_goal_usage_error "unsafe goal id: '$id'"
   fm_goal_id_valid "$item" || _fm_goal_usage_error "unsafe item id: '$item'"
-  fm_goal_state_valid "$state" || _fm_goal_usage_error "unknown mark state: '$state'"
+  [ -z "$state" ] || fm_goal_state_valid "$state" || _fm_goal_usage_error "unknown mark state: '$state'"
+  [ -n "$state" ] || [ -n "$stage" ] || _fm_goal_usage_error 'mark needs a state or a stage'
+  [ -z "$stage" ] || fm_stage_name_valid "$stage" || _fm_goal_usage_error "unsafe stage: '$stage'"
+  what=${state:+$state}${stage:+${state:+ }stage=$stage}
   [ -z "$task" ] || fm_goal_id_valid "$task" || _fm_goal_usage_error "unsafe task id: '$task'"
   case "$(printf '%s' "$note" | LC_ALL=C tr -d '[:space:]')" in
     '') _fm_goal_usage_error 'mark needs a note after --' ;;
@@ -1727,7 +1931,7 @@ cmd_mark() {
   fm_parent_channel_destination "$FM_GOAL_HOME" "$FM_GOAL_STATE" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     # secondmate home: publish through the parent channel.
-    line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note") || exit 2
+    line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || exit 2
     if [ "$FM_PARENT_CHANNEL_ROUTE" = local ]; then
       path="$FM_SECONDMATE_PARENT_HOME/state/goals/$id.goal"
       _fm_goal_regular_file "$path"
@@ -1751,7 +1955,7 @@ cmd_mark() {
       fm_goal_log "could not publish the mark on the parent channel"
       exit 1
     }
-    printf 'marked %s/%s %s via the parent channel\n' "$id" "$item" "$state"
+    printf 'marked %s/%s %s via the parent channel\n' "$id" "$item" "$what"
     return 0
   fi
   [ "$rc" -eq 1 ] || _fm_goal_die 1 'the secondmate identity of this home is unreadable'
@@ -1763,7 +1967,7 @@ cmd_mark() {
     fm_goal_log "unknown item '$item' in goal '$id'"
     exit 1
   }
-  line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note") || exit 2
+  line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || exit 2
   stamped=$(status_stamp_line "$line")
   path=$(fm_goal_marks_path "$id")
   fm_goal_lock_hold || exit 1
@@ -1776,7 +1980,7 @@ cmd_mark() {
   fi
   if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(tail -n 1 "$path" 2>/dev/null)" = "$stamped" ]; then
     fm_goal_lock_release
-    printf 'marked %s/%s %s (already recorded)\n' "$id" "$item" "$state"
+    printf 'marked %s/%s %s (already recorded)\n' "$id" "$item" "$what"
     return 0
   fi
   printf '%s\n' "$stamped" >> "$path" || {
@@ -1784,7 +1988,125 @@ cmd_mark() {
     _fm_goal_die 1 "could not append the mark to $path"
   }
   fm_goal_lock_release
-  printf 'marked %s/%s %s\n' "$id" "$item" "$state"
+  printf 'marked %s/%s %s\n' "$id" "$item" "$what"
+  return 0
+}
+
+# Probe one goal's items: for each item with a project that has a ladder, run
+# the probes of the rungs above its stage, lowest first, up to its target (the
+# whole ladder when it has none), stop at the first rung not reached, and mark
+# the highest rung reached. Probes run outside the goal lock; only the mark
+# takes it. rc 0 when every probed item was handled, 1 on a malformed ladder, a
+# failed mark, or an explicitly named item that cannot be probed.
+_fm_goal_probe_goal() {  # <id> <only-item or ''> <dry 0|1>
+  local id=$1 only=$2 dry=$3
+  local i j rc=0 prc cur cur_rank top first out evidence timeout reached_stage status=0 note label
+  _fm_goal_open_record "$id" || return 1
+  fm_goal_fold "$id" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$(date +%s)"
+  if [ -n "$only" ]; then
+    _fm_goal_index_of "$only" >/dev/null || { fm_goal_log "unknown item '$only' in goal '$id'"; return 1; }
+  fi
+  timeout=${FM_GOAL_PROBE_TIMEOUT:-60}
+  case "$timeout" in ''|*[!0-9]*|0) timeout=60 ;; esac
+  i=0
+  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+    if [ -n "$only" ] && [ "${FM_GOAL_ITEMS_IDS[$i]}" != "$only" ]; then
+      i=$((i + 1)); continue
+    fi
+    label="probe $id/${FM_GOAL_ITEMS_IDS[$i]}"
+    if [ -z "${FM_GOAL_ITEMS_PROJECTS[$i]}" ]; then
+      [ -z "$only" ] || { fm_goal_log "$label: the item has no project"; status=1; }
+      i=$((i + 1)); continue
+    fi
+    if [ "${FM_GOAL_M_STATES[$i]}" = dropped ]; then
+      i=$((i + 1)); continue
+    fi
+    rc=0
+    fm_stage_ladder_load "$FM_GOAL_CONFIG" "${FM_GOAL_ITEMS_PROJECTS[$i]}" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+      fm_goal_log "$label: $FM_STAGE_LADDER_ERROR"; status=1
+      i=$((i + 1)); continue
+    elif [ "$rc" -eq 1 ]; then
+      printf '%s [%s]: no stage ladder for the project, skipped\n' "$label" "${FM_GOAL_ITEMS_PROJECTS[$i]}"
+      [ -z "$only" ] || status=1
+      i=$((i + 1)); continue
+    fi
+    cur=${FM_GOAL_S_STAGES[$i]}
+    cur_rank=-1
+    [ -z "$cur" ] || cur_rank=$(fm_stage_ladder_rank "$cur") || cur_rank=-1
+    top=$((${#FM_STAGE_LADDER_NAMES[@]} - 1))
+    if [ -n "${FM_GOAL_ITEMS_TARGETS[$i]}" ]; then
+      top=$(fm_stage_ladder_rank "${FM_GOAL_ITEMS_TARGETS[$i]}") || top=$((${#FM_STAGE_LADDER_NAMES[@]} - 1))
+    fi
+    first=$((cur_rank + 1))
+    if [ "$first" -gt "$top" ]; then
+      printf '%s [%s]: stage %s, nothing above it to probe\n' "$label" "${FM_GOAL_ITEMS_PROJECTS[$i]}" "${cur:-none}"
+      i=$((i + 1)); continue
+    fi
+    reached_stage='' evidence='' prc=0
+    j=$first
+    while [ "$j" -le "$top" ]; do
+      prc=0
+      out=$(fm_run_timed "$timeout" env \
+        FM_GOAL_ID="$id" FM_GOAL_ITEM="${FM_GOAL_ITEMS_IDS[$i]}" \
+        FM_GOAL_PROJECT="${FM_GOAL_ITEMS_PROJECTS[$i]}" FM_GOAL_TASK="${FM_GOAL_ITEMS_TASKS[$i]}" \
+        FM_GOAL_STAGE="${FM_STAGE_LADDER_NAMES[$j]}" FM_GOAL_HOME="$FM_GOAL_HOME" \
+        bash -c "${FM_STAGE_LADDER_PROBES[$j]}" </dev/null 2>/dev/null) || prc=$?
+      [ "$prc" -eq 0 ] || break
+      reached_stage=${FM_STAGE_LADDER_NAMES[$j]}
+      evidence=$(_fm_goal_note_bounded "$(_fm_goal_clean_field "${out%%$'\n'*}")")
+      j=$((j + 1))
+    done
+    if [ -z "$reached_stage" ]; then
+      printf '%s [%s]: stage %s, %s not reached (probe exit %s)\n' "$label" \
+        "${FM_GOAL_ITEMS_PROJECTS[$i]}" "${cur:-none}" "${FM_STAGE_LADDER_NAMES[$first]}" "$prc"
+    elif [ "$dry" -eq 1 ]; then
+      printf '%s [%s]: would move %s -> %s (dry run)\n' "$label" "${FM_GOAL_ITEMS_PROJECTS[$i]}" "${cur:-none}" "$reached_stage"
+    else
+      note="probe passed for $reached_stage${evidence:+: $evidence}"
+      if ( cmd_mark "$id" "${FM_GOAL_ITEMS_IDS[$i]}" "stage=$reached_stage" -- "$note" ) >/dev/null; then
+        printf '%s [%s]: stage %s -> %s%s\n' "$label" "${FM_GOAL_ITEMS_PROJECTS[$i]}" "${cur:-none}" "$reached_stage" "${evidence:+ ($evidence)}"
+      else
+        fm_goal_log "$label: could not record the stage mark"; status=1
+      fi
+    fi
+    i=$((i + 1))
+  done
+  return "$status"
+}
+
+cmd_probe() {
+  local id='' only='' dry=0 arg path rc=0 any=0
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+    case "$arg" in
+      --dry-run) dry=1 ;;
+      -*) _fm_goal_usage_error "unknown flag for probe: $arg" ;;
+      *)
+        if [ -z "$id" ]; then id=$arg
+        elif [ -z "$only" ]; then only=$arg
+        else _fm_goal_usage_error 'probe takes at most a goal id and an item id'
+        fi
+        ;;
+    esac
+    shift
+  done
+  [ -z "$id" ] || fm_goal_id_valid "$id" || _fm_goal_usage_error "unsafe goal id: '$id'"
+  [ -z "$only" ] || fm_goal_id_valid "$only" || _fm_goal_usage_error "unsafe item id: '$only'"
+  _fm_goal_parent_home || exit 1
+  _fm_goal_require_actor 'main branch' || exit 1
+  if [ -n "$id" ]; then
+    _fm_goal_probe_goal "$id" "$only" "$dry" || exit 1
+    return 0
+  fi
+  while IFS= read -r path; do
+    any=1
+    id=${path##*/}
+    id=${id%.goal}
+    _fm_goal_probe_goal "$id" '' "$dry" || rc=1
+  done < <(fm_goal_active_records 2>/dev/null)
+  [ "$any" -eq 1 ] || _fm_goal_die 1 'no active goal records'
+  [ "$rc" -eq 0 ] || exit 1
   return 0
 }
 
@@ -1950,15 +2272,24 @@ cmd_close() {
 
 # Refuse close --done while any planned item is not done or dropped.
 _fm_goal_close_check_done() {  # <id>
-  local id=$1 i offenders=''
+  local id=$1 i offenders='' short=''
   fm_goal_fold "$id"
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_doneish "$i" || offenders="$offenders${offenders:+ }${FM_GOAL_ITEMS_IDS[$i]}"
+    # a dropped item no longer owes its target; any other item does
+    if [ -n "${FM_GOAL_ITEMS_TARGETS[$i]}" ] && [ "${FM_GOAL_M_STATES[$i]}" != dropped ] \
+      && ! _fm_goal_item_target_reached "$i"; then
+      short="$short${short:+ }${FM_GOAL_ITEMS_IDS[$i]}"
+    fi
     i=$((i + 1))
   done
   [ -z "$offenders" ] || {
     fm_goal_log "refused: close --done with items still open: $offenders"
+    return 1
+  }
+  [ -z "$short" ] || {
+    fm_goal_log "refused: close --done with items short of their target stage: $short"
     return 1
   }
   return 0
@@ -2117,7 +2448,7 @@ main() {
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'needs a subcommand'
   shift
   case "$cmd" in
-    start|edit|mark|show|brief|active|startable|exists|window|close) ;;
+    start|edit|mark|probe|show|brief|active|startable|exists|window|close) ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;
   esac
