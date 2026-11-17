@@ -1488,9 +1488,7 @@ test_closes_is_rendered_only_when_set() {
   brief="$home/data/brief-closes-manual/brief.md"
   assert_grep 'Delivery contract: mode=no-mistakes closes=8504 pr=manual' "$brief" \
     "the pr=manual contract line does not record the linked issue"
-  # shellcheck disable=SC2016
-  assert_grep 'pass `--closes 8504` on every `no-mistakes axi run` that starts a run' "$brief" \
-    "the pr=manual drive instruction does not pass --closes on every run start"
+  ! grep -q -e '--closes' "$brief" || fail "the pr=manual brief asks for --closes, which no-mistakes refuses with --skip pr"
   # shellcheck disable=SC2016
   assert_grep 'put a plain `Closes #8504` line in the PR body you write' "$brief" \
     "the pr=manual instruction does not name the plain Closes line"

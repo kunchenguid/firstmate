@@ -37,8 +37,9 @@
 # or branch. It renders a `closes=<n>` suffix token on the Delivery contract line
 # and tells the worker to pass `--closes <n>` on every `no-mistakes axi run` that
 # starts a run, because a run started without it drops the reference; under
-# pr=manual it also names the plain `Closes #<n>` line the worker writes into the
-# PR body it owns. Empty renders nothing, so a brief without one is unchanged.
+# pr=manual, which skips the pr step that `--closes` cannot combine with, it
+# names only the plain `Closes #<n>` line the worker writes into the PR body it
+# owns. Empty renders nothing, so a brief without one is unchanged.
 # fm_closes_valid refuses it outside a no-mistakes ship on no forge binding.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
@@ -580,7 +581,7 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
     contract_closes=" closes=$closes"
     nm_closes="This task closes issue #$closes: pass \`--closes $closes\` on every \`no-mistakes axi run\` that starts a run, including a new run after a failed or cancelled one, because a run started without it drops the closing reference from the PR body.
 "
-    nm_closes_manual="This task closes issue #$closes: pass \`--closes $closes\` on every \`no-mistakes axi run\` that starts a run, including a new run after a failed or cancelled one, and put a plain \`Closes #$closes\` line in the PR body you write, because the skipped \`pr\` step writes no closing reference.
+    nm_closes_manual="This task closes issue #$closes: put a plain \`Closes #$closes\` line in the PR body you write, because the skipped \`pr\` step writes no closing reference.
 "
   fi
   if [ -n "$consent" ]; then

@@ -102,8 +102,8 @@
 # caller states explicitly: it is never inferred from the task id, title, or
 # branch. It renders a `closes=<n>` token on the Delivery contract line and tells
 # the worker to pass `--closes <n>` on every `no-mistakes axi run` that starts a
-# run (under pr=manual it also writes a plain `Closes #<n>` line into the PR body
-# the worker owns). bin/fm-spawn.sh checks it against its own --closes and records
+# run (under pr=manual, which skips the pr step, it names only a plain
+# `Closes #<n>` line in the PR body the worker owns). bin/fm-spawn.sh checks it against its own --closes and records
 # it in the task record, and bin/fm-promote.sh takes it the same way. Without the
 # flag the brief is unchanged. Ship-only; bin/fm-dod-lib.sh's fm_closes_valid
 # owns where it is accepted: no-mistakes with no forge only.
