@@ -105,6 +105,7 @@
 #   reclaim_worktree_roots   colon list (default ~/.treehouse:~/orca/workspaces)
 # AK47_RECLAIM_SCOPE (tests only) restricts the census to agents working under
 # one directory, so a test never sees the box's real agents.
+# AK47_NO_MISTAKES (tests only) points the validation read at a fake binary.
 #
 # Exit: 0 the run completed (a finding or a stop that did not take is not a
 # failure), 1 a step failed, 2 bad usage or a malformed knob.
