@@ -2433,36 +2433,41 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
 # demanded a deep inspection of a closed task. Empty content carries no evidence
 # of a wedge, so it ends the episode instead.
 test_empty_pane_capture_ends_the_wedge_episode() {
-  local dir state fakebin out capture window key round
-  dir=$(wedge_threshold_fixture empty-pane-capture 'working: still compiling' 0 500)
-  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  window="test:fm-wedge"; key=$(watch_window_key "$window")
-  printf '2\n' > "$state/.wedge-escalations-$key"
-  : > "$capture"
-  round=1
-  # Three polls, not one: the escalation ladder reaches its threshold on the
-  # THIRD identical hash (the first sight resets the counter, the second arms it),
-  # so a two-round loop would pass even without the empty-capture guard.
-  while [ "$round" -le 3 ]; do
-    : > "$out"
-    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
-      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-      FM_STALE_ESCALATE_SECS=0 "$WATCH" > "$out" &
-    pid=$!
-    wait_poll_cycle "$state" "$pid" \
-      || { reap "$pid"; fail "the watcher did not finish a poll over an empty pane capture: $(cat "$out")"; }
-    reap "$pid"
-    ack_stopped_cycle "$state" || fail "could not acknowledge empty-capture round $round"
-    [ ! -s "$out" ] || fail "an empty pane capture raised a wake on round $round: $(cat "$out")"
-    [ ! -s "$state/.wake-queue" ] || fail "an empty pane capture queued a durable wake on round $round"
-    [ ! -e "$state/.wedge-escalations-$key" ] \
-      || fail "an empty pane capture kept the wedge escalation count on round $round"
-    [ ! -e "$state/.stale-since-$key" ] \
-      || fail "an empty pane capture kept a wedge timer armed on round $round"
-    round=$((round + 1))
+  local dir state fakebin out capture window key round flavor pid
+  for flavor in zero-byte whitespace-only; do
+    dir=$(wedge_threshold_fixture "empty-pane-capture-$flavor" 'working: still compiling' 0 500)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    window="test:fm-wedge"; key=$(watch_window_key "$window")
+    printf '2\n' > "$state/.wedge-escalations-$key"
+    case "$flavor" in
+      zero-byte)       : > "$capture" ;;
+      whitespace-only) printf ' \n\t\n   \n\n' > "$capture" ;;
+    esac
+    round=1
+    # Three polls, not one: the escalation ladder reaches its threshold on the
+    # THIRD identical hash (the first sight resets the counter, the second arms it),
+    # so a two-round loop would pass even without the empty-capture guard.
+    while [ "$round" -le 3 ]; do
+      : > "$out"
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+        FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        FM_STALE_ESCALATE_SECS=0 "$WATCH" > "$out" &
+      pid=$!
+      wait_poll_cycle "$state" "$pid" \
+        || { reap "$pid"; fail "the watcher did not finish a poll over a $flavor pane capture: $(cat "$out")"; }
+      reap "$pid"
+      ack_stopped_cycle "$state" || fail "could not acknowledge $flavor empty-capture round $round"
+      [ ! -s "$out" ] || fail "a $flavor pane capture raised a wake on round $round: $(cat "$out")"
+      [ ! -s "$state/.wake-queue" ] || fail "a $flavor pane capture queued a durable wake on round $round"
+      [ ! -e "$state/.wedge-escalations-$key" ] \
+        || fail "a $flavor pane capture kept the wedge escalation count on round $round"
+      [ ! -e "$state/.stale-since-$key" ] \
+        || fail "a $flavor pane capture kept a wedge timer armed on round $round"
+      round=$((round + 1))
+    done
   done
-  pass "a pane that renders nothing ends its wedge episode instead of escalating"
+  pass "a pane that renders nothing, byte-empty or whitespace-only, ends its wedge episode instead of escalating"
 }
 
 # The away daemon saved a blocking-dialog name while the picker was up, then the

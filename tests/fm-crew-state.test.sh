@@ -6412,7 +6412,7 @@ test_competing_live_runs_report_unknown_with_both_ids() {
 # ordering-unverified and newer-live-run-replacement safeguards completed,
 # cancelled and failed take. Without it the superseded handed_off row answers
 # for the branch and the confident reading is a wrong one that cannot error.
-test_handed_off_competing_live_runs_report_unknown_with_both_ids() {
+test_stale_handed_off_overview_row_yields_to_the_newer_live_run() {
   reset_fakes
   local d old_head new_head out
   d=$(new_case stale-handed-off-overview-row)
@@ -7096,7 +7096,7 @@ test_coarse_live_row_keeps_the_original_supersede_note
 test_coarse_live_rebased_row_is_not_attributed
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
-test_handed_off_competing_live_runs_report_unknown_with_both_ids
+test_stale_handed_off_overview_row_yields_to_the_newer_live_run
 test_current_active_run_beats_stale_overview_row
 test_current_active_run_beats_stale_failed_overview_row
 test_current_active_run_beats_same_head_stale_failed_overview_row
