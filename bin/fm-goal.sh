@@ -128,6 +128,14 @@
 #   fm-goal.sh export [<id>]
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
+#   fm-goal.sh driven --since <epoch>
+#
+# `driven` renders every goal active at any point of the window (active now,
+# or closed since <epoch>) in the captain's words, for the return brief's
+# "Driven goals" section (bin/fm-afk-return.sh): per item the stage at the
+# window's start, now, and the target, then an hour-by-hour list of the
+# updates inside the window (UTC clock hours; runs of quiet hours collapse).
+# It is read-only and prints nothing when no goal qualifies.
 #
 # `probe` runs each item's project stage ladder (<config>/stage-ladders/<project>,
 # home-local, owned by bin/fm-stage-ladder-lib.sh) from the rung above its
@@ -792,6 +800,10 @@ _fm_goal_items_graph_ok() {
 FM_GOAL_M_STATES=() FM_GOAL_M_ATS=() FM_GOAL_M_NOTES=() FM_GOAL_M_TASKS=()
 FM_GOAL_FOLD_IGNORED=0
 FM_GOAL_PROGRESS_ATS=()
+# Every valid mark on a planned item, in read order, for the since-epoch views
+# (`window`, `driven`): epoch, item index, state ('' for a stage-only mark),
+# stage ('' for a state-only mark).
+FM_GOAL_EV_ATS=() FM_GOAL_EV_IDXS=() FM_GOAL_EV_STATES=() FM_GOAL_EV_STAGES=()
 FM_GOAL_FOLD_LAST_AT=''
 FM_GOAL_FOLD_LAST_OWNER=''
 FM_GOAL_UNPLANNED_IDS=() FM_GOAL_UNPLANNED_STATES=() FM_GOAL_UNPLANNED_ATS=()
@@ -813,9 +825,10 @@ _fm_goal_fold_reset() {
   done
   FM_GOAL_FOLD_IGNORED=0
   FM_GOAL_PROGRESS_ATS=()
+  FM_GOAL_EV_ATS=(); FM_GOAL_EV_IDXS=(); FM_GOAL_EV_STATES=(); FM_GOAL_EV_STAGES=()
   FM_GOAL_FOLD_LAST_AT=''
   FM_GOAL_FOLD_LAST_OWNER=''
-  FM_GOAL_UNPLANNED_IDS=(); FM_GOAL_UNPLANNED_STATES=(); FM_GOAL_UNPLANNED_ATS=()
+  FM_GOAL_UNPLANNED_IDS=();FM_GOAL_UNPLANNED_STATES=(); FM_GOAL_UNPLANNED_ATS=()
   FM_GOAL_MERGED_TASKS=(); FM_GOAL_MERGED_ATS=()
 }
 
@@ -833,6 +846,10 @@ _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now
   [ "$at" -le $((now + _FM_GOAL_MARK_FUTURE_TOLERANCE)) ] || return 1
   FM_GOAL_PROGRESS_ATS[${#FM_GOAL_PROGRESS_ATS[@]}]=$at
   if idx=$(_fm_goal_index_of "$item"); then
+    FM_GOAL_EV_ATS[${#FM_GOAL_EV_ATS[@]}]=$at
+    FM_GOAL_EV_IDXS[${#FM_GOAL_EV_IDXS[@]}]=$idx
+    FM_GOAL_EV_STATES[${#FM_GOAL_EV_STATES[@]}]=$state
+    FM_GOAL_EV_STAGES[${#FM_GOAL_EV_STAGES[@]}]=$stage
     if [ -n "$state" ] && { [ -z "${FM_GOAL_M_ATS[$idx]}" ] || [ "$at" -ge "${FM_GOAL_M_ATS[$idx]}" ]; }; then
       FM_GOAL_M_STATES[idx]=$state
       FM_GOAL_M_ATS[idx]=$at
@@ -2525,6 +2542,196 @@ cmd_window() {
   return 0
 }
 
+# --- driven: the return brief's "Driven goals" body --------------------------
+
+FM_GOAL_DRIVEN_HOUR_ROWS=16
+FM_GOAL_DRIVEN_HOUR_EVENTS=4
+
+# An item's state in the captain's words.
+_fm_goal_state_words() {  # <state> <class>
+  case "$1:$2" in
+    open:captain) printf 'waiting on you' ;;
+    open:*) printf 'not started' ;;
+    running:*) printf 'in progress' ;;
+    waiting:*) printf 'waiting on something' ;;
+    blocked:*) printf 'blocked' ;;
+    done:*) printf 'done' ;;
+    dropped:*) printf 'dropped' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# The stage an item had when the window opened: the newest stage mark strictly
+# before <since> (a later line wins an equal epoch, as in the fold), or ''.
+_fm_goal_stage_before() {  # <idx> <since>
+  local idx=$1 since=$2 j=0 best='' best_at=''
+  while [ "$j" -lt "${#FM_GOAL_EV_ATS[@]}" ]; do
+    if [ "${FM_GOAL_EV_IDXS[$j]}" = "$idx" ] && [ -n "${FM_GOAL_EV_STAGES[$j]}" ] \
+      && [ "${FM_GOAL_EV_ATS[$j]}" -lt "$since" ] \
+      && { [ -z "$best_at" ] || [ "${FM_GOAL_EV_ATS[$j]}" -ge "$best_at" ]; }; then
+      best=${FM_GOAL_EV_STAGES[$j]}
+      best_at=${FM_GOAL_EV_ATS[$j]}
+    fi
+    j=$((j + 1))
+  done
+  printf '%s' "$best"
+}
+
+# One mark in the captain's words.
+_fm_goal_event_words() {  # <idx> <state> <stage>
+  local title=${FM_GOAL_ITEMS_TITLES[$1]} state=$2 stage=$3 words=''
+  [ -z "$state" ] || words=$(_fm_goal_state_words "$state" "${FM_GOAL_ITEMS_CLASSES[$1]}")
+  if [ -n "$stage" ] && [ -n "$words" ]; then
+    printf '%s: %s, reached %s' "$title" "$words" "$stage"
+  elif [ -n "$stage" ]; then
+    printf '%s: reached %s' "$title" "$stage"
+  else
+    printf '%s: %s' "$title" "$words"
+  fi
+}
+
+# The loaded, folded goal's section: its items (stage at the start of the
+# window, now, and target) and an hour-by-hour list of the updates inside it.
+_fm_goal_driven_render() {  # <since> <end>
+  local since=$1 end=$2
+  local i j head_state first_hour last_hour hour at idx cell stamp
+  local start_stage now_stage target words line n rows quiet_from=''
+  local -a hour_cells=() hour_counts=() out_rows=()
+  case "$FM_GOAL_REC_STATE" in
+    active) head_state="active, started $(fm_goal_epoch_iso "$FM_GOAL_REC_STARTED_EPOCH")" ;;
+    *) head_state="finished $(fm_goal_epoch_iso "$FM_GOAL_REC_CLOSED_EPOCH")" ;;
+  esac
+  fm_cap_line_var "  $FM_GOAL_REC_TITLE ($head_state):"; printf '%s\n' "$FM_LINE_CAP_LINE"
+  i=0
+  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+    start_stage=$(_fm_goal_stage_before "$i" "$since")
+    now_stage=${FM_GOAL_S_STAGES[$i]}
+    target=${FM_GOAL_ITEMS_TARGETS[$i]}
+    words=$(_fm_goal_state_words "${FM_GOAL_M_STATES[$i]}" "${FM_GOAL_ITEMS_CLASSES[$i]}")
+    line="    - ${FM_GOAL_ITEMS_TITLES[$i]}: start ${start_stage:-no stage yet}, now ${now_stage:-no stage yet}, target ${target:-none set} ($words)"
+    fm_cap_line_var "$line"; printf '%s\n' "$FM_LINE_CAP_LINE"
+    i=$((i + 1))
+  done
+  # Hour buckets are UTC clock hours, the first holding the window's start.
+  first_hour=$((since / 3600))
+  last_hour=$((end / 3600))
+  [ "$last_hour" -ge "$first_hour" ] || last_hour=$first_hour
+  rows=$(
+    j=0
+    while [ "$j" -lt "${#FM_GOAL_EV_ATS[@]}" ]; do
+      at=${FM_GOAL_EV_ATS[$j]}
+      if [ "$at" -ge "$since" ] && [ "$at" -le "$end" ]; then
+        printf '%s\t%s\t%s\n' "$at" "$j" "$(_fm_goal_event_words "${FM_GOAL_EV_IDXS[$j]}" "${FM_GOAL_EV_STATES[$j]}" "${FM_GOAL_EV_STAGES[$j]}")"
+      fi
+      j=$((j + 1))
+    done | LC_ALL=C sort -t "$(printf '\t')" -k1,1n -k2,2n -s
+  )
+  hour=$first_hour
+  while [ "$hour" -le "$last_hour" ]; do
+    hour_cells[hour - first_hour]=''
+    hour_counts[hour - first_hour]=0
+    hour=$((hour + 1))
+  done
+  if [ -n "$rows" ]; then
+    while IFS="$(printf '\t')" read -r at idx cell; do
+      hour=$((at / 3600 - first_hour))
+      hour_counts[hour]=$((hour_counts[hour] + 1))
+      if [ "${hour_counts[hour]}" -le "$FM_GOAL_DRIVEN_HOUR_EVENTS" ]; then
+        if [ -n "${hour_cells[hour]}" ]; then hour_cells[hour]="${hour_cells[hour]}; "; fi
+        hour_cells[hour]="${hour_cells[hour]}$cell"
+      fi
+    done <<EOF
+$rows
+EOF
+  fi
+  printf '    hour by hour (UTC):\n'
+  hour=$first_hour
+  while [ "$hour" -le "$last_hour" ]; do
+    n=${hour_counts[hour - first_hour]}
+    if [ "$n" -eq 0 ]; then
+      [ -n "$quiet_from" ] || quiet_from=$hour
+    else
+      if [ -n "$quiet_from" ]; then
+        out_rows[${#out_rows[@]}]=$(_fm_goal_driven_quiet_row "$quiet_from" "$((hour - 1))")
+        quiet_from=''
+      fi
+      stamp=$(fm_goal_epoch_iso $((hour * 3600)))
+      line="      ${stamp%:00:00Z}:00Z  $n update(s): ${hour_cells[hour - first_hour]}"
+      [ "$n" -le "$FM_GOAL_DRIVEN_HOUR_EVENTS" ] || line="$line; +$((n - FM_GOAL_DRIVEN_HOUR_EVENTS)) more"
+      fm_cap_line_var "$line"
+      out_rows[${#out_rows[@]}]=$FM_LINE_CAP_LINE
+    fi
+    hour=$((hour + 1))
+  done
+  [ -z "$quiet_from" ] || out_rows[${#out_rows[@]}]=$(_fm_goal_driven_quiet_row "$quiet_from" "$last_hour")
+  j=0
+  while [ "$j" -lt "${#out_rows[@]}" ] && [ "$j" -lt "$FM_GOAL_DRIVEN_HOUR_ROWS" ]; do
+    printf '%s\n' "${out_rows[$j]}"
+    j=$((j + 1))
+  done
+  if [ "${#out_rows[@]}" -gt "$FM_GOAL_DRIVEN_HOUR_ROWS" ]; then
+    printf '      (+%d more hour rows not shown)\n' "$((${#out_rows[@]} - FM_GOAL_DRIVEN_HOUR_ROWS))"
+  fi
+  return 0
+}
+
+# One collapsed row for a run of hours with no update.
+_fm_goal_driven_quiet_row() {  # <first-hour> <last-hour>
+  local a b count
+  a=$(fm_goal_epoch_iso $(($1 * 3600)))
+  b=$(fm_goal_epoch_iso $(($2 * 3600)))
+  count=$(($2 - $1 + 1))
+  if [ "$count" -eq 1 ]; then
+    printf '      %sZ  no updates\n' "${a%:00:00Z}:00"
+  else
+    printf '      %sZ to %sZ  no updates (%d hours)\n' "${a%:00:00Z}:00" "${b%:00:00Z}:00" "$count"
+  fi
+  return 0
+}
+
+# `driven --since <epoch>`: every goal that was active at any point of the
+# window - active now, or closed inside it - in the captain's words, for the
+# return brief's "Driven goals" section. Prints nothing when there is none.
+cmd_driven() {
+  local since='' flag now path id closed_epoch
+  while [ "$#" -gt 0 ]; do
+    flag=$1
+    case "$flag" in
+      --since)
+        [ "$#" -ge 2 ] && [ -n "${2-}" ] || _fm_goal_usage_error '--since needs an epoch'
+        since=$2
+        shift 2
+        ;;
+      *) _fm_goal_usage_error "unknown flag for driven: $flag" ;;
+    esac
+  done
+  case "$since" in ''|*[!0-9]*|0[0-9]*) _fm_goal_usage_error '--since needs an epoch (seconds)' ;; esac
+  [ "${#since}" -le 12 ] || _fm_goal_usage_error '--since epoch is too large'
+  now=$(date +%s)
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    id=${path##*/}
+    id=${id%.goal}
+    _fm_goal_open_record "$id" >/dev/null 2>&1 || continue
+    fm_goal_fold "$id" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$now"
+    _fm_goal_driven_render "$since" "$now"
+  done < <(fm_goal_active_records 2>/dev/null)
+  local closed_dir
+  closed_dir=$(fm_goal_closed_dir)
+  if [ -d "$closed_dir" ] && [ ! -L "$closed_dir" ] && [ ! -L "$(fm_goal_dir)" ]; then
+    for path in "$closed_dir"/*.goal; do
+      [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || continue
+      _fm_goal_load_record "$path" || continue
+      closed_epoch=${FM_GOAL_REC_CLOSED_EPOCH:-}
+      case "$closed_epoch" in ''|*[!0-9]*) continue ;; esac
+      [ "$closed_epoch" -ge "$since" ] || continue
+      fm_goal_fold "$FM_GOAL_REC_ID" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$now" "${path%.goal}.marks"
+      _fm_goal_driven_render "$since" "$closed_epoch"
+    done
+  fi
+  return 0
+}
+
 # --- main --------------------------------------------------------------------
 
 main() {
@@ -2532,7 +2739,7 @@ main() {
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'needs a subcommand'
   shift
   case "$cmd" in
-    start|edit|mark|probe|show|brief|active|startable|export|exists|window|close) ;;
+    start|edit|mark|probe|show|brief|active|startable|export|exists|window|driven|close) ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;
   esac

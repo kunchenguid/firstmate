@@ -537,7 +537,42 @@ test_export() {
   pass 'export is the JSON read of the projection: items, targets, stages, progress, empty and unknown ids'
 }
 
+test_driven() {
+  fixture; v2_items; start >/dev/null
+  local now since out first_hour
+  now=$(date +%s)
+  since=$((now - 4 * 3600))
+  expect_rc 0 goal driven --since "$since"
+  assert_contains "$(goal driven --since "$since")" 'Production goal (active, started ' 'driven names the active goal'
+  # a stage reached before the window is the start; marks inside it make the timeline
+  {
+    mark_line a running "$((since - 7200))"
+    printf 'goal [goal=I1] [item=a] [stage=merged] [at=%s]: before\n' "$((since - 3600))"
+    printf 'goal [goal=I1] [item=a] [stage=deployed] [at=%s]: inside\n' "$((now - 3600))"
+    mark_line b 'done' "$((now - 60))"
+  } > "$H/state/goals/I1.marks"
+  out=$(goal driven --since "$since")
+  assert_contains "$out" 'ship it: start merged, now deployed, target deployed (in progress)' 'start, now and target per item'
+  assert_contains "$out" 'hour by hour (UTC):' 'the timeline is present'
+  assert_contains "$out" 'update(s): ship it: reached deployed' 'a stage update lands in its hour'
+  assert_contains "$out" 'no updates' 'quiet hours are said'
+  assert_not_contains "$out" 'before' 'a mark before the window is not on the timeline'
+  expect_rc 2 goal driven
+  expect_rc 2 goal driven --since abc
+  first_hour=$(date -u -d "@$((since / 3600 * 3600))" +%Y-%m-%dT%H:00Z)
+  assert_contains "$out" "$first_hour" 'the first hour row names the hour the window opened in'
+  # a goal closed inside the window is still reported, with its final stage
+  goal mark I1 a 'done' --stage deployed -- ok >/dev/null
+  expect_rc 0 goal close I1 --done
+  expect_rc 1 goal active
+  out=$(goal driven --since "$since")
+  assert_contains "$out" 'Production goal (finished ' 'a goal closed in the window is reported as finished'
+  assert_contains "$out" 'ship it: start merged, now deployed, target deployed (done)' 'the closed goal keeps its stages'
+  assert_equals '' "$(goal driven --since "$((now + 3600))")" 'a goal closed before the window is not reported'
+  pass 'driven reports start, now and target per item and an hourly timeline'
+}
+
 fm_test_run test_start test_validation test_marks test_local_mate test_remote_mate \
   test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
-  test_probe_pr_merged test_limits test_target_close_and_brief test_export
+  test_probe_pr_merged test_limits test_target_close_and_brief test_export test_driven

@@ -27,7 +27,10 @@
 # merge-notification marker bin/fm-pr-lib.sh owns, read from durable records
 # only, never the forge - finished work that owes an ordinary teardown, which
 # is fleet work and so waits for the gate rather than holding it), then what
-# the away session handled, then cost. The health snapshot is taken BEFORE the
+# the away session handled, then the driven goals (per goal item the stage at
+# the start of the window, now, and the target, with an hourly timeline;
+# bin/fm-goal.sh driven owns that content and its captain-language wording),
+# then cost. The health snapshot is taken BEFORE the
 # daemon shutdown so the shutdown itself cannot read as a gap.
 #
 # THE GATE. `blocked:` is the crewmate protocol's firstmate-actionable verb. A
@@ -534,7 +537,7 @@ scan_landed_awaiting_cleanup() {  # -> <task>\t<url> rows
 
 render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-ok>
   local evidence=$1 blockers=$2 since=$3 drain_ok=$4 now record superseded superseded_at archive_dir stamp
-  local tag task key summary count routine routine_visible captain visible_outcomes live held_err last verb rows status url drained=0 pointer
+  local tag task key summary count routine routine_visible captain visible_outcomes live held_err last verb rows status url drained=0 pointer goals
   now=$(date +%s)
   # Where main processes outcomes through the drain's BRANCH OUTCOMES section
   # (the supervision host off Pi, docs/supervision-host.md "Captain outcomes"),
@@ -689,6 +692,22 @@ EOF
     printf '  %s routine outcome(s) recorded; none were visible.\n' "$routine"
   else
     printf '  (no routine outcomes recorded in the store for this window)\n'
+  fi
+
+  # 6b. driven goals: how far each goal item got while the captain was away.
+  # bin/fm-goal.sh driven owns the content and its plain-language wording; this
+  # only frames it. A render fault is said here and never gates the return.
+  printf 'Driven goals:\n'
+  goal_config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  if [ -z "$since" ]; then
+    printf '  (no away window recorded; goal progress not shown)\n'
+  elif [ ! -x "$SCRIPT_DIR/fm-goal.sh" ]; then
+    printf '  (goal progress unavailable: the goal tool is missing)\n'
+  elif goals=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$goal_config" "$SCRIPT_DIR/fm-goal.sh" driven --since "$since" 2>&1); then
+    if [ -n "$goals" ]; then printf '%s\n' "$goals"; else printf '  (no goals were being driven in this window)\n'; fi
+  else
+    printf '  (goal progress unavailable: %s)\n' "$(printf '%s' "$goals" | tr '\n' ' ' | cut -c1-160)"
   fi
 
   # 7. cost.

@@ -1285,6 +1285,56 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
 
 
 
+goal_in() {  # <case-dir> <args...>
+  local dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    "$dir/bin/fm-goal.sh" "$@"
+}
+
+test_return_brief_lists_driven_goals_with_start_now_target_and_an_hourly_timeline() {
+  local dir out now since goals_line cost_line
+  dir="$TMP_ROOT/brief-driven"
+  install_runner "$dir"
+  cp "$ROOT"/bin/fm-*-lib.sh "$ROOT/bin/fm-goal.sh" "$dir/bin/"
+  now=$(date +%s)
+  since=$((now - 3 * 3600))
+  printf '%s\n' "$since" > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  printf '%s\n' \
+    'item [id=node] [owner=main] [project=miko] [target=deployed]: refresh the node bundle' \
+    'item [id=secret] [owner=main] [class=captain]: rotate the grafana secret' > "$dir/items"
+  goal_in "$dir" start I1 --title 'Miko night run' --done-when 'bundle live' --named-by 'drive it' \
+    --plan plan.md --items-file "$dir/items" >/dev/null || fail "could not start the lab goal"
+  # merged before the window opened is the start; deployed one hour ago is now
+  printf 'goal [goal=I1] [item=node] [stage=merged] [at=%s]: PR merged\n' "$((since - 600))" > "$dir/home/state/goals/I1.marks"
+  printf 'goal [goal=I1] [item=node] [state=running] [at=%s]: started\n' "$((since + 60))" >> "$dir/home/state/goals/I1.marks"
+  printf 'goal [goal=I1] [item=node] [stage=deployed] [at=%s]: deployed\n' "$((now - 3600))" >> "$dir/home/state/goals/I1.marks"
+  out=$(run_return "$dir" begin) || fail "the lab return should clear: $out"
+  assert_contains "$out" $'Driven goals:\n  Miko night run (active, started ' "the brief did not name the driven goal"
+  assert_contains "$out" '    - refresh the node bundle: start merged, now deployed, target deployed (in progress)' "start, now and target were not listed for the item"
+  assert_contains "$out" '    - rotate the grafana secret: start no stage yet, now no stage yet, target none set (waiting on you)' "the captain's own item was not listed in plain words"
+  assert_contains "$out" '    hour by hour (UTC):' "the hourly timeline was missing"
+  assert_contains "$out" 'update(s): refresh the node bundle: reached deployed' "the in-window stage update was not on the timeline"
+  assert_not_contains "$out" 'PR merged' "a mark before the window leaked onto the timeline"
+  goals_line=$(line_of "$out" 'Driven goals:')
+  cost_line=$(line_of "$out" 'Cost:')
+  [ -n "$goals_line" ] && [ "$goals_line" -lt "$cost_line" ] || fail "the driven goals section is missing or after cost"
+  pass "the return brief lists start, now and target per goal item with an hourly timeline"
+}
+
+test_return_brief_says_so_when_no_goal_was_driven() {
+  local dir out
+  dir="$TMP_ROOT/brief-no-goal"
+  install_runner "$dir"
+  cp "$ROOT"/bin/fm-*-lib.sh "$ROOT/bin/fm-goal.sh" "$dir/bin/"
+  printf '%s\n' "$(( $(date +%s) - 7200 ))" > "$dir/home/state/.afk"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "the return should clear: $out"
+  assert_contains "$out" $'Driven goals:\n  (no goals were being driven in this window)' "an empty goal set was not said plainly"
+  pass "the return brief says plainly when no goal was driven"
+}
+
 test_unreadable_superseded_archive_keeps_return_gated() {
   local dir out rc epoch archive backup
   dir="$TMP_ROOT/superseded-unreadable"
@@ -1386,3 +1436,5 @@ test_return_brief_keeps_trip_row_count_after_probe
 test_return_brief_ignores_previous_main_session
 test_return_brief_keeps_in_window_history_across_main_restart
 test_return_brief_without_a_record_reports_the_legacy_flag
+test_return_brief_lists_driven_goals_with_start_now_target_and_an_hourly_timeline
+test_return_brief_says_so_when_no_goal_was_driven
