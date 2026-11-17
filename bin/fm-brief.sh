@@ -364,7 +364,7 @@ if [ "$KIND" = ship ]; then
     [ "$FORGEJO_CLI" != auto ] || FORGEJO_CLI=tea
     case "$FORGEJO_CLI" in
       fj)
-        echo "error: project '${POS[1]:-}' resolves to forgejo-cli (fj), but fj exposes no authenticated request passthrough and cannot bind a merge to a verified head, so firstmate cannot ship this task; register forge=forgejo:tea or forge=forgejo:fgj, or install and log in a supported Forgejo CLI for this project's host (docs/forgejo-cli-alternatives.md)" >&2
+        echo "error: project '${POS[1]:-}' resolves to forgejo-cli (fj), but fj exposes no authenticated request passthrough and cannot bind a merge to a verified head, so firstmate cannot ship this task; the project's registry binding names forge=forgejo:fj, so register forge=forgejo:tea or forge=forgejo:fgj (or drop the CLI to leave the project on tea) in data/projects.md (docs/forgejo-cli-alternatives.md)" >&2
         exit 1 ;;
       fgj)
         FORGE_RULE_LINE="Use fgj for Forgejo operations and chrome-devtools-axi for browser operations." ;;

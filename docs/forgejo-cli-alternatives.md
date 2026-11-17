@@ -39,7 +39,7 @@ Reproducing the record needs only a released build of each tool whose interface 
 
 Findings are bounded by interface generation rather than by a local version pin:
 
-- The `fj` refusal is bounded by the `forgejo-cli` interface generation this record covers: it has no `api` passthrough, cannot address a repository by slug, renders its pull request views as localized prose with no commit id, and hard-codes `head_commit_id: None` in its merge request. If a later generation changes any of these, the refusal must be re-verified against that generation before it is relaxed.
+- The `fj` refusal is bounded by the `forgejo-cli` interface generation this record covers: it has no `api` passthrough, cannot address a repository by slug, renders its pull request views as localized prose with no commit id, and hard-codes `head_commit_id: None` in its merge request. The login read is bounded the same way: it rests on `fj whoami --host <host>` exiting 0 exactly when that host is logged in. If a later generation changes any of these, the refusal must be re-verified against that generation before it is relaxed.
 - The `fgj` acceptance is bounded by the `fgj` interface generation that ships `fgj api`, the `gh api`-style request passthrough the whole acceptance rests on; an earlier generation without it cannot serve this record at all.
 
 ## `fj` cannot serve this contract, and why
@@ -94,16 +94,17 @@ There is no `--json`/`-o` flag anywhere in `fj pr`.
 **It cannot address a repository by slug.** `fj pr view`, `fj pr status`, and `fj pr merge` accept `-H/--host` and `-C/--cwd` but no `-r/--repo`; `RepoInfo::get_current` in `src/repo.rs` resolves the owner and repository from the git remote of the current directory (or of `-C`), using `--host` only to pick between several remotes.
 A merge watch runs from the fleet's state directory with no clone of the target in scope, so this alone rules `fj` out of that read even if the output were parseable.
 
-**What `fj` does offer, and what firstmate therefore uses.** Only its login list: `fj auth list` prints the hostname of every instance the user is logged into, one bare host per line, and nothing on stdout when there is none (the "not logged in" notice goes to stderr).
+**What `fj` does offer, and what firstmate therefore uses.** Only a per-host login predicate: `fj whoami --host <host>` exits 0 exactly when the user holds a login for `<host>` and nonzero otherwise, so firstmate reads the login from that exit status alone and parses no display line at all.
+The `whoami` command is listed by the `fj --help` output above; its `--host` flag and this exit-status meaning were taken from that shipped surface and the released source, and were **not** exercised live against a real `forgejo-cli` build in this record's verification pass, unlike the `fgj` path.
+That is why the reader is fail-closed: a generation whose `whoami` does not distinguish a logged-out host from a logged-in one makes the resolver treat the host as unconfigured and refuse, rather than reaching for another CLI or guessing.
 Its store is a JSON map from host to token (`~/Library/Application Support/forgejo-cli.forgejo-cli/keys.json` on macOS, the platform config directory elsewhere), which firstmate never reads, so the credential stays inside `fj`.
 
 ```
-$ fj auth list
-<redacted, forge A>
-<redacted, forge B>
+$ fj whoami --host <configured-host>;  echo $?   # 0
+$ fj whoami --host <other-host>;       echo $?   # nonzero
 ```
 
-Both hosts are instances the captain is logged into and stay out of this record, the same way [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) withholds its private-instance identifiers; what matters here is the shape, one bare host per line.
+Which hosts those are stays out of this record, the same way [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) withholds its private-instance identifiers; what matters here is only that the answer is a status asked about one host at a time.
 
 The narrowest safe shape for a project whose only Forgejo CLI is `fj` is therefore a refusal, not a fallback: `bin/fm-pr-lib.sh` recognizes `fj` and resolves its host login, and then refuses every operation that needs the pull request record, naming the missing capability and pointing here.
 `bin/fm-pr-merge.sh` never merges through it, and `bin/fm-pr-check.sh` refuses to arm a watch on it rather than leaving behind a poll that can never report anything.
@@ -148,7 +149,7 @@ That is the whole reason `fgj` is usable where `fj` is not, and why the head-bin
 
 ## Host and login resolution
 
-Both CLIs keep one login per instance and select it on the command line, but the stores and their reports differ.
+Both CLIs keep one login per instance and select it on the command line, but the stores and the way each answers for a host differ.
 
 `fgj` keeps `~/.config/fgj/config.yaml` (or `$XDG_CONFIG_HOME/fgj/config.yaml`) with a `hosts:` map keyed by hostname, and picks one with `--hostname`; `FGJ_TOKEN` and `FGJ_HOST` override it. `fgj auth status` prints a human report of the configured instances:
 
@@ -170,9 +171,9 @@ $ fgj auth token --hostname <unknown-host>;       echo $?   # 1
 `runAuthToken` in `cmd/auth.go` reads the token for a configured instance and errors out when the host is absent, so the status is a documented, machine-checkable signal rather than a rendered surface — the property [`VISION.md`](https://github.com/kunchenguid/firstmate/blob/main/VISION.md) requires of an adapter over another tool's output.
 The config file is still never read: it also holds each instance's token, and firstmate must not need it.
 
-`fj` prints its hostnames through `fj auth list` as bare lines, shown above.
+`fj` answers the same question per host: `fj whoami --host <host>` reports in its exit status whether that one host is logged in, as shown above, so no report is rendered, listed, or matched.
 
-Both are matched to the pull request's parsed host exactly, and a store with zero or several entries for that host fails rather than guesses, mirroring the `tea login list` match [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) owns.
+Both are handed the pull request's parsed host and fail rather than guess when it is not a host they hold a login for, mirroring the `tea login list` match [`docs/forgejo-tea-integration.md`](forgejo-tea-integration.md) owns.
 
 ## What firstmate does with this
 

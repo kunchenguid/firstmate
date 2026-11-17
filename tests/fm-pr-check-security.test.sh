@@ -3712,10 +3712,11 @@ SH
   rm -f "$dir/fakebin/fgj" "$state/task-a.check.sh" "$state/task-a.pr-poll"
   printf '# Projects\n\n- project [no-mistakes forge=forgejo:fj] - fixture (added 2026-01-01)\n' \
     > "$dir/home/data/projects.md"
+  # `whoami --host <host>` is the login predicate firstmate reads: exit 0
+  # exactly when <host> is logged in. No rendered `auth list` line is parsed.
   cat > "$dir/fakebin/fj" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-} ${2:-}" = "auth list" ]; then
-  printf 'forgejo.example\n'
+if [ "${1:-} ${2:-} ${3:-}" = "whoami --host forgejo.example" ] && [ "$#" -eq 3 ]; then
   exit 0
 fi
 printf 'fj: unexpected invocation: %s\n' "$*" >&2
@@ -3781,10 +3782,11 @@ SH
   # stay silent rather than reach for any other CLI, which is the same
   # never-invent-a-verdict property the fj refusal protects.
   rm -f "$dir/fakebin/fgj"
+  # fj is installed and logged in for this host, so only its inability to read
+  # the record can keep the poll silent.
   cat > "$dir/fakebin/fj" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-} ${2:-}" = "auth list" ]; then
-  printf 'forgejo.example\n'
+if [ "${1:-} ${2:-} ${3:-}" = "whoami --host forgejo.example" ] && [ "$#" -eq 3 ]; then
   exit 0
 fi
 printf 'fj: unexpected invocation: %s\n' "$*" >&2
