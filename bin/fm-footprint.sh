@@ -63,7 +63,8 @@
 #
 # What is never removed. Every removal below refuses whatever it cannot
 #   prove disposable, so fewer cases are cleaned rather than any case risked:
-#   - version-controlled work: a tree holding a .git, .hg, .svn, or .jj entry,
+#   - version-controlled work: a tree holding a .git, .hg, .svn, .jj, .bzr,
+#     .pijul, _darcs, .sl, _FOSSIL_ or .fslckout entry,
 #     or any entry named HEAD (a bare git repository), is never removed,
 #     whether or not its commits look published, because no cheap check
 #     covers every commit, stash, reflog entry, ignored file, and linked
@@ -73,17 +74,18 @@
 #   - anything whose ownership is not proven (the key directory test below);
 #   - a set-aside folder (.fm-closing-* or .fm-reclaim-*) left by an
 #     interrupted removal: it is reported, never removed again by its name.
-#   Before a directory is removed it is renamed aside under the task's spawn
-#   lock, and whether it may go is then decided from its own frozen contents,
-#   never from no process seeming to use it (the removal boundary, fp_settle):
-#   it is frozen (no write bit anywhere, so no ordinary process can create,
-#   rename or open anything there for writing), flushed, snapshotted, checked
-#   for running processes (which can only add a reason to keep), left for
-#   removal-grace-seconds, checked for version-controlled work again, and
-#   snapshotted again; any difference, or any failed step, puts it back with
-#   its permissions restored. The removal then deletes exactly the entries
-#   the verified snapshot lists, so anything that appeared later stays, with
-#   the folder around it. Firstmate never ends a process to free space;
+#   Before a directory is removed it is renamed aside (the daily pass and
+#   old-folder apply do so under the task's spawn lock; task close runs while
+#   teardown still holds the task's record), and whether it may go is then
+#   decided from its own frozen contents, never from no process seeming to
+#   use it (the removal boundary, fp_settle, below): it is frozen, flushed,
+#   snapshotted, checked for running processes (which can only add a reason
+#   to keep), left for removal-grace-seconds, checked for version-controlled
+#   work again, and snapshotted again; only a positive record of every step
+#   lets it go, and anything else puts it back with its permissions restored.
+#   The removal then deletes, by descriptor and identity, exactly the entries
+#   the verified snapshot lists, so anything that changed or appeared later
+#   stays, with the folder around it. Firstmate never ends a process to free space;
 #   teardown ends only the closing task's own processes, before task-close
 #   runs.
 #
@@ -354,12 +356,12 @@ fp_config() {
 # list it, so any tree holding one is never inspected or removed.
 FP_CTRL_GLOB=$(printf '*[\001-\037\177]*')
 
-# Version-control markers. A tree holding a .git, .hg, .svn, or .jj entry, or
-# any entry named HEAD (a bare git repository), may hold the only copy of
+# Version-control markers. A tree holding a .git, .hg, .svn, .jj, .bzr,
+# .pijul, _darcs, .sl, _FOSSIL_ or .fslckout entry, or any entry named HEAD (a bare git repository), may hold the only copy of
 # work, and no cheap check proves every commit, stash, reflog entry, ignored
 # file, and linked worktree of it is safe elsewhere, so such a tree is never
 # removed, whatever its remotes say.
-FP_VCS_TESTS='-name .git -o -name .hg -o -name .svn -o -name .jj -o -name HEAD'
+FP_VCS_TESTS='-name .git -o -name .hg -o -name .svn -o -name .jj -o -name .bzr -o -name .pijul -o -name _darcs -o -name .sl -o -name _FOSSIL_ -o -name .fslckout -o -name HEAD'
 
 # fp_marker_scan <root>...: one bounded scan printing every version-control
 # marker under the roots (without descending into one), and the line
@@ -377,11 +379,12 @@ fp_marker_scan() {  # <root>...
 # disposable: something under it is a version-control marker or has a name
 # with a control character or a backslash, or its scan did not complete. One
 # scan covers every root; when it stops or fails, or a line cannot be traced
-# to its root, each root is scanned on its own.
+# to its root, each root is scanned on its own. Returns 1 when <out> could
+# not be written, which the caller treats as every root blocked.
 fp_blocked() {  # <out> <root>...
   local out=$1 scan r mapped
   shift
-  : > "$out"
+  : > "$out" 2>/dev/null || return 1
   [ "$#" -gt 0 ] || return 0
   if scan=$(fp_marker_scan "$@") && case "$scan" in *FM-CONTROL-NAME*) false ;; *) true ;; esac; then
     [ -n "$scan" ] || return 0
@@ -390,12 +393,12 @@ fp_blocked() {  # <out> <root>...
              while (p != "") { if (p in root) { print p; found = 1; break }; if (!sub(/\/[^\/]*$/, "", p)) break }
              if (!found) bad = 1 }
         END { exit bad }' <(printf '%s\n' "$@") -); then
-      printf '%s\n' "$mapped" | sort -u > "$out"
+      printf '%s\n' "$mapped" | sort -u > "$out" 2>/dev/null || return 1
       return 0
     fi
   fi
   for r in "$@"; do
-    if ! scan=$(fp_marker_scan "$r") || [ -n "$scan" ]; then printf '%s\n' "$r" >> "$out"; fi
+    if ! scan=$(fp_marker_scan "$r") || [ -n "$scan" ]; then printf '%s\n' "$r" >> "$out" 2>/dev/null || return 1; fi
   done
 }
 
@@ -453,95 +456,52 @@ fp_set_aside() {  # <dir> <tag>
 # --- the removal boundary ----------------------------------------------------
 #
 # Whether a set-aside directory may go is decided from its own contents at
-# the moment of removal, never from no process seeming to use it. fp_settle
-# runs every removal (task close, the daily pass, old-folder apply) through
-# the same steps, each of which can only add reasons to keep:
-#   1. freeze: write permission is removed from every entry, so no ordinary
-#      process can create, rename, remove or open anything for writing there
-#      any more; a writer gets an error instead of silently losing its work;
+# the moment of removal, never from no process seeming to use it, and the
+# removal itself is bound to the objects that were verified, never to path
+# text. fp_settle runs every removal (task close, the daily pass, old-folder
+# apply) through the same steps, each of which can only add reasons to keep:
+#   1. freeze: write permission is removed from every directory and file, by
+#      descriptor and never through a link, so no ordinary process can
+#      create, rename, remove or open anything for writing there any more; a
+#      file with more than one link is never changed, because its mode is
+#      shared with a name outside, and keeps the whole copy;
 #   2. flush: dirty pages are written out, so a later write through a memory
 #      mapping or a descriptor opened earlier changes the entry's times;
-#   3. snapshot: type, permissions, inode, size, modification and change times
-#      and link count of every entry, at sub-second precision where the
-#      platform gives it;
+#   3. snapshot: type, permissions, device, inode, size, blocks,
+#      nanosecond modification and change times, and link count of every
+#      entry;
 #   4. the process check (fp_in_use): a copy a running process still uses, or
 #      every copy when the processes cannot be listed in full, is kept;
 #   5. the grace window (removal-grace-seconds);
 #   6. the content check again (version-controlled work, unsafe names, or
 #      anything unreadable keeps the copy), now that nothing new can appear;
 #   7. a second snapshot that must equal the first, entry for entry.
-# A copy that fails any step gets its permissions back and its old name
-# back; the rest are removed at once by the caller.
+# A copy is removable only when a positive record says every step verified
+# it; a step that fails or cannot write its result keeps it, and a kept copy
+# gets its permissions and its old name back. fp_fs remove then deletes, at
+# once, exactly the entries the verified snapshot lists, each checked against
+# its snapshotted identity in a parent opened by descriptor, giving each
+# directory its write bit back only when its own entries go; anything that
+# changed or appeared stays, with every directory above it.
+# The limit: a process that already holds a file open or mapped for writing,
+# that the process check cannot see (another user, such as root or a
+# container writing through a bind mount), and that writes only after the
+# second snapshot can lose that write; the grace window, not the process
+# check, is what protects against such a writer.
 
-# fp_stat_lines <dir>...: "symbolic-mode perm inode size mtime ctime links
-# path" per entry; the first character of the symbolic mode is its type.
-fp_stat_lines() {  # <dir>...
-  if [ "$FP_OS" = Darwin ]; then
-    fm_run_timed 600 find "$@" -xdev -exec /usr/bin/stat -f '%Sp %Lp %i %z %Fm %Fc %l %N' {} + </dev/null 2>/dev/null
-  else
-    fm_run_timed 600 find "$@" -xdev -printf '%M %m %i %s %T@ %C@ %n %p\n' </dev/null 2>/dev/null
-  fi
+# fp_fs <command> <args...>: runs the descriptor-safe filesystem engine
+# (bin/fm-footprint-fs.py, whose header owns each command's contract), bound
+# in time. Returns 4 when python3 is missing, so nothing can be removed.
+FP_FS="$SCRIPT_DIR/fm-footprint-fs.py"
+fp_fs() {  # <command> <args...>
+  command -v python3 >/dev/null 2>&1 || return 4
+  fm_run_timed 600 python3 -I -B "$FP_FS" "$@" </dev/null
 }
 
-# fp_remove_listed <snap>: removes exactly the entries a verified snapshot
-# lists ("root<TAB>stat line"), never whatever is there by then: directories
-# get their write bit back, the listed files and links are removed, then the
-# listed directories deepest first, each only if it is empty. Anything that
-# appeared after the snapshot is not listed, so it and every directory above
-# it stay. Returns 1 when any listed root is still there.
-fp_remove_listed() {  # <snap>
-  local snap=$1 rc=0 root
-  [ -s "$snap" ] || return 0
-  awk -F '\t' '{ l = $2; q = l; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
-      if (substr(l, 1, 1) == "d") printf "%s%c", q, 0 }' "$snap" |
-    xargs -0 chmod u+w 2>/dev/null || true
-  awk -F '\t' '{ l = $2; q = l; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
-      if (substr(l, 1, 1) != "d") printf "%s%c", q, 0 }' "$snap" |
-    xargs -0 rm -f -- 2>/dev/null || true
-  awk -F '\t' '{ l = $2; q = l; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
-      if (substr(l, 1, 1) == "d") { n = gsub(/\//, "/", q); print n "\t" q } }' "$snap" |
-    LC_ALL=C sort -t "$(printf '\t')" -k1,1nr | cut -f2- | tr '\n' '\0' |
-    xargs -0 rmdir -- 2>/dev/null || true
-  while IFS= read -r root; do
-    [ ! -e "$root" ] && [ ! -L "$root" ] || rc=1
-  done < <(cut -f1 "$snap" | LC_ALL=C sort -u)
-  return "$rc"
-}
-
-# fp_freeze <modes-out> <dir>...: records each entry's permissions, then
-# removes every write bit. Returns 1 when any entry could not be recorded or
-# frozen.
-fp_freeze() {  # <modes-out> <dir>...
-  local modes=$1
-  shift
-  if [ "$FP_OS" = Darwin ]; then
-    fm_run_timed 600 find "$@" -xdev ! -type l -exec /usr/bin/stat -f '%Lp %N' {} + </dev/null > "$modes" 2>/dev/null || return 1
-  else
-    fm_run_timed 600 find "$@" -xdev ! -type l -printf '%m %p\n' </dev/null > "$modes" 2>/dev/null || return 1
-  fi
-  fm_run_timed 600 find "$@" -xdev ! -type l -exec chmod a-w {} + </dev/null 2>/dev/null
-}
-
-# fp_thaw <modes> <dir>: gives every entry under <dir> its recorded
-# permissions back. Returns 1 when any could not be restored.
+# fp_thaw <modes> <dir>: gives every object under <dir> whose identity the
+# freeze recorded its permissions back. Returns 1 when any could not be.
 fp_thaw() {  # <modes> <dir>
-  local modes=$1 dir=$2 mode rc=0
-  while IFS= read -r mode; do
-    case "$mode" in ''|*[!0-7]*) rc=1; continue ;; esac
-    awk -v d="$dir" -v m="$mode" '{ p = $0; sub(/^[^ ]+ /, "", p) } $1 == m && (p == d || index(p, d "/") == 1) { printf "%s%c", p, 0 }' "$modes" |
-      xargs -0 chmod "$mode" 2>/dev/null || rc=1
-  done < <(awk -v d="$dir" '{ p = $0; sub(/^[^ ]+ /, "", p) } p == d || index(p, d "/") == 1 { print $1 }' "$modes" | sort -u)
-  return "$rc"
-}
-
-# fp_by_root <roots-file> <lines-file>: prefixes each stat line with the
-# root it lies under ("root<TAB>line"); a line under no root is dropped.
-fp_by_root() {  # <roots-file> <lines-file>
-  awk 'FILENAME == ARGV[1] { root[$0] = 1; next }
-    { q = $0; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
-      p = q
-      while (p != "") { if (p in root) { print p "\t" $0; break }; if (!sub(/\/[^\/]*$/, "", p)) break }
-    }' "$1" "$2"
+  fp_fs thaw "$1" "$2" 2>/dev/null
 }
 
 # fp_why_all <work-dir> <reason>: gives every root in <work-dir>/roots a reason to keep.
@@ -549,67 +509,123 @@ fp_why_all() {  # <work-dir> <reason>
   awk -v r="$2" '{ print $0 "\t" r }' "$1/roots" >> "$1/why"
 }
 
-# fp_settle <pairs> <ok-out> <kept-out> [<modes-out>]: runs the removal
-# boundary over the set-aside copies listed in <pairs> ("aside<TAB>dir").
-# Writes each copy that may be removed now, still frozen, as a pair to
-# <ok-out> and its verified snapshot to <ok-out>.snap for fp_remove_listed,
-# and each kept one as "reason<TAB>aside<TAB>dir" to <kept-out>
-# after putting it back. Reasons: frozen, unreadable, in-use, unlisted,
-# blocked, changed. <modes-out> keeps the recorded permissions, so a caller
-# that must put the whole batch back can thaw the copies it was given.
-fp_settle() {  # <pairs> <ok-out> <kept-out> [<modes-out>]
-  local pairs=$1 ok=$2 kept=$3 w aside area why grace
+# fp_settle <pairs> <ok-out> <kept-out>: runs the removal boundary over the
+# set-aside copies listed in <pairs> ("aside<TAB>dir"). A copy may be removed
+# only when a positive record says every step verified it; a step that fails,
+# cannot record its result, or leaves no snapshot keeps it. Writes each copy
+# that may be removed now, still frozen, as a pair to <ok-out>, its verified
+# snapshot to <ok-out>.snap and its recorded permissions to <ok-out>.modes
+# for fp_fs remove, and each kept one as "reason<TAB>aside<TAB>dir" to
+# <kept-out> after putting it back with its permissions restored. Reasons:
+# notool, frozen, linked, mount, unsafe, unreadable, in-use, unlisted,
+# blocked, changed, unrecorded. Returns 1 when its own records could not be
+# written, after putting every copy back.
+fp_settle() {  # <pairs> <ok-out> <kept-out>
+  local pairs=$1 ok=$2 kept=$3 w aside area why grace listed=1 bad=0
   local -a roots_all=()
-  : > "$ok"
-  : > "$ok.snap"
-  : > "$kept"
+  FP_UNLISTED_NAMES=
   while IFS='	' read -r aside area; do [ -n "$aside" ] && roots_all+=("$aside"); done < "$pairs"
-  [ "${#roots_all[@]}" -gt 0 ] || return 0
-  w=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-settle.XXXXXX") || w=
-  if [ -z "$w" ]; then
+  { : > "$ok" && : > "$ok.snap" && : > "$ok.modes" && : > "$kept"; } 2>/dev/null || bad=1
+  [ "${#roots_all[@]}" -gt 0 ] || return "$bad"
+  w=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-settle.XXXXXX" 2>/dev/null) || w=
+  if [ -z "$w" ] || [ "$bad" = 1 ]; then
+    [ -z "$w" ] || rmdir "$w" 2>/dev/null || true
     while IFS='	' read -r aside area; do
       fp_restore "$aside" "$area" || true
-      printf 'unreadable\t%s\t%s\n' "$aside" "$area" >> "$kept"
+      printf 'unrecorded\t%s\t%s\n' "$aside" "$area" >> "$kept" 2>/dev/null || true
     done < "$pairs"
-    return 0
+    return 1
   fi
-  printf '%s\n' "${roots_all[@]}" > "$w/roots"
-  : > "$w/why"
-  fp_freeze "$w/modes" "${roots_all[@]}" || fp_why_all "$w" frozen
-  fm_run_timed 120 sync </dev/null >/dev/null 2>&1 || fp_why_all "$w" unreadable
-  fp_stat_lines "${roots_all[@]}" > "$w/s1.raw" || fp_why_all "$w" unreadable
-  fp_by_root "$w/roots" "$w/s1.raw" | LC_ALL=C sort > "$w/s1"
-  if fp_in_use "$w/busy" "${roots_all[@]}"; then
-    awk '{ print $0 "\tin-use" }' "$w/busy" >> "$w/why"
+  {
+    printf '%s\n' "${roots_all[@]}" > "$w/roots" && : > "$w/why" && : > "$w/modes" &&
+      : > "$w/frozen" && : > "$w/s1" && : > "$w/s2" && : > "$w/busy" && : > "$w/blocked"
+  } 2>/dev/null || bad=1
+  if ! command -v python3 >/dev/null 2>&1; then
+    fp_why_all "$w" notool 2>/dev/null || bad=1
   else
-    fp_why_all "$w" unlisted
+    # 1. Freeze, by descriptor and never through a link (fp_fs freeze).
+    fp_fs freeze "$w/modes" "${roots_all[@]}" > "$w/frozen" 2>/dev/null || bad=1
+    # 2. Flush, so a write through an earlier mapping or descriptor changes
+    #    an entry's times. 3. Snapshot.
+    fm_run_timed 120 sync </dev/null >/dev/null 2>&1 || fp_why_all "$w" unreadable 2>/dev/null || bad=1
+    fp_fs snapshot "${roots_all[@]}" > "$w/s1" 2>/dev/null || bad=1
+    # 4. The process check only adds reasons to keep.
+    if fp_in_use "$w/busy" "${roots_all[@]}"; then
+      awk '{ print $0 "\tin-use" }' "$w/busy" >> "$w/why" 2>/dev/null || bad=1
+    else
+      listed=0
+    fi
+    # 5. The grace window. 6. The content check again. 7. Snapshot again.
+    grace=${FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE:-$FP_REMOVAL_GRACE_SECONDS}
+    case "$grace" in ''|*[!0-9]*) grace=5 ;; esac
+    [ "$grace" = 0 ] || sleep "$grace"
+    fp_blocked "$w/blocked" "${roots_all[@]}" || bad=1
+    fp_fs snapshot "${roots_all[@]}" > "$w/s2" 2>/dev/null || bad=1
   fi
-  grace=${FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE:-$FP_REMOVAL_GRACE_SECONDS}
-  case "$grace" in ''|*[!0-9]*) grace=5 ;; esac
-  [ "$grace" = 0 ] || sleep "$grace"
-  fp_blocked "$w/blocked" "${roots_all[@]}"
-  awk '{ print $0 "\tblocked" }' "$w/blocked" >> "$w/why"
-  fp_stat_lines "${roots_all[@]}" > "$w/s2.raw" || fp_why_all "$w" unreadable
-  fp_by_root "$w/roots" "$w/s2.raw" | LC_ALL=C sort > "$w/s2"
-  # A root whose entries differ in any way between the snapshots changed.
-  awk -F '\t' 'FILENAME == ARGV[1] { a[$1] = a[$1] "\n" $0; next }
-    FILENAME == ARGV[2] { b[$1] = b[$1] "\n" $0; next }
-    { if (a[$0] != b[$0]) print $0 "\tchanged" }' "$w/s1" "$w/s2" "$w/roots" >> "$w/why"
+  # The positive record: a root is verified only when it was frozen, both
+  # snapshots hold it in full with every non-directory singly linked and
+  # are identical for it, the process listing was complete and names
+  # nothing in it, and the content check found nothing. Every other root
+  # gets the first reason that applies.
+  awk -F '\t' -v listed="$listed" '
+    FILENAME == ARGV[1] { fz[$1] = $2; next }
+    FILENAME == ARGV[2] { if ($2 == "!") bad1[$1] = $3; else { a[$1] = a[$1] "\n" $0; if ($11 == ".") top1[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
+    FILENAME == ARGV[3] { if ($2 == "!") bad2[$1] = $3; else { b[$1] = b[$1] "\n" $0; if ($11 == ".") top2[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
+    FILENAME == ARGV[4] { busy[$0] = 1; next }
+    FILENAME == ARGV[5] { blk[$0] = 1; next }
+    FILENAME == ARGV[6] { if (!($1 in why)) why[$1] = $2; next }
+    { r = $0
+      if (r in why) w = why[r]
+      else if (!(r in fz)) w = "unrecorded"
+      else if (fz[r] != "ok") w = fz[r]
+      else if (r in bad1) w = bad1[r]
+      else if (r in linked) w = "linked"
+      else if (!(r in top1) || !(r in top2)) w = "unrecorded"
+      else if (r in busy) w = "in-use"
+      else if (listed != 1) w = "unlisted"
+      else if (r in blk) w = "blocked"
+      else if (r in bad2) w = bad2[r]
+      else if (a[r] != b[r]) w = "changed"
+      else w = "verified"
+      print r "\t" w }' "$w/frozen" "$w/s1" "$w/s2" "$w/busy" "$w/blocked" "$w/why" "$w/roots" > "$w/verdict" 2>/dev/null || bad=1
+  if [ "$bad" = 0 ]; then
+    awk -F '\t' '$2 == "verified" { print $1 }' "$w/verdict" > "$w/verified" 2>/dev/null &&
+      awk -F '\t' 'FILENAME == ARGV[1] { v[$0] = 1; next } ($1 in v)' "$w/verified" "$w/s2" > "$ok.snap" 2>/dev/null &&
+      cp "$w/modes" "$ok.modes" 2>/dev/null || bad=1
+  fi
   while IFS='	' read -r aside area; do
     [ -n "$aside" ] || continue
-    why=$(awk -F '\t' -v a="$aside" '$1 == a { print $2; exit }' "$w/why")
-    if [ -z "$why" ]; then
-      printf '%s\t%s\n' "$aside" "$area" >> "$ok"
-      awk -F '\t' -v a="$aside" '$1 == a' "$w/s2" >> "$ok.snap"
-    else
-      fp_thaw "$w/modes" "$aside" || true
-      fp_restore "$aside" "$area" || true
-      printf '%s\t%s\t%s\n' "$why" "$aside" "$area" >> "$kept"
+    why=$(awk -F '\t' -v a="$aside" '$1 == a { print $2; exit }' "$w/verdict" 2>/dev/null)
+    [ "$bad" = 0 ] || why=unrecorded
+    if [ "$why" = verified ] && printf '%s\t%s\n' "$aside" "$area" >> "$ok" 2>/dev/null; then
+      continue
     fi
+    fp_thaw "$w/modes" "$aside" || true
+    fp_restore "$aside" "$area" || true
+    printf '%s\t%s\t%s\n' "${why:-unrecorded}" "$aside" "$area" >> "$kept" 2>/dev/null || bad=1
   done < "$pairs"
-  [ -z "${4:-}" ] || cp "$w/modes" "$4" 2>/dev/null || true
-  rm -f "$w/roots" "$w/why" "$w/modes" "$w/s1.raw" "$w/s1" "$w/s2.raw" "$w/s2" "$w/busy" "$w/blocked"
+  rm -f "$w/roots" "$w/why" "$w/modes" "$w/frozen" "$w/s1" "$w/s2" "$w/busy" "$w/blocked" "$w/verdict" "$w/verified"
   rmdir "$w" 2>/dev/null || true
+  return "$bad"
+}
+
+# fp_remove_verified <ok-prefix> <out> <aside>...: removes the verified
+# copies through fp_fs remove, which deletes only what <ok-prefix>.snap lists
+# and checks each entry's identity first. Writes "aside<TAB>removed|partial
+# <TAB>kb" lines to <out>; a copy is removed only when its line says so and
+# it is gone.
+fp_remove_verified() {  # <ok-prefix> <out> <aside>...
+  local prefix=$1 out=$2
+  shift 2
+  fp_fs remove "$prefix.snap" "$prefix.modes" "$@" > "$out" 2>/dev/null
+}
+
+# fp_removed <out> <aside>: 0 when <out> records <aside> as removed and it is
+# gone; prints the removed KB.
+fp_removed() {  # <out> <aside>
+  local kb
+  kb=$(awk -F '\t' -v a="$2" '$1 == a && $2 == "removed" { print $3; exit }' "$1" 2>/dev/null)
+  [ -n "$kb" ] && [ ! -e "$2" ] && [ ! -L "$2" ] && printf '%s\n' "$kb"
 }
 
 # fp_restore <aside> <dir>: puts a set-aside directory back when its old name
@@ -708,7 +724,11 @@ fp_in_use() {  # <out> <dir>...
       else
         while IFS= read -r p; do
           case "$p" in "$proc"/[0-9]*) ;; *) rc=1; continue ;; esac
-          fp_proc_reread "$p" "$out.paths" || rc=1
+          if ! fp_proc_reread "$p" "$out.paths"; then
+            rc=1
+            st=$(head -c 64 "$p/comm" 2>/dev/null | tr -cd 'A-Za-z0-9._+-') || st=
+            FP_UNLISTED_NAMES="${FP_UNLISTED_NAMES:+$FP_UNLISTED_NAMES, }${st:-a process} (pid ${p##*/})"
+          fi
         done < <(grep -Eo "$proc/[0-9]+/(fd|maps)" "$out.err2" | sed 's|/[a-z]*$||' | sort -u)
       fi
       grep -Fqx -- "$probe" "$out.paths" || rc=1
@@ -772,26 +792,32 @@ fp_proc_reread() {  # <proc-pid-dir> <paths-out>
 }
 
 # fp_settle_one <aside> <dir>: runs the removal boundary for one set-aside
-# copy. Returns 0 when it may be removed now, with FP_SETTLED_SNAP naming its
-# verified snapshot for fp_remove_listed (the caller removes that file);
-# otherwise it is back at <dir> and FP_BLOCKER and FP_KEPT_HINT say why and
-# what clears it.
+# copy. Returns 0 only when the positive record verified it, with FP_SETTLED
+# naming the prefix of its verified snapshot and permissions for
+# fp_remove_verified (the caller removes those files); otherwise it is back
+# at <dir> and FP_BLOCKER and FP_KEPT_HINT say why and what clears it.
 fp_settle_one() {  # <aside> <dir>
   local f why
   FP_KEPT_HINT='move or remove that'
-  FP_SETTLED_SNAP=
-  f=$(mktemp "${TMPDIR:-/tmp}/fm-footprint-one.XXXXXX") || {
+  FP_SETTLED=
+  f=$(mktemp "${TMPDIR:-/tmp}/fm-footprint-one.XXXXXX" 2>/dev/null) || f=
+  if [ -z "$f" ] || ! printf '%s\t%s\n' "$1" "$2" > "$f" 2>/dev/null; then
+    [ -z "$f" ] || rm -f "$f"
     fp_restore "$1" "$2" || true
-    FP_BLOCKER="no temporary file to check it"
+    FP_BLOCKER="its check could not be recorded (is the temporary directory full?)"
+    FP_KEPT_HINT='it stays until it can be'
     return 1
-  }
-  printf '%s\t%s\n' "$1" "$2" > "$f"
-  fp_settle "$f" "$f.ok" "$f.kept"
-  why=$(cut -f1 "$f.kept" | head -n 1)
-  rm -f "$f" "$f.ok" "$f.kept"
-  FP_SETTLED_SNAP="$f.ok.snap"
+  fi
+  if fp_settle "$f" "$f.ok" "$f.kept" && grep -Fqx -- "$(printf '%s\t%s' "$1" "$2")" "$f.ok" 2>/dev/null; then
+    rm -f "$f" "$f.ok" "$f.kept"
+    FP_SETTLED="$f.ok"
+    return 0
+  fi
+  why=$(cut -f1 "$f.kept" 2>/dev/null | head -n 1)
+  rm -f "$f" "$f.ok" "$f.kept" "$f.ok.snap" "$f.ok.modes"
+  # Whatever the reason, the copy is not removed; make sure it is back.
+  [ ! -e "$1" ] || fp_restore "$1" "$2" || true
   case "$why" in
-    '') return 0 ;;
     blocked)
       fp_tree_disposable "$2" || true
       [ -n "$FP_BLOCKER" ] || FP_BLOCKER="it holds something that may not be removed"
@@ -801,12 +827,28 @@ fp_settle_one() {  # <aside> <dir>
       FP_KEPT_HINT='end that process once its work is safe'
       ;;
     unlisted)
-      FP_BLOCKER="the running processes could not be listed in full"
+      FP_BLOCKER="the running processes could not be listed in full${FP_UNLISTED_NAMES:+ ($FP_UNLISTED_NAMES cannot be inspected; on Linux nothing is removed while such a process, for example ssh-agent or gpg-agent, runs)}"
       FP_KEPT_HINT='it stays until they can be'
       ;;
     changed)
       FP_BLOCKER="something in it changed while it waited to be removed"
       FP_KEPT_HINT='whatever still writes there should finish first'
+      ;;
+    linked)
+      FP_BLOCKER="it holds a file hard-linked from elsewhere, such as a package store, whose permissions it shares"
+      FP_KEPT_HINT='remove those links by hand once its work is safe'
+      ;;
+    notool)
+      FP_BLOCKER="python3, which removal needs, is not installed"
+      FP_KEPT_HINT='it stays until it is'
+      ;;
+    mount)
+      FP_BLOCKER="another filesystem is mounted inside it"
+      FP_KEPT_HINT='unmount it first'
+      ;;
+    unrecorded)
+      FP_BLOCKER="its check could not be recorded (is the temporary directory full?)"
+      FP_KEPT_HINT='it stays until it can be'
       ;;
     *)
       FP_BLOCKER="it could not be frozen and checked in full"
@@ -1041,36 +1083,19 @@ cmd_task_close() {  # <id> <scratch> [project]
   # worker's own environment) would lose every later bounded call's temp
   # files, so later steps run with the system temp instead.
   case "${TMPDIR:-}/" in "$scratch"/*) export TMPDIR=/tmp ;; esac
+  local owned=0
   if [ -n "$scratch" ] && { [ -e "$scratch" ] || [ -L "$scratch" ]; }; then
     if ! fp_scratch_owned "$scratch" "$id"; then
       scratch_result=refused
     else
+      owned=1
       # The Docker identity is read only from an area proven to be this
       # task's, and before anything in it is removed.
       gen=$(fm_footprint_task_generation "$scratch") || gen=
-      scratch_kb=$(fp_du_kb "$scratch" 60) || scratch_kb=
-      if ! fp_tree_disposable "$scratch"; then
-        # The landed-work checks cover the task's own copy, not a
-        # repository the worker made inside its scratch area.
-        scratch_result=kept
-      elif ! aside=$(fp_set_aside "$scratch" closing); then
-        scratch_result=partial
-        FP_BLOCKER="$scratch could not be set aside"
-      elif ! fp_settle_one "$aside" "$scratch"; then
-        # The removal boundary kept it and put it back (see fp_settle).
-        rm -f "$FP_SETTLED_SNAP"
-        scratch_result=kept
-        kept_hint=$FP_KEPT_HINT
-      elif fp_remove_listed "$FP_SETTLED_SNAP"; then
-        rm -f "$FP_SETTLED_SNAP"
-        scratch_result=removed
-      else
-        rm -f "$FP_SETTLED_SNAP"
-        scratch_result=partial
-        FP_BLOCKER="what is left, including anything that appeared after it was checked, is at $aside"
-      fi
     fi
   fi
+  # Docker first: a task container still running could write into the area
+  # through a bind mount as another user, which the process check cannot see.
   if [ -n "$gen" ]; then
     fp_docker_task_remove "$id" "$gen"
     case "$FP_DOCKER_RESULT" in partial|unknown|down) fp_docker_retry_add "$id" "$gen" || queue_lost=1 ;; esac
@@ -1080,6 +1105,29 @@ cmd_task_close() {  # <id> <scratch> [project]
   else
     FP_DOCKER_REMOVED=0
     FP_DOCKER_RESULT=absent
+  fi
+  if [ "$owned" = 1 ]; then
+    scratch_kb=$(fp_du_kb "$scratch" 60) || scratch_kb=
+    if ! fp_tree_disposable "$scratch"; then
+      # The landed-work checks cover the task's own copy, not a
+      # repository the worker made inside its scratch area.
+      scratch_result=kept
+    elif ! aside=$(fp_set_aside "$scratch" closing); then
+      scratch_result=partial
+      FP_BLOCKER="$scratch could not be set aside"
+    elif ! fp_settle_one "$aside" "$scratch"; then
+      # The removal boundary kept it and put it back (see fp_settle).
+      scratch_result=kept
+      kept_hint=$FP_KEPT_HINT
+    else
+      if fp_remove_verified "$FP_SETTLED" "$FP_SETTLED.rm" "$aside" && fp_removed "$FP_SETTLED.rm" "$aside" >/dev/null; then
+        scratch_result=removed
+      else
+        scratch_result=partial
+        FP_BLOCKER="what is left, including anything that appeared or changed after it was checked, is at $aside"
+      fi
+      rm -f "$FP_SETTLED.snap" "$FP_SETTLED.modes" "$FP_SETTLED.rm"
+    fi
   fi
   kept=$(fp_du_kb "$DATA_DIR/$id" 30) || kept=
   oversized=-
@@ -1613,17 +1661,21 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     while IFS='	' read -r aside entry; do asides+=("$aside"); done < "$tmp.pairs"
     # The removal boundary (see fp_settle) for the whole batch; if it keeps
     # any entry, every entry goes back.
-    fp_settle "$tmp.pairs" "$tmp.ok" "$tmp.kept" "$tmp.modes"
-    if [ -s "$tmp.kept" ]; then
+    local settled=0
+    fp_settle "$tmp.pairs" "$tmp.ok" "$tmp.kept" && settled=1
+    if [ "$settled" = 0 ] || [ -s "$tmp.kept" ]; then
       while IFS='	' read -r aside entry; do
-        fp_thaw "$tmp.modes" "$aside" || true
+        fp_thaw "$tmp.ok.modes" "$aside" || true
         fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
       done < "$tmp.ok"
-      case "$(cut -f1 "$tmp.kept" | head -n 1)" in
-        in-use|unlisted) left="a running process still uses an entry, or the running processes could not be listed in full" ;;
+      case "$(cut -f1 "$tmp.kept" 2>/dev/null | head -n 1)" in
+        in-use|unlisted) left="a running process still uses an entry, or the running processes could not be listed in full${FP_UNLISTED_NAMES:+ ($FP_UNLISTED_NAMES cannot be inspected; on Linux nothing is removed while such a process, for example ssh-agent or gpg-agent, runs)}" ;;
+        linked) left="an entry holds a file hard-linked from elsewhere, such as a package store" ;;
+        notool) left="python3, which removal needs, is not installed" ;;
+        unrecorded|'') left="the check could not be recorded (is the temporary directory full?)" ;;
         *) left="an entry changed while it was being set aside or waiting to be removed" ;;
       esac
-      rm -f "$tmp" "$tmp.print" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.kept" "$tmp.modes"
+      rm -f "$tmp" "$tmp.print" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.ok.modes" "$tmp.kept"
       die "$left; nothing removed - run old-tasks again"
     fi
     # The frozen copies must still print what the preview printed, apart from
@@ -1631,18 +1683,17 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     if ! fp_tree_print "$tmp.map" > "$tmp.print2" ||
       ! cmp -s <(fp_print_unfrozen < "$tmp.print") <(fp_print_unfrozen < "$tmp.print2"); then
       while IFS='	' read -r aside entry; do
-        fp_thaw "$tmp.modes" "$aside" || true
+        fp_thaw "$tmp.ok.modes" "$aside" || true
         fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
       done < "$tmp.ok"
-      rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.kept" "$tmp.modes"
+      rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.ok.modes" "$tmp.kept"
       die "an entry changed while it was being set aside or waiting to be removed; nothing removed - run old-tasks again"
     fi
-    fp_remove_listed "$tmp.ok.snap" || true
-    rm -f "$tmp.ok" "$tmp.ok.snap" "$tmp.kept" "$tmp.modes"
+    fp_remove_verified "$tmp.ok" "$tmp.rm" "${asides[@]}" || true
     total=0 gone=0 left=0
     while IFS='	' read -r kind kb entry; do
       aside=$(awk -F '\t' -v e="$entry" '$2 == e { print $1; exit }' "$tmp.pairs")
-      if [ ! -e "$aside" ] && [ ! -L "$aside" ]; then
+      if fp_removed "$tmp.rm" "$aside" >/dev/null; then
         printf 'removed %s %s %s\n' "$kind" "$(fp_human "$kb")" "$entry"
         total=$((total + kb))
         gone=$((gone + 1))
@@ -1651,7 +1702,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
         left=$((left + 1))
       fi
     done < "$tmp"
-    rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.blocked" "$PREVIEW_FILE"
+    rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.ok.modes" "$tmp.kept" "$tmp.rm" "$PREVIEW_FILE"
     printf 'Removed %s entries, %s, from old task folders.' "$gone" "$(fp_human "$total")"
     [ "$left" = 0 ] && printf '\n' || printf ' %s could not be fully removed.\n' "$left"
     return 0
@@ -1683,7 +1734,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
 
 cmd_sweep() {  # [--dry-run]
   local dry=0 base area id age_cut now uid work removed=0 removed_kb=0 kb path aside entry
-  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0 inuse=0 inuse_ids='' unlisted=0 changed=0 changed_ids=''
+  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0 inuse=0 inuse_ids='' unlisted=0 changed=0 changed_ids='' linked=0 linked_ids='' kb
   local -a cands=() orphans=() asides=()
   [ "${1:-}" = --dry-run ] && dry=1
   fp_config
@@ -1757,7 +1808,7 @@ cmd_sweep() {  # [--dry-run]
     # process left behind can still work in it, so whether it may go is
     # decided from its frozen contents after a grace window, and the process
     # check only ever adds reasons to keep.
-    fp_settle "$work/pairs" "$work/ok" "$work/kept"
+    fp_settle "$work/pairs" "$work/ok" "$work/kept" || true
     asides=()
     while IFS='	' read -r aside area; do asides+=("$aside"); done < "$work/ok"
     while IFS='	' read -r why aside area; do
@@ -1767,6 +1818,10 @@ cmd_sweep() {  # [--dry-run]
           [ "$inuse" -gt 5 ] || inuse_ids="$inuse_ids${inuse_ids:+, }${area##*/}"
           ;;
         unlisted) unlisted=$((unlisted + 1)) ;;
+        linked)
+          linked=$((linked + 1))
+          [ "$linked" -gt 5 ] || linked_ids="$linked_ids${linked_ids:+, }${area##*/}"
+          ;;
         changed)
           changed=$((changed + 1))
           [ "$changed" -gt 5 ] || changed_ids="$changed_ids${changed_ids:+, }${area##*/}"
@@ -1781,21 +1836,22 @@ cmd_sweep() {  # [--dry-run]
     done < "$work/kept"
   fi
   if [ "${#asides[@]}" -gt 0 ]; then
-    fp_du_many "$work/du" "${asides[@]}"
-    fp_remove_listed "$work/ok.snap" || true
+    # Removed at once after verification; the reclaimed size comes from the
+    # verified snapshot, so nothing slow runs in between.
+    fp_remove_verified "$work/ok" "$work/rm" "${asides[@]}" || true
     for aside in "${asides[@]}"; do
+      if kb=$(fp_removed "$work/rm" "$aside"); then
+        id=${aside##*/.fm-reclaim-}
+        id=${id%.*}
+        removed=$((removed + 1))
+        removed_kb=$((removed_kb + kb))
+        printf '%s\t%s\t-\t-\t%s\t0\tsweep\torphan-removed\t-\n' "$now" "$id" "$kb" >> "$work/ledger"
+        continue
+      fi
       [ -e "$aside" ] || [ -L "$aside" ] || continue
       leftover=$((leftover + 1))
       [ "$leftover" -gt 5 ] || leftover_names="$leftover_names${leftover_names:+, }${aside##*/}"
     done
-    while IFS='	' read -r kb path; do
-      [ ! -e "$path" ] && [ ! -L "$path" ] || continue
-      id=${path##*/.fm-reclaim-}
-      id=${id%.*}
-      removed=$((removed + 1))
-      removed_kb=$((removed_kb + kb))
-      printf '%s\t%s\t-\t-\t%s\t0\tsweep\torphan-removed\t-\n' "$now" "$id" "$kb"
-    done < "$work/du" > "$work/ledger"
     if [ -s "$work/ledger" ] && [ -d "$DATA_DIR" ] && [ ! -L "$DATA_DIR" ] && [ ! -L "$LEDGER" ]; then
       (umask 077 && cat "$work/ledger" >> "$LEDGER") || true
     fi
@@ -1803,12 +1859,21 @@ cmd_sweep() {  # [--dry-run]
   rm -rf "$work"
   [ "$dry" = 1 ] || printf 'Removed %s orphaned scratch area(s), %s.\n' "$removed" "$(fp_human "$removed_kb")"
   if [ "$kept" -gt 0 ]; then
-    printf 'Kept %s orphaned scratch area(s) whole because they hold version-controlled work, an unsafe name, or something unreadable: %s.\n' "$kept" "$kept_ids"
+    printf 'Kept %s orphaned scratch area(s) whole because they hold version-controlled work, an unsafe name, or something that could not be checked in full: %s.\n' "$kept" "$kept_ids"
     findings="${findings:+$findings; }$kept orphaned scratch area(s) kept because they hold version-controlled work or could not be checked ($kept_ids)"
   fi
   if [ "$unlisted" -gt 0 ]; then
-    printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed in full.\n' "$unlisted"
-    findings="${findings:+$findings; }$unlisted orphaned scratch area(s) kept because the running processes could not be listed"
+    if [ -n "$FP_UNLISTED_NAMES" ]; then
+      printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed in full: %s cannot be inspected. On Linux, cleanup removes nothing while a process of this user that cannot be inspected, such as ssh-agent or gpg-agent, is running.\n' "$unlisted" "$FP_UNLISTED_NAMES"
+      findings="${findings:+$findings; }$unlisted orphaned scratch area(s) kept because the running processes could not be listed ($FP_UNLISTED_NAMES cannot be inspected; Linux cleanup removes nothing while such a process, for example ssh-agent or gpg-agent, runs)"
+    else
+      printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed in full.\n' "$unlisted"
+      findings="${findings:+$findings; }$unlisted orphaned scratch area(s) kept because the running processes could not be listed"
+    fi
+  fi
+  if [ "$linked" -gt 0 ]; then
+    printf 'Kept %s orphaned scratch area(s) whole because they hold files hard-linked from elsewhere, such as a package store, whose permissions they share: %s. Remove them by hand once their work is safe.\n' "$linked" "$linked_ids"
+    findings="${findings:+$findings; }$linked orphaned scratch area(s) kept because they hold hard-linked files ($linked_ids)"
   fi
   if [ "$inuse" -gt 0 ]; then
     printf 'Kept %s orphaned scratch area(s) a running process still works in or holds open: %s. End that process when its work is safe, and the daily pass removes the area.\n' "$inuse" "$inuse_ids"

@@ -234,10 +234,12 @@ test_set_aside_folders_are_never_removed_by_name() {
   # A real interrupted close: the deletion fails, the set-aside copy stays.
   s=$(scratch_for task-q1)
   printf 'x\n' > "$s/data"
-  printf '#!/usr/bin/env bash\nexit 42\n' > "$FB/rmdir"
-  chmod +x "$FB/rmdir"
-  out=$(fp task-close task-q1 "$s")
-  rm -f "$FB/rmdir"
+  # The removal is interrupted: something new appears in the area while it
+  # is being removed, so the area cannot be removed whole.
+  printf '#!/usr/bin/env bash\n[ "$2" = . ] && : > "$1/appeared-late"\nexit 0\n' > "$FB/remove-hook"
+  chmod +x "$FB/remove-hook"
+  out=$(FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook" fp task-close task-q1 "$s")
+  rm -f "$FB/remove-hook"
   assert_contains "$out" "only partly removed" "the interrupted close must say so"
   q=$(find "$base" -maxdepth 1 -name '.fm-closing-task-q1*' | head -n 1)
   [ -n "$q" ] || fail "the interrupted close must leave its set-aside copy"
@@ -516,37 +518,21 @@ test_a_surviving_process_keeps_a_closing_area() {
   pass "close keeps an area a process that survived teardown still uses"
 }
 
-# at_step <step> <writer-pid> <go-file> <dir> [tool...]: wraps the tools one removal
-# step runs so that, the first time that step starts after <dir> was set
-# aside, the writer is released and the hook waits for it to finish and exit
-# before the real tool runs. Steps: freeze (the chmod that removes write
-# bits), procs (the tools that read the process table: lsof and ps on macOS,
-# find, readlink and cat on /proc on Linux), delete (the final rm of the
-# listed files, after the directories got their write bit back).
+# at_step <step> <writer-pid> <go-file> <dir> [tool...]: makes one removal
+# step, the first time it starts after <dir> was set aside, release the
+# writer and wait for it to finish and exit before the step goes on. Steps:
+# freeze (the engine's freeze), procs (the tools that read the process
+# table: lsof and ps on macOS, find, readlink and cat on /proc on Linux),
+# delete (the engine's removal, once it has made the copy's top directory
+# writable again for its own entries, through FM_FOOTPRINT_TEST_REMOVE_HOOK).
 at_step() {
   local step=$1 tool real match
   shift
   local pid=$1 go=$2 dir=$3
   shift 3
-  if [ "$#" -eq 0 ]; then
-    case "$step" in
-      freeze) set -- chmod ;;
-      procs) set -- lsof ps find readlink cat ;;
-      delete) set -- rm ;;
-    esac
-  fi
-  for tool in "$@"; do
-    real=$(command -v "$tool") || continue
-    case "$step" in
-      freeze) match="chmod*a-w*" ;;
-      procs) match="lsof*|ps*|*/proc/*" ;;
-      delete) match="rm*-f*--*/.fm-reclaim-*|rm*-f*--*/.fm-closing-*" ;;
-    esac
-    cat > "$FB/$tool" <<SH
-#!/usr/bin/env bash
-case "$tool \$*" in
-  $match)
-    if [ ! -e "$go.fired" ] && [ ! -e "$dir" ]; then
+  local wait_for="[ ! -e '$go.fired' ] && [ ! -e '$dir' ]"
+  local release
+  release=$(cat <<SH
       : > "$go.fired"
       : > "$go"
       n=0
@@ -555,6 +541,38 @@ case "$tool \$*" in
         case "\$("$(command -v ps)" -o stat= -p "$pid" 2>/dev/null)" in *Z*) break ;; esac
         sleep .05; n=\$((n + 1))
       done
+SH
+)
+  if [ "$step" = delete ]; then
+    cat > "$FB/remove-hook" <<SH
+#!/usr/bin/env bash
+if [ "\$2" = . ] && $wait_for; then
+$release
+fi
+exit 0
+SH
+    chmod +x "$FB/remove-hook"
+    export FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook"
+    return 0
+  fi
+  if [ "$#" -eq 0 ]; then
+    case "$step" in
+      freeze) set -- python3 ;;
+      procs) set -- lsof ps find readlink cat ;;
+    esac
+  fi
+  for tool in "$@"; do
+    real=$(command -v "$tool") || continue
+    case "$step" in
+      freeze) match="python3*fm-footprint-fs.py*freeze*" ;;
+      procs) match="lsof*|ps*|*/proc/*" ;;
+    esac
+    cat > "$FB/$tool" <<SH
+#!/usr/bin/env bash
+case "$tool \$*" in
+  $match)
+    if $wait_for; then
+$release
     fi
     ;;
 esac
@@ -564,7 +582,10 @@ SH
   done
 }
 
-unhook() { command rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink" "$FB/cat" "$FB/chmod" "$FB/rm" "$FB/hidden-pids"; }
+unhook() {
+  command rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink" "$FB/cat" "$FB/chmod" "$FB/rm" "$FB/python3" "$FB/remove-hook" "$FB/hidden-pids"
+  unset FM_FOOTPRINT_TEST_REMOVE_HOOK
+}
 
 # writer_in <dir> <go-file> <subdir>: a stray process rooted in <dir> that,
 # once <go-file> appears, tries to commit new work in <subdir> of its working
@@ -803,15 +824,15 @@ test_a_write_during_the_grace_window_keeps_the_area() {
   age 3 "$s"
   hide_from_listing "$holder"
   # Release it once the area is frozen.
-  local real_chmod
-  real_chmod=$(command -v chmod)
-  cat > "$FB/chmod" <<SH
+  local real_python
+  real_python=$(command -v python3)
+  cat > "$FB/python3" <<SH
 #!/usr/bin/env bash
-"$real_chmod" "\$@"; rc=\$?
-case "\$*" in *a-w*) : > "$TMP_ROOT/grace-writer/go" ;; esac
+"$real_python" "\$@"; rc=\$?
+case "\$*" in *fm-footprint-fs.py*freeze*) : > "$TMP_ROOT/grace-writer/go" ;; esac
 exit \$rc
 SH
-  chmod +x "$FB/chmod"
+  chmod +x "$FB/python3"
   out=$(FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE='' fp sweep)
   unhook
   assert_grep "unique output" "$s/out.log" "output written during the grace window must survive"
@@ -920,6 +941,266 @@ SH
   out=$(fp sweep)
   assert_absent "$s" "with the holder gone, the area is removed"
   pass "an open-file listing that leaves out any live process keeps every area"
+}
+
+# --- the removal is bound to what was verified -----------------------------
+#
+# Each case runs for close, the daily pass and old-folder apply;
+# FOOTPRINT_TEST_MODES selects a subset (to show one path failing alone).
+
+# target <mode> <id>: makes a removal target for close, sweep or apply and
+# prints its path: a closing task's area, an orphaned area, or an old task
+# folder's rebuildable entry. run_target <mode> <id> <path> removes it the
+# way that mode does and prints the output.
+target() {
+  case "$1" in
+    close|sweep) scratch_for "$2" ;;
+    apply)
+      finished_folder "$2"
+      mkdir -p "$H/data/$2/node_modules"
+      printf '%s\n' "$H/data/$2/node_modules"
+      ;;
+  esac
+}
+
+run_target() {
+  local id
+  case "$1" in
+    close) fp task-close "$2" "$3" ;;
+    sweep) age 3 "$3"; fp sweep ;;
+    apply)
+      age 40 "$H/data/$2"
+      fp old-tasks >/dev/null
+      id=$(preview_id)
+      [ -n "$id" ] || { echo "no preview offered"; return 0; }
+      fp old-tasks --apply "$id"
+      ;;
+  esac
+}
+
+# claims_removed <mode> <output>: 0 when the output reports the target removed.
+claims_removed() {
+  case "$1" in
+    close) case "$2" in *"scratch removed"*) return 0 ;; esac ;;
+    sweep) case "$2" in *"Removed 1 orphaned"*) return 0 ;; esac ;;
+    apply) case "$2" in *"removed rebuildable"*) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+# during_removal <action>: runs "<action> <set-aside copy>" once, at the
+# moment the removal starts on the copy's own entries: through the engine's
+# test hook once it has made the copy's top directory writable, or through
+# rm when a removal deletes by path. The action only changes the copy; the
+# removal then goes on with its own arguments.
+during_removal() {
+  local real_rm
+  real_rm=$(command -v rm)
+  cat > "$FB/remove-hook" <<SH
+#!/usr/bin/env bash
+[ "\$2" = . ] && [ ! -e "$TMP_ROOT/during.done" ] || exit 0
+: > "$TMP_ROOT/during.done"
+"$1" "\$1"
+exit 0
+SH
+  cat > "$FB/rm" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$TMP_ROOT/during.done" ]; then
+  for a in "\$@"; do
+    case "\$a" in
+      */.fm-closing-*/*|*/.fm-reclaim-*/*)
+        pre=\${a%%/.fm-*}
+        rest=\${a#"\$pre"/}
+        : > "$TMP_ROOT/during.done"
+        "$1" "\$pre/\${rest%%/*}"
+        break
+        ;;
+    esac
+  done
+fi
+exec "$real_rm" "\$@"
+SH
+  chmod +x "$FB/remove-hook" "$FB/rm"
+  command rm -f "$TMP_ROOT/during.done"
+  export FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook"
+}
+
+test_a_directory_swapped_for_a_link_during_removal_removes_nothing_outside() {
+  local mode t out victim
+  for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+    new_home "swap-$mode"
+    victim="$TMP_ROOT/swap-$mode/outside/victim"
+    mkdir -p "$victim"
+    printf 'precious\n' > "$victim/index.js"
+    printf 'precious\n' > "$victim/README.md"
+    t=$(target "$mode" task-s1)
+    mkdir -p "$t/pkg"
+    printf 'x\n' > "$t/pkg/index.js"
+    printf 'x\n' > "$t/pkg/README.md"
+    # A process the checks cannot see runs a package link at the worst
+    # moment: the directory is renamed and a link to a checkout put in its
+    # place.
+    cat > "$FB/swap" <<SH
+#!/usr/bin/env bash
+"$(command -v mv)" "\$1/pkg" "\$1/pkg.old" && "$(command -v ln)" -s "$victim" "\$1/pkg" && : > "$TMP_ROOT/swap-$mode/swapped"
+SH
+    chmod +x "$FB/swap"
+    during_removal "$FB/swap"
+    out=$(run_target "$mode" task-s1 "$t")
+    unhook
+    assert_present "$TMP_ROOT/swap-$mode/swapped" "the swap must have happened during the $mode removal"
+    assert_present "$victim/index.js" "$mode must never remove a file outside the copy through a swapped link"
+    assert_present "$victim/README.md" "$mode must never remove a file outside the copy through a swapped link"
+    ! claims_removed "$mode" "$out" || fail "$mode must not report a copy it could not remove whole as removed: $out"
+  done
+  pass "a directory swapped for a link during removal removes nothing outside the copy, in close, the daily pass and apply"
+}
+
+test_a_file_saved_over_during_removal_is_kept() {
+  local mode t out
+  for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+    new_home "save-$mode"
+    t=$(target "$mode" task-v1)
+    printf 'draft\n' > "$t/out.txt"
+    # An atomic save lands once the copy is writable again: a new file is
+    # renamed over the checked one.
+    cat > "$FB/save" <<'SH'
+#!/usr/bin/env bash
+printf 'final result, written after the check\n' > "$1/.out.tmp" && mv -f "$1/.out.tmp" "$1/out.txt"
+SH
+    chmod +x "$FB/save"
+    during_removal "$FB/save"
+    out=$(run_target "$mode" task-v1 "$t")
+    unhook
+    grep -rqs 'final result, written after the check' "${t%/*}" ||
+      fail "$mode must keep a file saved over the checked one during removal: $out"
+    ! claims_removed "$mode" "$out" || fail "$mode must not report the copy removed: $out"
+  done
+  pass "a file saved over a checked one during removal is kept, in close, the daily pass and apply"
+}
+
+file_mode() { if [ "$(uname -s)" = Darwin ]; then /usr/bin/stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
+
+test_freezing_never_changes_a_hard_linked_file() {
+  local mode t out outside
+  for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+    new_home "link-$mode"
+    outside="$TMP_ROOT/link-$mode/outside"
+    mkdir -p "$outside"
+    printf 'user source\n' > "$outside/notes.txt"
+    chmod 644 "$outside/notes.txt"
+    t=$(target "$mode" task-h1)
+    ln "$outside/notes.txt" "$t/notes-link.txt"
+    out=$(run_target "$mode" task-h1 "$t")
+    assert_equals 644 "$(file_mode "$outside/notes.txt")" "$mode must never change a file whose other name lies outside"
+    printf 'edit\n' >> "$outside/notes.txt" || fail "$mode must leave the outside file writable"
+    assert_present "$t/notes-link.txt" "$mode must keep the copy holding a hard-linked file whole"
+    assert_contains "$out" "hard-linked" "$mode must say why the copy is kept"
+  done
+  # A link to a file outside is never followed: the outside file keeps its
+  # mode and the copy is removed.
+  new_home link-static
+  outside="$TMP_ROOT/link-static/outside"
+  mkdir -p "$outside"
+  printf 'user source\n' > "$outside/other.txt"
+  chmod 644 "$outside/other.txt"
+  t=$(scratch_for task-h2)
+  ln -s "$outside/other.txt" "$t/link"
+  out=$(fp task-close task-h2 "$t")
+  assert_absent "$t" "a copy holding only a link to an outside file is removed"
+  assert_equals 644 "$(file_mode "$outside/other.txt")" "the link's target must keep its mode"
+  pass "freezing never changes a hard-linked file or a link's target, in close, the daily pass and apply"
+}
+
+test_a_check_that_cannot_record_keeps_the_copy() {
+  local mode t out d
+  for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+    new_home "full-$mode"
+    t=$(target "$mode" task-f1)
+    printf 'work\n' > "$t/out.txt"
+    [ "$mode" != apply ] || { age 40 "$H/data/task-f1"; fp old-tasks >/dev/null; }
+    # No write can land anywhere, as on a full disk: every record the check
+    # makes fails.
+    case "$mode" in
+      close) out=$(trap '' XFSZ; ulimit -f 0; fp task-close task-f1 "$t") ;;
+      sweep) age 3 "$t"; out=$(trap '' XFSZ; ulimit -f 0; fp sweep) ;;
+      apply) out=$(trap '' XFSZ; ulimit -f 0; fp old-tasks --apply "$(preview_id)") ;;
+    esac
+    assert_present "$t/out.txt" "$mode must put the copy back under its name when its check cannot be recorded: $out"
+    ! claims_removed "$mode" "$out" || fail "$mode must not report removal when its check could not be recorded: $out"
+    # Positive control: with writes working again, the copy goes.
+    out=$(run_target "$mode" task-f1 "$t")
+    assert_absent "$t" "$mode must remove the copy once its check can be recorded: $out"
+  done
+  # An empty or missing snapshot is never success.
+  d="$TMP_ROOT/full-close/lonely"
+  mkdir -p "$d/inner"
+  out=$(python3 "$ROOT/bin/fm-footprint-fs.py" remove /dev/null /dev/null "$d" 2>&1)
+  assert_contains "$out" "$d	partial" "a copy with no snapshot must be reported partial"
+  assert_present "$d/inner" "a copy with no snapshot must be left whole"
+  pass "a check that cannot record its result, or an empty snapshot, keeps the copy, in close, the daily pass and apply"
+}
+
+test_close_removes_docker_before_scratch_and_the_pass_measures_nothing_after_its_check() {
+  local s dir out o real_du
+  new_home order
+  dir="$TMP_ROOT/order/docker"
+  s=$(scratch_for task-o1)
+  printf 'cache\n' > "$s/cache"
+  docker_standin "$dir"
+  printf 'c1\t%s\n' "$(env_of task-o1 FM_DOCKER_LABEL)" > "$dir/objects"
+  mv "$FB/docker" "$FB/docker.standin"
+  cat > "$FB/docker" <<SH
+#!/usr/bin/env bash
+case "\$1" in rm) if [ -d "$s" ]; then echo present; else echo gone; fi >> "$dir/area-at-rm" ;; esac
+exec "$FB/docker.standin" "\$@"
+SH
+  chmod +x "$FB/docker"
+  out=$(fp task-close task-o1 "$s")
+  assert_contains "$out" "scratch removed" "close must remove the area"
+  assert_equals present "$(head -n 1 "$dir/area-at-rm" 2>/dev/null)" "the task's containers must be removed while its area is still there"
+  command rm -f "$FB/docker" "$FB/docker.standin"
+  export FM_FOOTPRINT_DOCKER=
+  # The daily pass reads each removed area's size from its verified
+  # snapshot; nothing measures a copy between its check and its removal.
+  o=$(scratch_for task-o2)
+  printf 'cache\n' > "$o/cache"
+  age 3 "$o"
+  real_du=$(command -v du)
+  cat > "$FB/du" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$TMP_ROOT/order/du.log"
+exec "$real_du" "\$@"
+SH
+  chmod +x "$FB/du"
+  out=$(fp sweep)
+  command rm -f "$FB/du"
+  printf '%s\n' "$out" | grep -Eq 'Removed 1 orphaned scratch area\(s\), [1-9][0-9]* KB' || fail "the pass must report the size it removed: $out"
+  ! grep -q '\.fm-reclaim-' "$TMP_ROOT/order/du.log" 2>/dev/null || fail "the pass must not measure a set-aside copy after its check"
+  pass "close removes Docker objects before the area, and the pass measures nothing between its check and its removal"
+}
+
+test_an_uninspectable_process_is_named_on_linux() {
+  local s out agent
+  if [ "$(uname -s)" != Linux ] || ! command -v ssh-agent >/dev/null 2>&1; then
+    printf 'ok - # SKIP Linux with ssh-agent only\n'
+    return 0
+  fi
+  new_home agent
+  agent=$(ssh-agent -s | sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
+  [ -n "$agent" ] || fail "ssh-agent must start"
+  s=$(scratch_for task-a1)
+  printf 'cache\n' > "$s/cache"
+  out=$(fp task-close task-a1 "$s")
+  assert_present "$s/cache" "an area must be kept while an uninspectable process runs"
+  assert_contains "$out" "ssh-agent (pid $agent) cannot be inspected" "close must name the process"
+  age 3 "$s"
+  out=$(fp sweep)
+  assert_contains "$out" "Linux cleanup removes nothing while such a process" "the daily finding must say so plainly"
+  kill "$agent" 2>/dev/null || true
+  out=$(fp task-close task-a1 "$s")
+  assert_absent "$s" "with the agent gone, the area is removed"
+  pass "on Linux an uninspectable process such as ssh-agent keeps every area and is named"
 }
 
 # --- the Docker retry queue under concurrent closes -------------------------
@@ -1180,6 +1461,12 @@ fm_test_run \
   test_a_write_during_the_grace_window_keeps_the_area \
   test_a_writable_memory_mapping_keeps_the_area \
   test_a_partial_open_file_listing_keeps_everything \
+  test_a_directory_swapped_for_a_link_during_removal_removes_nothing_outside \
+  test_a_file_saved_over_during_removal_is_kept \
+  test_freezing_never_changes_a_hard_linked_file \
+  test_a_check_that_cannot_record_keeps_the_copy \
+  test_close_removes_docker_before_scratch_and_the_pass_measures_nothing_after_its_check \
+  test_an_uninspectable_process_is_named_on_linux \
   test_control_character_names_hide_the_whole_folder \
   test_only_rebuildable_directories_free_of_work_are_offered \
   test_preview_binds_contents_and_identity \
