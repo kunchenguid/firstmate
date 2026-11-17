@@ -38,7 +38,7 @@ reset_case() {
 }
 
 enter_away() {
-  "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "away entry failed"
+  "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 1' --spend 1 --spend-words 'cap at 1' >/dev/null || fail "away entry failed"
 }
 
 lane() {  # <task> <crew-state line>
@@ -97,7 +97,7 @@ test_not_away_does_nothing() {
   away_long_wait_tick 100000
   [ "$(count_wakes)" = 0 ] || fail "an attended home escalated a long wait"
   [ ! -e "$STATE/.stub-calls" ] || fail "an attended home paid a crew-state read"
-  FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "quiet entry failed"
+  FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 1' --spend 1 --spend-words 'cap at 1' >/dev/null || fail "quiet entry failed"
   away_long_wait_tick 100000
   away_long_wait_tick 200000
   [ "$(count_wakes)" = 0 ] || fail "quiet mode escalated a long wait"
@@ -187,7 +187,7 @@ test_watcher_loop() {
   mkdir -p "$dir/state" "$dir/config"
   fm_test_track_watcher_state "$dir/state"
   touch "$dir/state/home-summary.json"
-  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 1' --spend 1 --spend-words 'cap at 1' >/dev/null \
     || fail "away entry failed"
   printf 'working [at=1000]: on it\n' > "$dir/state/worker.status"
   printf 'worktree=%s\nkind=ship\n' "$dir" > "$dir/state/worker.meta"

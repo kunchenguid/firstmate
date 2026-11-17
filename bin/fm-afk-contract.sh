@@ -71,6 +71,9 @@
 #   confirmed_epoch: <seconds>        is the go, so no later human step stamps it
 #   mode: quiet                    only on a quiet entry (FM_AFK_MODE=quiet); absent
 #                                  means away
+#   drive_goals: <id> <id> ...     only when /afk named goals (`enter
+#                                  --drive-goal`, DRIVE GOALS below); absent
+#                                  means none were named
 #   words: | or |-                 the captain's words, verbatim, never edited,
 #     <line>                       one record line per input line (or `words: -`
 #     ...                          when /afk carried no words); `|` retains a
@@ -94,7 +97,8 @@
 #
 # Usage:
 #   fm-afk-contract.sh enter [--words-file <path> | --words <text>]
-#       [--expected-return <UTC ISO 8601>] [--spend <n>]
+#       [--expected-return <UTC ISO 8601>] [--spend <n> [--spend-words <quote>]]
+#       [--drive-goal <id>]...
 #     Write the record now, with no separate confirmation step, then print the
 #     entry announcement and the read-back. Exit 0 on success and 2 on a usage
 #     error. --words-file keeps the file's bytes verbatim, trailing newlines
@@ -103,7 +107,10 @@
 #     carry the original session entry forward, and archive the superseded
 #     record. A replacement is staged before the prior record is archived and
 #     replaced. `propose` and `confirm` were retired with the wait-for-go gate.
-#     Without --spend the recorded cap follows SPEND CAP below.
+#     Without --spend the recorded cap follows SPEND CAP below, and a --spend
+#     under the default needs the --spend-words quote SPEND CAP below describes.
+#     --drive-goal (repeatable) names a goal the captain asked to keep driving;
+#     DRIVE GOALS below owns what the record does with it.
 #   fm-afk-contract.sh readback
 #     The record's content for the captain and for the away session: the words
 #     verbatim plus the entry time, expected return, spend cap, and reach line
@@ -150,9 +157,24 @@
 # two can never count differently.
 # Without --spend, entry records the count standing at that moment, so away mode
 # never narrows work already under way; it never records less than
-# FM_AFK_CONTRACT_SPEND_DEFAULT, so an idle home still enters with the ordinary
-# room to work, and never 0. An explicit --spend is the captain's number and is
-# recorded unchanged.
+# FM_AFK_CONTRACT_SPEND_DEFAULT (50, the captain's standing worker cap, which
+# holds while away too), so an idle home still enters with the full room to work,
+# and never 0. A --spend under that default is refused unless the captain's own
+# words set it: the call must also carry --spend-words with the exact words, and
+# those words must appear verbatim in the away words being recorded. That is a
+# substring check, not a reading of the words (NO PARSER above still holds), so
+# a cap of 5 or 20 can no longer be written by a caller's own choice. A --spend
+# at or above the default is the captain's number and is recorded unchanged.
+#
+# DRIVE GOALS (drive_goals; this script owns the field, bin/fm-goal.sh reads it
+# through _fm_goal_away_named). `enter --drive-goal <id>` (repeatable) records
+# the goal ids the captain's /afk named, in the order given and without
+# duplicates, as one space-separated header field; an id that bin/fm-goal.sh
+# would refuse as unsafe (fm_goal_id_valid) refuses the entry (exit 2). The goal
+# need not have a record yet: the entry turn may write it right after. Naming is
+# the captain's emphasis and provenance, not the driving switch: while an away
+# record stands every active goal drives (bin/fm-branch-prompt.sh "Drive goals").
+# Only an away record carries the field; a quiet entry refuses --drive-goal.
 #
 # Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
 # posture, spend-cap, and lock helpers (fm_afk_contract_path,
@@ -173,7 +195,7 @@ FM_AFK_CONTRACT_VERSION=2
 # Older record versions this script still reads (never writes).
 FM_AFK_CONTRACT_READABLE_VERSIONS="1 2"
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
-FM_AFK_CONTRACT_SPEND_DEFAULT=4
+FM_AFK_CONTRACT_SPEND_DEFAULT=50
 FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.'
 # Generous against the longest legitimate holder, a merge waiting on the forge,
 # so the bound only ever trips on something genuinely wedged.
@@ -309,7 +331,7 @@ fm_afk_contract_validate_iso() {  # <ts>
 }
 
 # Render a whole record on stdout.
-# Inputs: WORDS (verbatim), EXPECTED_RETURN, SPEND.
+# Inputs: WORDS (verbatim), EXPECTED_RETURN, SPEND, DRIVE_GOALS.
 fm_afk_contract_render_record() {  # <entered-iso> <entered-epoch> <confirmed-iso> <confirmed-epoch>
   local entered=$1 entered_epoch=$2 confirmed=$3 confirmed_epoch=$4
   printf 'version: %s\n' "$FM_AFK_CONTRACT_VERSION"
@@ -322,6 +344,7 @@ fm_afk_contract_render_record() {  # <entered-iso> <entered-epoch> <confirmed-is
   printf 'confirmed: %s\n' "$confirmed"
   printf 'confirmed_epoch: %s\n' "$confirmed_epoch"
   [ "${FM_AFK_CONTRACT_ENTRY_MODE:-away}" != quiet ] || printf 'mode: quiet\n'
+  [ -z "${DRIVE_GOALS:-}" ] || printf 'drive_goals: %s\n' "$DRIVE_GOALS"
   if [ -n "$WORDS" ]; then
     local words_body=$WORDS words_indicator='|-'
     case "$words_body" in
@@ -442,7 +465,7 @@ fm_afk_contract_validate() {  # <path>
 # A quiet record reads back as quiet mode: no return, reach, or spend cap
 # applies while the captain is present.
 fm_afk_contract_render_readback() {  # <path>
-  local path=$1 words expected spend
+  local path=$1 words expected spend drive
   if [ "$(fm_afk_contract_record_mode "$path")" = quiet ]; then
     printf 'Quiet mode (recorded):\n'
     printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
@@ -454,6 +477,12 @@ fm_afk_contract_render_readback() {  # <path>
     printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
     printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
     printf '  spend cap: %s concurrent workers\n' "$spend"
+    drive=$(fm_afk_contract_read_field "$path" drive_goals)
+    if [ -n "$drive" ]; then
+      printf '  drive goals: %s (named at entry; every active goal drives while away)\n' "${drive// /, }"
+    else
+      printf '  drive goals: none named (every active goal drives while away)\n'
+    fi
     printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
   fi
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
@@ -492,9 +521,16 @@ fm_afk_contract_render_announcement() {  # <path>
 
 # --- subcommands ------------------------------------------------------------
 
-fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEND
-  local words_file='' spend_given=0
+# Whether bin/fm-goal.sh accepts <id> as a goal id: its fm_goal_id_valid is the
+# one owner of that rule, so a subshell sources it rather than copying the rule.
+fm_afk_contract_goal_id_valid() {  # <id>
+  bash -c '. "$1" && fm_goal_id_valid "$2"' _ "$FM_AFK_CONTRACT_DIR/fm-goal.sh" "$1" >/dev/null 2>&1
+}
+
+fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEND, DRIVE_GOALS
+  local words_file='' spend_given=0 spend_words=''
   WORDS=; EXPECTED_RETURN=-; SPEND=$FM_AFK_CONTRACT_SPEND_DEFAULT; FM_AFK_CONTRACT_SCALARS_GIVEN=0
+  DRIVE_GOALS=
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --words-file)
@@ -521,6 +557,16 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEN
         spend_given=1
         FM_AFK_CONTRACT_SCALARS_GIVEN=1
         shift 2 ;;
+      --spend-words)
+        [ "$#" -gt 1 ] || { fm_afk_contract_log '--spend-words requires the captain'"'"'s exact words'; return 2; }
+        spend_words=$2
+        shift 2 ;;
+      --drive-goal)
+        [ "$#" -gt 1 ] || { fm_afk_contract_log '--drive-goal requires a goal id'; return 2; }
+        fm_afk_contract_goal_id_valid "$2" || { fm_afk_contract_log "--drive-goal needs a goal id bin/fm-goal.sh accepts (letters, digits, dot, underscore, dash), got '$2'"; return 2; }
+        case " $DRIVE_GOALS " in *" $2 "*) ;; *) DRIVE_GOALS="${DRIVE_GOALS:+$DRIVE_GOALS }$2" ;; esac
+        FM_AFK_CONTRACT_SCALARS_GIVEN=1
+        shift 2 ;;
       --action|--object|--when|--stop|--grant|--grant=*)
         fm_afk_contract_log "$1 was retired: the captain's away words are the whole mandate, so pass them with --words or --words-file and nothing else"
         return 2 ;;
@@ -536,7 +582,27 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEN
     WORDS=$(cat "$words_file"; rc=$?; printf x; exit "$rc") || return 1
     WORDS=${WORDS%x}
   fi
-  [ "$spend_given" -eq 1 ] || SPEND=$(fm_afk_contract_entry_spend_default) || return 1
+  if [ "$spend_given" -eq 1 ]; then
+    if [ "$SPEND" -lt "$FM_AFK_CONTRACT_SPEND_DEFAULT" ]; then
+      if [ -z "$spend_words" ]; then
+        fm_afk_contract_log "--spend $SPEND is under the standing worker cap of $FM_AFK_CONTRACT_SPEND_DEFAULT, which holds while away: pass --spend-words with the captain's own words that set this cap, or omit --spend"
+        return 2
+      fi
+      case "$WORDS" in
+        *"$spend_words"*) ;;
+        *)
+          fm_afk_contract_log "--spend $SPEND is under the standing worker cap of $FM_AFK_CONTRACT_SPEND_DEFAULT and the --spend-words quote does not appear verbatim in the away words being recorded, so the captain's words do not set it"
+          return 2 ;;
+      esac
+    fi
+  else
+    [ -z "$spend_words" ] || { fm_afk_contract_log '--spend-words only applies with --spend'; return 2; }
+    SPEND=$(fm_afk_contract_entry_spend_default) || return 1
+  fi
+  if [ -n "$DRIVE_GOALS" ] && [ "${FM_AFK_MODE:-}" = quiet ]; then
+    fm_afk_contract_log '--drive-goal belongs to an away entry: quiet mode holds nothing and drives nothing'
+    return 2
+  fi
   return 0
 }
 
@@ -577,7 +643,7 @@ fm_afk_contract_cmd_enter() {
       fm_afk_contract_log "away posture already recorded at $(fm_afk_contract_read_field "$record" entered); a refresh leaves it untouched"
     fi
     if [ "$FM_AFK_CONTRACT_SCALARS_GIVEN" -eq 1 ]; then
-      fm_afk_contract_log "the expected return and spend cap given with this refresh were not applied; enter new words to replace the mandate"
+      fm_afk_contract_log "the expected return, spend cap, and drive goals given with this refresh were not applied; enter new words to replace the mandate"
     fi
     rm -f "$legacy"
     fm_afk_contract_render_announcement "$record" || return 1

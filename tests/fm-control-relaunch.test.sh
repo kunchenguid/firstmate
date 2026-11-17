@@ -3531,7 +3531,7 @@ test_away_branch_relaunch_accepts_existing_dispatchable_items() {
     dir=$(new_case "away-$state" "$id")
     add_ship_task "$dir" "$id" claude
     seed_backlog "$dir" "$id" "$state"
-    FM_HOME="$dir/home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+    FM_HOME="$dir/home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 1' --spend 1 --spend-words 'cap at 1' >/dev/null \
       || fail "away entry failed for a $state relaunch"
 
     rc=0

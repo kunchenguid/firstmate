@@ -474,7 +474,8 @@ family_for_basename() {
     fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
     fm-voice-relay.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
-    fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
+    fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh|\
+    fm-wake-drain-goal.test.sh)
       printf '%s\n' standalone
       ;;
     *)
@@ -1020,6 +1021,7 @@ tests/fm-usage-warner.test.sh 26345
 tests/fm-vendor-auth-probe.test.sh 45255
 tests/fm-voice-relay.test.sh 32486
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 8784
+tests/fm-wake-drain-goal.test.sh 50000
 tests/fm-wake-drain-open-decisions-cursor.test.sh 47677
 tests/fm-wake-drain-open-decisions.test.sh 8781
 tests/fm-wake-drain-outcome-backstop.test.sh 46316

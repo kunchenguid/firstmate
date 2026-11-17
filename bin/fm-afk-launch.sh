@@ -69,12 +69,20 @@
 #
 # Usage:
 #   fm-afk-launch.sh enter [--words-file <path> | --words <text>]
-#                          [--expected-return <UTC ISO 8601>] [--spend <n>]
+#                          [--expected-return <UTC ISO 8601>]
+#                          [--spend <n> [--spend-words <quote>]]
+#                          [--drive-goal <id>]...
 #                              Write the away-posture record now, with no
 #                              separate confirmation, then print the entry
 #                              announcement and the read-back. With no words
 #                              while away it is a refresh; new words replace
 #                              the mandate. On Pi this is the whole entry.
+#                              --drive-goal names a goal the captain asked to
+#                              keep driving; every active goal drives while
+#                              away, and the entry says which. The spend cap
+#                              defaults to 50 and a lower --spend needs the
+#                              captain's own words as --spend-words
+#                              (bin/fm-afk-contract.sh owns both rules).
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
@@ -352,6 +360,26 @@ fm_afk_launch_host_engine_note() {
     "$FM_SUPERVISION_ENGINE_PROBLEM"
 }
 
+# The goals this away entry will drive, said once at entry because the captain
+# who typed /afk may not look at the screen again: every active goal drives
+# while an away record stands (bin/fm-branch-prompt.sh "Drive goals"), and a goal
+# `enter --drive-goal` named that has no record yet is called out so the entry
+# turn writes it (.agents/skills/drive-goal/SKILL.md). bin/fm-goal.sh owns what
+# is active; bin/fm-afk-contract.sh owns the named field.
+fm_afk_launch_goal_note() {
+  local named active id listed='' missing=''
+  [ "${FM_AFK_MODE:-}" != quiet ] || return 0
+  named=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$FM_AFK_LAUNCH_STATE" "$FM_AFK_CONTRACT_CMD" field drive_goals 2>/dev/null) || named=
+  active=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$FM_AFK_LAUNCH_STATE" "$FM_AFK_LAUNCH_DIR/fm-goal.sh" active 2>/dev/null) || active=
+  for id in $active; do listed="${listed:+$listed, }$id"; done
+  for id in $named; do
+    case " $(printf '%s' "$active" | tr '\n' ' ') " in *" $id "*) ;; *) missing="${missing:+$missing, }$id" ;; esac
+  done
+  [ -z "$listed" ] || printf 'Goals driven while away: %s (every active goal drives; the ones named at entry come first in the GOAL section).\n' "$listed"
+  [ -z "$missing" ] || printf 'Named goal with no active record: %s; write it now with bin/fm-goal.sh start so the away session has something to drive.\n' "$missing"
+  return 0
+}
+
 fm_afk_launch_catchup_pending() {
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
@@ -387,6 +415,7 @@ fm_afk_launch_enter() {
     esac
   fi
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
+  fm_afk_launch_goal_note
   fm_afk_launch_host_engine_note
 }
 

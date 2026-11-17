@@ -188,7 +188,9 @@ test_brief() {
   printf 'drive_goals: I3 I1\n' > "$H/state/.afk-contract"
   out=$(goal brief); first=${out%%$'\n'*}
   assert_contains "$first" 'GOAL I3 ' 'named goals first'
-  assert_contains "$out" 'not driven while away (not named)' 'unnamed goal contextual'
+  assert_contains "$out" 'GOAL I2 (active since' 'unnamed goal listed'
+  assert_contains "$out" 'driven while away: yes, active goal' 'unnamed active goal drives while away'
+  assert_not_contains "$out" 'not driven while away' 'no goal is left undriven while away'
   [ "$(printf '%s\n' "$out" | wc -c)" -le 3072 ] || fail 'total brief byte cap'
   local_mate
   out=$(mate_goal brief)

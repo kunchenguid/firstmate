@@ -39,7 +39,9 @@
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
 #   3. wake-drain     - presents durable wakes and advances recovery handling
-#                       state, so it only runs when locked. The local bounded
+#                       state, so it only runs when locked; its GOAL section
+#                       (bin/fm-goal.sh brief) is printed on the read-only
+#                       path too, because the brief mutates nothing. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
 #                       First, on every harness and away posture, it seeds the
 #                       outcome store's display tail copy when that is absent
@@ -1112,6 +1114,11 @@ if [ "$READ_ONLY" -eq 1 ]; then
   reemit_emit "skipped (read-only session) - $QLEN record(s) remain queued because this session lacks verified fleet-lock ownership."
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -z "$GUARD_OUT" ] || reemit_emit "$GUARD_OUT"
+  # The goal brief mutates nothing, so a read-only session still shows the
+  # GOAL section the drain would have printed (the locked path gets it from the
+  # drain itself).
+  GOAL_OUT=$("$SCRIPT_DIR/fm-goal.sh" brief 2>/dev/null) || GOAL_OUT=
+  [ -z "$GOAL_OUT" ] || reemit_emit "$GOAL_OUT"
 else
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-branch-outcome.sh" seed-tail >/dev/null 2>&1 || true
   # Pi supervision-branch recovery, locked path only: clear leases whose

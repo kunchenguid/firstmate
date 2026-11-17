@@ -32,7 +32,7 @@ When the plan changes later, `bin/fm-goal.sh edit <id> --items-file <path>` keep
 
 Attended or away, the drain's GOAL section is the live state and its GOAL DUTY line is the standing duty: start or advance every startable item nobody is on.
 Steer the owning second mate with `bin/fm-send.sh`, or, for an item this home owns, dispatch it within the spend cap from a backlog item filed for exactly that step.
-When `/afk` words name a goal, the afk skill's entry carries the id through `--drive-goal`; a goal the away record does not name is context only while away, and the entry output names every active goal left undriven.
+When `/afk` words name a goal, the afk skill's entry carries the id through `--drive-goal`; every active goal drives while away whether or not the record names it, and the entry output lists the goals that will drive.
 
 ## Marks and the secondmate duty
 

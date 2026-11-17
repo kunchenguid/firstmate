@@ -5,7 +5,9 @@
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, captain
-# calls due to proceed on their deadline default, and on
+# calls due to proceed on their deadline default, the GOAL section (every active
+# drive goal's live state and the GOAL DUTY line, read-only from
+# bin/fm-goal.sh brief, which owns its rendering and bounds), and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
@@ -1031,6 +1033,24 @@ cap_outcome_line() {  # <line> <max-bytes>
   OUTCOME_LINE_BYTES=${#OUTCOME_LINE}
 }
 
+# The GOAL section the away prompt and the drive-goal skill promise: every
+# active drive goal's live state, then the GOAL DUTY line, exactly as
+# `bin/fm-goal.sh brief` renders and bounds it (that script owns the format, the
+# named-goal ordering, and the secondmate form). It is read-only and prints
+# nothing when the home has no goal, so a home without goals is unchanged. A
+# brief that cannot run is said on stderr and never fails the drain: a goal
+# render fault must not hide the wakes beside it.
+print_goal_section() {
+  local out
+  [ -x "$SCRIPT_DIR/fm-goal.sh" ] || return 0
+  if ! out=$("$SCRIPT_DIR/fm-goal.sh" brief 2>&1); then
+    printf 'GOAL SKIPPED: bin/fm-goal.sh brief failed (%s); run it by hand to see the goal state\n' \
+      "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" >&2
+    return 0
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
 print_status_sections() {
   local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
@@ -1286,6 +1306,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   DRAIN_LOCK_HELD=false
   (print_status_presentation) || true
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
+  print_goal_section
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
     printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 0 --recovery-generation %s\n' "${RECOVERY_MARKER_TOKEN##*:}" >&2
   fi
@@ -1308,6 +1329,7 @@ if [ "$ACTOR" = main ]; then
     DRAIN_LOCK_HELD=false
     (print_status_presentation) || true
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
+  print_goal_section
     assert_watcher_liveness
     exit "$BRANCH_OUTCOMES_RC"
   fi
@@ -1371,5 +1393,6 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
 
 (print_status_presentation "$RAW_ROWS") || true
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
+print_goal_section
 assert_watcher_liveness
 exit "$BRANCH_OUTCOMES_RC"

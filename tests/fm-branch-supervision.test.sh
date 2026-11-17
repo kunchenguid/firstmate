@@ -76,17 +76,17 @@ test_branch_prompt_names_drive_goals_and_keeps_the_never_set_byte_identical() {
   local prompt
   prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
 
-  # The drive-goal paragraph (drive-goal plan, ship G4): a goal the away
-  # record names joins the captain's words, driven through the same guarded
-  # scripts with the drain's GOAL section as its live state, while a goal the
-  # record does not name stays context and the attended posture keeps driving
+  # The drive-goal paragraph (drive-goal plan, ship G4; the captain's
+  # goal-drive-always decision, away autonomy S1): every active goal drives
+  # while away, named or not, through the same guarded scripts with the drain's
+  # GOAL section as its live state, and the attended posture keeps driving
   # MAIN's duty.
   case "$prompt" in
-    *"Drive goals: the record may name drive goals (\`drive goals:\` in its read-back), firstmate's reading of which captain-named goals the words ask you to keep driving."*"A named goal is part of the words: the drain's GOAL section is its live state, and each open item's next step there is plainly named by reference."*"Record progress with \`bin/fm-goal.sh mark\`, and close a goal with \`bin/fm-goal.sh close <goal> --done\` only when that command accepts it."*"An item classed captain, and every never-set action, is never advanced: report it verdict captain once per unchanged situation and keep driving the other items."*"A goal the record does not name is context only."*"Attended: a GOAL section is MAIN's drive duty."*) ;;
+    *"Drive goals: every active goal drives while the captain is away, whether or not the record names it (\`drive goals:\` in its read-back lists the ones the captain named)."*"A named goal is part of the words, and an unnamed active goal drives the same way: the drain's GOAL section is its live state, and each open item's next step there is plainly named by reference."*"Record progress with \`bin/fm-goal.sh mark\`, and close a goal with \`bin/fm-goal.sh close <goal> --done\` only when that command accepts it."*"An item classed captain, and every never-set action, is never advanced: report it verdict captain once per unchanged situation and keep driving the other items."*"Naming a goal records the captain's emphasis only; it never widens what a goal may do."*"Attended: a GOAL section is MAIN's drive duty."*) ;;
     *) fail "branch prompt lost the drive-goal paragraph" ;;
   esac
   assert_contains "$prompt" \
-    "Never by analogy: act only where the words, a drive goal the record names, or the standing drive and ask-less rules plainly cover the event and the action - and there a reversible, in-plan step inside a named goal proceeds without asking - while the words and rules cover nothing they do not say and the limits below still bind." \
+    "Never by analogy: act only where the words, an active drive goal, or the standing drive and ask-less rules plainly cover the event and the action - and there a reversible, in-plan step inside an active goal proceeds without asking - while the words and rules cover nothing they do not say and the limits below still bind." \
     "branch prompt lost the drive-goal clause in the never-by-analogy rule"
 
   assert_contains "$prompt" \
@@ -1416,7 +1416,7 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   assert_contains "$out" "$refusal" "attended refusal lost its wording"
 
   # /afk is the go: the one entry call writes the record that relocates.
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away entry failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 2' --spend 2 --spend-words 'cap at 2' >/dev/null || fail "away entry failed"
 
   # Under the record the partition passes and the merge script reaches its
   # OWN gate (no task record here), never the partition refusal.
@@ -1481,7 +1481,7 @@ WRAPPER
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1) || true
   assert_not_contains "$out" "caps concurrent workers" "a field-read after archive refused a main spawn via the spend cap"
   assert_not_contains "$out" "no readable spend cap" "a field-read after archive killed the spawn instead of restoring attended behavior"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away re-entry failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 2' --spend 2 --spend-words 'cap at 2' >/dev/null || fail "away re-entry failed"
 
   # Archive is absence: the attended refusal returns, byte for byte.
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
@@ -1533,7 +1533,7 @@ test_away_branch_spawn_requires_queued_dispatchable_work() {
 
 ## Done
 EOF
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null || fail "away entry failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 2' --spend 2 --spend-words 'cap at 2' >/dev/null || fail "away entry failed"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
     "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
@@ -1605,12 +1605,12 @@ test_quiet_record_never_caps_a_present_captains_spawn() {
   mkdir -p "$home/state" "$root/bin"
   git init -q -b main "$root"
   git -C "$root" commit -q --allow-empty -m init
-  FM_AFK_MODE=quiet FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "quiet entry failed"
+  FM_AFK_MODE=quiet FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 1' --spend 1 --spend-words 'cap at 1' >/dev/null || fail "quiet entry failed"
   fm_write_meta "$home/state/task-a.meta" "window=fm-task-a" "kind=ship"
   fm_write_meta "$home/state/task-b.meta" "window=fm-task-b" "kind=ship"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
   assert_not_contains "$out" "caps concurrent workers" "a quiet record capped a present captain's spawn"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null 2>&1 || fail "away entry over quiet failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 1' --spend 1 --spend-words 'cap at 1' >/dev/null 2>&1 || fail "away entry over quiet failed"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
   assert_contains "$out" "caps concurrent workers at 1 and 2 ordinary task(s) are live" "the away record's cap no longer binds"
   pass "a quiet-mode record never caps a present captain's spawn, while the away record's cap still binds"
@@ -1650,7 +1650,7 @@ fi
 exec "\$REAL" "\$@"
 WRAPPER
   chmod +x "$root/bin/fm-afk-contract.sh"
-  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null || fail "away entry failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'cap at 1' --spend 1 --spend-words 'cap at 1' >/dev/null || fail "away entry failed"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$root/bin/fm-spawn.sh" task-q1 --mode no-mistakes --yolo off \

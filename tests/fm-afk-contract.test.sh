@@ -68,7 +68,7 @@ test_readback_renders_words_verbatim_with_the_record_scalars() {
   home=$(make_home readback)
   words="$home/words.txt"
   printf 'drive the windows fix to green and merge it,\n  cut a prerelease; then re-run "nm-ci-windows"\n\tif the install deadlocks abort the competing pipeline\nmerge task y even if nm-ci-windows looks red enough, honestly\n' > "$words"
-  out=$(contract "$home" enter --words-file "$words" --expected-return 2026-09-08T08:00Z --spend 3 2>&1) \
+  out=$(contract "$home" enter --words-file "$words" --expected-return 2026-09-08T08:00Z --spend 3 --spend-words "cut a prerelease" 2>&1) \
     || fail "entry with words failed: $out"
   assert_contains "$out" 'Away posture (recorded):' 'read-back title'
   assert_contains "$out" 'expected return: 2026-09-08T08:00Z' 'expected return rendered'
@@ -127,7 +127,7 @@ test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return() {
   assert_contains "$out" 'hold-for-return only. No phone channel is configured; anything that needs you waits for your return.' 'announcement says hold-for-return only, aloud'
   assert_contains "$out" 'Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return.' 'announcement says the words will be carried out'
   assert_contains "$out" 'Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say.' 'announcement states the never-set'
-  assert_contains "$out" 'Expected return: not given. Spend cap: 4 concurrent workers.' 'announcement carries the defaults'
+  assert_contains "$out" 'Expected return: not given. Spend cap: 50 concurrent workers.' 'announcement carries the defaults'
   assert_contains "$out" 'Away posture (recorded):' 'the read-back follows the entry'
   assert_contains "$out" '    merge it when green' 'the read-back carries the words'
   assert_not_contains "$out" 'Say go' 'entry must never ask for a go'
@@ -221,7 +221,7 @@ test_plain_entry_and_refresh_leave_no_wait() {
   assert_contains "$out" '  your words: (none)' 'a plain entry reads back no words'
   first=$(cat "$home/state/.afk-contract")
   sleep 1
-  out=$(contract "$home" enter --spend 9 2>&1) || fail "refresh failed: $out"
+  out=$(contract "$home" enter --spend 90 2>&1) || fail "refresh failed: $out"
   assert_contains "$out" 'already recorded at' 'refresh names the standing record'
   assert_contains "$out" 'were not applied' 'refresh says its scalars were not applied'
   assert_contains "$out" 'hold-for-return only.' 'refresh repeats the announcement'
@@ -720,47 +720,119 @@ test_away_entry_over_quiet_mode_becomes_away_and_quiet_never_masks_away() {
 }
 
 # The spend cap entry records without --spend is the parallelism already
-# standing in this home, counted exactly the way the later refusal counts it, so
+# standing in this home (never below the standing 50), counted exactly the way the later refusal counts it, so
 # away mode never narrows work that is already under way. The earlier default
 # stays a floor, and a secondmate is a persistent home rather than spend.
 test_entry_without_spend_records_the_live_worker_count_never_below_the_floor() {
   local home out i
   home=$(make_home spend-live-above)
-  for i in 1 2 3 4 5 6; do
+  for i in $(seq 1 52); do
     fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
   done
   fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
-  [ "$(contract "$home" live-workers)" = 6 ] \
+  [ "$(contract "$home" live-workers)" = 52 ] \
     || fail "live-workers counted the secondmate or miscounted: $(contract "$home" live-workers)"
   out=$(contract "$home" enter --words 'keep the lane busy' 2>&1) || fail "entry failed: $out"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 6 ] \
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 52 ] \
     || fail "entry did not take the live count as the cap: $(contract "$home" field spend_max_concurrent_workers)"
-  assert_contains "$out" 'Spend cap: 6 concurrent workers.' 'the announcement carries the live count'
-  assert_contains "$out" '  spend cap: 6 concurrent workers' 'the read-back carries the live count'
+  assert_contains "$out" 'Spend cap: 52 concurrent workers.' 'the announcement carries the live count'
+  assert_contains "$out" '  spend cap: 52 concurrent workers' 'the read-back carries the live count'
 
   home=$(make_home spend-live-below)
   fm_write_meta "$home/state/task-1.meta" "window=fm-task-1" "kind=ship"
   fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
   out=$(contract "$home" enter --words 'quiet lane' 2>&1) || fail "entry failed: $out"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 50 ] \
     || fail "a home below the floor did not keep the default cap: $(contract "$home" field spend_max_concurrent_workers)"
 
   home=$(make_home spend-live-empty)
   out=$(contract "$home" enter --words 'nothing running' 2>&1) || fail "entry failed: $out"
   [ "$(contract "$home" live-workers)" = 0 ] || fail "an empty home did not count zero workers"
-  [ "$(contract "$home" field spend_max_concurrent_workers)" = 4 ] \
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 50 ] \
     || fail "an empty home recorded a cap other than the default floor"
 
   home=$(make_home spend-live-explicit)
   for i in 1 2 3 4 5 6; do
     fm_write_meta "$home/state/task-$i.meta" "window=fm-task-$i" "kind=ship"
   done
-  contract "$home" enter --words 'hold it down' --spend 2 >/dev/null 2>&1 || fail "explicit entry failed"
+  contract "$home" enter --words 'hold it down' --spend 2 --spend-words 'hold it down' >/dev/null 2>&1 || fail "explicit entry failed"
   [ "$(contract "$home" field spend_max_concurrent_workers)" = 2 ] \
     || fail "an explicit --spend lost to the live count"
   pass "entry without --spend records the live worker count, never below the default floor, and an explicit --spend still wins"
 }
 
+# The standing worker cap is 50 while away too (away autonomy S1, follow-up 9):
+# an idle entry records 50, and a --spend under it is the captain's number only
+# when the call quotes the captain's own words, verbatim, from the words being
+# recorded. The check is a substring test, never a reading of the words.
+test_spend_defaults_to_fifty_and_a_lower_cap_needs_the_captains_words() {
+  local home out rc
+  home=$(make_home spend-fifty)
+  out=$(contract "$home" enter --words 'work all night' 2>&1) || fail "plain entry failed: $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 50 ] \
+    || fail "an idle entry did not record the standing cap of 50: $(contract "$home" field spend_max_concurrent_workers)"
+  assert_contains "$out" 'Spend cap: 50 concurrent workers.' 'the announcement carries the default cap'
+
+  home=$(make_home spend-refused)
+  rc=0; out=$(contract "$home" enter --words 'work all night' --spend 5 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a --spend under 50 with no quoted words was accepted (rc=$rc): $out"
+  assert_contains "$out" 'under the standing worker cap of 50' 'the refusal names the standing cap'
+  [ ! -e "$home/state/.afk-contract" ] || fail "a refused entry wrote a record"
+  rc=0; out=$(contract "$home" enter --words 'work all night' --spend 5 --spend-words 'cap it at 5' 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a quote missing from the away words was accepted (rc=$rc): $out"
+  assert_contains "$out" 'does not appear verbatim' 'the refusal says the quote is not in the words'
+  [ ! -e "$home/state/.afk-contract" ] || fail "a refused quote wrote a record"
+  rc=0; out=$(contract "$home" enter --words 'work all night' --spend-words 'work' 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "--spend-words without --spend was accepted (rc=$rc): $out"
+  rc=0; out=$(contract "$home" enter --words 'work all night, cap it at 5 workers' --spend 5 --spend-words 'cap it at 5' 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a cap the words set was refused (rc=$rc): $out"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 5 ] || fail "the captain's own cap was not recorded"
+
+  home=$(make_home spend-high)
+  contract "$home" enter --words 'go wide' --spend 80 >/dev/null 2>&1 || fail "a cap above the standing 50 was refused"
+  [ "$(contract "$home" field spend_max_concurrent_workers)" = 80 ] || fail "a cap above 50 was not recorded unchanged"
+  pass "the away cap defaults to 50, and a lower --spend is accepted only with the captain's own words quoted from the record"
+}
+
+# `enter --drive-goal` (away autonomy S1, G3) writes the header field the goal
+# reader already ships, once per id in the given order, refuses an id the goal
+# owner would refuse, belongs to an away entry only, and reads back.
+test_drive_goal_is_recorded_once_per_id_and_read_back() {
+  local home out rc
+  home=$(make_home drive-goal)
+  out=$(contract "$home" enter --words 'drive I1 hard' --drive-goal I1 --drive-goal Miko-2 --drive-goal I1 2>&1) \
+    || fail "entry with --drive-goal failed: $out"
+  [ "$(contract "$home" field drive_goals)" = 'I1 Miko-2' ] \
+    || fail "drive_goals was not recorded once per id in order: $(contract "$home" field drive_goals)"
+  assert_contains "$out" '  drive goals: I1, Miko-2 (named at entry; every active goal drives while away)' 'the read-back names the goals'
+  contract "$home" validate || fail "a record with drive_goals does not validate"
+  [ "$(contract "$home" words)" = 'drive I1 hard' ] || fail "the drive_goals field disturbed the verbatim words"
+
+  # A words line that merely looks like the field never reads as it.
+  home=$(make_home drive-goal-in-words)
+  contract "$home" enter --words 'drive_goals: Sneaky' >/dev/null 2>&1 || fail "entry failed"
+  [ -z "$(contract "$home" field drive_goals)" ] || fail "a words line read as the drive_goals field"
+
+  for bad in '../x' 'a/b' '.hidden' 'sp ace' ''; do
+    rc=0; out=$(contract "$home" enter --words 'again' --drive-goal "$bad" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] || fail "--drive-goal '$bad' was accepted (rc=$rc): $out"
+  done
+  rc=0; out=$(contract "$home" enter --words 'again' --drive-goal 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "--drive-goal with no id was accepted (rc=$rc)"
+
+  home=$(make_home drive-goal-quiet)
+  rc=0; out=$(FM_AFK_MODE=quiet contract "$home" enter --drive-goal I1 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a quiet entry accepted --drive-goal (rc=$rc): $out"
+  [ ! -e "$home/state/.afk-contract" ] || fail "a refused quiet entry wrote a record"
+
+  home=$(make_home drive-goal-none)
+  out=$(contract "$home" enter --words 'nothing named' 2>&1) || fail "plain entry failed: $out"
+  assert_contains "$out" '  drive goals: none named (every active goal drives while away)' 'an unnamed entry still says every active goal drives'
+  pass "--drive-goal is recorded once per id, read back, refused for unsafe ids and quiet entries, and never read out of the words"
+}
+
+test_spend_defaults_to_fifty_and_a_lower_cap_needs_the_captains_words
+test_drive_goal_is_recorded_once_per_id_and_read_back
 test_readback_renders_words_verbatim_with_the_record_scalars
 test_words_preserve_final_newline_shape
 test_enter_writes_a_v2_record_in_one_step_and_announces_hold_for_return

@@ -72,7 +72,8 @@
 # goal, 3 KB total, later goals collapsed to one line); `window` renders the
 # since-epoch view a return brief needs. The brief also reads drive_goals
 # from state/.afk-contract when that field is present (bin/fm-afk-contract.sh
-# owns it): named goals come first and are labeled as driven while away.
+# owns it): named goals come first, and every active goal is labeled as driven
+# while away, named or not (the captain's goal-drive-always decision).
 #
 # CLOSE. `close --done` archives the record and marks to state/goals/closed/
 # (<id>-<closed_epoch>.goal carrying a projection snapshot, and .marks with
@@ -1191,8 +1192,8 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
   fm_goal_fold "$id" "$state" "$data" "$now"
   line="GOAL $id (active since $FM_GOAL_REC_STARTED"
   case "$away" in
-    named) line="$line; driven while away: yes)" ;;
-    unnamed) line="$line; not driven while away (not named))" ;;
+    named) line="$line; driven while away: yes, named)" ;;
+    unnamed) line="$line; driven while away: yes, active goal)" ;;
     *) line="$line)" ;;
   esac
   line="$line: $FM_GOAL_REC_TITLE"

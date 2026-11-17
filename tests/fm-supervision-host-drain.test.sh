@@ -156,7 +156,7 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "FIRSTMATE SUPERVISION WAKE: signal: demo.status" "the wake prompt must carry the reason"
   assert_contains "$out" "finish with the bin/fm-branch-report.sh command." "the wake prompt must name the host's report surface"
   assert_contains "$out" "POSTURE: AWAY." "an away wake prompt must carry the posture tail"
-  assert_contains "$out" "When the record names drive goals, the drain's GOAL section is their live state and each open item's next step is named by reference: drive the startable ones through the same scripts, never past the never-set." \
+  assert_contains "$out" "While away, every active goal drives, named by the record or not: the drain's GOAL section is its live state and each open item's next step is named by reference: drive the startable ones through the same scripts, never past the never-set." \
     "the away tail must carry the drive-goal rule"
   assert_contains "$out" "Credential entry, legal or financial acceptance, an attended prompt, and any discard the captain did not name are refused for every actor in every posture, whatever the words say; money is spent only on the captain's explicit consent to that exact item. A destructive or security-sensitive step, a delete above all, proceeds only after a written analysis, recorded before the action, showing nothing crucial breaks; anything shared by other lanes, unpushed or unmerged work, credentials, and production data are always crucial and stay refused." \
     "the away tail's away-limits sentences must stay byte-identical"

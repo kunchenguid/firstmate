@@ -63,6 +63,60 @@ enter_posture() {  # <home>
 }
 
 # ---------------------------------------------------------------------------
+# UNIT 0b: `enter --drive-goal` (away autonomy S1, G3). The away record names
+# the goals the captain asked to keep driving in the header field bin/fm-goal.sh
+# reads, the read-back says so, and the entry output lists every active goal
+# that will drive, because every active goal drives while away. A named goal
+# with no record yet is called out, and an unsafe id refuses the entry.
+# ---------------------------------------------------------------------------
+unit_enter_names_drive_goals_and_says_which_goals_drive() {
+  local st out rc items env_
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-drive-goal.XXXXXX")
+  mkdir -p "$st/state" "$st/data"
+  items="$st/items"
+  printf 'item [id=a] [owner=main]: first step\n' > "$items"
+  labenv() { env FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_DATA_OVERRIDE="$st/data" "$@"; }
+  for id in I1 I2; do
+    labenv "$ROOT/bin/fm-goal.sh" start "$id" --title "Goal $id" --done-when "$id live" --named-by "do $id" \
+      --plan plan.md --items-file "$items" >/dev/null 2>&1 || fail "enter drive-goal: could not start goal $id"
+  done
+  out=$(labenv "$LAUNCH" enter --words 'keep I2 moving' --drive-goal I2 --drive-goal Later --drive-goal I2 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+    && [ "$(labenv "$CONTRACT" field drive_goals)" = 'I2 Later' ] \
+    && [ "$(labenv "$CONTRACT" words)" = 'keep I2 moving' ] \
+    && printf '%s' "$out" | grep -F '  drive goals: I2, Later (named at entry; every active goal drives while away)' >/dev/null \
+    && printf '%s' "$out" | grep -F 'Goals driven while away: I1, I2' >/dev/null \
+    && printf '%s' "$out" | grep -F 'Named goal with no active record: Later' >/dev/null; then
+    pass "enter --drive-goal: the record names the goals once each, the read-back and entry output say every active goal drives, and a goal with no record is called out"
+  else
+    fail "enter --drive-goal: record, read-back, or goal note wrong (rc=$rc): $out"
+  fi
+  # The reader bin/fm-goal.sh already ships sees exactly what was written.
+  if labenv "$ROOT/bin/fm-goal.sh" brief | head -1 | grep -F 'GOAL I2 (active since' >/dev/null; then
+    pass "enter --drive-goal: the goal brief reads the named goal first from the record"
+  else
+    fail "enter --drive-goal: the goal brief did not read the named goal first"
+  fi
+  out=$(labenv "$LAUNCH" enter --words 'other words' --drive-goal '../escape' 2>&1)
+  rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -F -- '--drive-goal needs a goal id' >/dev/null \
+    && [ "$(labenv "$CONTRACT" field drive_goals)" = 'I2 Later' ]; then
+    pass "enter --drive-goal: an unsafe goal id is refused and leaves the standing record alone"
+  else
+    fail "enter --drive-goal: an unsafe id was not refused cleanly (rc=$rc): $out"
+  fi
+  out=$(labenv "$LAUNCH" enter --words 'no goals named' 2>&1)
+  if printf '%s' "$out" | grep -F '  drive goals: none named (every active goal drives while away)' >/dev/null \
+    && printf '%s' "$out" | grep -F 'Goals driven while away: I1, I2' >/dev/null \
+    && [ -z "$(labenv "$CONTRACT" field drive_goals)" ]; then
+    pass "enter without --drive-goal records no field and still drives every active goal"
+  else
+    fail "enter without --drive-goal: wrong read-back or goal note: $out"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # UNIT 0: /afk is itself the go. `enter` writes the away-posture record in the
 # same call, with no separate confirmation, and prints the announcement and the
 # read-back after the record exists; on Pi the entry ends there, and every
@@ -73,7 +127,7 @@ unit_enter_records_the_posture_in_one_step_without_a_daemon() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-enter.XXXXXX")
   mkdir -p "$st/state"
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter \
-    --words 'merge the windows fix when green' --expected-return 2026-09-08T08:00Z --spend 2 2>&1)
+    --words 'merge the windows fix when green' --expected-return 2026-09-08T08:00Z --spend 2 --spend-words 'merge the windows fix' 2>&1)
   rc=$?
   if [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk-contract.proposed" ] \
     && [ "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" words)" = 'merge the windows fix when green' ] \
@@ -1788,6 +1842,7 @@ e2e_rex() {
 
 unit_clear_stale
 unit_enter_records_the_posture_in_one_step_without_a_daemon
+unit_enter_names_drive_goals_and_says_which_goals_drive
 unit_retired_two_step_entry_is_refused
 unit_pi_never_launches_the_daemon
 unit_test_harness_seam_requires_the_marker
