@@ -753,7 +753,9 @@ cmd_release() {
   if [ "$backend" = tmux ]; then
     tmux_identity=$(tmux_release_window_identity "$target") || die "cannot identify the tmux endpoint"
     IFS='|' read -r socket server window <<< "$tmux_identity"
-    [ -n "$socket" ] && tmux_release_window_valid "$window" || die "cannot identify the tmux endpoint"
+    if [ -z "$socket" ] || ! tmux_release_window_valid "$window"; then
+      die "cannot identify the tmux endpoint"
+    fi
     birth=$(fm_pid_start_time "$server") || die "cannot identify the tmux server process"
   fi
   state=$(fm_backend_agent_state "$backend" "$target")
@@ -765,8 +767,10 @@ cmd_release() {
     "release_wt=$wt" "release_project=$project" "closed_backend=$backend" "closed_target=$target" \
     "tmux_socket=$socket" "tmux_server=$server" "tmux_window=$window" "tmux_birth=$birth" || die "cannot journal release"
   if [ "$backend" = tmux ]; then
-    [ "$(tmux_release_window_identity "$target")" = "$tmux_identity" ] &&
-      tmux_release_server_matches "$socket" "$server" "$birth" || die "the tmux endpoint changed before closing"
+    if [ "$(tmux_release_window_identity "$target")" != "$tmux_identity" ] ||
+      ! tmux_release_server_matches "$socket" "$server" "$birth"; then
+      die "the tmux endpoint changed before closing"
+    fi
     tmux -S "$socket" kill-window -t "$window" || die "cannot close the tmux endpoint"
   else
     fm_backend_kill "$backend" "$target" || die "cannot close the endpoint"
