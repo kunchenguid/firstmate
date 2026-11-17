@@ -1704,7 +1704,7 @@ test_github_enterprise_config_resolution() {
   code_root="$TMP_ROOT/github-enterprise-code-root"
   url=https://leadsonline.ghe.com/Org/repo/pull/7
   mkdir -p "$code_root/bin" "$code_root/config" "$code_root/home/config" "$code_root/override"
-  cp "$ROOT/bin/fm-pr-lib.sh" "$code_root/bin/"
+  cp "$ROOT/bin/fm-pr-lib.sh" "$ROOT/bin/fm-meta-lib.sh" "$code_root/bin/"
   printf 'leadsonline.ghe.com\n' > "$code_root/config/github-hosts"
   printf 'home.ghe.com\n' > "$code_root/home/config/github-hosts"
   printf 'override.ghe.com\n' > "$code_root/override/github-hosts"
