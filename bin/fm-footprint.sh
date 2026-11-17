@@ -74,18 +74,18 @@
 #   - a set-aside folder (.fm-closing-* or .fm-reclaim-*) left by an
 #     interrupted removal: it is reported, never removed again by its name.
 #   Before a directory is removed it is renamed aside under the task's spawn
-#   lock and the set-aside copy is checked again, because the directory can
-#   change between the first check and the rename; a copy that fails the
-#   second check is put back. The quiescence check comes between the rename
-#   and that second check: a copy that a running process still works in or
-#   holds a file open in is put back, and when the running processes cannot
-#   be listed in full (every live process of this user must appear in the
-#   listing, and so must a probe file this process holds open), every copy
-#   is put back. A renamed copy has a name no other process knows, so once
-#   none is rooted in it or holds anything open there, nothing can write
-#   into it again, and the second check that follows sees everything any
-#   writer left. Firstmate never ends a process to free space; teardown ends
-#   only the closing task's own processes, before task-close runs.
+#   lock, and whether it may go is then decided from its own frozen contents,
+#   never from no process seeming to use it (the removal boundary, fp_settle):
+#   it is frozen (no write bit anywhere, so no ordinary process can create,
+#   rename or open anything there for writing), flushed, snapshotted, checked
+#   for running processes (which can only add a reason to keep), left for
+#   removal-grace-seconds, checked for version-controlled work again, and
+#   snapshotted again; any difference, or any failed step, puts it back with
+#   its permissions restored. The removal then deletes exactly the entries
+#   the verified snapshot lists, so anything that appeared later stays, with
+#   the folder around it. Firstmate never ends a process to free space;
+#   teardown ends only the closing task's own processes, before task-close
+#   runs.
 #
 # owns-scratch <task-id> <scratch-dir>
 #   Exit 0 only when <scratch-dir> is this home's own area for the task (the
@@ -349,17 +349,6 @@ fp_config() {
   FP_KEY=$(fm_footprint_home_key "$FM_HOME") || die "cannot hash this home's path (shasum or sha256sum is required)"
 }
 
-# fp_remove_tree <dir>: removes a directory tree without leaving its
-# filesystem; read-only directories (a Go module cache) are made writable
-# first. Returns 1 when anything is left behind.
-fp_remove_tree() {  # <dir>
-  local dir=$1
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  fm_run_timed 600 find "$dir" -xdev -type d ! -perm -u+w -exec chmod u+w {} + </dev/null 2>/dev/null || true
-  fm_run_timed 600 find "$dir" -xdev -depth -delete </dev/null 2>/dev/null || true
-  [ ! -e "$dir" ] && [ ! -L "$dir" ]
-}
-
 # A name holding a control character (a newline above all) or a backslash
 # would make one path read as two or be escaped differently by the tools that
 # list it, so any tree holding one is never inspected or removed.
@@ -461,6 +450,168 @@ fp_set_aside() {  # <dir> <tag>
   printf '%s\n' "$to"
 }
 
+# --- the removal boundary ----------------------------------------------------
+#
+# Whether a set-aside directory may go is decided from its own contents at
+# the moment of removal, never from no process seeming to use it. fp_settle
+# runs every removal (task close, the daily pass, old-folder apply) through
+# the same steps, each of which can only add reasons to keep:
+#   1. freeze: write permission is removed from every entry, so no ordinary
+#      process can create, rename, remove or open anything for writing there
+#      any more; a writer gets an error instead of silently losing its work;
+#   2. flush: dirty pages are written out, so a later write through a memory
+#      mapping or a descriptor opened earlier changes the entry's times;
+#   3. snapshot: type, permissions, inode, size, modification and change times
+#      and link count of every entry, at sub-second precision where the
+#      platform gives it;
+#   4. the process check (fp_in_use): a copy a running process still uses, or
+#      every copy when the processes cannot be listed in full, is kept;
+#   5. the grace window (removal-grace-seconds);
+#   6. the content check again (version-controlled work, unsafe names, or
+#      anything unreadable keeps the copy), now that nothing new can appear;
+#   7. a second snapshot that must equal the first, entry for entry.
+# A copy that fails any step gets its permissions back and its old name
+# back; the rest are removed at once by the caller.
+
+# fp_stat_lines <dir>...: "symbolic-mode perm inode size mtime ctime links
+# path" per entry; the first character of the symbolic mode is its type.
+fp_stat_lines() {  # <dir>...
+  if [ "$FP_OS" = Darwin ]; then
+    fm_run_timed 600 find "$@" -xdev -exec /usr/bin/stat -f '%Sp %Lp %i %z %Fm %Fc %l %N' {} + </dev/null 2>/dev/null
+  else
+    fm_run_timed 600 find "$@" -xdev -printf '%M %m %i %s %T@ %C@ %n %p\n' </dev/null 2>/dev/null
+  fi
+}
+
+# fp_remove_listed <snap>: removes exactly the entries a verified snapshot
+# lists ("root<TAB>stat line"), never whatever is there by then: directories
+# get their write bit back, the listed files and links are removed, then the
+# listed directories deepest first, each only if it is empty. Anything that
+# appeared after the snapshot is not listed, so it and every directory above
+# it stay. Returns 1 when any listed root is still there.
+fp_remove_listed() {  # <snap>
+  local snap=$1 rc=0 root
+  [ -s "$snap" ] || return 0
+  awk -F '\t' '{ l = $2; q = l; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
+      if (substr(l, 1, 1) == "d") printf "%s%c", q, 0 }' "$snap" |
+    xargs -0 chmod u+w 2>/dev/null || true
+  awk -F '\t' '{ l = $2; q = l; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
+      if (substr(l, 1, 1) != "d") printf "%s%c", q, 0 }' "$snap" |
+    xargs -0 rm -f -- 2>/dev/null || true
+  awk -F '\t' '{ l = $2; q = l; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
+      if (substr(l, 1, 1) == "d") { n = gsub(/\//, "/", q); print n "\t" q } }' "$snap" |
+    LC_ALL=C sort -t "$(printf '\t')" -k1,1nr | cut -f2- | tr '\n' '\0' |
+    xargs -0 rmdir -- 2>/dev/null || true
+  while IFS= read -r root; do
+    [ ! -e "$root" ] && [ ! -L "$root" ] || rc=1
+  done < <(cut -f1 "$snap" | LC_ALL=C sort -u)
+  return "$rc"
+}
+
+# fp_freeze <modes-out> <dir>...: records each entry's permissions, then
+# removes every write bit. Returns 1 when any entry could not be recorded or
+# frozen.
+fp_freeze() {  # <modes-out> <dir>...
+  local modes=$1
+  shift
+  if [ "$FP_OS" = Darwin ]; then
+    fm_run_timed 600 find "$@" -xdev ! -type l -exec /usr/bin/stat -f '%Lp %N' {} + </dev/null > "$modes" 2>/dev/null || return 1
+  else
+    fm_run_timed 600 find "$@" -xdev ! -type l -printf '%m %p\n' </dev/null > "$modes" 2>/dev/null || return 1
+  fi
+  fm_run_timed 600 find "$@" -xdev ! -type l -exec chmod a-w {} + </dev/null 2>/dev/null
+}
+
+# fp_thaw <modes> <dir>: gives every entry under <dir> its recorded
+# permissions back. Returns 1 when any could not be restored.
+fp_thaw() {  # <modes> <dir>
+  local modes=$1 dir=$2 mode rc=0
+  while IFS= read -r mode; do
+    case "$mode" in ''|*[!0-7]*) rc=1; continue ;; esac
+    awk -v d="$dir" -v m="$mode" '{ p = $0; sub(/^[^ ]+ /, "", p) } $1 == m && (p == d || index(p, d "/") == 1) { printf "%s%c", p, 0 }' "$modes" |
+      xargs -0 chmod "$mode" 2>/dev/null || rc=1
+  done < <(awk -v d="$dir" '{ p = $0; sub(/^[^ ]+ /, "", p) } p == d || index(p, d "/") == 1 { print $1 }' "$modes" | sort -u)
+  return "$rc"
+}
+
+# fp_by_root <roots-file> <lines-file>: prefixes each stat line with the
+# root it lies under ("root<TAB>line"); a line under no root is dropped.
+fp_by_root() {  # <roots-file> <lines-file>
+  awk 'FILENAME == ARGV[1] { root[$0] = 1; next }
+    { q = $0; for (i = 1; i <= 7; i++) sub(/^[^ ]* /, "", q)
+      p = q
+      while (p != "") { if (p in root) { print p "\t" $0; break }; if (!sub(/\/[^\/]*$/, "", p)) break }
+    }' "$1" "$2"
+}
+
+# fp_why_all <work-dir> <reason>: gives every root in <work-dir>/roots a reason to keep.
+fp_why_all() {  # <work-dir> <reason>
+  awk -v r="$2" '{ print $0 "\t" r }' "$1/roots" >> "$1/why"
+}
+
+# fp_settle <pairs> <ok-out> <kept-out> [<modes-out>]: runs the removal
+# boundary over the set-aside copies listed in <pairs> ("aside<TAB>dir").
+# Writes each copy that may be removed now, still frozen, as a pair to
+# <ok-out> and its verified snapshot to <ok-out>.snap for fp_remove_listed,
+# and each kept one as "reason<TAB>aside<TAB>dir" to <kept-out>
+# after putting it back. Reasons: frozen, unreadable, in-use, unlisted,
+# blocked, changed. <modes-out> keeps the recorded permissions, so a caller
+# that must put the whole batch back can thaw the copies it was given.
+fp_settle() {  # <pairs> <ok-out> <kept-out> [<modes-out>]
+  local pairs=$1 ok=$2 kept=$3 w aside area why grace
+  local -a roots_all=()
+  : > "$ok"
+  : > "$ok.snap"
+  : > "$kept"
+  while IFS='	' read -r aside area; do [ -n "$aside" ] && roots_all+=("$aside"); done < "$pairs"
+  [ "${#roots_all[@]}" -gt 0 ] || return 0
+  w=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-settle.XXXXXX") || w=
+  if [ -z "$w" ]; then
+    while IFS='	' read -r aside area; do
+      fp_restore "$aside" "$area" || true
+      printf 'unreadable\t%s\t%s\n' "$aside" "$area" >> "$kept"
+    done < "$pairs"
+    return 0
+  fi
+  printf '%s\n' "${roots_all[@]}" > "$w/roots"
+  : > "$w/why"
+  fp_freeze "$w/modes" "${roots_all[@]}" || fp_why_all "$w" frozen
+  fm_run_timed 120 sync </dev/null >/dev/null 2>&1 || fp_why_all "$w" unreadable
+  fp_stat_lines "${roots_all[@]}" > "$w/s1.raw" || fp_why_all "$w" unreadable
+  fp_by_root "$w/roots" "$w/s1.raw" | LC_ALL=C sort > "$w/s1"
+  if fp_in_use "$w/busy" "${roots_all[@]}"; then
+    awk '{ print $0 "\tin-use" }' "$w/busy" >> "$w/why"
+  else
+    fp_why_all "$w" unlisted
+  fi
+  grace=${FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE:-$FP_REMOVAL_GRACE_SECONDS}
+  case "$grace" in ''|*[!0-9]*) grace=5 ;; esac
+  [ "$grace" = 0 ] || sleep "$grace"
+  fp_blocked "$w/blocked" "${roots_all[@]}"
+  awk '{ print $0 "\tblocked" }' "$w/blocked" >> "$w/why"
+  fp_stat_lines "${roots_all[@]}" > "$w/s2.raw" || fp_why_all "$w" unreadable
+  fp_by_root "$w/roots" "$w/s2.raw" | LC_ALL=C sort > "$w/s2"
+  # A root whose entries differ in any way between the snapshots changed.
+  awk -F '\t' 'FILENAME == ARGV[1] { a[$1] = a[$1] "\n" $0; next }
+    FILENAME == ARGV[2] { b[$1] = b[$1] "\n" $0; next }
+    { if (a[$0] != b[$0]) print $0 "\tchanged" }' "$w/s1" "$w/s2" "$w/roots" >> "$w/why"
+  while IFS='	' read -r aside area; do
+    [ -n "$aside" ] || continue
+    why=$(awk -F '\t' -v a="$aside" '$1 == a { print $2; exit }' "$w/why")
+    if [ -z "$why" ]; then
+      printf '%s\t%s\n' "$aside" "$area" >> "$ok"
+      awk -F '\t' -v a="$aside" '$1 == a' "$w/s2" >> "$ok.snap"
+    else
+      fp_thaw "$w/modes" "$aside" || true
+      fp_restore "$aside" "$area" || true
+      printf '%s\t%s\t%s\n' "$why" "$aside" "$area" >> "$kept"
+    fi
+  done < "$pairs"
+  [ -z "${4:-}" ] || cp "$w/modes" "$4" 2>/dev/null || true
+  rm -f "$w/roots" "$w/why" "$w/modes" "$w/s1.raw" "$w/s1" "$w/s2.raw" "$w/s2" "$w/busy" "$w/blocked"
+  rmdir "$w" 2>/dev/null || true
+}
+
 # fp_restore <aside> <dir>: puts a set-aside directory back when its old name
 # is free. Returns 1 when it stays aside.
 fp_restore() {  # <aside> <dir>
@@ -480,12 +631,14 @@ fp_restore() {  # <aside> <dir>
 # probe file this process holds open. Otherwise, or on a timeout, it returns
 # 1 with <out> empty and the caller removes nothing. A process is never ended
 # to free space.
-# macOS lists with lsof; Linux reads each process's cwd and fd links under
-# /proc (FM_PROC_ROOT_OVERRIDE in tests), where a readable fd directory is the
-# proof that process was read.
+# macOS lists with lsof, which names memory-mapped files too; Linux reads
+# each process's cwd and fd links and its file-backed memory maps under /proc
+# (FM_PROC_ROOT_OVERRIDE in tests), where a readable fd directory and maps
+# file are the proof that process was read. This check only ever adds reasons
+# to keep: fp_settle never takes its silence as proof that a copy is safe.
 fp_in_use() {  # <out> <dir>...
   local out=$1 dir parent phys last_parent='' last_phys='' rc=0 lrc probe_dir probe uid p st proc
-  local -a fds=() cwds=()
+  local -a fds=() cwds=() maps=()
   shift
   : > "$out" || return 1
   uid=$(id -u 2>/dev/null) || return 1
@@ -532,6 +685,7 @@ fp_in_use() {  # <out> <dir>...
       case "${st%% *}" in Z|X|'') continue ;; esac
       fds+=("$p/fd")
       cwds+=("$p/cwd")
+      maps+=("$p/maps")
     done < <(find "$proc" -mindepth 1 -maxdepth 1 -name '[0-9]*' -user "$uid" 2>/dev/null)
     if [ "${#fds[@]}" -eq 0 ]; then
       rc=1
@@ -545,6 +699,11 @@ fp_in_use() {  # <out> <dir>...
       ! grep -v 'No such file or directory' "$out.err" | grep -q . || rc=1
       grep -Fqx -- "$probe" "$out.paths" || rc=1
       readlink -- "${cwds[@]}" >> "$out.paths" 2>/dev/null || true
+      # File-backed memory mappings, which outlive their descriptor: the path
+      # is everything after the fifth field of a maps line.
+      fm_run_timed 120 cat -- "${maps[@]}" </dev/null 2> "$out.err" |
+        awk 'NF >= 6 { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]+ +/, "", p); if (p ~ /^\//) print p }' >> "$out.paths"
+      ! grep -v 'No such file or directory' "$out.err" | grep -q . || rc=1
       rm -f "$out.err"
     fi
   fi
@@ -571,22 +730,49 @@ fp_in_use() {  # <out> <dir>...
   return "$rc"
 }
 
-# fp_area_idle <dir>: 0 when no running process uses <dir>; otherwise sets
-# FP_BLOCKER to why it is kept.
-fp_area_idle() {  # <dir>
-  local f rc=0
-  FP_IDLE_UNKNOWN=1
-  f=$(mktemp "${TMPDIR:-/tmp}/fm-footprint-busy.XXXXXX") || { FP_BLOCKER="no temporary file to list running processes"; return 1; }
-  if ! fp_in_use "$f" "$1"; then
-    FP_BLOCKER="the running processes could not be listed, so it could not be shown idle"
-    rc=1
-  elif [ -s "$f" ]; then
-    FP_IDLE_UNKNOWN=0
-    FP_BLOCKER="a running process still works in it or holds a file open there"
-    rc=1
-  fi
-  rm -f "$f"
-  return "$rc"
+# fp_settle_one <aside> <dir>: runs the removal boundary for one set-aside
+# copy. Returns 0 when it may be removed now, with FP_SETTLED_SNAP naming its
+# verified snapshot for fp_remove_listed (the caller removes that file);
+# otherwise it is back at <dir> and FP_BLOCKER and FP_KEPT_HINT say why and
+# what clears it.
+fp_settle_one() {  # <aside> <dir>
+  local f why
+  FP_KEPT_HINT='move or remove that'
+  FP_SETTLED_SNAP=
+  f=$(mktemp "${TMPDIR:-/tmp}/fm-footprint-one.XXXXXX") || {
+    fp_restore "$1" "$2" || true
+    FP_BLOCKER="no temporary file to check it"
+    return 1
+  }
+  printf '%s\t%s\n' "$1" "$2" > "$f"
+  fp_settle "$f" "$f.ok" "$f.kept"
+  why=$(cut -f1 "$f.kept" | head -n 1)
+  rm -f "$f" "$f.ok" "$f.kept"
+  FP_SETTLED_SNAP="$f.ok.snap"
+  case "$why" in
+    '') return 0 ;;
+    blocked)
+      fp_tree_disposable "$2" || true
+      [ -n "$FP_BLOCKER" ] || FP_BLOCKER="it holds something that may not be removed"
+      ;;
+    in-use)
+      FP_BLOCKER="a running process still works in it or holds a file open or mapped there"
+      FP_KEPT_HINT='end that process once its work is safe'
+      ;;
+    unlisted)
+      FP_BLOCKER="the running processes could not be listed in full"
+      FP_KEPT_HINT='it stays until they can be'
+      ;;
+    changed)
+      FP_BLOCKER="something in it changed while it waited to be removed"
+      FP_KEPT_HINT='whatever still writes there should finish first'
+      ;;
+    *)
+      FP_BLOCKER="it could not be frozen and checked in full"
+      FP_KEPT_HINT='it stays until it can be'
+      ;;
+  esac
+  return 1
 }
 
 # --- Docker -------------------------------------------------------------
@@ -829,22 +1015,18 @@ cmd_task_close() {  # <id> <scratch> [project]
       elif ! aside=$(fp_set_aside "$scratch" closing); then
         scratch_result=partial
         FP_BLOCKER="$scratch could not be set aside"
-      elif ! fp_area_idle "$aside"; then
-        # Teardown ends the task's processes first; one that survived, or a
-        # process table that cannot be listed in full, keeps the area.
-        fp_restore "$aside" "$scratch" || FP_BLOCKER="$FP_BLOCKER (left at $aside)"
+      elif ! fp_settle_one "$aside" "$scratch"; then
+        # The removal boundary kept it and put it back (see fp_settle).
+        rm -f "$FP_SETTLED_SNAP"
         scratch_result=kept
-        kept_hint='end that process once its work is safe'
-        [ "$FP_IDLE_UNKNOWN" = 0 ] || kept_hint='it stays until the running processes can be listed'
-      elif ! fp_tree_disposable "$aside"; then
-        # Checked once nothing can write there any more.
-        fp_restore "$aside" "$scratch" || FP_BLOCKER="$FP_BLOCKER (left at $aside)"
-        scratch_result=kept
-      elif fp_remove_tree "$aside"; then
+        kept_hint=$FP_KEPT_HINT
+      elif fp_remove_listed "$FP_SETTLED_SNAP"; then
+        rm -f "$FP_SETTLED_SNAP"
         scratch_result=removed
       else
+        rm -f "$FP_SETTLED_SNAP"
         scratch_result=partial
-        FP_BLOCKER="what is left is at $aside"
+        FP_BLOCKER="what is left, including anything that appeared after it was checked, is at $aside"
       fi
     fi
   fi
@@ -1308,6 +1490,23 @@ fp_old_task_id() {  # <rows> <print-out>
   { cat "$rows"; cat "$2"; } | fp_sha256_stream
 }
 
+# fp_print_unfrozen: reads fp_tree_print lines and drops what freezing a
+# tree changes: the write bits of each mode (octal on macOS, hexadecimal on
+# Linux) and each change time.
+fp_print_unfrozen() {
+  awk -v os="$FP_OS" '
+    function clearw(m,   v, i, c, d, n, p, out) {
+      v = 0
+      if (os == "Darwin") { for (i = 1; i <= length(m); i++) v = v * 8 + substr(m, i, 1) }
+      else { for (i = 1; i <= length(m); i++) { c = tolower(substr(m, i, 1)); v = v * 16 + index("0123456789abcdef", c) - 1 } }
+      p = v % 512; n = v - p; out = 0
+      for (d = 1; d <= 64; d *= 8) { c = int(p / d) % 8; if (int(c / 2) % 2) c -= 2; out += c * d }
+      return n + out
+    }
+    /^S / { $4 = clearw($4); $7 = "-"; print; next }
+    { print }'
+}
+
 # fp_restore_all <pairs>: puts every set-aside entry ("aside<TAB>entry") back.
 fp_restore_all() {  # <pairs>
   local aside entry
@@ -1371,24 +1570,38 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     # still hold nothing that blocks removal; otherwise everything goes back.
     local -a asides=()
     while IFS='	' read -r aside entry; do asides+=("$aside"); done < "$tmp.pairs"
-    # Nothing may still be working in or holding open any set-aside copy;
-    # once that holds, nothing can change them, so they are checked last.
-    if ! fp_in_use "$tmp.busy" "${asides[@]+"${asides[@]}"}" || [ -s "$tmp.busy" ]; then
-      fp_restore_all "$tmp.pairs"
-      rm -f "$tmp" "$tmp.print" "$tmp.pairs" "$tmp.map" "$tmp.busy"
-      die "a running process still uses an entry, or the running processes could not be listed in full; nothing removed - end that work, then run old-tasks again"
+    # The removal boundary (see fp_settle) for the whole batch; if it keeps
+    # any entry, every entry goes back.
+    fp_settle "$tmp.pairs" "$tmp.ok" "$tmp.kept" "$tmp.modes"
+    if [ -s "$tmp.kept" ]; then
+      while IFS='	' read -r aside entry; do
+        fp_thaw "$tmp.modes" "$aside" || true
+        fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
+      done < "$tmp.ok"
+      case "$(cut -f1 "$tmp.kept" | head -n 1)" in
+        in-use|unlisted) left="a running process still uses an entry, or the running processes could not be listed in full" ;;
+        *) left="an entry changed while it was being set aside or waiting to be removed" ;;
+      esac
+      rm -f "$tmp" "$tmp.print" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.kept" "$tmp.modes"
+      die "$left; nothing removed - run old-tasks again"
     fi
-    rm -f "$tmp.busy"
-    if ! fp_tree_print "$tmp.map" > "$tmp.print2" || ! cmp -s "$tmp.print" "$tmp.print2" ||
-      ! fp_blocked "$tmp.blocked" "${asides[@]+"${asides[@]}"}" || [ -s "$tmp.blocked" ]; then
-      fp_restore_all "$tmp.pairs"
-      rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.blocked"
-      die "an entry changed while it was being set aside; nothing removed - run old-tasks again"
+    # The frozen copies must still print what the preview printed, apart from
+    # the write bits and change times the freeze itself altered.
+    if ! fp_tree_print "$tmp.map" > "$tmp.print2" ||
+      ! cmp -s <(fp_print_unfrozen < "$tmp.print") <(fp_print_unfrozen < "$tmp.print2"); then
+      while IFS='	' read -r aside entry; do
+        fp_thaw "$tmp.modes" "$aside" || true
+        fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
+      done < "$tmp.ok"
+      rm -f "$tmp" "$tmp.print" "$tmp.print2" "$tmp.pairs" "$tmp.map" "$tmp.ok" "$tmp.ok.snap" "$tmp.kept" "$tmp.modes"
+      die "an entry changed while it was being set aside or waiting to be removed; nothing removed - run old-tasks again"
     fi
+    fp_remove_listed "$tmp.ok.snap" || true
+    rm -f "$tmp.ok" "$tmp.ok.snap" "$tmp.kept" "$tmp.modes"
     total=0 gone=0 left=0
     while IFS='	' read -r kind kb entry; do
       aside=$(awk -F '\t' -v e="$entry" '$2 == e { print $1; exit }' "$tmp.pairs")
-      if fp_remove_tree "$aside"; then
+      if [ ! -e "$aside" ] && [ ! -L "$aside" ]; then
         printf 'removed %s %s %s\n' "$kind" "$(fp_human "$kb")" "$entry"
         total=$((total + kb))
         gone=$((gone + 1))
@@ -1429,7 +1642,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
 
 cmd_sweep() {  # [--dry-run]
   local dry=0 base area id age_cut now uid work removed=0 removed_kb=0 kb path aside entry
-  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0 inuse=0 inuse_ids='' unlisted=0
+  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0 inuse=0 inuse_ids='' unlisted=0 changed=0 changed_ids=''
   local -a cands=() orphans=() asides=()
   [ "${1:-}" = --dry-run ] && dry=1
   fp_config
@@ -1499,51 +1712,36 @@ cmd_sweep() {  # [--dry-run]
     done
   fi
   if [ "${#asides[@]}" -gt 0 ]; then
-    # The quiescence boundary first: an orphan has no task, but a process left
-    # behind can still work in it, and a rename does not move it out. Every
-    # copy still in use goes back, and if the running processes cannot be
-    # listed in full, every copy goes back.
-    if fp_in_use "$work/busy" "${asides[@]}"; then
-      asides=()
-      while IFS='	' read -r aside area; do
-        if grep -Fqx -- "$aside" "$work/busy"; then
+    # The removal boundary (see fp_settle): an orphan has no task, but a
+    # process left behind can still work in it, so whether it may go is
+    # decided from its frozen contents after a grace window, and the process
+    # check only ever adds reasons to keep.
+    fp_settle "$work/pairs" "$work/ok" "$work/kept"
+    asides=()
+    while IFS='	' read -r aside area; do asides+=("$aside"); done < "$work/ok"
+    while IFS='	' read -r why aside area; do
+      case "$why" in
+        in-use)
           inuse=$((inuse + 1))
           [ "$inuse" -gt 5 ] || inuse_ids="$inuse_ids${inuse_ids:+, }${area##*/}"
-          fp_restore "$aside" "$area" || back=$((back + 1))
-        else
-          asides+=("$aside")
-          printf '%s\t%s\n' "$aside" "$area" >> "$work/pairs2"
-        fi
-      done < "$work/pairs"
-    else
-      asides=()
-      while IFS='	' read -r aside area; do
-        inuse=$((inuse + 1))
-        fp_restore "$aside" "$area" || back=$((back + 1))
-      done < "$work/pairs"
-      unlisted=1
-    fi
-  fi
-  if [ "${#asides[@]}" -gt 0 ]; then
-    # Then check every idle copy's contents again: the area could change
-    # between the first scan and the rename, or before its last writer
-    # stopped, and nothing can change it now. A copy that blocks goes back.
-    fp_blocked "$work/blocked2" "${asides[@]}"
-    asides=()
-    while IFS='	' read -r aside area; do
-      if grep -Fqx -- "$aside" "$work/blocked2"; then
-        kept=$((kept + 1))
-        [ "$kept" -gt 5 ] || kept_ids="$kept_ids${kept_ids:+, }${area##*/}"
-        fp_restore "$aside" "$area" || back=$((back + 1))
-      else
-        asides+=("$aside")
-      fi
-    done < "$work/pairs2"
+          ;;
+        unlisted) unlisted=$((unlisted + 1)) ;;
+        changed)
+          changed=$((changed + 1))
+          [ "$changed" -gt 5 ] || changed_ids="$changed_ids${changed_ids:+, }${area##*/}"
+          ;;
+        *)
+          kept=$((kept + 1))
+          [ "$kept" -gt 5 ] || kept_ids="$kept_ids${kept_ids:+, }${area##*/}"
+          ;;
+      esac
+      [ -e "$aside" ] || [ -L "$aside" ] || continue
+      back=$((back + 1))
+    done < "$work/kept"
   fi
   if [ "${#asides[@]}" -gt 0 ]; then
     fp_du_many "$work/du" "${asides[@]}"
-    fm_run_timed 600 find "${asides[@]}" -xdev -type d ! -perm -u+w -exec chmod u+w {} + </dev/null 2>/dev/null || true
-    fm_run_timed 600 find "${asides[@]}" -xdev -depth -delete </dev/null 2>/dev/null || true
+    fp_remove_listed "$work/ok.snap" || true
     for aside in "${asides[@]}"; do
       [ -e "$aside" ] || [ -L "$aside" ] || continue
       leftover=$((leftover + 1))
@@ -1567,12 +1765,17 @@ cmd_sweep() {  # [--dry-run]
     printf 'Kept %s orphaned scratch area(s) whole because they hold version-controlled work, an unsafe name, or something unreadable: %s.\n' "$kept" "$kept_ids"
     findings="${findings:+$findings; }$kept orphaned scratch area(s) kept because they hold version-controlled work or could not be checked ($kept_ids)"
   fi
-  if [ "$unlisted" = 1 ]; then
-    printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed, so none could be shown idle.\n' "$inuse"
-    findings="${findings:+$findings; }$inuse orphaned scratch area(s) kept because the running processes could not be listed"
-  elif [ "$inuse" -gt 0 ]; then
+  if [ "$unlisted" -gt 0 ]; then
+    printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed in full.\n' "$unlisted"
+    findings="${findings:+$findings; }$unlisted orphaned scratch area(s) kept because the running processes could not be listed"
+  fi
+  if [ "$inuse" -gt 0 ]; then
     printf 'Kept %s orphaned scratch area(s) a running process still works in or holds open: %s. End that process when its work is safe, and the daily pass removes the area.\n' "$inuse" "$inuse_ids"
     findings="${findings:+$findings; }$inuse orphaned scratch area(s) kept because a process still uses them ($inuse_ids)"
+  fi
+  if [ "$changed" -gt 0 ]; then
+    printf 'Kept %s orphaned scratch area(s) that changed while they waited to be removed: %s.\n' "$changed" "$changed_ids"
+    findings="${findings:+$findings; }$changed orphaned scratch area(s) kept because they changed while waiting to be removed ($changed_ids)"
   fi
   if [ "$leftover" -gt 0 ]; then
     printf 'Left %s set-aside scratch folder(s) in %s untouched: %s. Inspect and remove them by hand.\n' "$leftover" "$base" "$leftover_names"

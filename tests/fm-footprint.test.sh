@@ -105,10 +105,13 @@ $U/Library/Caches/firstmate/scratch" "$out" "absent config must give the default
     *) assert_equals "on on on [] 24 30
 ${XDG_CACHE_HOME:-$U/.cache}/firstmate/scratch" "$out" "absent config must give the defaults" ;;
   esac
-  printf '# local choices\ncache-cap-gb 50\ntask-tmpdir off   # trailing comment\n\nold-task-days 7\n' > "$H/config/footprint"
-  out=$(lib 'fm_footprint_config_read "$H/config" && echo "$FP_CACHE_CAP_GB $FP_TASK_TMPDIR $FP_OLD_TASK_DAYS"')
-  assert_equals "50 off 7" "$out" "valid keys must be read"
-  for bad in 'cache-cap-gb lots' 'task-cleanup maybe' 'frobnicate 1' 'old-task-days 1.5' 'cache-cap-gb 1 2' 'scratch-root'; do
+  out=$(lib 'fm_footprint_config_read "$H/config"; echo "$FP_REMOVAL_GRACE_SECONDS"')
+  assert_equals 5 "$out" "the removal grace window must default to 5 seconds"
+  printf '# local choices\ncache-cap-gb 50\ntask-tmpdir off   # trailing comment\n\nold-task-days 7\nremoval-grace-seconds 12\n' > "$H/config/footprint"
+  out=$(lib 'fm_footprint_config_read "$H/config" && echo "$FP_CACHE_CAP_GB $FP_TASK_TMPDIR $FP_OLD_TASK_DAYS $FP_REMOVAL_GRACE_SECONDS"')
+  assert_equals "50 off 7 12" "$out" "valid keys must be read"
+  for bad in 'cache-cap-gb lots' 'task-cleanup maybe' 'frobnicate 1' 'old-task-days 1.5' 'cache-cap-gb 1 2' 'scratch-root' \
+    'removal-grace-seconds 0' 'removal-grace-seconds 601' 'removal-grace-seconds 2.5'; do
     printf '%s\n' "$bad" > "$H/config/footprint"
     out=$(lib 'fm_footprint_config_read "$H/config" && echo accepted || echo "refused: $FP_CONFIG_ERROR"')
     assert_contains "$out" "refused: $H/config/footprint line 1" "malformed '$bad' must be refused naming its line"

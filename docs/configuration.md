@@ -981,6 +981,7 @@ cache-cap-gb 50                    # shared download-cache cap for this machine;
 orphan-grace-hours 24              # age before the daily pass removes a scratch area whose task has no record
 old-task-days 30                   # age before a finished task folder's rebuildable entries are offered
 keep-warn-mb 200                   # a closed task whose kept folder is larger is flagged, never trimmed
+removal-grace-seconds 5            # how long a frozen, set-aside directory waits before its final check and removal (1 to 600)
 ```
 
 `scratch-root` must be absolute, at most 64 bytes, and outside this home's `data/` and `projects/`, because temp paths under it must stay within the 104-byte Unix socket limit on macOS.
@@ -1008,8 +1009,9 @@ Every removal refuses what it cannot prove disposable, so fewer cases are cleane
   The landed-work checks prove the task's own copy, not a repository the worker made inside its scratch area, so such an area is kept whole and named; once that repository is moved or removed, the daily pass removes the area.
 - A tree holding a name with a control character or a backslash, or one that cannot be read in full, is never removed.
 - A directory is renamed aside under the task's spawn lock and that copy is checked again before removal; a copy that now fails the check is put back.
-- Between the rename and that second check, a set-aside copy that a running process still works in or holds a file open in is put back and reported; once no process uses a copy nothing can write to it again, so the second check sees everything any writer left.
-- That process check lists every open file and working directory of every process of this user, and it counts only when every live process seen before and after it appears in it; otherwise every copy is put back. No process is ever ended to free space.
+- Whether a set-aside copy may go is decided from its own contents at the moment of removal, never from no process seeming to use it. The copy is frozen (every write bit removed, so no ordinary process can create, rename, or open anything in it for writing), flushed to disk, and snapshotted (type, permissions, inode, size, modification and change times, and link count of every entry); after `removal-grace-seconds` it is checked for version-controlled work again and snapshotted again, and any difference puts it back with its permissions restored.
+- A process check runs inside that window and can only add reasons to keep: a copy a process of this user still works in, holds a file open in, or has mapped into memory, or every copy when the processes cannot be listed in full, is put back. No process is ever ended to free space.
+- The removal deletes exactly the entries the verified snapshot lists; anything that appeared afterwards is not removed, nor is any folder above it, and what is left is reported.
 - A set-aside folder (`.fm-closing-*`, `.fm-reclaim-*`) left by an interrupted removal is reported, never removed again on the strength of its name.
 - Docker objects are selected only by the generation read from an area proven to be the task's; without one, nothing in Docker is removed.
 
@@ -1031,7 +1033,7 @@ Limits worth knowing:
 
 - Cache order uses the newest modification time of a cache directory and its direct entries; reading a cached item need not change it, so the order approximates least recently used.
 - Scratch removal and Docker removal are independent best-effort steps, not one transaction; a partial removal is recorded and named, not undone.
-- The process check sees this user's processes; a process of another user, such as root, that can write into a private scratch area is outside it.
+- A process that already held a file in the area open for writing, or mapped it for writing, before the freeze, that the process check cannot see, and that writes only during the removal itself and not during the grace window, can lose that write; a process of another user, such as root, can also undo the freeze.
 - On a case-insensitive filesystem, as on macOS by default, two task ids that differ only in case name one task record and one area, so they are one task to Firstmate.
 - Removal stays on one filesystem (`find -xdev`) and never follows links; that is a traversal limit, not the ownership proof, which is the key directory's identity.
 - The home key comes from the home's physical path alone, so separate machines sharing one remote Docker context with the same home path and task id are outside its isolation.

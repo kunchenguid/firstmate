@@ -465,6 +465,9 @@ fi
 # Close-time cleanup and the footprint report talk to Docker; no test may reach a
 # live daemon on the host, so Docker is absent unless a test names a stand-in.
 export FM_FOOTPRINT_DOCKER=
+# Removals wait out a grace window (removal-grace-seconds, default 5 s); a
+# suite that does not test that window skips the wait.
+export FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE=${FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE-0}
 
 TREEHOUSE_ROOT=$(fm_test_tmproot fm-treehouse-pool)
 export TREEHOUSE_ROOT

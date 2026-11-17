@@ -217,7 +217,7 @@ test_work_added_after_the_first_check_is_caught() {
 }
 
 test_set_aside_folders_are_never_removed_by_name() {
-  local s key base out q real_find
+  local s key base out q
   new_home quarantine
   s=$(scratch_for task-q0)
   base=${s%/*}
@@ -234,15 +234,10 @@ test_set_aside_folders_are_never_removed_by_name() {
   # A real interrupted close: the deletion fails, the set-aside copy stays.
   s=$(scratch_for task-q1)
   printf 'x\n' > "$s/data"
-  real_find=$(command -v find)
-  cat > "$FB/find" <<SH
-#!/usr/bin/env bash
-for a in "\$@"; do [ "\$a" != -delete ] || exit 42; done
-exec "$real_find" "\$@"
-SH
-  chmod +x "$FB/find"
+  printf '#!/usr/bin/env bash\nexit 42\n' > "$FB/rmdir"
+  chmod +x "$FB/rmdir"
   out=$(fp task-close task-q1 "$s")
-  rm -f "$FB/find"
+  rm -f "$FB/rmdir"
   assert_contains "$out" "only partly removed" "the interrupted close must say so"
   q=$(find "$base" -maxdepth 1 -name '.fm-closing-task-q1*' | head -n 1)
   [ -n "$q" ] || fail "the interrupted close must leave its set-aside copy"
@@ -521,25 +516,43 @@ test_a_surviving_process_keeps_a_closing_area() {
   pass "close keeps an area a process that survived teardown still uses"
 }
 
-# quiet_hook <writer-pid> <go-file> <dir>: wraps the tools that read the
-# process table (lsof and ps on macOS, find and readlink on /proc on Linux) so
-# that, the first time one runs after <dir> was set aside, the writer is
-# released and the hook waits for it to finish and exit before the real tool
-# runs.
-quiet_hook() {
-  local tool real
-  for tool in lsof ps find readlink; do
+# at_step <step> <writer-pid> <go-file> <dir> [tool...]: wraps the tools one removal
+# step runs so that, the first time that step starts after <dir> was set
+# aside, the writer is released and the hook waits for it to finish and exit
+# before the real tool runs. Steps: freeze (the chmod that removes write
+# bits), procs (the tools that read the process table: lsof and ps on macOS,
+# find, readlink and cat on /proc on Linux), delete (the final rm of the
+# listed files, after the directories got their write bit back).
+at_step() {
+  local step=$1 tool real match
+  shift
+  local pid=$1 go=$2 dir=$3
+  shift 3
+  if [ "$#" -eq 0 ]; then
+    case "$step" in
+      freeze) set -- chmod ;;
+      procs) set -- lsof ps find readlink cat ;;
+      delete) set -- rm ;;
+    esac
+  fi
+  for tool in "$@"; do
     real=$(command -v "$tool") || continue
+    case "$step" in
+      freeze) match="chmod*a-w*" ;;
+      procs) match="lsof*|ps*|*/proc/*" ;;
+      delete) match="rm*-f*--*/.fm-reclaim-*|rm*-f*--*/.fm-closing-*" ;;
+    esac
     cat > "$FB/$tool" <<SH
 #!/usr/bin/env bash
 case "$tool \$*" in
-  lsof*|ps*|*/proc/*)
-    if [ ! -e "$2.fired" ] && [ ! -e "$3" ]; then
-      : > "$2.fired"
-      : > "$2"
+  $match)
+    if [ ! -e "$go.fired" ] && [ ! -e "$dir" ]; then
+      : > "$go.fired"
+      : > "$go"
       n=0
-      while kill -0 "$1" 2>/dev/null && [ "\$n" -lt 200 ]; do
-        case "\$("$(command -v ps)" -o stat= -p "$1" 2>/dev/null)" in *Z*) break ;; esac
+      [ "$pid" != 0 ] || while [ ! -e "$go.result" ] && [ "\$n" -lt 200 ]; do sleep .05; n=\$((n + 1)); done
+      while [ "$pid" != 0 ] && kill -0 "$pid" 2>/dev/null && [ "\$n" -lt 200 ]; do
+        case "\$("$(command -v ps)" -o stat= -p "$pid" 2>/dev/null)" in *Z*) break ;; esac
         sleep .05; n=\$((n + 1))
       done
     fi
@@ -551,47 +564,65 @@ SH
   done
 }
 
-unhook() { rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink"; }
+unhook() { command rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink" "$FB/cat" "$FB/chmod" "$FB/rm" "$FB/hidden-pids"; }
 
 # writer_in <dir> <go-file> <subdir>: a stray process rooted in <dir> that,
-# once <go-file> appears, commits new work in <subdir> of its working
-# directory (which follows <dir> when it is set aside) and exits.
+# once <go-file> appears, tries to commit new work in <subdir> of its working
+# directory (which follows <dir> when it is set aside), records "ok" or
+# "failed" in <go-file>.result, and exits.
 writer_in() {
-  stray "$1" "n=0; while [ ! -e '$2' ] && [ \$n -lt 600 ]; do sleep .05; n=\$((n+1)); done
-    mkdir -p '$3' && git -c init.defaultBranch=main init -q '$3' && printf unique > '$3/unique.txt' &&
-    git -C '$3' add unique.txt && exec git -C '$3' -c user.email=t@example.invalid -c user.name=t commit -qm late"
+  # It waits without starting any process (a read with a timeout on a FIFO
+  # nobody writes), so it has no short-lived children while it waits.
+  mkfifo "$2.fifo"
+  stray "$1" "exec 9<>'$2.fifo'; n=0; while [ ! -e '$2' ] && [ \$n -lt 60 ]; do read -t 1 -u 9 x || :; n=\$((n+1)); done
+    if mkdir -p '$3' && git -c init.defaultBranch=main init -q '$3' && printf unique > '$3/unique.txt' &&
+      git -C '$3' add unique.txt && git -C '$3' -c user.email=t@example.invalid -c user.name=t commit -qm late 2>/dev/null; then
+      echo ok > '$2.result'
+    else
+      echo failed > '$2.result'
+    fi"
 }
 
-test_work_finished_before_the_process_check_is_caught() {
+# no_lost_commit <go-file> <path>: a commit the writer reported made must
+# still exist at <path> (or under its put-back area).
+no_lost_commit() {
+  [ -e "$1.result" ] || fail "the writer never reported"
+  if [ "$(cat "$1.result")" = ok ]; then
+    [ -f "$2" ] || fail "a commit the writer made was removed: $2"
+  fi
+}
+
+test_work_finished_before_the_freeze_is_caught() {
   local s out go entry id
   new_home quiet-writer
   go="$TMP_ROOT/quiet-writer/go"
-  # The daily pass: the writer commits and exits right as the check starts.
+  # The daily pass: the writer commits and exits just before the freeze.
   s=$(scratch_for task-q1)
   printf 'cache\n' > "$s/cache"
   writer_in "$s" "$go" late
   age 3 "$s"
-  quiet_hook "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$s"
+  at_step freeze "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$s"
   out=$(fp sweep)
   unhook
-  assert_present "$go.fired" "the writer must have been released at the process check"
-  assert_present "$s/late/unique.txt" "work committed just before the process check must survive the daily pass"
+  assert_present "$go.fired" "the writer must have been released at the freeze"
+  assert_equals ok "$(cat "$go.result")" "the writer's commit must succeed before the freeze"
+  assert_present "$s/late/unique.txt" "work committed just before the freeze must survive the daily pass"
   assert_contains "$out" "Kept 1 orphaned scratch area(s) whole because they hold version-controlled work" "the pass must keep the area for its work"
   stop_strays
   # Close: the same interleaving.
-  rm -f "$go" "$go.fired"
+  rm -f "$go" "$go.fired" "$go.result" "$go.fifo"
   s=$(scratch_for task-q2)
   printf 'cache\n' > "$s/cache"
   writer_in "$s" "$go" late
-  quiet_hook "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$s"
+  at_step freeze "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$s"
   out=$(fp task-close task-q2 "$s")
   unhook
-  assert_present "$go.fired" "the writer must have been released at close's process check"
-  assert_present "$s/late/unique.txt" "work committed just before close's process check must survive"
+  assert_equals ok "$(cat "$go.result")" "the writer's commit must succeed before close's freeze"
+  assert_present "$s/late/unique.txt" "work committed just before close's freeze must survive"
   assert_contains "$out" "is version-controlled work" "close must keep the area for its work"
   stop_strays
   # Old-folder apply: the writer turns a previewed entry into a repository.
-  rm -f "$go" "$go.fired"
+  rm -f "$go" "$go.fired" "$go.result" "$go.fifo"
   finished_folder old-q3
   entry="$H/data/old-q3/node_modules"
   mkdir -p "$entry/pkg"
@@ -601,11 +632,11 @@ test_work_finished_before_the_process_check_is_caught() {
   id=$(preview_id)
   [ -n "$id" ] || fail "the preview must offer the entry"
   writer_in "$entry" "$go" late
-  quiet_hook "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$entry"
+  at_step freeze "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$entry"
   out=$(fp old-tasks --apply "$id")
   unhook
-  assert_present "$go.fired" "the writer must have been released at apply's process check"
-  assert_present "$entry/late/unique.txt" "work committed just before apply's process check must survive"
+  assert_equals ok "$(cat "$go.result")" "the writer's commit must succeed before apply's freeze"
+  assert_present "$entry/late/unique.txt" "work committed just before apply's freeze must survive"
   assert_contains "$out" "nothing removed" "apply must remove nothing"
   stop_strays
   # Positive control: an idle area is still removed by the daily pass.
@@ -614,7 +645,210 @@ test_work_finished_before_the_process_check_is_caught() {
   age 3 "$s"
   out=$(fp sweep)
   assert_absent "$s" "an idle orphan must still be removed"
-  pass "work a writer finishes just before the process check is caught by the content check after it"
+  pass "work a writer finishes just before the freeze is caught by the content check at the end"
+}
+
+test_a_frozen_area_refuses_new_work() {
+  local s out go step kept_copy
+  new_home frozen-writer
+  go="$TMP_ROOT/frozen-writer/go"
+  # Released after the freeze, at the process check: the writer's work
+  # cannot be made at all. Released during the final removal, once the
+  # directories are writable again: its work can be made, but only the
+  # entries the verified snapshot listed are removed, so the work and the
+  # area around it stay.
+  for step in procs delete; do
+    rm -f "$go" "$go.fired" "$go.result" "$go.fifo"
+    s=$(scratch_for "task-f-$step")
+    printf 'cache\n' > "$s/cache"
+    writer_in "$s" "$go" late
+    age 3 "$s"
+    at_step "$step" "${STRAYS[${#STRAYS[@]}-1]}" "$go" "$s"
+    # At the removal step the writer is one the process check cannot see,
+    # the worst case; otherwise the check would keep the area for it.
+    [ "$step" = procs ] || hide_from_listing "${STRAYS[${#STRAYS[@]}-1]}"
+    out=$(fp sweep)
+    unhook
+    assert_present "$go.fired" "the writer must have been released at the $step step"
+    if [ "$step" = procs ]; then
+      assert_equals failed "$(cat "$go.result")" "a frozen area must refuse new work at the $step step"
+      no_lost_commit "$go" "$s/late/unique.txt"
+    else
+      assert_equals ok "$(cat "$go.result")" "the writer must manage to commit during the removal"
+      kept_copy=$(find "${s%/*}" -maxdepth 3 -path "*/.fm-reclaim-task-f-$step.*/late/unique.txt" | head -n 1)
+      [ -n "$kept_copy" ] || fail "work made during the removal must stay in the set-aside copy"
+      assert_contains "$out" "Left 1 set-aside scratch folder(s)" "what is left must be reported"
+      git -C "${kept_copy%/unique.txt}" rev-parse -q --verify HEAD >/dev/null || fail "the commit made during the removal must be intact"
+    fi
+    stop_strays
+  done
+  pass "a frozen area refuses new work, and work made during the removal itself is never removed"
+}
+
+# A process rooted in the area forks while the removal runs and then exits;
+# its child is hidden from every listing (the gap the fifth review
+# found on Linux), so the area goes on to removal, and the child is released
+# to commit during the final removal itself. Only the entries the verified
+# snapshot listed are removed, so its commit and the folder around it stay.
+test_a_child_born_after_the_listing_loses_nothing() {
+  local s out go mode entry id kept_copy
+  new_home fork-child
+  go="$TMP_ROOT/fork-child/go"
+  for mode in sweep close apply; do
+    rm -f "$go" "$go.fired" "$go.result" "$go.fork" "$go.fork.fired" "$go.fifo" "$go.child" "$TMP_ROOT/hidden.extra"
+    if [ "$mode" = apply ]; then
+      finished_folder old-fk
+      entry="$H/data/old-fk/node_modules"
+      mkdir -p "$entry/pkg"
+      printf 'module\n' > "$entry/pkg/index.js"
+      age 40 "$H/data/old-fk"
+      fp old-tasks >/dev/null
+      id=$(preview_id)
+      [ -n "$id" ] || fail "the preview must offer the entry"
+      s=$entry
+    else
+      s=$(scratch_for "task-fk-$mode")
+      printf 'cache\n' > "$s/cache"
+      age 3 "$s"
+    fi
+    mkfifo "$go.fifo"
+    # The parent waits without children, forks the child once released, waits
+    # until the child has recorded itself as hidden, and exits.
+    stray "$s" "exec 9<>'$go.fifo'; n=0; while [ ! -e '$go.fork' ] && [ \$n -lt 60 ]; do read -t 1 -u 9 x || :; n=\$((n+1)); done
+      bash -c 'echo \$\$ >> \"$TMP_ROOT/hidden.extra\"; echo \$\$ > \"$go.child\"; exec 8<>\"$go.fifo\"; n=0
+        while [ ! -e \"$go\" ] && [ \$n -lt 60 ]; do read -t 1 -u 8 x || :; n=\$((n+1)); done
+        if mkdir -p late && git -c init.defaultBranch=main init -q late && printf unique > late/unique.txt &&
+          git -C late add unique.txt && git -C late -c user.email=t@example.invalid -c user.name=t commit -qm late 2>/dev/null; then
+          echo ok > \"$go.result\"
+        else
+          echo failed > \"$go.result\"
+        fi' </dev/null >/dev/null 2>&1 &
+      n=0; while [ ! -s '$go.child' ] && [ \$n -lt 100 ]; do read -t 1 -u 9 x || :; n=\$((n+1)); done
+      exit 0"
+    # The parent forks as the area is frozen and exits; the child is hidden
+    # from the process check; the final removal releases the child.
+    at_step freeze "${STRAYS[${#STRAYS[@]}-1]}" "$go.fork" "$s"
+    hide_from_listing "${STRAYS[${#STRAYS[@]}-1]}"
+    at_step delete 0 "$go" "$s"
+    case "$mode" in
+      sweep) out=$(fp sweep) ;;
+      close) out=$(fp task-close "task-fk-$mode" "$s") ;;
+      apply) out=$(fp old-tasks --apply "$id") ;;
+    esac
+    unhook
+    assert_present "$go.fork.fired" "the parent must have forked during the $mode removal"
+    n=0; until [ -e "$go.result" ] || [ "$n" -ge 100 ]; do : > "$go"; sleep .05; n=$((n + 1)); done
+    [ -e "$go.result" ] || fail "the child never reported in $mode"
+    if [ "$(cat "$go.result")" = ok ]; then
+      kept_copy=$(find "${s%/*}" -maxdepth 3 -path '*/late/unique.txt' | head -n 1)
+      [ -n "$kept_copy" ] || fail "the child's commit made during the $mode removal was removed"
+      git -C "${kept_copy%/unique.txt}" rev-parse -q --verify HEAD >/dev/null || fail "the child's commit must be intact after $mode"
+    fi
+    kill "$(cat "$go.child" 2>/dev/null)" 2>/dev/null || true
+    stop_strays
+  done
+  pass "a child born after the process listing, hidden from it, loses nothing during the removal"
+}
+
+# hide_from_listing <pid>: the process check runs but this process and all
+# of its descendants are left out of every source consistently, so the
+# listing looks complete and idle, as processes the check cannot see would.
+hide_from_listing() {
+  local pid=$1 real_ps real_lsof real_find
+  real_ps=$(command -v ps)
+  real_lsof=$(command -v lsof || true)
+  real_find=$(command -v find)
+  cat > "$FB/hidden-pids" <<SH
+#!/usr/bin/env bash
+{ echo "$pid"; cat "$TMP_ROOT/hidden.extra" 2>/dev/null; } > "$TMP_ROOT/hidden.roots"
+"$real_ps" -A -o pid= -o ppid= | awk 'FILENAME == ARGV[1] { root[\$1] = 1; next } { parent[\$1] = \$2 }
+  END { for (p in parent) { q = p; while (q != "" && q != 0) { if (q in root) { print p; break }; if (q == 1) break; q = parent[q] } } }' "$TMP_ROOT/hidden.roots" -
+SH
+  cat > "$FB/ps" <<SH
+#!/usr/bin/env bash
+"$FB/hidden-pids" > "$TMP_ROOT/hidden.pids"
+"$real_ps" "\$@" | awk 'FILENAME == ARGV[1] { h[\$1] = 1; next } !(\$1 in h)' "$TMP_ROOT/hidden.pids" -
+SH
+  cat > "$FB/lsof" <<SH
+#!/usr/bin/env bash
+"$FB/hidden-pids" > "$TMP_ROOT/hidden.pids.lsof"
+"$real_lsof" "\$@" > "$TMP_ROOT/hidden.lsof"
+rc=\$?
+awk 'FILENAME == ARGV[1] { h[\$1] = 1; next } /^p/ { skip = (substr(\$0, 2) in h) } !skip' "$TMP_ROOT/hidden.pids.lsof" "$TMP_ROOT/hidden.lsof"
+exit \$rc
+SH
+  cat > "$FB/find" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *-user*)
+    "$FB/hidden-pids" > "$TMP_ROOT/hidden.pids.find"
+    "$real_find" "\$@" | awk 'FILENAME == ARGV[1] { h[\$1] = 1; next } { n = \$0; sub(/.*\//, "", n) } !(n in h)' "$TMP_ROOT/hidden.pids.find" - ;;
+  *) exec "$real_find" "\$@" ;;
+esac
+SH
+  chmod +x "$FB/hidden-pids" "$FB/ps" "$FB/lsof" "$FB/find"
+}
+
+test_a_write_during_the_grace_window_keeps_the_area() {
+  local s out holder
+  new_home grace-writer
+  printf 'scratch-root %s\nremoval-grace-seconds 3\n' "$SHORT/grace-writer" > "$H/config/footprint"
+  s=$(scratch_for task-g1)
+  printf 'log\n' > "$s/out.log"
+  # A writer outside the area that opened its file before the freeze and is
+  # invisible to the process check appends during the grace window.
+  stray "$TMP_ROOT" "exec 3>>'$s/out.log'; n=0; while [ ! -e '$TMP_ROOT/grace-writer/go' ] && [ \$n -lt 600 ]; do sleep .05; n=\$((n+1)); done
+    sleep 1; echo 'unique output' >&3; exec sleep 30"
+  holder=${STRAYS[${#STRAYS[@]}-1]}
+  age 3 "$s"
+  hide_from_listing "$holder"
+  # Release it once the area is frozen.
+  local real_chmod
+  real_chmod=$(command -v chmod)
+  cat > "$FB/chmod" <<SH
+#!/usr/bin/env bash
+"$real_chmod" "\$@"; rc=\$?
+case "\$*" in *a-w*) : > "$TMP_ROOT/grace-writer/go" ;; esac
+exit \$rc
+SH
+  chmod +x "$FB/chmod"
+  out=$(FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE='' fp sweep)
+  unhook
+  assert_grep "unique output" "$s/out.log" "output written during the grace window must survive"
+  assert_contains "$out" "Kept 1 orphaned scratch area(s) that changed while they waited to be removed" "the pass must keep the changed area"
+  [ -w "$s/out.log" ] || fail "a kept area must get its write permission back"
+  stop_strays
+  out=$(fp sweep)
+  assert_absent "$s" "with the writer gone, the area is removed"
+  pass "a write during the grace window, by a process the check cannot see, keeps the area"
+}
+
+test_a_writable_memory_mapping_keeps_the_area() {
+  local s out py
+  py=$(command -v python3 || true)
+  if [ -z "$py" ] || ! "$py" -c 'import mmap' 2>/dev/null; then
+    printf 'ok - # SKIP python3 with mmap is not available\n'
+    return 0
+  fi
+  new_home mmap-writer
+  s=$(scratch_for task-m1)
+  # A process outside the area maps a file in it, closes the descriptor,
+  # and keeps the writable mapping.
+  stray "$TMP_ROOT" "exec '$py' -c 'import mmap,os,sys,time
+fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600); os.ftruncate(fd,4096)
+m=mmap.mmap(fd,4096,mmap.MAP_SHARED,mmap.PROT_READ|mmap.PROT_WRITE); os.close(fd)
+open(sys.argv[2],\"w\").close(); time.sleep(60)' '$s/result.bin' '$TMP_ROOT/mmap-writer/ready'"
+  n=0; until [ -e "$TMP_ROOT/mmap-writer/ready" ] || [ "$n" -ge 100 ]; do sleep .05; n=$((n + 1)); done
+  age 3 "$s"
+  out=$(fp sweep)
+  assert_present "$s/result.bin" "a file a live process has mapped for writing must survive"
+  assert_contains "$out" "a running process still works in or holds open" "the pass must name the mapping"
+  out=$(fp task-close task-m1 "$s")
+  assert_present "$s/result.bin" "close must keep a mapped file"
+  stop_strays
+  out=$(fp task-close task-m1 "$s")
+  assert_absent "$s" "with the mapping gone, the area is removed"
+  pass "a writable memory mapping whose descriptor is closed keeps the area"
 }
 
 test_a_partial_open_file_listing_keeps_everything() {
@@ -829,7 +1063,7 @@ test_preview_binds_contents_and_identity() {
   rm -f "$FB/ln"
   assert_present "$TMP_ROOT/preview-id/saved/data" "the swap must have happened"
   assert_present "$e/unique.txt" "the replacement must be put back, not removed"
-  assert_contains "$out" "changed while it was being set aside; nothing removed" "apply must refuse"
+  assert_contains "$out" "changed while it was being set aside or waiting to be removed; nothing removed" "apply must refuse"
   # Unchanged, the same apply removes the entry.
   rm -rf "$e"
   mv "$TMP_ROOT/preview-id/saved" "$e"
@@ -914,7 +1148,11 @@ fm_test_run \
   test_a_process_still_using_an_orphan_keeps_it \
   test_an_unreadable_process_table_removes_nothing \
   test_a_surviving_process_keeps_a_closing_area \
-  test_work_finished_before_the_process_check_is_caught \
+  test_work_finished_before_the_freeze_is_caught \
+  test_a_frozen_area_refuses_new_work \
+  test_a_child_born_after_the_listing_loses_nothing \
+  test_a_write_during_the_grace_window_keeps_the_area \
+  test_a_writable_memory_mapping_keeps_the_area \
   test_a_partial_open_file_listing_keeps_everything \
   test_control_character_names_hide_the_whole_folder \
   test_only_rebuildable_directories_free_of_work_are_offered \
