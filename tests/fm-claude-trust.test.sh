@@ -4,8 +4,9 @@
 # Both halves of the contract are load-bearing and both are proven here, for
 # each directory a claude launch can start in: a legitimate fresh task worktree
 # and a seeded secondmate home are trusted so the agent reaches its brief or
-# charter with no human, and every out-of-scope path is REFUSED rather than
-# warned about or quietly skipped.
+# charter with no human, as is every folder the launch grants with --add-dir,
+# and every out-of-scope path is REFUSED rather than warned about or quietly
+# skipped.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -638,6 +639,43 @@ claude_launch_doorbell() {  # <launch command>
   )
 }
 
+# Print each --add-dir value of a launch command, one per line, using the same
+# shell argument splitting the pane sees.
+claude_launch_add_dirs() {  # <launch command>
+  local command=$1
+  while [[ "$command" == export\ *\;* ]]; do
+    command=${command#*; }
+  done
+  (
+    eval "set -- $command"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --add-dir ] && [ "$#" -gt 1 ]; then
+        printf '%s\n' "$2"
+        shift
+      fi
+      shift
+    done
+  )
+}
+
+# assert_every_add_dir_trusted <store> <launch-log> <want-count> <msg>: the
+# launch carries exactly <want-count> --add-dir grants and the store holds a
+# hasTrustDialogAccepted entry keyed by each exact granted path. Claude Code
+# shows its folder-trust prompt for an --add-dir folder it has never seen, so a
+# grant without its entry stops the worker before it reads the brief.
+assert_every_add_dir_trusted() {
+  local store=$1 log=$2 want=$3 msg=$4 dirs count d
+  dirs=$(claude_launch_add_dirs "$(cat "$log")")
+  count=$(printf '%s' "$dirs" | grep -c .)
+  [ "$count" = "$want" ] || fail "$msg: expected $want --add-dir grants, got $count: $dirs"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    assert_trusted "$store" "$d" "$msg: the granted folder '$d' has no trust entry"
+  done <<EOF
+$dirs
+EOF
+}
+
 # The spawn half: a real fm-spawn of a claude worker must pre-register the
 # worktree AND deliver a record-backed doorbell for the brief, with no dialog to
 # answer and no human in the loop.
@@ -724,6 +762,91 @@ test_secondmate_leased_worktree_home_is_trusted() {
   assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its leased worktree home"
   pass "fm-spawn.sh: a claude secondmate spawn pre-trusts a leased worktree home"
+}
+
+# Every folder a claude launch grants with --add-dir is a folder Claude Code has
+# never seen, so it shows its folder-trust prompt for it just as it does for the
+# start directory, and firstmate cannot answer that prompt. The trust entries
+# must be keyed by the exact paths the grants carry, so the two cannot drift.
+test_every_claude_add_dir_folder_is_trusted_before_launch() {
+  local case_dir home proj wt config fakebin launch_log out store
+  case_dir="$TMP_ROOT/add-dir-spawn"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/claude-config"
+  launch_log="$case_dir/launch.log"
+  store="$config/.claude.json"
+  mkdir -p "$config"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_git_worktree "$proj" "$wt" wt-add-dir
+  fm_test_spawn_brief "$home" adddirspawn
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" adddirspawn "$proj" claude \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "the claude spawn must succeed: $out"
+  assert_present "$launch_log" "the claude spawn sent no launch command"
+  assert_every_add_dir_trusted "$store" "$launch_log" 4 \
+    "a claude ship spawn left an --add-dir folder untrusted"
+  # Only the granted folders are trusted, never a wider parent of them.
+  assert_not_trusted "$store" "$(cd "$home/state" && pwd -P)" \
+    "the claude spawn trusted the whole state directory"
+  assert_not_trusted "$store" "$(cd "$home/data" && pwd -P)" \
+    "the claude spawn trusted the whole data directory"
+  assert_not_trusted "$store" "$(cd "$home" && pwd -P)" \
+    "the claude spawn trusted the whole home"
+  pass "fm-spawn.sh: every claude add-dir folder is trusted before launch"
+}
+
+# An --add-dir folder gets a trust-only entry keyed by its exact path, and an
+# argument that could trust more than a channel folder - the root, the home or
+# config directory or an ancestor of them, a missing folder, or a path that is
+# not already its own resolved path - refuses the whole registration and leaves
+# the store unwritten.
+test_add_dir_folders_are_trusted_only_within_scope() {
+  local rec out chan link store
+  rec=$(make_case add-dir-scope)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  chan=$(mkdir -p "$CASE_DIR/state/t.inbox" && cd "$CASE_DIR/state/t.inbox" && pwd -P)
+  out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CONFIG" "$TRUST" --add-dir "$chan" "$WT" "$PROJ" 2>&1)
+  expect_code 0 $? "a channel folder must be trusted: $out"
+  assert_contains "$out" "trusted (add-dir): $chan" "registration did not report the add-dir entry"
+  assert_trust_only_no_import_consent "$store" "$chan" "the add-dir entry was not trust-only"
+  assert_trusted "$store" "$(cd "$WT" && pwd -P)" "the worktree was not trusted alongside the add-dir folder"
+  assert_not_trusted "$store" "$(cd "$CASE_DIR/state" && pwd -P)" "the add-dir parent was trusted"
+
+  rm -f "$store"
+  link="$CASE_DIR/chan-link"
+  ln -s "$chan" "$link"
+  # Resolved paths, so each refusal is for scope rather than for resolution.
+  for bad in / "$(cd "$CONFIG" && pwd -P)" "$(cd "$CASE_DIR" && pwd -P)" "$CASE_DIR/missing" "$link"; do
+    out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CONFIG" "$TRUST" --add-dir "$bad" "$WT" "$PROJ" 2>&1)
+    expect_code 1 $? "--add-dir '$bad' must be refused: $out"
+    assert_contains "$out" "refusing to pre-register Claude trust" "--add-dir '$bad' was not refused by name"
+    assert_absent "$store" "a refused --add-dir '$bad' still wrote the store"
+  done
+  # The home directory itself is refused even when it is not the config dir.
+  out=$(CLAUDE_CONFIG_DIR="$CONFIG" HOME="$CASE_DIR/state" "$TRUST" --add-dir "$(cd "$CASE_DIR/state" && pwd -P)" "$WT" "$PROJ" 2>&1)
+  expect_code 1 $? "--add-dir naming the home directory must be refused: $out"
+  assert_absent "$store" "a refused home-directory --add-dir still wrote the store"
+  pass "fm-claude-trust.sh: add-dir folders are trusted only within scope"
+}
+
+# A secondmate's one grant is its steering inbox in the PARENT home's state, a
+# folder outside the secondmate home it starts in, so it needs its own entry.
+test_every_secondmate_add_dir_folder_is_trusted_before_launch() {
+  local case_dir home out
+  case_dir="$TMP_ROOT/sm-add-dir-spawn"
+  home="$case_dir/fm-homes/adddir-n1"
+  seed_secondmate_home "$home" adddir-n1 clone
+  out=$(spawn_secondmate_claude "$case_dir" "$home" adddir-n1)
+  expect_code 0 $? "a claude secondmate spawn must succeed: $out"
+  assert_present "$case_dir/launch.log" "the claude secondmate spawn sent no launch command"
+  assert_every_add_dir_trusted "$case_dir/claude-config/.claude.json" "$case_dir/launch.log" 1 \
+    "a claude secondmate spawn left an --add-dir folder untrusted"
+  pass "fm-spawn.sh: every claude secondmate add-dir folder is trusted before launch"
 }
 
 # The seed is the whole security boundary for home-level trust, so every path
@@ -868,6 +991,9 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
 test_refused_spawn_leaves_no_task_state
 test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted
+test_add_dir_folders_are_trusted_only_within_scope
+test_every_claude_add_dir_folder_is_trusted_before_launch
+test_every_secondmate_add_dir_folder_is_trusted_before_launch
 test_secondmate_home_trust_refuses_everything_unseeded
 test_worktree_mode_still_refuses_a_secondmate_home
 test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded
