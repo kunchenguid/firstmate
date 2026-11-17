@@ -6567,6 +6567,50 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+test_released_branch_safety_and_reassigned_copy() {
+  local case_dir head moved rc
+  case_dir=$(make_case released-safety)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" released
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" checkout --detach -q
+  printf 'branch=fm/task-x1\n' >> "$case_dir/state/task-x1.meta"
+  printf 'branch=fm/task-x1\nhead=%s\nendpoint_closed=1\nreleased_at=1\n' "$head" > "$case_dir/state/task-x1.review-park"
+  printf 'task=another\nhome=elsewhere\n' > "$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-dir)/fm-slot-owner"
+  printf 'do not touch\n' > "$case_dir/wt/other-task-file"
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q --allow-empty -m moved
+  moved=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/fm/task-x1 "$moved"
+  rc=0; run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "released: a moved unpushed branch was accepted"
+  grep -q 'released branch.*not proven pushed' "$case_dir/out" || fail "released: missing refusal: $(cat "$case_dir/out")"
+  [ -f "$case_dir/wt/other-task-file" ] || fail "released: another task's copy was touched"
+  git -C "$case_dir/project" update-ref refs/heads/fm/task-x1 "$head"
+  rc=0; run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "released: teardown refused its recorded head: $(cat "$case_dir/out")"
+  [ -f "$case_dir/wt/other-task-file" ] || fail "released: another task's copy was touched"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "released: task record survived"
+  ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 || fail "released: branch survived"
+  pass "released teardown preserves a reassigned copy and refuses moved unpushed work"
+}
+
+test_stale_release_record_keeps_owned_copy_safety_gate() {
+  local case_dir head rc
+  case_dir=$(make_case stale-release-owned)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" work
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'branch=fm/task-x1\nhead=%s\nreleased_at=1\n' "$head" > "$case_dir/state/task-x1.review-park"
+  printf 'task=task-x1\nhome=%s\n' "$case_dir" > "$(git -C "$case_dir/wt" rev-parse --path-format=absolute --git-dir)/fm-slot-owner"
+  printf 'unsaved\n' > "$case_dir/wt/unsaved"
+  rc=0; run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "stale release: dirty owned copy was removed"
+  [ -f "$case_dir/wt/unsaved" ] && [ -f "$case_dir/state/task-x1.meta" ] || fail "stale release: dirty work or task record was lost"
+  pass "a stale release record never bypasses the owned copy's dirty-work gate"
+}
+
+test_stale_release_record_keeps_owned_copy_safety_gate
+test_released_branch_safety_and_reassigned_copy
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved

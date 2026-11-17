@@ -137,6 +137,20 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Release on review
+
+On 2026-11-17, tmux 3.6a on Linux arm64 was checked with a private socket and a task window named `fm-lane` in session `lab`.
+The following commands returned the same server PID before and after the close, and the window ID from the first command was absent from the final inventory:
+
+```sh
+tmux display-message -p -t '=lab:=fm-lane' '#{socket_path}|#{pid}|#{window_id}'
+tmux kill-window -t '=lab:=fm-lane'
+tmux -S "$socket" display-message -p '#{pid}'
+tmux -S "$socket" list-windows -a -F '#{window_id}'
+```
+
+The portable release and relaunch regressions run with `bash bin/fm-test-run.sh tests/fm-park.test.sh tests/fm-control-relaunch.test.sh`.
+
 ### Agent liveness name sources
 
 Hermes Agent v0.21.7 was verified as a tmux worker on Linux on 2026-11-02: native Node TUI / Python module argv yielded `alive`, and the tool-side harness detector returned `hermes`.

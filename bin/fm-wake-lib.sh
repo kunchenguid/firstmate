@@ -2002,21 +2002,35 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
-# A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
-# Require both its pool state and the same Git common directory as the recorded
-# project; an ordinary linked worktree is not evidence that Treehouse owns it.
-fm_treehouse_pool_slot() {  # <project-dir> <worktree>
-  local project=$1 worktree=$2 slot pool state project_common slot_common
+# Prove a Treehouse slot by its default pool layout or by the configured pool's
+# inventory for a custom worktree_path. Both also require the same Git common
+# directory as the recorded project; a linked worktree alone proves nothing.
+fm_treehouse_pool_slot() {  # <project-dir> <worktree> [probe-custom]
+  local project=$1 worktree=$2 slot pool state project_common slot_common slots gitdir marker
   [ -d "$project" ] && [ -d "$worktree" ] || return 1
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
   pool=$(dirname "$(dirname "$slot")")
   state="$pool/treehouse-state.json"
-  [ -f "$state" ] && [ ! -L "$state" ] || return 1
+  [ ! -L "$state" ] || return 1
   project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
   slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 1
-  [ "$project_common" = "$slot_common" ]
+  [ "$project_common" = "$slot_common" ] || return 1
+  [ ! -f "$state" ] || return 0
+  gitdir=$(git -C "$slot" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 1
+  [ "$gitdir" != "$project_common" ] || return 1
+  marker="$gitdir/fm-slot-owner"
+  # A previously claimed custom slot remains recognizable even if Treehouse
+  # cannot answer. Its owner check will reject an unsafe marker separately.
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || return 0
+  # Only an allocation or park intake probes an as-yet unclaimed custom path.
+  # Ordinary teardown of an unrelated worktree never invokes the pool CLI.
+  [ "${3:-}" = probe-custom ] || return 1
+  command -v treehouse >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+  slots=$(cd "$project" && treehouse status --json 2>/dev/null) || return 1
+  printf '%s\n' "$slots" | jq -e --arg path "$slot" \
+    'select(type == "array") | [.[] | select(.path == $path)] | length == 1' >/dev/null 2>&1
 }
 
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
@@ -2038,14 +2052,24 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
 # the remaining crewmate spawns onto the durable lease is separate follow-up work.
 #
-# The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
-# checkout rather than a file inside it - so claiming a slot can never dirty the
-# copy teardown's landed-work checks inspect, and a returned slot carries no
-# untracked leftover from it.
+# For the default layout the claim is a sibling of the checkout; for a custom
+# path it is in that linked worktree's Git administrative directory. Neither
+# location dirties the checkout or survives removal of the worktree itself.
 fm_treehouse_slot_owner_marker() {  # <worktree>
-  local worktree=$1 slot
+  local worktree=$1 slot pool gitdir common
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
-  printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
+  pool=$(dirname "$(dirname "$slot")")
+  [ ! -L "$pool/treehouse-state.json" ] || return 1
+  if [ -f "$pool/treehouse-state.json" ] && [ ! -L "$pool/treehouse-state.json" ]; then
+    printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
+  else
+    # The linked-worktree administrative directory is unique per custom slot,
+    # survives a return, and is outside the checkout's tracked files.
+    gitdir=$(git -C "$slot" rev-parse --path-format=absolute --git-dir 2>/dev/null) || return 1
+    common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+    [ "$gitdir" != "$common" ] && [ -d "$gitdir" ] || return 1
+    printf '%s/fm-slot-owner\n' "$gitdir"
+  fi
 }
 
 # Claim a pool slot for a task, replacing whatever the previous holder left.

@@ -93,6 +93,16 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$world/treehouse.log"
 if [ "\${1:-} \${2:-}" = "status --json" ]; then cat "$world/treehouse.status.json" 2>/dev/null || echo '[]'; exit 0; fi
+if [ "\${1:-}" = return ]; then
+  git -C "$wt" checkout --detach -q || exit 1
+  printf '[{"path":"%s","status":"available","lease_holder":null}]\n' "$wt" > "$world/treehouse.status.json"
+  exit 0
+fi
+if [ "\${1:-}" = get ]; then
+  [ ! -e "$world/treehouse.full" ] || exit 1
+  printf '[{"path":"%s","status":"leased","lease_holder":"lane"}]\n' "$wt" > "$world/treehouse.status.json"
+  printf '%s\n' "$wt"; exit 0
+fi
 [ "\${1:-}" = lease ] || exit 1
 [ ! -e "$world/treehouse.fail" ] || exit 1
 printf '%s\n' "$wt"
@@ -113,18 +123,24 @@ SH
   # live claude in the foreground while $world/agent.alive exists.
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
+if [ "\${1:-}" = -S ]; then
+  shift 2
+  case "\$1" in display-message) echo "$$" ;; list-windows) echo '@9' ;; *) exit 1 ;; esac
+  exit 0
+fi
 [ ! -e "$world/tmux.hang" ] || sleep 30
 [ ! -e "$world/tmux.unreadable" ] || { echo "lost server" >&2; exit 1; }
-[ -e "$world/agent.alive" ] || { echo "no server running on /tmp/tmux-fake/default" >&2; exit 1; }
+[ -e "$world/agent.alive" ] || [ -e "$world/agent.stopped" ] || { echo "no server running on /tmp/tmux-fake/default" >&2; exit 1; }
 case "\$1" in
   list-windows) echo fm-lane ;;
-  display-message) echo /dev/ttysfake ;;
+  display-message) case "\$*" in *socket_path*) printf '/tmp/fake|%s|@1\n' "$$" ;; *pane_current_command*) echo bash ;; *) echo /dev/ttysfake ;; esac ;;
+  kill-window) rm -f "$world/agent.stopped"; exit 0 ;;
   *) exit 1 ;;
 esac
 SH
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
-case " \$* " in *" -t ttysfake "*) echo "1 1 1 claude"; exit 0 ;; esac
+case " \$* " in *" -t ttysfake "*) [ ! -e "$world/agent.stopped" ] || { echo "1 1 1 bash"; exit 0; }; echo "1 1 1 claude"; exit 0 ;; esac
 exec /bin/ps "\$@"
 SH
   cat > "$fakebin/fm-crew-state.sh" <<SH
@@ -1201,7 +1217,239 @@ test_land_waits_for_an_action_under_way() {
   pass "a merge-time cleanup waits for a relaunch of the same lane that is under way"
 }
 
+test_release_and_reacquire_parked_lane() {
+  local w wt head out rc=0
+  w=$(make_world release-cycle "$GH_URL"); gh_fixture "$w/gh.1.json"
+  wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  printf 'pr=%s\nhead=%s\nparked_at=%s\nslot_leased=yes\n' "$GH_URL" "$head" "$(date +%s)" > "$w/state/lane.review-park"
+  printf 'task=lane\nhome=%s\n' "$w" > "$(dirname "$wt")/.fm-slot-owner"
+  printf '[{"path":"%s","status":"leased","lease_holder":"lane"}]\n' "$wt" > "$w/treehouse.status.json"
+  : > "$w/agent.stopped"
+  out=$(run_park "$w" release lane 2>&1) || rc=$?
+  [ "$rc" = 0 ] || fail "release: $out"
+  grep -q '^released_at=' "$w/state/lane.review-park" || fail "release did not record completion"
+  [ ! -e "$(dirname "$wt")/.fm-slot-owner" ] || fail "release retained its claim"
+  grep -q '^return --force --if-lease-holder lane ' "$w/treehouse.log" || fail "release did not conditionally return the lease"
+  out=$(run_park "$w" resume lane --trigger 'new review comment' 2>&1) || fail "resume: $out"
+  [ ! -e "$w/state/lane.review-park" ] || fail "resume retained its park record"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || fail "resume changed the branch head"
+  grep -q 'fresh local copy.*new review comment' "$w/control.log" || fail "resume did not include the trigger"
+  pass "release returns the lease and a review trigger reacquires its branch"
+}
+
+test_release_refuses_unsafe_copies() {
+  local w wt head rc out variant
+  for variant in dirty detached foreign unclean stale; do
+    w=$(make_world "release-$variant" "$GH_URL"); gh_fixture "$w/gh.1.json"
+    wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+    printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=yes\n' "$GH_URL" "$head" > "$w/state/lane.review-park"
+    printf 'task=lane\nhome=%s\n' "$w" > "$(dirname "$wt")/.fm-slot-owner"
+    printf '[{"path":"%s","status":"leased","lease_holder":"lane"}]\n' "$wt" > "$w/treehouse.status.json"
+    : > "$w/agent.stopped"
+    case "$variant" in
+      dirty) printf 'uncommitted\n' > "$wt/untracked" ;;
+      detached) git -C "$wt" checkout --detach -q ;;
+      foreign) printf 'task=other\nhome=%s\n' "$w" > "$(dirname "$wt")/.fm-slot-owner" ;;
+      unclean) gh_fixture "$w/gh.1.json" 'rollup="FAILURE"' ;;
+      stale) printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=yes\n' "${GH_URL%/*}/8" "$head" > "$w/state/lane.review-park" ;;
+    esac
+    rc=0; out=$(run_park "$w" release lane 2>&1) || rc=$?
+    [ "$rc" != 0 ] || fail "$variant: unsafe release succeeded: $out"
+    [ -e "$w/agent.stopped" ] || fail "$variant: endpoint was closed"
+    ! grep -q '^return ' "$w/treehouse.log" 2>/dev/null || fail "$variant: slot was returned"
+  done
+  pass "release refuses dirty, detached, foreign, unclean, and stale-PR lanes before closing the endpoint"
+}
+
+test_released_lane_waits_for_a_slot() {
+  local w wt head out
+  w=$(make_world release-wait "$GH_URL"); gh_fixture "$w/gh.1.json"
+  wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  git -C "$wt" checkout --detach -q
+  printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=no\nbranch=fm/lane\nendpoint_closed=1\nclosed_backend=tmux\nclosed_target=fm:fm-lane\nreleased_at=1\n' "$GH_URL" "$head" > "$w/state/lane.review-park"
+  : > "$w/treehouse.full"
+  out=$(run_park "$w" resume lane --trigger 'new review comment' 2>&1) || fail "waiting: $out"
+  case "$out" in 'waiting lane:'*) ;; *) fail "waiting: expected one waiting report: $out" ;; esac
+  grep -q '^acquire_wait=' "$w/state/lane.review-park" || fail "waiting: marker missing"
+  out=$(run_park "$w" resume lane --trigger 'new review comment' 2>&1) || fail "waiting retry: $out"
+  [ -z "$out" ] || fail "waiting: duplicate report: $out"
+  rm -f "$w/treehouse.full"
+  run_park "$w" resume lane --trigger 'new review comment' >/dev/null || fail "waiting: retry failed"
+  [ ! -e "$w/state/lane.review-park" ] || fail "waiting: did not relaunch"
+  pass "a full pool reports once and retries when a copy becomes available"
+}
+
+test_custom_pool_paths_have_distinct_owner_claims() {
+  local w first second marker1 marker2
+  w=$(make_world release-custom "$GH_URL")
+  mkdir -p "$w/flat"
+  first="$w/flat/repo-1"; second="$w/flat/repo-2"
+  git -C "$w/project" worktree add -q -b custom-one "$first" main
+  git -C "$w/project" worktree add -q -b custom-two "$second" main
+  printf '[{"name":"1","path":"%s"},{"name":"2","path":"%s"}]\n' "$first" "$second" > "$w/treehouse.status.json"
+  PATH="$w/fakebin:$PATH" FM_HOME="$w" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_treehouse_pool_slot "$2" "$3" probe-custom && fm_treehouse_pool_slot "$2" "$4" probe-custom || exit 1
+    fm_treehouse_slot_owner_claim "$3" lane-one "$5" && fm_treehouse_slot_owner_claim "$4" lane-two "$5" || exit 1
+    fm_treehouse_slot_owner_state "$3" lane-one; [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || exit 1
+    fm_treehouse_slot_owner_state "$4" lane-two; [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || exit 1
+  ' _ "$ROOT" "$w/project" "$first" "$second" "$w" || fail "custom paths could not be claimed independently"
+  marker1=$(git -C "$first" rev-parse --path-format=absolute --git-dir)/fm-slot-owner
+  marker2=$(git -C "$second" rev-parse --path-format=absolute --git-dir)/fm-slot-owner
+  [ "$marker1" != "$marker2" ] && [ -f "$marker1" ] && [ -f "$marker2" ] || fail "custom paths shared an owner marker"
+  pass "custom pool paths are inventoried and have distinct owner claims"
+}
+
+test_park_claims_an_unclaimed_custom_slot() {
+  local w old custom head marker out
+  w=$(make_world park-custom "$GH_URL"); gh_fixture "$w/gh.1.json"
+  old="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  git -C "$old" checkout --detach -q
+  mkdir -p "$w/flat"
+  custom="$w/flat/repo-1"
+  git -C "$w/project" worktree add -q "$custom" fm/lane
+  sed -i.bak "s#^worktree=.*#worktree=$custom#" "$w/state/lane.meta"
+  rm -f "$w/state/lane.meta.bak"
+  printf '[{"name":"1","path":"%s","status":"leased","lease_holder":"lane"}]\n' "$custom" > "$w/treehouse.status.json"
+  out=$(run_park "$w" park lane 2>&1) || fail "custom park: $out"
+  marker=$(git -C "$custom" rev-parse --path-format=absolute --git-dir)/fm-slot-owner
+  grep -qx 'task=lane' "$marker" || fail "custom park did not claim the leased slot"
+  grep -qx 'slot_leased=yes' "$w/state/lane.review-park" || fail "custom park did not preserve the lease"
+  [ "$(git -C "$custom" rev-parse HEAD)" = "$head" ] || fail "custom park changed the branch"
+  pass "parking claims an unclaimed custom slot already leased to the task"
+}
+
+test_crew_state_reports_a_released_lane_without_a_copy() {
+  local w out head
+  w=$(make_world released-state "$GH_URL"); head=$(cat "$w/head")
+  sed -i.bak "s#^worktree=.*#worktree=$w/missing-copy#" "$w/state/lane.meta"
+  rm -f "$w/state/lane.meta.bak"
+  printf 'pr=%s\nhead=%s\nparked_at=1\nreleased_at=1\n' "$GH_URL" "$head" > "$w/state/lane.review-park"
+  out=$(FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" bash "$ROOT/bin/fm-crew-state.sh" lane) || fail "released state: $out"
+  case "$out" in *'state: paused'*'released on review'*) ;; *) fail "released state was not paused: $out" ;; esac
+  printf 'acquire_wait=1\n' >> "$w/state/lane.review-park"
+  out=$(FM_HOME="$w" FM_STATE_OVERRIDE="$w/state" bash "$ROOT/bin/fm-crew-state.sh" lane) || fail "waiting state: $out"
+  case "$out" in *'waiting for a free local copy'*) ;; *) fail "waiting state did not name its reason: $out" ;; esac
+  pass "a released lane remains paused without a copy and reports a pool wait"
+}
+
+test_release_opt_in_drives_park_and_release() {
+  local w wt head out
+  w=$(make_world release-tick "$GH_URL"); gh_fixture "$w/gh.1.json"
+  wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  printf 'pr=%s\nhead=%s\nparked_at=%s\nslot_leased=yes\n' "$GH_URL" "$head" "$(date +%s)" > "$w/state/lane.review-park"
+  printf 'task=lane\nhome=%s\n' "$w" > "$(dirname "$wt")/.fm-slot-owner"
+  printf '[{"name":"3","path":"%s","status":"leased","lease_holder":"lane"}]\n' "$wt" > "$w/treehouse.status.json"
+  : > "$w/agent.stopped"
+  run_park "$w" tick >/dev/null || fail "opt-in: tick without flag failed"
+  [ -e "$w/agent.stopped" ] && [ ! -e "$w/treehouse.log" ] || fail "opt-in: release ran without the flag"
+  : > "$w/config/release-on-review"
+  run_park "$w" tick >/dev/null || fail "opt-in: tick with flag failed"
+  wait_report "$w" release-tick
+  grep -q '^released_at=' "$w/state/lane.review-park" || fail "opt-in: clean parked lane was not released"
+
+  w=$(make_world release-auto-park "$GH_URL"); gh_fixture "$w/gh.1.json"
+  : > "$w/config/release-on-review"
+  out=$(run_park "$w" tick 2>&1) || fail "opt-in park: $out"
+  wait_report "$w" release-auto-park
+  [ -f "$w/state/lane.review-park" ] || fail "opt-in: release flag did not also park"
+  grep -qx 'slot_leased=yes' "$w/state/lane.review-park" || fail "opt-in: auto-park did not lease"
+  pass "release-on-review alone opts into parking and releases an eligible parked lane"
+}
+
+test_interrupted_tmux_release_settles_by_server_identity() {
+  local w wt head birth out
+  w=$(make_world release-interrupted "$GH_URL"); gh_fixture "$w/gh.1.json"
+  wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  birth=$(FM_HOME="$w" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_start_time "$2"' _ "$ROOT" "$$") || fail "cannot read test process birth"
+  printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=yes\nbranch=fm/lane\nreleasing=1\nrelease_wt=%s\nrelease_project=%s\nclosed_backend=tmux\nclosed_target=fm:fm-lane\ntmux_socket=/tmp/fake\ntmux_server=%s\ntmux_window=@1\ntmux_birth=%s\n' "$GH_URL" "$head" "$wt" "$w/project" "$$" "$birth" > "$w/state/lane.review-park"
+  printf 'task=lane\nhome=%s\n' "$w" > "$(dirname "$wt")/.fm-slot-owner"
+  printf '[{"path":"%s","status":"leased","lease_holder":"lane"}]\n' "$wt" > "$w/treehouse.status.json"
+  out=$(run_park "$w" release lane 2>&1) || fail "interrupted release: $out"
+  grep -q '^released_at=' "$w/state/lane.review-park" || fail "interrupted release was not settled"
+  ! grep -q '^releasing=' "$w/state/lane.review-park" || fail "interrupted release journal was retained"
+  pass "an interrupted tmux close is settled against its recorded server and window identity"
+}
+
+test_reacquire_refuses_a_moved_branch() {
+  local w wt head moved out rc=0
+  w=$(make_world release-moved "$GH_URL"); gh_fixture "$w/gh.1.json"
+  wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  git -C "$wt" checkout --detach -q
+  git -C "$wt" -c user.name=Test -c user.email=test@example.invalid commit -q --allow-empty -m moved
+  moved=$(git -C "$wt" rev-parse HEAD)
+  git -C "$w/project" update-ref refs/heads/fm/lane "$moved"
+  git -C "$wt" checkout --detach -q main
+  git -C "$w/project" update-ref refs/remotes/origin/main "$(git -C "$w/project" rev-parse main)"
+  printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=no\nbranch=fm/lane\nendpoint_closed=1\nclosed_backend=tmux\nclosed_target=fm:fm-lane\nreleased_at=1\n' "$GH_URL" "$head" > "$w/state/lane.review-park"
+  out=$(run_park "$w" resume lane --trigger 'new review comment' 2>&1) || rc=$?
+  [ "$rc" != 0 ] || fail "moved branch was accepted: $out"
+  case "$out" in *'relaunch-failed lane:'*'recorded branch moved'*) ;; *) fail "moved branch was not reported: $out" ;; esac
+  [ "$(git -C "$w/project" rev-parse refs/heads/fm/lane)" = "$moved" ] || fail "moved branch was altered"
+  grep -q '^resume_error=' "$w/state/lane.review-park" || fail "moved branch did not block resume"
+  [ ! -e "$w/control.log" ] || fail "moved branch launched an agent"
+  pass "a branch changed while released blocks relaunch without changing its tip"
+}
+
+test_reacquire_fast_forwards_a_new_forge_head() {
+  local w wt head next tree out
+  w=$(make_world release-fast-forward "$GH_URL")
+  wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  git init -q --bare "$w/origin.git"
+  git -C "$w/project" remote add origin "$w/origin.git"
+  git -C "$w/project" push -q origin main
+  tree=$(git -C "$w/project" rev-parse "$head^{tree}")
+  next=$(printf 'forge update\n' | git -C "$w/project" commit-tree "$tree" -p "$head")
+  git -C "$w/project" push -q origin "$next:refs/pull/7/head"
+  git -C "$wt" checkout --detach -q
+  gh_fixture "$w/gh.1.json" "head=$next" "review_oid=$next"
+  printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=no\nbranch=fm/lane\nendpoint_closed=1\nclosed_backend=tmux\nclosed_target=fm:fm-lane\nreleased_at=1\n' "$GH_URL" "$head" > "$w/state/lane.review-park"
+  out=$(run_park "$w" resume lane --trigger 'new push' 2>&1) || fail "fast-forward: $out"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$next" ] || fail "fast-forward: wrong head"
+  [ "$(tail -1 "$w/state/lane.meta")" = "pr=$GH_URL" ] || fail "fast-forward: PR block no longer ends the task record"
+  grep -q 'new push' "$w/control.log" || fail "fast-forward: trigger missing"
+  pass "reacquire fetches and fast-forwards to a moved forge head while keeping the PR metadata last"
+}
+
+test_real_treehouse_reuses_returned_slots() {
+  local w a b c d slots
+  if ! command -v treehouse >/dev/null 2>&1; then
+    pass "real Treehouse pool reuse (skipped: treehouse is absent)"
+    return
+  fi
+  w="$TMP_ROOT/real-pool"
+  mkdir -p "$w/project" "$w/pool" "$w/config"
+  git init -q -b main "$w/project"
+  printf 'max_trees = 2\n' > "$w/project/treehouse.toml"
+  git -C "$w/project" add treehouse.toml
+  git -C "$w/project" commit -q -m base
+  export TREEHOUSE_ROOT="$w/pool" XDG_CONFIG_HOME="$w/config"
+  a=$(cd "$w/project" && treehouse get --lease --lease-holder a) || fail "real pool: first lease failed"
+  b=$(cd "$w/project" && treehouse get --lease --lease-holder b) || fail "real pool: second lease failed"
+  (cd "$w/project" && treehouse return --force --if-lease-holder a "$a") || fail "real pool: return failed"
+  c=$(cd "$w/project" && treehouse get --lease --lease-holder c) || fail "real pool: reuse failed"
+  [ "$c" = "$a" ] || fail "real pool: returned slot was not reused"
+  (cd "$w/project" && treehouse return --force --if-lease-holder b "$b") || fail "real pool: second return failed"
+  d=$(cd "$w/project" && treehouse get --lease --lease-holder a) || fail "real pool: reacquisition failed"
+  [ "$d" = "$b" ] || fail "real pool: reacquisition did not use the freed slot"
+  slots=$(cd "$w/project" && treehouse status --json) || fail "real pool: status failed"
+  printf '%s' "$slots" | jq -e 'length == 2 and ([.[].name] | sort == ["1", "2"])' >/dev/null || fail "real pool grew or changed slot names"
+  unset TREEHOUSE_ROOT XDG_CONFIG_HOME
+  pass "real Treehouse reuses returned slot numbers and never exceeds the private pool size"
+}
+
 fm_test_run \
+  test_release_opt_in_drives_park_and_release \
+  test_crew_state_reports_a_released_lane_without_a_copy \
+  test_park_claims_an_unclaimed_custom_slot \
+  test_real_treehouse_reuses_returned_slots \
+  test_reacquire_fast_forwards_a_new_forge_head \
+  test_interrupted_tmux_release_settles_by_server_identity \
+  test_reacquire_refuses_a_moved_branch \
+  test_custom_pool_paths_have_distinct_owner_claims \
+  test_release_refuses_unsafe_copies \
+  test_released_lane_waits_for_a_slot \
+  test_release_and_reacquire_parked_lane \
   test_github_gate_clean_and_each_unclean_condition \
   test_github_gate_refuses_until_every_required_check_reports \
   test_github_gate_waits_for_review_bots_or_quiet_window \

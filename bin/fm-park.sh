@@ -6,11 +6,12 @@
 # Usage:
 #   fm-park.sh gate <task-id> [--expect-head <sha>]
 #   fm-park.sh park <task-id>
+#   fm-park.sh release <task-id>
 #   fm-park.sh resume <task-id> --trigger <text>
 #   fm-park.sh land <task-id> [--if-eligible] [--detach]
 #   fm-park.sh tick
 #   fm-park.sh list
-#   fm-park.sh run <task-id> park|resume|land [<args>...]   (internal)
+#   fm-park.sh run <task-id> park|release|resume|land [<args>...]   (internal)
 #
 # gate is read-only: one fresh forge read of the task's recorded pr= (GitHub
 # through one gh GraphQL read, GitLab through glab api for the merge request and
@@ -70,6 +71,13 @@
 # parking. Each tick promotes a pending record to parked once its agent is
 # confirmed dead and drops it only if still alive after the stop timeout.
 #
+# release rechecks the forge head, clean branch, stopped agent, empty inbox,
+# pool lease and slot claim, then closes the endpoint and returns the copy.
+# It journals the close before the conditional return; the task, branch, PR,
+# brief and backlog item remain. A released lane may be resumed onto any free
+# slot, or merged and cleaned up without touching its former slot.
+# config/release-on-review enables automatic park and release in this home.
+#
 # resume writes a note naming the PR, the parked head and the trigger, then runs
 # bin/fm-control.sh relaunch --note-file, which starts a fresh agent of the
 # recorded adapter in the same copy on the same branch with its original brief
@@ -97,7 +105,7 @@
 # first, which makes the watcher the one owner of a merged lane's teardown.
 #
 # tick is what bin/fm-watch.sh runs every check interval. With
-# neither config/auto-land nor config/park-on-review, and no park record, it exits
+# no config/auto-land, config/park-on-review or config/release-on-review, and no park record, it exits
 # after those file tests. Otherwise, holding state/.review-park-tick.lock (a
 # held lock exits silently):
 #   - pending merged-lane cleanup requests (state/<id>.review-park-land) are
@@ -106,10 +114,10 @@
 #     collected with this tick's close lines;
 #   - each parked lane gets one forge read; a trigger relaunches it, a merge is
 #     left to the merge poll, and a close without merge is reported once;
-#   - with config/auto-land or config/park-on-review, each other idle ship lane
+#   - with any of those flags, each other idle ship lane
 #     with pr= and an armed merge poll gets one forge read:
 #     a close without merge is reported once (marker
-#     state/.review-park-closed-<id>), and with config/park-on-review a clean
+#     state/.review-park-closed-<id>), and with either review flag a clean
 #     gate parks it.
 # Relaunch triggers on a parked lane: the head moved, checks failing, changes
 # requested, a merge conflict, any unresolved review thread, or any new
@@ -144,7 +152,7 @@
 # list prints each parked lane: id, PR, parked head, and when it parked.
 #
 # The record is key=value lines (pr, head, parked_at, slot_leased, pending
-# until the stop is confirmed, and resume_error after a failed relaunch), mode
+# until the stop is confirmed, release journal fields, and resume_error after a failed relaunch), mode
 # 0600, published by rename.
 # GraphQL and jq programs below are literal, not shell expressions.
 # shellcheck disable=SC2016
@@ -573,13 +581,20 @@ park_preflight() {  # <id>
 
 # Durable Treehouse lease for a pool slot; prints yes when taken, no when the
 # copy is not a Treehouse slot, and fails when a slot cannot be leased.
-slot_lease() {  # <id>
-  local id=$1 meta project wt slot_dir pool slot leased holder secs
+slot_lease() (  # <id>
+  local id=$1 meta project wt slot_dir pool slot leased holder secs project_lock
   local -a root=()
   meta="$STATE/$id.meta"
   project=$(fm_meta_get "$meta" project)
   wt=$(fm_meta_get "$meta" worktree)
-  if [ -z "$project" ] || ! fm_treehouse_pool_slot "$project" "$wt"; then
+  if [ -z "$project" ]; then
+    printf 'no\n'
+    return 0
+  fi
+  project_lock=$(fm_treehouse_project_lock_path "$project") || return 1
+  fm_lock_try_acquire "$project_lock" || return 1
+  trap 'fm_lock_release "$project_lock"' EXIT
+  if ! fm_treehouse_pool_slot "$project" "$wt" probe-custom; then
     printf 'no\n'
     return 0
   fi
@@ -589,7 +604,12 @@ slot_lease() {  # <id>
   slot_dir=$(dirname "$(CDPATH='' cd -- "$wt" && pwd -P)")
   slot=$(basename "$slot_dir")
   pool=$(dirname "$slot_dir")
-  [ "$(basename "$(dirname "$pool")")" != .treehouse ] || root=(--root "$(dirname "$(dirname "$pool")")")
+  if [ -f "$pool/treehouse-state.json" ] && [ "$(basename "$(dirname "$pool")")" = .treehouse ]; then
+    root=(--root "$(dirname "$(dirname "$pool")")")
+  else
+    slot=$( (cd "$project" && treehouse status --json) | jq -er --arg p "$wt" \
+      '[.[] | select(.path == $p)] | if length == 1 then .[0].name else error("slot missing") end') || return 1
+  fi
   # A lane parked before and relaunched since still holds its lease, which
   # treehouse lease refuses to take again, so this task's own lease counts.
   secs=$(step_secs 60) || return 1
@@ -597,14 +617,26 @@ slot_lease() {  # <id>
     | jq -r --arg p "$(CDPATH='' cd -- "$wt" && pwd -P)" \
       '[.[] | select(.status == "leased" and .path == $p) | .lease_holder] | first // empty' 2>/dev/null) || holder=
   if [ "$holder" = "$id" ]; then
+    fm_treehouse_slot_owner_state "$wt" "$id"
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      mine) ;;
+      absent) fm_treehouse_slot_owner_claim "$wt" "$id" "$FM_HOME" || return 1 ;;
+      *) return 1 ;;
+    esac
     printf 'yes\n'
     return 0
   fi
   secs=$(step_secs 60) || return 1
   leased=$( (cd "$project" && fm_run_timed "$secs" treehouse lease "$slot" --lease-holder "$id" "${root[@]}") 2>/dev/null) || return 1
   [ "$(CDPATH='' cd -- "$leased" 2>/dev/null && pwd -P)" = "$(CDPATH='' cd -- "$wt" && pwd -P)" ] || return 1
+  fm_treehouse_slot_owner_state "$wt" "$id"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine) ;;
+    absent) fm_treehouse_slot_owner_claim "$wt" "$id" "$FM_HOME" || return 1 ;;
+    *) return 1 ;;
+  esac
   printf 'yes\n'
-}
+)
 
 cmd_park() {
   local id=${1-} why result head local_head pr lease parked_at out rc=0 line inbox_lock
@@ -651,10 +683,241 @@ cmd_park() {
   printf 'parked %s: PR %s clean at %s; agent stopped\n' "$id" "$pr" "${head:0:12}"
 }
 
+# Return a parked lane's lease only after a fresh forge and local safety check.
+# The release journal is written before closing the endpoint or returning the
+# slot, so an interrupted operation cannot be mistaken for an ordinary park.
+cmd_release() {
+  local id=${1-} meta wt project branch head pr parked backend target result inbox_lock state line dirty tmux_identity socket server window birth
+  task_id_ok "$id" || die "usage: fm-park.sh release <task-id>" 2
+  lock_try "$(lane_lock "$id")" || die "another park action holds $id"
+  [ -f "$(record_path "$id")" ] || die "$id is not parked"
+  if [ -n "$(record_get "$id" releasing)" ]; then
+    if [ -z "$(record_get "$id" endpoint_closed)" ]; then
+      local settle_rc=0
+      settle_endpoint_close "$id" || settle_rc=$?
+      [ "$settle_rc" != 2 ] || return 0
+      [ "$settle_rc" = 0 ] || die "$id's endpoint close could not be proved"
+    fi
+    finish_release "$id" || die "$id has an unfinished release that could not be settled"
+    return 0
+  fi
+  [ -z "$(record_get "$id" pending)$(record_get "$id" resume_error)$(record_get "$id" released_at)" ] || die "$id is not ready for release"
+  meta="$STATE/$id.meta"
+  wt=$(fm_meta_get "$meta" worktree); project=$(fm_meta_get "$meta" project)
+  branch=$(fm_meta_get "$meta" branch); head=$(record_get "$id" head)
+  pr=$(record_get "$id" pr); parked=$(record_get "$id" parked_at)
+  [ -n "$pr" ] && [ "$pr" = "$(fm_meta_get "$meta" pr)" ] || die "the parked PR no longer matches the task record"
+  backend=$(fm_backend_of_meta "$meta"); target=$(fm_backend_target_of_meta "$meta")
+  case "$backend" in tmux|herdr|rex) ;; *) die "backend $backend cannot release a parked lane" ;; esac
+  fm_backend_validate_task_endpoint "$meta" "$id" || die "the recorded endpoint is invalid"
+  if [ "$(record_get "$id" slot_leased)" != yes ] || ! fm_treehouse_pool_slot "$project" "$wt"; then
+    die "the lane does not hold a pool lease"
+  fi
+  fm_treehouse_slot_owner_state "$wt" "$id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || die "the pool slot is not claimed by $id"
+  [ -n "$branch" ] && [ "$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$branch" ] || die "the local copy is not on its recorded branch"
+  [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)" = "$head" ] || die "the local head moved"
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || die "cannot inspect the local copy"
+  [ -z "$dirty" ] || die "the local copy is dirty"
+  if ! result=$(gate_eval "$id" "$head") || ! gate_print "$result" >/dev/null; then
+    die "the release gate is not clean"
+  fi
+  inbox_lock=$(fm_task_inbox_delivery_lock_path "$STATE" "$id")
+  fm_task_inbox_lock_acquire "$inbox_lock" || die "cannot lock the steering inbox"
+  LOCKS_HELD="$LOCKS_HELD $inbox_lock"
+  if find "$STATE/$id.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | grep -q .; then die "an instruction is waiting"; fi
+  state=$(fm_backend_agent_state "$backend" "$target")
+  [ "$state" = dead ] || die "the stopped agent cannot be verified ($state)"
+  if ! result=$(gate_eval "$id" "$head") || ! gate_print "$result" >/dev/null; then
+    die "the release gate changed before closing the endpoint"
+  fi
+  socket=; server=; window=; birth=
+  if [ "$backend" = tmux ]; then
+    tmux_identity=$(tmux display-message -p -t "=${target%%:*}:=${target#*:}" '#{socket_path}|#{pid}|#{window_id}') || die "cannot identify the tmux endpoint"
+    IFS='|' read -r socket server window <<< "$tmux_identity"
+    [ -n "$socket" ] && [ -n "$window" ] || die "cannot identify the tmux endpoint"
+    birth=$(fm_pid_start_time "$server") || die "cannot identify the tmux server process"
+  fi
+  record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked" "slot_leased=yes" "branch=$branch" "releasing=1" \
+    "release_wt=$wt" "release_project=$project" "closed_backend=$backend" "closed_target=$target" \
+    "tmux_socket=$socket" "tmux_server=$server" "tmux_window=$window" "tmux_birth=$birth" || die "cannot journal release"
+  if [ "$backend" = tmux ]; then
+    # A successful close is the proof for this exact endpoint; a generic
+    # missing-window observation cannot establish which tmux server held it.
+    tmux kill-window -t "=${target%%:*}:=${target#*:}" || die "cannot close the tmux endpoint"
+  else
+    fm_backend_kill "$backend" "$target" || die "cannot close the endpoint"
+    state=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
+    [ "${state%%$'\t'*}" = gone ] || die "endpoint absence cannot be proved"
+  fi
+  record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked" "slot_leased=yes" "branch=$branch" "releasing=1" \
+    "release_wt=$wt" "release_project=$project" "endpoint_closed=1" "closed_backend=$backend" "closed_target=$target" || die "cannot record endpoint closure"
+  finish_release "$id" || die "cannot finish the release"
+  line="paused [at=$(date +%s)]: released on review: PR $pr clean at ${head:0:12}; agent stopped and local copy returned; relaunches on review activity"
+  status_append "$id" "$line"
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$line" >/dev/null 2>&1 || true
+  printf 'released %s: PR %s; local copy returned\n' "$id" "$pr"
+}
+
+settle_endpoint_close() {  # <id>
+  local id=$1 meta backend target state result socket server window birth observed windows inbox_lock
+  meta="$STATE/$id.meta"; backend=$(fm_backend_of_meta "$meta"); target=$(fm_backend_target_of_meta "$meta")
+  [ "$(record_get "$id" closed_backend)" = "$backend" ] && [ "$(record_get "$id" closed_target)" = "$target" ] || return 1
+  [ "$(record_get "$id" release_wt)" = "$(fm_meta_get "$meta" worktree)" ] &&
+    [ "$(record_get "$id" release_project)" = "$(fm_meta_get "$meta" project)" ] &&
+    [ "$(record_get "$id" pr)" = "$(fm_meta_get "$meta" pr)" ] || return 1
+  state=$(fm_backend_agent_state "$backend" "$target")
+  if [ "$state" = dead ]; then
+    inbox_lock=$(fm_task_inbox_delivery_lock_path "$STATE" "$id")
+    fm_task_inbox_lock_acquire "$inbox_lock" || return 1
+    LOCKS_HELD="$LOCKS_HELD $inbox_lock"
+    if find "$STATE/$id.inbox" -maxdepth 1 -name '*.msg' 2>/dev/null | grep -q .; then return 1; fi
+    if ! result=$(gate_eval "$id" "$(record_get "$id" head)") || ! gate_print "$result" >/dev/null; then
+      record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
+        "parked_at=$(record_get "$id" parked_at)" "slot_leased=yes" || return 1
+      return 2
+    fi
+    if [ "$backend" = tmux ]; then
+      tmux kill-window -t "=${target%%:*}:=${target#*:}" || return 1
+    else
+      fm_backend_kill "$backend" "$target" || return 1
+      state=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
+      [ "${state%%$'\t'*}" = gone ] || return 1
+    fi
+  elif [ "$backend" != tmux ]; then
+    state=$(fm_control_endpoint_absence_verdict "$backend" "$target" "$meta")
+    [ "${state%%$'\t'*}" = gone ] || return 1
+  else
+    # Re-read the exact server and stable window id saved before the close.
+    # The server's process birth guards against socket and PID reuse.
+    socket=$(record_get "$id" tmux_socket); server=$(record_get "$id" tmux_server)
+    window=$(record_get "$id" tmux_window); birth=$(record_get "$id" tmux_birth)
+    [ -n "$socket" ] && [ -n "$window" ] && [ -n "$birth" ] || return 1
+    [ "$(fm_pid_start_time "$server" 2>/dev/null || true)" = "$birth" ] || return 1
+    observed=$(tmux -S "$socket" display-message -p '#{pid}' 2>/dev/null) || return 1
+    [ "$observed" = "$server" ] || return 1
+    windows=$(tmux -S "$socket" list-windows -a -F '#{window_id}' 2>/dev/null) || return 1
+    ! printf '%s\n' "$windows" | grep -Fxq -- "$window" || return 1
+  fi
+  record_write "$id" "pr=$(record_get "$id" pr)" "head=$(record_get "$id" head)" \
+    "parked_at=$(record_get "$id" parked_at)" "slot_leased=yes" "branch=$(record_get "$id" branch)" \
+    "release_wt=$(record_get "$id" release_wt)" "release_project=$(record_get "$id" release_project)" \
+    "releasing=1" "endpoint_closed=1" "closed_backend=$backend" "closed_target=$target"
+}
+
+# Complete the journaled return after a crash without returning a slot that was
+# reassigned. The project lock serializes the status read, return, and claim.
+finish_release() {  # <id>
+  local id=$1 meta project wt pool root lock holder pr head parked branch backend target dirty slots
+  local -a root_arg=()
+  [ "$(record_get "$id" endpoint_closed)" = 1 ] || return 1
+  meta="$STATE/$id.meta"; project=$(fm_meta_get "$meta" project); wt=$(fm_meta_get "$meta" worktree)
+  pr=$(record_get "$id" pr); head=$(record_get "$id" head); parked=$(record_get "$id" parked_at)
+  [ "$wt" = "$(record_get "$id" release_wt)" ] && [ "$project" = "$(record_get "$id" release_project)" ] &&
+    [ "$pr" = "$(fm_meta_get "$meta" pr)" ] || return 1
+  branch=$(record_get "$id" branch); backend=$(record_get "$id" closed_backend); target=$(record_get "$id" closed_target)
+  pool=$(dirname "$(dirname "$wt")")
+  if [ -f "$pool/treehouse-state.json" ] && [ "$(basename "$(dirname "$pool")")" = .treehouse ]; then
+    root=$(dirname "$(dirname "$pool")"); root_arg=(--root "$root")
+  fi
+  lock=$(fm_treehouse_project_lock_path "$project") || return 1
+  lock_try "$lock" || return 1
+  slots=$(cd "$project" && treehouse status --json "${root_arg[@]}") || return 1
+  holder=$(printf '%s\n' "$slots" | jq -er --arg p "$wt" \
+    'select(type == "array") | [.[] | select(.path == $p)] | if length == 1 then .[0].lease_holder // "" else error("slot missing") end') || return 1
+  fm_treehouse_slot_owner_state "$wt" "$id"
+  if [ "$holder" = "$id" ]; then
+    [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
+    [ "$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$branch" ] || return 1
+    [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)" = "$head" ] || return 1
+    dirty=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+    [ -z "$dirty" ] || return 1
+    fm_control_remove_worktree_wiring "$meta" "$wt" "$STATE" "$id" || return 1
+    (cd "$project" && treehouse return --force --if-lease-holder "$id" "$wt" "${root_arg[@]}") || return 1
+    fm_treehouse_slot_owner_release "$wt" "$id"
+  elif [ -z "$holder" ]; then
+    [ "$FM_TREEHOUSE_SLOT_OWNER" != unsafe ] || return 1
+    fm_treehouse_slot_owner_release "$wt" "$id"
+  elif [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+    return 1
+  fi
+  record_write "$id" "pr=$pr" "head=$head" "parked_at=$parked" "slot_leased=no" "branch=$branch" \
+    "endpoint_closed=1" "closed_backend=$backend" "closed_target=$target" "released_at=$(date +%s)" || return 1
+  fm_lock_release "$lock"
+}
+
 # --- resume ----------------------------------------------------------------
 
+# Reacquire an existing interrupted lease before asking Treehouse for another.
+# Its get operation is not idempotent for a holder that already owns a slot.
+reacquire_slot() {  # <id>
+  local id=$1 meta project old pool root lock wt branch head tip snap forge ref tmp meta_lock slots dirty unpushed
+  local -a root_arg=()
+  meta="$STATE/$id.meta"; project=$(fm_meta_get "$meta" project); old=$(fm_meta_get "$meta" worktree)
+  branch=$(record_get "$id" branch); head=$(record_get "$id" head)
+  pool=$(dirname "$(dirname "$old")")
+  if [ -f "$pool/treehouse-state.json" ] && [ "$(basename "$(dirname "$pool")")" = .treehouse ]; then
+    root=$(dirname "$(dirname "$pool")"); root_arg=(--root "$root")
+  fi
+  lock=$(fm_treehouse_project_lock_path "$project") || return 1
+  lock_try "$lock" || return 2
+  slots=$(cd "$project" && treehouse status --json "${root_arg[@]}") || return 1
+  wt=$(printf '%s\n' "$slots" | jq -er --arg id "$id" \
+    'select(type == "array") | [.[] | select(.status == "leased" and .lease_holder == $id) | .path] | if length == 1 then .[0] elif length == 0 then "" else error("multiple leases") end') || return 1
+  if [ -z "$wt" ]; then
+    wt=$(cd "$project" && treehouse get --lease --lease-holder "$id" "${root_arg[@]}") || return 2
+  fi
+  fm_treehouse_pool_slot "$project" "$wt" probe-custom || return 1
+  fm_treehouse_slot_owner_claim "$wt" "$id" "$FM_HOME" || return 1
+  dirty=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+  [ -z "$dirty" ] || return 1
+  tip=$(git -C "$project" rev-parse --verify "refs/heads/$branch" 2>/dev/null || true)
+  if [ "$tip" != "$head" ]; then
+    echo "recorded branch moved while released" >&2
+  elif ! snap=$(snapshot "$(record_get "$id" pr)") || ! forge=$(printf '%s' "$snap" | jq -er .head); then
+    echo "cannot read the current forge head" >&2
+  elif ! git -C "$wt" checkout -q "$branch"; then
+    echo "cannot check out the recorded branch" >&2
+  elif [ "$forge" != "$head" ] && {
+    fm_pr_url_parse "$(record_get "$id" pr)" || return 1
+    case "$FM_PR_PROVIDER" in github) ref="refs/pull/$FM_PR_NUMBER/head" ;; gitlab) ref="refs/merge-requests/$FM_PR_NUMBER/head" ;; *) ref= ;; esac
+    [ -z "$ref" ] || ! git -C "$wt" fetch -q origin "$ref" ||
+      [ "$(git -C "$wt" rev-parse FETCH_HEAD)" != "$forge" ] || ! git -C "$wt" merge --ff-only -q FETCH_HEAD
+  }; then
+    echo "cannot fast-forward to the forge head" >&2
+  elif [ "$(git -C "$wt" rev-parse HEAD)" != "$forge" ]; then
+    echo "checkout does not match the forge head" >&2
+  else
+    meta_lock=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$meta_lock" || return 1
+    LOCKS_HELD="$LOCKS_HELD $meta_lock"
+    [ "$(grep -c '^worktree=' "$meta" || true)" = 1 ] && [ "$(fm_meta_get "$meta" worktree)" = "$old" ] || return 1
+    tmp=$(mktemp "$STATE/.review-park-meta.XXXXXX") || return 1
+    if awk -v wt="$wt" '/^worktree=/{print "worktree=" wt; next} {print}' "$meta" > "$tmp" && mv -f "$tmp" "$meta"; then
+      record_write "$id" "pr=$(record_get "$id" pr)" "head=$forge" "parked_at=$(record_get "$id" parked_at)" \
+        "slot_leased=yes" "branch=$branch" "endpoint_closed=1" "closed_backend=$(record_get "$id" closed_backend)" "closed_target=$(record_get "$id" closed_target)" || return 1
+      fm_lock_release "$meta_lock"
+      fm_lock_release "$lock"
+      return 0
+    fi
+    rm -f "$tmp"
+  fi
+  dirty=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+  [ -z "$dirty" ] || return 1
+  tip=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
+  if [ "$tip" != "$head" ] && [ "$tip" != "${forge:-}" ]; then
+    unpushed=$(git -C "$wt" log --format=%H "$tip" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
+    [ -z "$unpushed" ] || return 1
+  fi
+  (cd "$project" && treehouse return --force --if-lease-holder "$id" "$wt" "${root_arg[@]}") || return 1
+  fm_treehouse_slot_owner_release "$wt" "$id"
+  return 1
+}
+
 cmd_resume() {
-  local id=${1-} trigger pr head note out rc=0 rec
+  local id=${1-} trigger pr head note out rc=0 rec fresh=0 acquire_rc=0 why
+  local key value
+  local -a release_fields=()
   task_id_ok "$id" || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
   shift
   [ "${1-}" = --trigger ] && [ -n "${2-}" ] || die "usage: fm-park.sh resume <task-id> --trigger <text>" 2
@@ -662,12 +925,34 @@ cmd_resume() {
   rec=$(record_path "$id")
   [ -f "$rec" ] || die "$id is not parked"
   lock_try "$(lane_lock "$id")" || die "another park action holds $id"
+  [ "$(record_get "$id" pr)" = "$(fm_meta_get "$STATE/$id.meta" pr)" ] || die "the parked PR no longer matches the task record"
+  [ -z "$(record_get "$id" releasing)" ] || die "$id has an unfinished release"
+  if [ -n "$(record_get "$id" released_at)" ]; then
+    fresh=1
+    reacquire_slot "$id" 2> "$PARK_TMP/acquire-error" || acquire_rc=$?
+    if [ "$acquire_rc" -eq 2 ]; then
+      if [ -z "$(record_get "$id" acquire_wait)" ]; then
+        printf 'acquire_wait=%s\n' "$(date +%s)" >> "$rec"
+        printf 'waiting %s: review activity is waiting for a free local copy\n' "$id"
+      fi
+      return 0
+    elif [ "$acquire_rc" -ne 0 ]; then
+      printf 'resume_error=%s\n' "$(date +%s)" >> "$rec"
+      why=$(tail -1 "$PARK_TMP/acquire-error")
+      printf 'relaunch-failed %s: PR %s could not reacquire its branch%s\n' "$id" "$(record_get "$id" pr)" "${why:+: $why}"
+      return 1
+    fi
+  fi
   pr=$(record_get "$id" pr)
   head=$(record_get "$id" head)
   note="$PARK_TMP/note"
   {
     printf 'This lane was parked on review: PR %s was clean and ready to merge at head %s, so its previous agent was stopped.\n' "$pr" "$head"
-    printf 'You are a fresh agent relaunched in the same local copy on the same branch because: %s.\n' "$trigger"
+    if [ "$fresh" = 1 ]; then
+      printf 'You are a fresh agent relaunched in a fresh local copy on the PR branch because: %s. Dependencies may need reinstalling.\n' "$trigger"
+    else
+      printf 'You are a fresh agent relaunched in the same local copy on the same branch because: %s.\n' "$trigger"
+    fi
     printf 'Read the PR and its new review activity, address it on this branch, then report again exactly as your instructions define done.\n'
   } > "$note"
   # Written before the launch, so the fresh worker's own reports always follow
@@ -675,8 +960,12 @@ cmd_resume() {
   status_append "$id" "working [at=$(date +%s)]: relaunched from review park: $trigger"
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$CONTROL_BIN" "$id" relaunch --note-file "$note" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
+    for key in branch endpoint_closed closed_backend closed_target relaunch_started; do
+      value=$(record_get "$id" "$key")
+      [ -z "$value" ] || release_fields+=("$key=$value")
+    done
     record_write "$id" "pr=$pr" "head=$head" "parked_at=$(record_get "$id" parked_at)" \
-      "slot_leased=$(record_get "$id" slot_leased)" "resume_error=$(date +%s)" || true
+      "slot_leased=$(record_get "$id" slot_leased)" ${release_fields[@]+"${release_fields[@]}"} "resume_error=$(date +%s)" || true
     printf 'relaunch-failed %s: PR %s (%s): %s\n' "$id" "$pr" "$trigger" "$(printf '%s\n' "$out" | tail -1)"
     return 1
   fi
@@ -691,8 +980,48 @@ land_eligible() {  # <id>
   [ -e "$(record_path "$1")" ] || [ -e "$CONFIG/auto-land" ]
 }
 
+# A relaunch may have acquired a lease before it could publish the new copy in
+# the task record. Settle that lease before records-only teardown.
+return_interrupted_lease() {  # <id>
+  local id=$1 meta project old pool root lock slots wt dirty tip forge snap unpushed
+  local -a root_arg=()
+  meta="$STATE/$id.meta"; project=$(fm_meta_get "$meta" project); old=$(fm_meta_get "$meta" worktree)
+  pool=$(dirname "$(dirname "$old")")
+  if [ -f "$pool/treehouse-state.json" ] && [ "$(basename "$(dirname "$pool")")" = .treehouse ]; then
+    root=$(dirname "$(dirname "$pool")"); root_arg=(--root "$root")
+  fi
+  lock=$(fm_treehouse_project_lock_path "$project") || return 1
+  lock_try "$lock" || return 1
+  slots=$(cd "$project" && treehouse status --json "${root_arg[@]}") || return 1
+  wt=$(printf '%s\n' "$slots" | jq -er --arg id "$id" \
+    'select(type == "array") | [.[] | select(.status == "leased" and .lease_holder == $id) | .path] | if length == 1 then .[0] elif length == 0 then "" else error("multiple leases") end') || return 1
+  if [ -n "$wt" ]; then
+    fm_treehouse_pool_slot "$project" "$wt" probe-custom || return 1
+    fm_treehouse_slot_owner_state "$wt" "$id"
+    if [ "$wt" = "$old" ] && [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+      fm_lock_release "$lock"
+      return 0
+    fi
+    case "$FM_TREEHOUSE_SLOT_OWNER" in absent|mine) ;; *) return 1 ;; esac
+    dirty=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+    [ -z "$dirty" ] || return 1
+    tip=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
+    if [ "$tip" != "$(record_get "$id" head)" ]; then
+      unpushed=$(git -C "$wt" log --format=%H "$tip" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
+      if [ -n "$unpushed" ]; then
+        snap=$(snapshot "$(record_get "$id" pr)") || return 1
+        forge=$(printf '%s' "$snap" | jq -er .head) || return 1
+        [ "$tip" = "$forge" ] || return 1
+      fi
+    fi
+    (cd "$project" && treehouse return --force --if-lease-holder "$id" "$wt" "${root_arg[@]}") || return 1
+    fm_treehouse_slot_owner_release "$wt" "$id"
+  fi
+  fm_lock_release "$lock"
+}
+
 cmd_land() {
-  local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why tmp
+  local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why tmp released=0 wt
   task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach] [--queue]" 2
   shift
   while [ "$#" -gt 0 ]; do
@@ -727,6 +1056,26 @@ cmd_land() {
   fi
   LOCKS_HELD="$LOCKS_HELD $(lane_lock "$id")"
   [ -f "$STATE/$id.meta" ] || return 0
+  if [ -f "$(record_path "$id")" ] && [ "$(record_get "$id" pr)" != "$(fm_meta_get "$STATE/$id.meta" pr)" ]; then
+    printf 'cleanup-refused %s: parked PR no longer matches the task record\n' "$id"
+    return 1
+  fi
+  if [ -n "$(record_get "$id" releasing)" ]; then
+    if [ -z "$(record_get "$id" endpoint_closed)" ]; then
+      settle_endpoint_close "$id" || { printf 'cleanup-refused %s: endpoint close could not be settled\n' "$id"; return 1; }
+    fi
+    finish_release "$id" || { printf 'cleanup-refused %s: unfinished release could not be settled\n' "$id"; return 1; }
+  fi
+  if [ -n "$(record_get "$id" released_at)" ]; then
+    return_interrupted_lease "$id" || { printf 'cleanup-refused %s: interrupted lease could not be settled\n' "$id"; return 1; }
+    wt=$(fm_meta_get "$STATE/$id.meta" worktree)
+    if [ -d "$wt" ]; then
+      fm_treehouse_slot_owner_state "$wt" "$id"
+      [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || released=1
+    else
+      released=1
+    fi
+  fi
   pr=$(fm_meta_get "$STATE/$id.meta" pr)
   if [ -e "$STATE/$id.review-park-land" ] \
     && [ "$(fm_meta_get "$STATE/$id.review-park-land" pr)" != "$pr" ]; then
@@ -735,7 +1084,13 @@ cmd_land() {
   fi
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$TEARDOWN_BIN" "$id" 2>&1) || rc=$?
   case "$rc" in
-    0) printf 'cleaned up %s: PR %s merged; lane torn down and its working copy returned\n' "$id" "$pr" ;;
+    0)
+      if [ "$released" = 1 ]; then
+        printf 'cleaned up %s: PR %s merged; released lane and its local branch removed\n' "$id" "$pr"
+      else
+        printf 'cleaned up %s: PR %s merged; lane torn down and its working copy returned\n' "$id" "$pr"
+      fi
+      ;;
     4)
       printf 'cleaned up %s: PR %s merged; lane torn down, but its returned pool slot was lost\n' "$id" "$pr"
       printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' || true
@@ -751,14 +1106,25 @@ cmd_land() {
 # --- detached action -------------------------------------------------------
 
 cmd_run() {
-  local id=${1-} verb=${2-} out
+  local id=${1-} verb=${2-} out rc=0 release_failed=0
   task_id_ok "$id" || die "usage: fm-park.sh run <task-id> park|resume|land [<args>...]" 2
-  case "$verb" in park|resume|land) ;; *) die "usage: fm-park.sh run <task-id> park|resume|land [<args>...]" 2 ;; esac
+  case "$verb" in park|release|resume|land) ;; *) die "usage: fm-park.sh run <task-id> park|release|resume|land [<args>...]" 2 ;; esac
   shift 2
-  out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>/dev/null ) || true
+  if [ "$verb" = release ]; then
+    out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>&1 ) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      [ ! -e "$STATE/.review-park-release-error-$id" ] || return 0
+      release_failed=1
+    else
+      rm -f "$STATE/.review-park-release-error-$id"
+    fi
+  else
+    out=$( LOCKS_HELD=; trap release_locks EXIT; "cmd_$verb" "$id" "$@" 2>/dev/null ) || true
+  fi
   if [ -n "$out" ]; then
     case "$out" in *"another lifecycle action is already running"*|*"another park action still holds"*) return 0 ;; esac
     report_write "$id" "$out" || return 1
+    [ "$release_failed" != 1 ] || : > "$STATE/.review-park-release-error-$id"
     [ "$verb" != land ] || rm -f -- "$STATE/$id.review-park-land"
   elif [ "$verb" = land ] && [ ! -e "$STATE/$id.meta" ]; then
     rm -f -- "$STATE/$id.review-park-land"
@@ -776,6 +1142,10 @@ closed_once() {  # <id> <pr>
 watch_parked() {  # <id>
   local id=$1 pr head parked snap result state triggers
   ! lane_busy "$id" || return 0
+  if [ -n "$(record_get "$id" releasing)" ]; then
+    action_start "$id" release
+    return 0
+  fi
   if [ -n "$(record_get "$id" pending)" ]; then
     ( LOCKS_HELD=; trap release_locks EXIT; settle_pending "$id" ) || true
     # Relaunching replaces the agent, so wait until the stop is confirmed.
@@ -794,7 +1164,14 @@ watch_parked() {  # <id>
     closed) closed_once "$id" "$pr"; return 0 ;;
   esac
   triggers=$(printf '%s' "$result" | jq -r '.triggers | join("; ")')
-  [ -n "$triggers" ] || return 0
+  if [ -z "$triggers" ]; then
+    if [ -e "$CONFIG/release-on-review" ] && [ -z "$(record_get "$id" released_at)$(record_get "$id" releasing)" ] \
+      && [ "$(record_get "$id" slot_leased)" = yes ]; then
+      case "$(fm_backend_of_meta "$STATE/$id.meta")" in tmux|herdr|rex) action_start "$id" release ;; esac
+    fi
+    return 0
+  fi
+  [ -z "$(record_get "$id" releasing)" ] || return 0
   action_start "$id" resume --trigger "$triggers"
 }
 
@@ -808,7 +1185,7 @@ watch_unparked() {  # <id>
   snap=$(snapshot "$pr") || return 0
   state=$(printf '%s' "$snap" | jq -r .state)
   [ "$state" != closed ] || { closed_once "$id" "$pr"; return 0; }
-  [ "$state" = open ] && [ -e "$CONFIG/park-on-review" ] || return 0
+  [ "$state" = open ] && { [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/release-on-review" ]; } || return 0
   ! lane_busy "$id" || return 0
   local idle_secs
   idle_secs=$(step_secs "$READ_SECS") || return 0
@@ -866,7 +1243,7 @@ cmd_tick() {
   local rec id meta any=0
   local -a parked=() unparked=()
   for rec in "$STATE"/*.review-park "$STATE"/*.review-park-land "$STATE"/.review-park-report-*; do [ -e "$rec" ] && any=1 && break; done
-  [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ] || return 0
+  [ "$any" = 1 ] || [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/release-on-review" ] || [ -e "$CONFIG/auto-land" ] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   lock_try "$STATE/.review-park-tick.lock" || return 0
   DEADLINE=$(( $(date +%s) + TICK_SECS ))
@@ -894,7 +1271,7 @@ cmd_tick() {
   DEADLINE=$(( $(date +%s) + (TICK_SECS + 1) / 2 ))
   lines+=$(visit_lanes "$STATE/.review-park-tick-next" watch_parked ${parked[@]+"${parked[@]}"})$'\n' || true
   DEADLINE=$full_deadline
-  if [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]; then
+  if [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/release-on-review" ] || [ -e "$CONFIG/auto-land" ]; then
     for meta in "$STATE"/*.meta; do
       [ -e "$meta" ] || continue
       id=$(basename "$meta" .meta)
@@ -920,7 +1297,7 @@ cmd_list() {
     printf '%s\tPR %s\thead %s\tparked %s%s\n' "$id" "$(record_get "$id" pr)" \
       "$(record_get "$id" head | cut -c1-12)" \
       "$(date -u -r "$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || date -u -d "@$(record_get "$id" parked_at)" +%Y-%m-%dT%H:%MZ 2>/dev/null || record_get "$id" parked_at)" \
-      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')"
+      "$([ -z "$(record_get "$id" pending)" ] || printf '\tparking; stop not yet confirmed')$([ -z "$(record_get "$id" released_at)" ] || printf '\treleased on review')$([ -z "$(record_get "$id" releasing)" ] || printf '\trelease in progress')$([ -z "$(record_get "$id" resume_error)" ] || printf '\trelaunch failed; run fm-park.sh resume by hand')"
   done
 }
 
@@ -929,6 +1306,7 @@ case "${1:-}" in
   -h|--help) usage ;;
   gate) shift; cmd_gate "$@" ;;
   park) shift; cmd_park "$@" ;;
+  release) shift; cmd_release "$@" ;;
   resume) shift; cmd_resume "$@" ;;
   land) shift; cmd_land "$@" ;;
   tick) cmd_tick ;;

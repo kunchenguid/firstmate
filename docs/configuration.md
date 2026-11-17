@@ -838,9 +838,11 @@ The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#poli
 ## Park on review
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
+The optional `config/release-on-review` presence flag also parks clean lanes and returns their leased Treehouse copies while they await review.
+Review activity reacquires a free copy and relaunches the lane; use `bin/fm-park.sh resume <id> --trigger <text>` to deliver a steer to a released lane.
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
-Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
-Both flags are home-local and not inherited by secondmate homes.
+These flags also let `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; without them, teardown does not read GitLab merge requests.
+These flags are home-local and not inherited by secondmate homes.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
 
 ## PR registration scan (config/pr-register-scan)

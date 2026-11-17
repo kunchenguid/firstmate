@@ -1396,6 +1396,21 @@ EOF
 
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
 
+test_released_endpoint_is_reported_by_design() {
+  local rec root home fakebin out
+  rec=$(new_world released-endpoint)
+  IFS='|' read -r root home fakebin <<< "$rec"
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  make_fake_tmux "$fakebin" ''
+  printf 'window=fm-sess:released\nkind=ship\n' > "$home/state/task-released.meta"
+  printf 'released_at=1\n' > "$home/state/task-released.review-park"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'endpoint: released on review (by design)' "released endpoint was not identified"
+  assert_not_contains "$out" 'endpoint: dead (backend=tmux window=fm-sess:released)' "released endpoint was reported dead"
+  pass "session start identifies a released endpoint as intentional"
+}
+
 test_endpoint_liveness_tmux() {
   local rec root home fakebin out
   rec=$(new_world liveness-tmux)
@@ -3116,6 +3131,7 @@ test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
+test_released_endpoint_is_reported_by_design
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_endpoint_read_death_is_isolated_and_reported

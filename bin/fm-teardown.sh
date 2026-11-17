@@ -1744,7 +1744,7 @@ EOF
 # (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
 # GitLab MR goes through the GitHub read like any other target.
 gitlab_mr_landing_opted_in() {
-  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
+  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/release-on-review" ] || [ -e "$CONFIG/auto-land" ]
 }
 
 pr_is_merged() {
@@ -2754,6 +2754,7 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree>
 # step that would read or touch $WT consults teardown_owns_worktree, so a
 # reassigned slot is skipped consistently rather than by each step's own guess.
 TEARDOWN_SLOT_REASSIGNED=0
+TEARDOWN_RELEASED=0
 TEARDOWN_SLOT_REASSIGNED_TO=
 TEARDOWN_SLOT_REASSIGNED_HOME=
 require_owned_task_worktree_slot() {
@@ -2773,7 +2774,7 @@ require_owned_task_worktree_slot() {
 }
 
 teardown_owns_worktree() {
-  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ] && [ "$TEARDOWN_RELEASED" != 1 ]
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3701,8 +3702,42 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
-require_owned_task_worktree_slot || exit 1
+if [ -n "$(fm_meta_get "$STATE/$ID.review-park" released_at)$(fm_meta_get "$STATE/$ID.review-park" releasing)" ]; then
+  if [ -d "$WT" ]; then
+    fm_treehouse_slot_owner_state "$WT" "$ID"
+  else
+    FM_TREEHOUSE_SLOT_OWNER=absent
+  fi
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine) ;;
+    absent|other) TEARDOWN_RELEASED=1 ;;
+    *) echo "REFUSED: released slot ownership cannot be read" >&2; exit 1 ;;
+  esac
+fi
+if [ "$TEARDOWN_RELEASED" = 1 ]; then
+  RELEASED_BRANCH=$(fm_meta_get "$STATE/$ID.review-park" branch)
+  RELEASED_HEAD=$(fm_meta_get "$STATE/$ID.review-park" head)
+  if [ "$KIND" != ship ] || [ "$(fm_meta_get "$META" branch)" != "$RELEASED_BRANCH" ] \
+    || [ "$(fm_meta_get "$STATE/$ID.review-park" pr)" != "$PR_URL" ] \
+    || [ "$(fm_meta_get "$STATE/$ID.review-park" endpoint_closed)" != 1 ] \
+    || ! fm_pr_head_valid "$RELEASED_HEAD" \
+    || ! git check-ref-format --branch "$RELEASED_BRANCH" >/dev/null 2>&1; then
+    echo "REFUSED: released lane record does not match its task, branch, PR, and verified head" >&2
+    exit 1
+  fi
+  RELEASED_TIP=$(git -C "$PROJ" rev-parse --verify "refs/heads/$RELEASED_BRANCH" 2>/dev/null || true)
+  RELEASED_UNPUSHED=unknown
+  if [ -n "$RELEASED_TIP" ]; then
+    RELEASED_UNPUSHED=$(git -C "$PROJ" log --format=%H "$RELEASED_TIP" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || RELEASED_UNPUSHED=unknown
+  fi
+  if [ -z "$RELEASED_TIP" ] || { [ "$RELEASED_TIP" != "$RELEASED_HEAD" ] && [ -n "$RELEASED_UNPUSHED" ]; }; then
+    echo "REFUSED: released branch $RELEASED_BRANCH has work not proven pushed" >&2
+    exit 1
+  fi
+else
+  require_exclusive_task_worktree_slot || exit 1
+  require_owned_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3835,7 +3870,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -3889,7 +3924,7 @@ teardown_herdr_journal_orphaned() {
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
+if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -3923,7 +3958,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
@@ -3944,7 +3979,7 @@ fi
 # A refused or skipped Herdr close must stop before the reaper or Treehouse
 # return can end the pane shell in the task copy. Confirm the exact pane is gone
 # while the copy and every durable record are still intact.
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -4088,7 +4123,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
-  :
+  if [ "$TEARDOWN_RELEASED" = 1 ]; then
+    git -C "$PROJ" branch -D "$RELEASED_BRANCH" >/dev/null || exit 1
+  fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -4099,9 +4136,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook and environment files so a reused pool worktree cannot fire
   # signals for a dead task or hand a t3code env block or channel statement to
   # its next holder.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  remove_harness_worktree_wiring "$WT"
+  fm_control_remove_worktree_wiring "$META" "$WT" "$STATE" "$ID"
   if [ "$BACKEND" = t3code ]; then
     "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
     git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"
@@ -4135,7 +4170,7 @@ if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" 
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
-elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
   # a stale request. A task with no cached record costs nothing.
@@ -4219,7 +4254,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" "$STATE/$ID.pr-register-refused" \
-  "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" \
+  "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" "$STATE/.review-park-release-error-$ID" \
   "$STATE/$ID.pr-register-timed-out" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
@@ -4301,6 +4336,8 @@ if [ "$TEARDOWN_POOL_SLOT_LOST" = 1 ]; then
   echo "teardown $ID finished its cleanup and removed its task record, but a returned pool slot did not come back clean (see the warning above); clear those paths so the pool can reuse the slot" >&2
 elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$TEARDOWN_RELEASED" = 1 ]; then
+  echo "teardown $ID complete (released on review; local branch removed)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else

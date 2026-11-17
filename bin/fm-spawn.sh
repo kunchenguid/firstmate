@@ -2483,6 +2483,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
     exit 1
   }
+  if [ -n "$(fm_meta_get "$STATE/$ID.review-park" released_at)$(fm_meta_get "$STATE/$ID.review-park" releasing)" ]; then
+    echo "error: task $ID is released on review; reacquire its copy through bin/fm-park.sh resume" >&2
+    exit 1
+  fi
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
@@ -2526,19 +2530,19 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           `unreadable` is rechecked too, because a stopped Rex server
   #           reads as unreachable to a read that never starts it
   #           (fm_control_absence_recheck_applies owns that rule).
-  #   tmux  - REFUSES, always. A task record carries no socket identity for its
-  #           endpoint, and a server-wide inventory describes only the server
-  #           this process addresses, so no read available here can tell "gone"
-  #           from "on a server I cannot see". A tmux `missing` therefore stays
-  #           as deadlocked as it was before this change - deliberately, and
-  #           with the reason stated rather than guessed past.
+  #   tmux  - normally refuses. Its task record carries no socket identity,
+  #           so a missing window may be on a different server. The one
+  #           exception is the matching unused closure proof written by
+  #           release-on-review, after that action closed the exact endpoint.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  if fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
+  if [ "$RELAUNCH_STATE" = missing ] && fm_control_release_closed "$RELAUNCH_META" "$BACKEND" "$RELAUNCH_TARGET"; then
+    RELAUNCH_STATE=missing
+  elif fm_control_absence_recheck_applies "$BACKEND" "$RELAUNCH_STATE"; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
       gone) RELAUNCH_STATE=missing ;;
@@ -4981,6 +4985,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+  elif [ "$BACKEND" = tmux ]; then
+    # Consume the release proof before creating an endpoint. A crash after
+    # creation must never let a later attempt treat that endpoint as absent.
+    printf 'relaunch_started=1\n' >> "$STATE/$ID.review-park" || exit 1
+    SES=${RELAUNCH_TARGET%%:*}
+    WID=$(fm_backend_tmux_create_task "$SES" "$W" "$WT") || exit 1
+    T="$SES:$W"
+    WT_TARGET=$WID
   elif [ "$BACKEND" = rex ]; then
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -5032,8 +5044,8 @@ EOF
     #
     # Herdr reaches here only on a PROVEN-gone pane: its every read is scoped to
     # the session the record names (fm_control_endpoint_absence_verdict owns
-    # that argument). tmux and every secondmate were already refused, and rex
-    # took the branch above, so there is no dispatch left to make.
+    # that argument). tmux and rex took their branches above, and every
+    # secondmate was already refused.
     #
     # This deliberately uses the FLAT container shape rather than Herdr's
     # presentation projection: projection is a presentation-only layout that is
@@ -6186,7 +6198,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # under its successor.
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
-  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT" probe-custom; then
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
