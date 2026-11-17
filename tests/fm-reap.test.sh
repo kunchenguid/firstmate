@@ -423,6 +423,79 @@ assert_contains "$out" 'kept ready-idle: error: refusing - the worktree holds wo
 assert_present "$FIN/state/ready-idle.meta" 'the kept lane keeps its record'
 pass 'reap: finished-but-not-done lanes reach the check wake and teardown alone decides what lands'
 
+# --- the merged fast path ----------------------------------------------------
+# A lane whose PR merged and whose worktree is clean is due at once: done
+# without the 2h wait, a finished-but-working lane without the idle wait. A
+# dirty or missing worktree falls back to the timed waits; a registered board
+# keeps its grace; a merge without a clean tree never closes anything by
+# itself - teardown stays the judge of landed work.
+MERGED="$TMP_ROOT/merged"
+mkdir -p "$MERGED/state" "$MERGED/config" "$MERGED/data"
+mwt="$MERGED/wt-clean"
+git init -q "$mwt"
+git -C "$mwt" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+mkdir -p "$MERGED/state/procevent"
+mwt2="$MERGED/wt-dirty"
+git init -q "$mwt2"
+git -C "$mwt2" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+touch "$mwt2/untracked"
+mmerged() {  # <id> <worktree-or-empty> <status lines...>
+  local id=$1 wt=$2
+  shift 2
+  printf 'kind=ship\nharness=claude\nworktree=%s\n' "$wt" > "$MERGED/state/$id.meta"
+  printf 'milestone [name=gate-end] [at=%s] [sha=%s] [run=r1] [rounds=1] [result=passed]: gate\nmilestone [name=pr-created] [at=%s] [sha=%s]: PR https://example.invalid/pr/1\nmilestone [name=merge] [at=%s] [sha=%s]: PR https://example.invalid/pr/1\n%s\n' \
+    "$((now - 20000))" "$SHA" "$((now - 19000))" "$SHA" "$((now - 18000))" "$SHA" "$1" > "$MERGED/state/$id.status"
+  shift
+  printf '%s\n' "$@" >> "$MERGED/state/$id.status"
+}
+merged_list() { FM_STATE_OVERRIDE="$MERGED/state" FM_CONFIG_OVERRIDE="$MERGED/config" FM_DATA_OVERRIDE="$MERGED/data" "$REAP" list; }
+mmerged fresh-done "$mwt" "done [at=$((now - 300))]: PR https://example.invalid/pr/1"
+mmerged stale-done-dirty "$mwt2" "done [at=$((now - 9000))]: PR https://example.invalid/pr/1"
+mmerged fresh-done-dirty "$mwt2" "done [at=$((now - 300))]: PR https://example.invalid/pr/1"
+mmerged fresh-working "$mwt" "working [at=$((now - 600))]: waiting"
+touch -d "@$((now - 600))" "$MERGED/state/fresh-working.status"
+mmerged stale-working-dirty "$mwt2" "working [at=$((now - 9000))]: waiting"
+touch -d "@$((now - 9000))" "$MERGED/state/stale-working-dirty.status"
+printf 'kind=ship\nharness=claude\nworktree=%s\n' "$mwt" > "$MERGED/state/no-merge.meta"
+printf 'milestone [name=pr-created] [at=%s] [sha=%s]: PR https://example.invalid/pr/1\ndone [at=%s]: PR https://example.invalid/pr/1\n' \
+  "$((now - 19000))" "$SHA" "$((now - 300))" > "$MERGED/state/no-merge.status"
+printf 'kind=ship\nharness=claude\nworktree=%s\n' "$MERGED/wt-gone" > "$MERGED/state/gone-wt.meta"
+printf 'milestone [name=merge] [at=%s] [sha=%s]: PR https://example.invalid/pr/1\ndone [at=%s]: PR https://example.invalid/pr/1\n' \
+  "$((now - 18000))" "$SHA" "$((now - 300))" > "$MERGED/state/gone-wt.status"
+printf 'kind=ship\nharness=claude\nworktree=%s\n' "$mwt" > "$MERGED/state/boarded.meta"
+printf 'milestone [name=merge] [at=%s] [sha=%s]: PR https://example.invalid/pr/1\ndone [at=%s]: PR https://example.invalid/pr/1\n' \
+  "$((now - 18000))" "$SHA" "$((now - 300))" > "$MERGED/state/boarded.status"
+printf 'adapter=lavish\nkind=task-owned\nowner_task=boarded\n' > "$MERGED/state/procevent/lavish-b.source"
+out=$(merged_list)
+assert_contains "$out" 'fresh-done due done 5m ago, PR merged, worktree clean' 'a merged, clean, done lane is due at once, not in 2h'
+assert_contains "$out" 'stale-done-dirty due done 2h ago' 'a merged lane past its done time is due through the ordinary wait'
+assert_contains "$out" 'fresh-done-dirty waiting done 5m ago, closes in 115m' 'a dirty worktree keeps the done wait'
+assert_contains "$out" 'fresh-working due gate passed, PR merged, worktree clean' 'a merged, clean, finished lane is due without idling 2h'
+assert_contains "$out" 'stale-working-dirty due gate passed, PR merged, idle 2h' 'a dirty finished lane is due through its idle wait'
+assert_contains "$out" 'no-merge waiting done 5m ago, closes in 115m' 'a clean lane without a merge keeps the done wait'
+assert_contains "$out" 'gone-wt waiting done 5m ago, closes in 115m' 'a missing worktree keeps the done wait'
+assert_contains "$out" 'boarded waiting done 5m ago board, closes in 1435m' 'a registered board keeps its grace over a merged PR'
+pass 'verdicts: merged and clean closes at once; dirty, unmerged, missing, and boarded lanes keep their waits'
+
+# Enforce closes the merged lane at once through teardown, nothing else.
+printf 'shadow\n' > "$MERGED/config/reaper"
+out=$(FM_STATE_OVERRIDE="$MERGED/state" FM_CONFIG_OVERRIDE="$MERGED/config" FM_DATA_OVERRIDE="$MERGED/data" "$REAP" check)
+assert_contains "$out" 'reap (shadow, nothing closed): 4 finished worker(s)' 'shadow reports the merged fast lanes'
+cat > "$TMP_ROOT/teardown-merged" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  fresh-done|fresh-working) printf 'tore down %s\n' "\$1" ;;
+  *) printf 'error: refusing - the worktree holds work that has not landed (1 commit)\n' >&2; exit 1 ;;
+esac
+SH
+chmod +x "$TMP_ROOT/teardown-merged"
+out=$(FM_STATE_OVERRIDE="$MERGED/state" FM_CONFIG_OVERRIDE="$MERGED/config" FM_DATA_OVERRIDE="$MERGED/data" \
+  FM_REAP_TEARDOWN="$TMP_ROOT/teardown-merged" "$REAP" run)
+assert_contains "$out" 'closed fresh-done (done 5m ago, PR merged, worktree clean)' 'a merged clean done lane is closed at once'
+assert_contains "$out" 'closed fresh-working (gate passed, PR merged, worktree clean)' 'a merged clean finished lane is closed at once'
+assert_contains "$out" 'kept stale-done-dirty: error: refusing - the worktree holds work that has not landed (1 commit)' 'teardown alone decides a dirty merged lane'
+pass 'reap: the merged fast path closes clean lanes through teardown and keeps the rest'
+
 kill "$LIVE_PID" 2>/dev/null
 wait "$LIVE_PID" 2>/dev/null
 echo '# all fm-reap tests passed'

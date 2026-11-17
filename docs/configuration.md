@@ -2688,6 +2688,8 @@ No crewmate or scout outlives its task.
 `bin/fm-send.sh` refuses new work for a worker whose newest lifecycle status is done or failed, so new work becomes a new task with its own route and worker; its header owns the `--after-done` reasons that still reach a finished worker.
 While `config/reaper` exists, session start arms the reaper as the watcher check `state/reaper.check.sh`, which looks at every recorded ship and scout task on the normal `FM_CHECK_INTERVAL` cadence.
 A task is due two hours after its done line (`FM_REAP_DONE_SECS`), or, while a Lavish board is registered for it, one day after the later of that line and the board's newest round (`FM_REAP_BOARD_SECS`); second mates are never due.
+A lane whose milestones show a merged PR and whose recorded worktree is clean (a local `git status`, no network) is due at once instead: done without the two-hour wait and a finished-but-working lane without the idle wait, because the PR landed and nothing local can follow.
+A dirty or missing worktree keeps the timed waits, where teardown names what it refuses to discard, and a registered board keeps its grace; `bin/fm-reap.sh list` shows every verdict.
 
 | `config/reaper` | Behavior |
 | --- | --- |
@@ -2701,6 +2703,23 @@ An unchanged kept cleanup reports once, then repeats after an exponentially incr
 
 `bin/fm-reap.sh sweep-state` is a separate manual cleanup of stale lock folders and old markers in `state/`, independent of `config/reaper`.
 It is a dry run that prints counts by kind unless given `--apply`, and its header owns what counts as stale.
+
+## Auto-dispatch (config/auto-dispatch)
+
+A queued backlog row whose brief is written no longer waits for a firstmate turn to start: while `config/auto-dispatch` exists, session start arms `bin/fm-auto-dispatch.sh` as the watcher check `state/auto-dispatch.check.sh`, which dispatches such rows through `bin/fm-dispatch.sh new` on the normal `FM_CHECK_INTERVAL` cadence.
+The admission queue still owns retries of starts the capacity guard held; auto-dispatch owns only rows that were never started.
+
+| `config/auto-dispatch` | Behavior |
+| --- | --- |
+| absent | Off; `bin/fm-auto-dispatch.sh list` still shows every verdict. |
+| `shadow` | One `check:` wake names the dispatchable rows when that set changes; nothing starts. Run a shadow week before enforcing. |
+| `enforce` | At most `FM_AUTODISPATCH_MAX_STARTS` (default 1) dispatches per pass, through the same front door firstmate uses. |
+
+A row is dispatched only when every gate holds: `tasks-axi` lists it as ready (no open blocker, no active hold - which is also how captain calls and money calls stay undispatched), it is not secondmate- or captain-class, it has no task record yet, its brief exists, is filled in, and carries a crewmate delivery contract, and its project clone is present.
+The launch passes only recorded decisions to `fm-dispatch.sh`: the mode, branch prefix, base branch and upstream consent from the brief's own contract lines, `--scout` for a SCOUT brief, and `--yolo` from the project's registered standing posture (`bin/fm-project-mode.sh`); a per-task deviation is firstmate's to hold or dispatch by hand.
+Every existing guard keeps its verdict unchanged: the resolver's weekly start guard and receipts, the capacity and load guard, and the project delivery mode agreement - a start held by spawn admission lands in the admission queue exactly as a firstmate start would.
+A weekly-guard hold is retried at most every `FM_AUTODISPATCH_RETRY_SECS` (default 900) without a wake; a launch that ends in anything but a start or a hold is parked with one wake row naming the evidence and never retried blind - firstmate fixes it and runs `bin/fm-auto-dispatch.sh drop <id>`, or rewrites the brief, which clears the mark itself.
+The default is OFF: a dispatch spends quota, so the switch is provably safe only where a home turned it on deliberately.
 
 ## Toolchain
 

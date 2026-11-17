@@ -33,6 +33,14 @@
 #   `due gate passed, PR ready|merged, idle <n>h`. A malformed or unreadable
 #   milestone record means not due. Teardown stays the only judge of landed
 #   work, so due here never discards anything: an unlanded lane is kept.
+#   Merged fast path: a lane whose milestones show a merge and whose recorded
+#   worktree is clean (a local git status, no network) is due at once - done
+#   without waiting FM_REAP_DONE_SECS, a finished-but-working lane without
+#   waiting FM_REAP_IDLE_SECS - because its PR landed and nothing local can
+#   follow; a dirty or missing worktree falls back to the waits above, where
+#   teardown names what it refuses to discard. A registered board keeps its
+#   grace here too. The verdict reads `due done <n>h ago, PR merged, worktree
+#   clean` or `due gate passed, PR merged, worktree clean`.
 #
 # Mode: config/reaper holds `shadow` or `enforce`; without the file the reaper
 #   is off and its check prints nothing. Roll out with a shadow week first.
@@ -163,6 +171,25 @@ finished_work() {
     }'
 }
 
+# <task-id> -> 0 when the lane's milestones record a merge; 1 otherwise,
+# including an unreadable or malformed milestone stream.
+merged() {
+  "$SCRIPT_DIR/fm-task-milestones.sh" records "$STATE/$1.status" 2>/dev/null \
+    | awk -F'\t' '$1 == "merge" { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+# <task-id> -> 0 when the task's recorded worktree is clean: no staged,
+# tracked, or untracked change. 1 when it is dirty, missing, or unreadable,
+# which reads as not clean so the lane keeps its ordinary waits and teardown
+# stays the only judge of landed work. A local git status only, no network.
+worktree_clean() {
+  local wt out
+  wt=$(meta_get "$STATE/$1.meta" worktree)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  out=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || return 1
+  [ -z "$out" ]
+}
+
 # One line per recorded crewmate/scout: <id> <verdict> <detail>.
 verdicts() {
   local meta id kind lc state at now board last clock ttl age
@@ -198,6 +225,10 @@ verdicts() {
           printf '%s due %s, idle %sh%s\n' "$id" "$work" "$(( age / 3600 ))" "$board"
           continue
         fi
+        if [ -z "$board" ] && merged "$id" && worktree_clean "$id"; then
+          printf '%s due gate passed, PR merged, worktree clean\n' "$id"
+          continue
+        fi
       fi
       printf '%s active %s\n' "$id" "${state:-no-status}"
       continue
@@ -214,6 +245,8 @@ verdicts() {
     age=$(( now - clock ))
     if [ "$age" -ge "$ttl" ]; then
       printf '%s due done %sh ago%s\n' "$id" "$(( age / 3600 ))" "$board"
+    elif [ -z "$board" ] && merged "$id" && worktree_clean "$id"; then
+      printf '%s due done %sm ago, PR merged, worktree clean\n' "$id" "$(( age / 60 ))"
     else
       printf '%s waiting done %sm ago%s, closes in %sm\n' "$id" "$(( age / 60 ))" "$board" "$(( (ttl - age + 59) / 60 ))"
     fi

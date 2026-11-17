@@ -1789,6 +1789,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     "$SCRIPT_DIR/fm-reap.sh" arm >/dev/null 2>&1 \
       || echo "MISSING: the reaper could not be armed; finished workers are not closed or reported"
   fi
+  # The auto-dispatch check starts queued briefs once config/auto-dispatch opts in.
+  if local_phase && [ -f "$CONFIG/auto-dispatch" ] && command -v jq >/dev/null 2>&1 && [ -x "$SCRIPT_DIR/fm-auto-dispatch.sh" ]; then
+    "$SCRIPT_DIR/fm-auto-dispatch.sh" arm >/dev/null 2>&1 \
+      || echo "MISSING: auto-dispatch could not be armed; queued briefs wait for a firstmate turn"
+  fi
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"
