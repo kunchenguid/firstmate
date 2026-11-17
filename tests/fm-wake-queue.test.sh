@@ -1614,6 +1614,45 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   pass "a branch-actor scoped ack never swallows an unacked main-owned row, and main's later drain sees exactly what remains"
 }
 
+# A host publishes the branch's grant before its engine runs. Its branch tool
+# may not be allowed to inspect the host process through ps, but it must still
+# drain and acknowledge only the exact rows in that published snapshot.
+test_branch_actor_keeps_its_grant_when_ps_cannot_inspect_the_host() {
+  local dir state sequence generation
+  dir=$(make_case branch-ps-denied)
+  state="$dir/state"
+  mkdir -p "$dir/fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/ps"
+  chmod +x "$dir/fakebin/ps"
+
+  append_wake "$state" check "main-only.check.sh" "check: main-only" || fail "main append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "branch append failed"
+  FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    "$GRANT" activate "$$" ps-denied || fail "branch owner activation failed"
+  FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    "$GRANT" publish ps-denied 2 || fail "branch grant publication failed"
+
+  PATH="$dir/fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch lost its live grant when ps was unavailable: $(cat "$dir/branch.err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/branch.out" \
+    || fail "branch drain omitted its granted row"
+  ! grep -Fq "$(printf '\tcheck\tmain-only.check.sh\t')" "$dir/branch.out" \
+    || fail "branch drain presented the main-owned row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  [ "$sequence" = 2 ] && [ -n "$generation" ] || fail "branch drain omitted its exact acknowledgement"
+  PATH="$dir/fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed when ps was unavailable"
+  grep -Fq "$(printf '\tcheck\tmain-only.check.sh\t')" "$state/.wake-queue" \
+    || fail "branch acknowledgement swallowed the main-owned row"
+  ! grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
+    || fail "branch acknowledgement left its granted row queued"
+
+  pass "branch drain and acknowledgement keep their published grant when ps cannot inspect the host"
+}
+
 test_main_drain_excludes_rows_already_granted_to_branch() {
   local dir state out err sequence generation
   dir=$(make_case main-excludes-branch-grant)
@@ -3818,6 +3857,7 @@ test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
+test_branch_actor_keeps_its_grant_when_ps_cannot_inspect_the_host
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_ack_commits_secondmate_stall_receipts
 test_main_is_never_told_to_drain_rows_only_the_branch_owns
