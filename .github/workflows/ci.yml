@@ -632,6 +632,11 @@ jobs:
           FM_TEST_STOCK_BASH=1 /bin/bash bin/fm-test-tap-verify.sh \
             tests/fm-watch-triage.test.sh
 
+          # Same shape for the supervision host's wait for its arm to close:
+          # Bash 3.2 has no fractional read timeout and probes with child sleeps.
+          FM_TEST_STOCK_BASH=1 /bin/bash bin/fm-test-tap-verify.sh \
+            tests/fm-supervision-host.test.sh
+
           # The fork-free hot-path helpers must stay byte-identical to the
           # commands they replace under stock Bash 3.2, which lacks the
           # printf %(...)T clock and falls back to date.

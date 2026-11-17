@@ -982,6 +982,17 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
 
+# CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the
+# await_close cases. The rest of this file is not a Bash 3.2 suite. Adding
+# another stock-bash case means adding it to this list, not to ci.yml.
+if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
+  fm_test_run \
+    test_parked_host_starts_no_process_once_its_arm_reported \
+    test_arm_that_disappears_ends_the_wait \
+    test_attended_main_only_close_passes_straight_to_main
+  exit 0
+fi
+
 fm_test_run \
   test_parked_host_starts_no_process_once_its_arm_reported \
   test_arm_that_disappears_ends_the_wait \
