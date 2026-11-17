@@ -730,7 +730,10 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: merging a Forgejo pull request requires jq on PATH" >&2
     exit 1
   }
-  fm_pr_forgejo_cli_preference "$META"
+  fm_pr_forgejo_cli_preference "$META" || {
+    echo "error: merging a Forgejo pull request at $PR_HOST cannot resolve the project's registered Forgejo CLI: ${FM_PR_FORGEJO_CLI_PREFERENCE_ERROR:-the registry entry could not be read}; nothing is recorded and no merge is attempted" >&2
+    exit 1
+  }
   fm_pr_forgejo_resolve "$PR_HOST" "$FM_PR_FORGEJO_CLI_PREFERENCE" || {
     forgejo_action="merging a Forgejo pull request"
     forgejo_host=$PR_HOST

@@ -1758,7 +1758,10 @@ pr_is_merged() {
   fi
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    fm_pr_forgejo_cli_preference "$META"
+    # A binding the registry parser refuses leaves the read on `auto`, as it
+    # always has here: teardown's merged proof is a read of what was already
+    # merged, not the arming or merge decision that refuses such a binding.
+    fm_pr_forgejo_cli_preference "$META" || true
     fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$FM_PR_FORGEJO_CLI_PREFERENCE" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD

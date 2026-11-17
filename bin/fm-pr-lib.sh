@@ -1555,13 +1555,21 @@ fm_pr_forgejo_api() {  # <method> <owner> <repo> <suffix> [<cli-args>...]
 # bin/fm-project-mode.sh reports, so a registry gap never silently pins a CLI.
 # Every warning fm-project-mode.sh writes about an absent project goes to
 # /dev/null: this is a lookup, and the caller reports its own refusal.
+# A binding fm-project-mode.sh itself refuses (its exit status 3) is not a
+# registry gap: it is a registration the parser names as broken, so this does
+# not fall back to `auto`. Its own refusal message is kept in
+# FM_PR_FORGEJO_CLI_PREFERENCE_ERROR and this returns 1, so arming and the merge
+# path refuse with that message instead of proving a merge to the pull request's
+# recorded state through tea, which is the CLI no `auto` project ever chose.
 # bin/fm-pr-poll.sh, which sources nothing, is handed the resolved preference
 # through the registered poll sidecar (fm_pr_poll_prepare) instead of calling
 # this.
 FM_PR_FORGEJO_CLI_PREFERENCE=
+FM_PR_FORGEJO_CLI_PREFERENCE_ERROR=
 fm_pr_forgejo_cli_preference() {  # <task-meta-file>
   FM_PR_FORGEJO_CLI_PREFERENCE=auto
-  local meta=${1:-} project preference data resolved
+  FM_PR_FORGEJO_CLI_PREFERENCE_ERROR=
+  local meta=${1:-} project preference data resolved errfile status=0
   [ -n "$meta" ] && [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   project=$(grep '^project=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   [ -n "$project" ] || return 0
@@ -1581,8 +1589,18 @@ fm_pr_forgejo_cli_preference() {  # <task-meta-file>
   else
     data="${FM_HOME:-$_FM_PR_LIB_ROOT}/data"
   fi
+  # The parser's stderr is kept rather than discarded on failure, because the
+  # only failure it signals is its own refusal of the binding and that message
+  # names the entry to correct.
+  errfile=$(mktemp "${TMPDIR:-/tmp}/fm-forgejo-cli-preference.XXXXXX" 2>/dev/null) || return 0
   preference=$(FM_HOME="${FM_HOME:-$_FM_PR_LIB_ROOT}" FM_DATA_OVERRIDE="$data" \
-    "$_FM_PR_LIB_ROOT/bin/fm-project-mode.sh" --forge-cli "$project" 2>/dev/null) || return 0
+    "$_FM_PR_LIB_ROOT/bin/fm-project-mode.sh" --forge-cli "$project" 2>"$errfile") || status=$?
+  if [ "$status" -eq 3 ]; then
+    FM_PR_FORGEJO_CLI_PREFERENCE_ERROR=$(cat "$errfile" 2>/dev/null)
+  fi
+  rm -f "$errfile"
+  [ "$status" -ne 3 ] || return 1
+  [ "$status" -eq 0 ] || return 0
   case "$preference" in
     tea|fgj|fj) FM_PR_FORGEJO_CLI_PREFERENCE=$preference ;;
     auto) ;;

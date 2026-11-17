@@ -291,7 +291,10 @@ if [ "$PROVIDER" = forgejo ]; then
     echo "error: watching a Forgejo pull request requires jq on PATH" >&2
     exit 1
   }
-  fm_pr_forgejo_cli_preference "$META"
+  fm_pr_forgejo_cli_preference "$META" || {
+    echo "error: watching a Forgejo pull request at $HOST cannot resolve the project's registered Forgejo CLI: ${FM_PR_FORGEJO_CLI_PREFERENCE_ERROR:-the registry entry could not be read}; no watch is armed and no pull request state is recorded" >&2
+    exit 1
+  }
   fm_pr_forgejo_resolve "$HOST" "$FM_PR_FORGEJO_CLI_PREFERENCE" || {
     forgejo_action="watching a Forgejo pull request"
     forgejo_host=$HOST

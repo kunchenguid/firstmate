@@ -3734,6 +3734,58 @@ SH
   pass "fm-pr-check resolves the Forgejo CLI for arming and refuses fj by name"
 }
 
+# A forge binding the registry parser itself refuses (here forge=forgejo:fgg) is
+# not a registry gap that leaves a project on `auto`: it is a registration the
+# parser names as broken, so arming and the merge both refuse with the parser's
+# own message rather than proceeding on tea. tea is installed and logged in for
+# this host inside the case, so only the refusal can keep either path off it.
+test_forgejo_malformed_binding_is_refused() {
+  local dir state url rc
+  dir=$(make_case forgejo-malformed-binding)
+  state="$dir/home/state"
+  url=https://forgejo.example/o/r/pulls/7
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  printf '# Projects\n\n- project [no-mistakes forge=forgejo:fgg] - fixture (added 2026-01-01)\n' \
+    > "$dir/home/data/projects.md"
+  cat > "$dir/fakebin/tea" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_TEA_LOG"
+case "${1:-} ${2:-}" in
+  "login list") printf '[{"name":"main","url":"https://forgejo.example"}]\n' ;;
+  api) printf '{"state":"open","merged":false,"head":{"sha":"abc"}}\n' ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tea"
+  : > "$dir/tea.log"
+
+  write_poll_meta "$state" task-a "$url" "project=$dir/project"
+  set +e
+  FM_TEST_TEA_LOG="$dir/tea.log" run_check_entry "$dir" task-a "$url" \
+    > "$dir/arm.out" 2> "$dir/arm.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming must refuse a malformed forge binding"
+  assert_grep 'unknown Forgejo CLI "fgg"' "$dir/arm.err" \
+    "the arming refusal did not carry the registry parser's own message"
+  assert_absent "$state/task-a.check.sh" \
+    "a malformed forge binding still armed a watch"
+  [ ! -s "$dir/tea.log" ] || fail "arming fell back to tea on a malformed forge binding"
+
+  write_task_meta "$dir" task-a
+  set +e
+  FM_TEST_TEA_LOG="$dir/tea.log" run_merge_entry "$dir" task-a "$url" \
+    > "$dir/merge.out" 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the merge path must refuse a malformed forge binding"
+  assert_grep 'unknown Forgejo CLI "fgg"' "$dir/merge.err" \
+    "the merge refusal did not carry the registry parser's own message"
+  assert_no_grep "pr=$url" "$state/task-a.meta" \
+    "a malformed forge binding still recorded the pull request"
+  [ ! -s "$dir/tea.log" ] || fail "the merge path fell back to tea on a malformed forge binding"
+  pass "arming and the merge refuse a malformed forge binding instead of falling back to tea"
+}
+
 # fgj is the other Forgejo CLI that can serve the watch: it keeps its own
 # per-hostname auth store and reaches the REST record through `fgj api`, so the
 # watch resolves it when tea is absent and reads the same boolean merged field.
@@ -5862,6 +5914,7 @@ test_arming_baselines_an_already_degraded_change
 test_forgejo_merge_watch
 test_forgejo_fgj_merge_watch
 test_forgejo_arming_resolves_the_forgejo_cli
+test_forgejo_malformed_binding_is_refused
 test_forgejo_poll_honors_the_recorded_cli
 test_forgejo_login_list_shapes
 test_gerrit_merge_watch
