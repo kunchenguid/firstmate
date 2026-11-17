@@ -80,7 +80,7 @@ Handle it start to finish in one turn sequence:
    An allowance diagnostic is not a refusal; report a refusal only when that task's cleanup actually refuses, quoting its reason.
    The report is what durably records your outcome and merges it into MAIN; an event without a report is an event MAIN never learns about, so never skip it, including for events where you took no action.
 5. Acknowledge: after the report succeeds, run the exact `--ack-through` command the drain printed as WAKE_ACK_REQUIRED, once.
-   A command that exits 0 means the wake is done: never run `--ack-through` a second time for it, including after a `--task fleet` report on a single-task wake, because the repeat is refused and wastes a turn.
+   A command that exits 0 without printing a further command means the wake is done: never run `--ack-through` a second time for it, including after a `--task fleet` report on a single-task wake, because the repeat is refused and wastes a turn. If its output names a new command to run, run that command.
 6. Release every lease you claimed: `bin/fm-lease.sh release <task>`.
 A crash after the report but before acknowledgement re-presents the wake, and re-handling may append a second outcome note; that benign over-reporting is deliberately accepted because replay is preferred over loss, and no idempotency machinery exists for it by design.
 
