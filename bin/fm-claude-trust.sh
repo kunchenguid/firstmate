@@ -25,7 +25,7 @@
 #                    to the home or code checkout root or carries import consent
 #                    onto channel entries. Claude Code 2.1.326 checks these at
 #                    startup independently of the launch directory's trust.
-# Prints one line naming what it registered; refuses loudly on anything else.
+# Prints one line per registered directory and reports refusals on stderr.
 #
 # WHY THIS EXISTS. Claude Code gates a folder it has never seen behind an
 # interactive workspace-trust dialog, and --dangerously-skip-permissions does

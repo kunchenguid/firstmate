@@ -672,15 +672,8 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
-# any per-task state exists, and before its busy hooks are written, every
-# claude launch pre-registers its launch directory -
-# the task worktree, or the secondmate home for a --secondmate spawn -
-# in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a folder it has never
-# seen and firstmate cannot answer it. That helper's header owns the structural
-# scope test for both shapes and every refusal; a failed registration stops this
-# spawn rather than launching a worker that would wedge on the dialog.
+# Claude launch preparation refuses the spawn if trust registration fails.
+# See bin/fm-claude-trust.sh for the scope and consent rules.
 # polytoken (the captain-approved TUI-pane-plus-REST hybrid) is the one harness
 # whose worker's unattended permission posture cannot ride a launch flag: a
 # per-task config dir is generated under state/ mirroring the operator's global
@@ -6205,22 +6198,11 @@ fi
 spawn_enter_recorded_worktree
 spawn_assert_agent_worktree
 
-# Pre-register Claude's workspace trust for the directory this launch starts in,
-# at the first point that directory is known and before any per-task state is
-# created below. The dialog gates the pane before the brief is ever read, and it
-# also gates loading the project settings written further down, so nothing armed
-# below takes effect without it. EVERY claude launch needs it, a secondmate's
-# included: its home is just as unseen by Claude as a fresh worktree, and
-# skipping the step for that kind left a standalone-clone secondmate home with
-# nothing registered and a pane wedged on a dialog firstmate cannot answer.
-# bin/fm-claude-trust.sh owns the structural scope test for both shapes and
-# refuses anything that is neither this project's own isolated worktree nor a
-# seeded secondmate home marked for this id; a refusal blocks the spawn rather
-# than launching a worker that would wedge. Refusing here rather than beside the
-# arm keeps this in the same class as the two worktree refusals just above: no
-# temp root, no retired relaunch wiring and no busy record exists yet to strand,
-# so the refusal names the endpoint the same way they do and leaves nothing else
-# behind.
+# Prepare Claude's launch directory and task-channel trust before arming hooks.
+# Trust prompts can block project settings and the brief before either takes
+# effect. Channel preparation may create directories here, so keep refusals
+# ahead of temporary launch wiring, relaunch retirement, and the busy record.
+# bin/fm-claude-trust.sh owns the structural scope checks.
 # agy gates a fresh worktree or secondmate home behind its own folder-trust
 # dialog and honours a trustedWorkspaces entry written ahead of launch
 # (bin/fm-agy-trust.sh), so the same pre-registration removes the dialog for it.
