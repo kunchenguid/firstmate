@@ -718,8 +718,8 @@
 # runtime, Claude included as defense in depth. bin/fm-git-strip-ai-trailers.sh
 # owns the identities, the hook install, and chaining the repository git is
 # actually running in so a project husky hook still runs. Author identity is
-# not rewritten. A forge=external ship installs that directory even under
-# config/keep-ai-trailers, because its pre-push wrapper carries the push guard.
+# not rewritten. A ship that requires a push guard under the policy above
+# installs that directory even under config/keep-ai-trailers.
 # T3 Code owns its provider command, so it cannot receive Claude's inline
 # attribution settings; the Git hook and environment overlay still apply.
 # Publishing the record and moving this home's backlog item to In flight are one

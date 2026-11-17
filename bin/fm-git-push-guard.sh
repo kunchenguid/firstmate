@@ -2,8 +2,10 @@
 # Per-task pre-push guard. Two record kinds share one pre-push wrapper:
 #   - forge=external: the review tool uploads its own snapshot, so a worker
 #     never needs to push a branch (docs/external-review-forge.md owns that design);
-#   - mode=no-mistakes ship: pushes go to a stamped no-mistakes gate, or come
+#   - gate policy: pushes go to a stamped no-mistakes gate, or come
 #     from that gate when it publishes its run (the gate rule below).
+# bin/fm-spawn.sh owns policy selection; bin/fm-promote.sh owns installation
+# for an existing scout promoted to a ship.
 #
 # Usage:
 #   fm-git-push-guard.sh <guard-file> <remote-name> <remote-url>
@@ -34,7 +36,7 @@
 # `bin/fm-git-strip-ai-trailers.sh install --push-guard`, whose pre-push wrapper
 # runs this guard before chaining to the repository's own pre-push hook.
 #
-# The guard refuses:
+# The forge=external rule refuses:
 #   (a) any push whose remote name is `origin`, or whose name or URL is one of
 #       the shared URLs, which also covers `git push <url>` and a second remote
 #       aliasing origin's URL with or without a trailing `.git`;

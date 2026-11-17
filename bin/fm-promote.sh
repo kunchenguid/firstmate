@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Promote a scout task to a ship task in place: the crewmate keeps its window,
-# worktree, and loaded context; only the contract changes. Flips kind= to ship in
+# worktree, and loaded context. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. Promotion also writes the crewmate's ship instructions to
 # data/<task-id>/ship-instructions.md, appends that same superseding contract to
@@ -44,6 +44,12 @@
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only. A forge=external project is refused
 # outright, because its push guard is installed only by a ship spawn.
+# For mode=no-mistakes with forge=none or forgejo, promotion installs the gate
+# push guard into the scout's existing per-task hooks directory. Without an
+# executable pre-push wrapper there, promotion refuses before changing the
+# task contract; spawn a fresh ship so its Git environment selects the guard.
+# bin/fm-git-push-guard.sh owns the gate rule. Gerrit retains its worker-side
+# publication path without that rule.
 # The project's pr=manual binding is read the same way and applies to a promoted
 # no-mistakes mode only (bin/fm-project-mode.sh --pr; bin/fm-dod-lib.sh's
 # fm_pr_text_valid owns where it is accepted); the ship's Definition of done then
