@@ -35,6 +35,7 @@
 # Revert (<1 min, keeps every log and every quarantine directory):
 #   systemctl --user disable --now ak47-devops.timer ak47-agent-reclaim.timer ak47-devops-weekly.timer
 #   rm ~/.config/systemd/user/ak47-devops{,-weekly}.{service,timer}
+#   rm ~/.config/systemd/user/ak47-agent-reclaim.{service,timer}
 #   rm ~/.config/systemd/user/ak47-swap-reclaim.service
 #   systemctl --user daemon-reload
 #   sudo rm /etc/sysctl.d/60-ak47-swap.conf /etc/sysctl.d/60-ak47-inotify.conf

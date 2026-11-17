@@ -113,7 +113,7 @@ while [ $# -gt 0 ]; do
     --apply) APPLY=1; shift ;;
     --print) PRINT=1; shift ;;
     --stop-watcher) STOP_WATCHER=${2:?--stop-watcher needs a home directory}; shift 2 ;;
-    -h|--help) sed -n '2,98p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,102p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "agent-reclaim.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
