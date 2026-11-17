@@ -64,8 +64,8 @@ test_parked_host_starts_no_process_once_its_arm_reported() {
   wait_until 150 grep -qs '^watcher: started ' "$home/host.out" || fail "park-processes: the arm never reported"
   host_pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
   [ -n "$host_pid" ] || fail "park-processes: no recorded host"
-  # One more poll lets the host take the refresh that follows the report.
-  sleep 1.5
+  # Two more polls let the host take the refresh that follows the report.
+  sleep 2.5
   printf '%s\n' "$host_pid" > "$home/probe-host"
   sleep 3
   window=$(cat "$home/host-processes" 2>/dev/null)
