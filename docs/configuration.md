@@ -14,7 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
-| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
+| Parking workers, releasing worktrees, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -838,8 +838,13 @@ The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#poli
 ## Park on review
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
-The optional `config/release-on-review` presence flag also parks clean lanes and returns their leased Treehouse copies while they await review.
-Review activity reacquires a free copy and relaunches the lane; use `bin/fm-park.sh resume <id> --trigger <text>` to deliver a steer to a released lane.
+The optional `config/release-on-review` presence flag enables parking by itself and returns eligible leased Treehouse worktrees on tmux, Herdr, and Rex.
+Release closes the worker's endpoint and keeps the task record, branch, PR or merge request, and brief, so the backlog item stays open.
+The same events that wake a parked lane, such as new comments, requested changes, a conflict, or a new push, wake a released lane.
+Firstmate reacquires a free worktree, verifies the checkout against the current forge head, and includes the trigger in the replacement worker's instructions.
+If no worktree is available when the watcher detects a trigger, the lane waits for one.
+Use `bin/fm-park.sh resume <id> --trigger <text>` to resume a released lane with a manual instruction.
+On merge, the watcher runs normal teardown without touching the released worktree.
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
 These flags also let `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; without them, teardown does not read GitLab merge requests.
 These flags are home-local and not inherited by secondmate homes.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# fm-park.sh - park a ship lane whose PR or MR only awaits human review, watch
-# it while its agent is stopped, relaunch a fresh worker on review activity,
-# and clean the lane up once the merge poll sees it merged.
+# fm-park.sh - park or release a ship lane whose PR or MR only awaits human
+# review, relaunch a fresh worker on review activity, and clean the lane up
+# once the merge poll sees it merged.
 #
 # Usage:
 #   fm-park.sh gate <task-id> [--expect-head <sha>]
@@ -54,10 +54,10 @@
 # its local copy is clean with HEAD equal to the forge
 # head; bin/fm-crew-state.sh reads done or paused; the agent is idle; the
 # steering inbox holds no unhandled message; and the gate is clean. It then
-# durably leases a Treehouse slot to the task (treehouse lease, state-only, so a
-# later get never hands the copy out and prune never removes it even if the
-# endpoint shell dies; bin/fm-teardown.sh's treehouse return releases it),
-# evaluates the gate again with --expect-head immediately before the stop,
+# durably leases a Treehouse slot if the task uses the pool. The lease keeps
+# get and prune from taking the copy even if the endpoint shell dies, until
+# review release or teardown returns it. Park then evaluates the gate again
+# with --expect-head immediately before the stop,
 # acquires the same inbox-delivery lock as fm-send, checks once more that the
 # agent is idle and the inbox empty, writes
 # state/<id>.review-park marked pending=1, stops the agent with
@@ -78,13 +78,18 @@
 # slot, or merged and cleaned up without touching its former slot.
 # config/release-on-review enables automatic park and release in this home.
 #
-# resume writes a note naming the PR, the parked head and the trigger, then runs
-# bin/fm-control.sh relaunch --note-file, which starts a fresh agent of the
-# recorded adapter in the same copy on the same branch with its original brief
-# plus that note. A working: line superseding the declared wait is appended just
+# resume reacquires a lease for a released lane before relaunch, checking out
+# the recorded branch and verifying it against the current forge head. A newer
+# head can be fast-forwarded; local divergence is preserved and blocks resume.
+# When there is no free slot, the watcher can retry on a later tick while the
+# trigger still applies. A lane that only parked reuses its original copy.
+# resume runs bin/fm-control.sh relaunch --note-file to start a fresh agent of
+# the recorded adapter with the original brief plus a note naming the PR, head
+# and trigger. A working: line superseding the declared wait is appended just
 # before the launch, so the fresh worker's own reports always follow it. Success
-# removes the park record; failure keeps it with resume_error=, which crew state
-# reports as blocked and which stops tick retrying until resume runs by hand.
+# removes the park record; a checkout or relaunch failure keeps it with
+# resume_error=, which crew state reports as blocked and which stops tick
+# retrying until resume runs by hand.
 #
 # land waits for any other park action on the lane to finish, runs
 # bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
@@ -130,11 +135,11 @@
 # removes and prints nothing, so the next tick retries. A quiet tick prints
 # nothing.
 #
-# A lane action started by tick (park, resume) or by the merge poll (land) runs
+# A lane action started by tick (park, release, resume) or by the merge poll (land) runs
 # detached, as fm-park.sh run, in its own process group with stdio closed, so it
 # outlives the watcher iteration that started it and no tick or watcher budget
 # can cut it short. It takes the lane's lock itself (state/.review-park-<id>.lock,
-# held by every park, resume and land), so a lane runs one action at a time and
+# held by every park, release, resume and land), so a lane runs one action at a time and
 # tick skips a lane whose lock is held. Its stdout outcome line, if any, is
 # published as state/.review-park-report-<id>-<epoch>-<pid> (a park refusal
 # prints none), and the next tick reports it.

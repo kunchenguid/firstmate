@@ -49,8 +49,8 @@
 # refresh_remote_refs has updated those refs from each remote when the local ones
 # do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# the forge (GitHub, Forgejo, or - only when config/park-on-review or
-# config/auto-land opts this home in - a GitLab merge request) reports a PR head
+# the forge (GitHub, Forgejo, or a GitLab merge request with landing opt-in as
+# documented in docs/configuration.md under "Park on review") reports a PR head
 # that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
@@ -159,6 +159,11 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# For a lane released on review, an absent or different slot claim plus the
+# matching release record and its endpoint closure proof let cleanup skip the
+# former copy. Teardown checks the current branch tip in the project clone
+# before deleting that branch, since the retained ref can move after release.
+# If the task still owns the slot, the normal worktree safeguards apply.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -1740,7 +1745,7 @@ EOF
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
 # The GitLab merged-MR read is opt-in with the park-on-review flags
-# (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
+# (bin/fm-park.sh, docs/configuration.md "Park on review"); without an opt-in a
 # GitLab MR goes through the GitHub read like any other target.
 gitlab_mr_landing_opted_in() {
   [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/release-on-review" ] || [ -e "$CONFIG/auto-land" ]

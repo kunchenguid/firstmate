@@ -411,58 +411,6 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
   esac
 }
 
-# fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
-# that an endpoint reading `missing` is actually GONE rather than merely
-# unreachable from this seat. Call it only for a raw state that
-# fm_control_absence_recheck_applies accepts.
-#
-# Prints "<verdict>\t<reason>" - always exactly one TAB, so a caller splits
-# unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is empty
-# except on `unproven`, where it is the concrete sentence the caller's refusal
-# message embeds. It is returned on stdout rather than set in a variable
-# because every caller reads this through a command substitution, where an
-# assignment made here could never reach them.
-#
-# The verdicts:
-#   gone     - absence is PROVEN. There is no endpoint and therefore no agent.
-#   dead     - the endpoint is there after all and holds no agent.
-#   alive    - the endpoint is there and an agent is running in it.
-#   unproven - neither could be established; the caller must refuse.
-#
-# fm_backend_agent_state's `missing` conflates "the endpoint was DESTROYED"
-# with "the endpoint is UNREACHABLE from here right now". An unreachable
-# endpoint can still hold a live agent on the task's worktree, so every caller
-# that would act on absence - `exit` claiming the agent stopped, `relaunch`
-# re-creating the endpoint - must come through here rather than trusting the
-# raw verdict.
-#
-# Whether absence is provable AT ALL is a property of the backend, not of the
-# reading:
-#   herdr CAN prove it. Every read goes through fm_backend_herdr_cli, which
-#     passes `--session <session>`, so the recheck starts and reads the session
-#     the RECORD names, through that session's own socket. The answer is about
-#     the task's endpoint and nothing else.
-#   rex CAN prove it. Rex never reuses an id, a session never survives its
-#     server, and a missing target is a structured not-found (exit 3) distinct
-#     from an unreachable server (exit 4). So a not-found from the server the
-#     task was CREATED on proves the block gone. The record names that server
-#     (rex_server, from the task's [meta]); the recheck refuses unless the
-#     server this process reaches - starting a stopped personal server, which
-#     then answers with authority - is that one.
-#   t3code has a native absence verdict: `missing` means archived or not found
-#     on the verified server, while an unreachable server reads `unreadable`.
-#     The proof re-reads the thread, but exit and relaunch refuse before it:
-#     V2 has no session stop and a thread cannot host a replacement.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven`. Relaunch alone can instead use the matching one-use
-#     closure proof recorded by release-on-review; ordinary exit still refuses.
-#
-# Both control-plane callers share this one implementation so the proof cannot
-# drift into two answers for the same endpoint.
 fm_control_remove_worktree_wiring() {  # <meta> <worktree> <state> <id>
   local meta=$1 wt=$2 state=$3 id=$4 path harness
   rm -f "$wt/.claude/settings.local.json" "$wt/.opencode/plugins/fm-turn-end.js" \
@@ -491,6 +439,55 @@ fm_control_release_closed() {  # <meta> <backend> <target>
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]
 }
 
+# fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
+# that an endpoint reading `missing` is actually GONE rather than merely
+# unreachable from this seat. Call it only for a raw state that
+# fm_control_absence_recheck_applies accepts.
+#
+# Prints "<verdict>\t<reason>" - always exactly one TAB, so a caller splits
+# unambiguously with ${raw%%$'\t'*} and ${raw#*$'\t'}. The reason is empty
+# except on `unproven`, where it is the concrete sentence the caller's refusal
+# message embeds. It is returned on stdout rather than set in a variable
+# because every caller reads this through a command substitution, where an
+# assignment made here could never reach them.
+#
+# The verdicts:
+#   gone     - absence is PROVEN. There is no endpoint and therefore no agent.
+#   dead     - the endpoint is there after all and holds no agent.
+#   alive    - the endpoint is there and an agent is running in it.
+#   unproven - neither could be established; the caller must refuse.
+#
+# fm_backend_agent_state's `missing` conflates "the endpoint was DESTROYED"
+# with "the endpoint is UNREACHABLE from here right now". An unreachable
+# endpoint can still hold a live agent on the task's worktree, so every caller
+# that would act on absence - `exit` claiming the agent stopped, `relaunch`
+# re-creating the endpoint - must obtain a proof before trusting the raw
+# verdict. This function owns the live check.
+#
+# Whether absence is provable AT ALL is a property of the backend, not of the
+# reading:
+#   herdr CAN prove it. Every read goes through fm_backend_herdr_cli, which
+#     passes `--session <session>`, so the recheck starts and reads the session
+#     the RECORD names, through that session's own socket. The answer is about
+#     the task's endpoint and nothing else.
+#   rex CAN prove it. Rex never reuses an id, a session never survives its
+#     server, and a missing target is a structured not-found (exit 3) distinct
+#     from an unreachable server (exit 4). So a not-found from the server the
+#     task was CREATED on proves the block gone. The record names that server
+#     (rex_server, from the task's [meta]); the recheck refuses unless the
+#     server this process reaches - starting a stopped personal server, which
+#     then answers with authority - is that one.
+#   t3code has a native absence verdict: `missing` means archived or not found
+#     on the verified server, while an unreachable server reads `unreadable`.
+#     The proof re-reads the thread, but exit and relaunch refuse before it:
+#     V2 has no session stop and a thread cannot host a replacement.
+#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
+#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
+#     carry the endpoint's socket identity - so a different but running server
+#     would answer "not anywhere" about a window it was never able to see.
+#     There is no read available here that closes that gap, so tmux always
+#     returns `unproven`. See fm_control_release_closed for the review-resume
+#     path, which relies on a recorded close instead of a live absence check.
 fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
   local backend=${1-} target=${2-} meta=${3-}
   fm_backend_source "$backend" \
