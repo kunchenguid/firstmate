@@ -82,13 +82,6 @@ QUAR_DAYS=$(ak47_conf quarantine_days 7)
 QUAR_MAX=$(ak47_conf quarantine_expire_max 200)
 MAX_ENTRIES=$(ak47_conf tmp_max_entries 5000)
 MAX_MOVES=$(ak47_conf tmp_max_moves 2000)
-# The class a finding files under in firstmate's inbox. fm-inbox accepts only a
-# fixed vocabulary (captain: text|voice; automated: sentry|lane-tick|ci|watch|
-# health), and an unknown class exits 1 - which the delivery gate below reads as
-# "not delivered" and correctly refuses to commit the dedupe key. That is how
-# every ak47 finding went undelivered while the gate kept reporting FAILED
-# instead of SILENT: the class was simply not in the vocabulary.
-INBOX_CLASS=${AK47_INBOX_CLASS:-health}
 SWAP_ARMED=$(ak47_conf_bool swap_pressure 0)
 FAT_ARMED=$(ak47_conf_bool fat_process 0)
 FAT_GB=$(ak47_conf fat_process_gb 3)
@@ -458,31 +451,10 @@ line="tick mode=$([ "$APPLY" -eq 1 ] && echo apply || echo dry-run) tmp_before=$
 ak47_log "$DEVOPS_LOG" "$line"
 
 # Findings the table cannot settle: durable, rate-limited, and delivered to the
-# chair's inbox so a lane can pick them up. One key per finding per 6 h.
+# chair's inbox so a lane can pick them up. One key per finding per 6 h; the
+# delivery and dedupe contract is owned by ak47_deliver_findings.
 if [ "${#findings[@]}" -gt 0 ]; then
-  mkdir -p "$AK47_STATE/keys" 2>/dev/null || true
-  # The dedupe key is committed only after the note is actually delivered. A
-  # key touched before a failed send silences the finding for six hours: the
-  # same defect the health beat had, in the other half of the same system.
-  fresh=(); freshkeys=()
-  for f in "${findings[@]}"; do
-    key=${f%%|*}; msg=${f#*|}
-    kf="$AK47_STATE/keys/$key"
-    if [ ! -f "$kf" ] || [ $(( $(ak47_epoch) - $(stat -c %Y "$kf" 2>/dev/null || echo 0) )) -gt 21600 ]; then
-      ak47_log "$FIND_LOG" "$key $msg"
-      fresh+=("$msg"); freshkeys+=("$kf")
-    fi
-  done
-  if [ "${#fresh[@]}" -gt 0 ]; then
-    body=$(printf '%s; ' "${fresh[@]}")
-    if [ -x "$FM_HOME/bin/fm-inbox.sh" ] && \
-       "$FM_HOME/bin/fm-inbox.sh" note --source "$INBOX_CLASS" \
-         "ak47 hygiene: ${body}board $AK47_STATE/status.md" >/dev/null 2>&1; then
-      for kf in "${freshkeys[@]}"; do touch "$kf" 2>/dev/null || true; done
-    else
-      ak47_log "$FIND_LOG" "DELIVERY-FAILED ${#fresh[@]} finding(s) not delivered; dedupe keys not committed"
-    fi
-  fi
+  ak47_deliver_findings "$FIND_LOG" "ak47 hygiene" "$AK47_STATE/status.md" "${findings[@]}" || true
 fi
 
 # Refresh the board every run so status.md is never older than one interval.

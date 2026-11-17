@@ -197,6 +197,8 @@ fi
   echo "# ak47 health $et ($now)"
   echo "load $l1 / $l5 / $l15 on $CORES threads | RAM ${mem_av}/${mem_tot} GB free | swap ${sw_pct}% | pressure cpu $cpu_some mem-full $mem_full io-full $io_full"
   echo "disk ${root_pct}% | /tmp ${tmp_g} GB | inotify $ino/$ino_max | CPU ${tctl}°C NVMe ${nvt}°C | net $route_if ${freq}MHz ${rssi}dBm ${link}Mbit | agents $agents | watcher ${beat}s"
+  # the last agent-reclaim run (ak47/guards/agent-reclaim.sh, every 15 min), as one line
+  [ -r "$SD/agent-reclaim.line" ] && cut -d' ' -f2- "$SD/agent-reclaim.line"
   echo; echo "## findings"; [ ${#finds[@]} -eq 0 ] && echo "none"; for f in "${finds[@]}"; do echo "- ${f#*|}"; done
   echo; echo "## automatic fixes this run"; [ ${#fixes[@]} -eq 0 ] && echo "none"; for f in "${fixes[@]}"; do echo "- $f"; done
 } >"$SD/health-latest.md"

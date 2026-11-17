@@ -50,6 +50,7 @@ PAYLOAD_FILES=(
   budget.conf
   census-producers.conf
   census.sh
+  guards/agent-reclaim.sh
   guards/cleanup-patterns.conf
   guards/guard-producers.sh
   lib/classify.py
@@ -110,6 +111,7 @@ OWNED=(
   ansible/playbooks/files/ak47/budget.conf
   ansible/playbooks/files/ak47/census-producers.conf
   ansible/playbooks/files/ak47/census.sh
+  ansible/playbooks/files/ak47/guards/agent-reclaim.sh
   ansible/playbooks/files/ak47/guards/cleanup-patterns.conf
   ansible/playbooks/files/ak47/guards/guard-producers.sh
   ansible/playbooks/files/ak47/lib/classify.py
@@ -132,6 +134,8 @@ OWNED=(
   ansible/playbooks/templates/ak47-health.timer
   ansible/playbooks/templates/ak47-devops.service
   ansible/playbooks/templates/ak47-devops.timer
+  ansible/playbooks/templates/ak47-agent-reclaim.service
+  ansible/playbooks/templates/ak47-agent-reclaim.timer
   ansible/playbooks/templates/ak47-devops-weekly.service
   ansible/playbooks/templates/ak47-devops-weekly.timer
   ansible/playbooks/templates/ak47-swap-reclaim.service

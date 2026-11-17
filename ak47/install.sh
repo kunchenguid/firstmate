@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ak47/install.sh - put the hygiene system on this box, and say how to take it off.
 #
-# Installs two user timers (the 5-minute tick and the Monday review), seeds the
-# operator config if it is absent, records the first census baseline, and runs
-# one tick so the log is provably alive before the script exits.
+# Installs three user timers (the 5-minute tick, the 15-minute agent reclaim,
+# and the Monday review), seeds the operator config if it is absent, records the
+# first census baseline, and runs one tick and one dry-run reclaim so both are
+# provably alive before the script exits.
 #
 # Idempotent: running it twice changes nothing the second time.
 # Reversible: --uninstall removes the units and leaves every log, every
@@ -51,7 +52,8 @@ run_nonfatal() {
   fi
 }
 
-UNITS="ak47-devops.service ak47-devops.timer ak47-devops-weekly.service ak47-devops-weekly.timer"
+UNITS="ak47-devops.service ak47-devops.timer ak47-agent-reclaim.service ak47-agent-reclaim.timer ak47-devops-weekly.service ak47-devops-weekly.timer"
+TIMERS="ak47-devops.timer ak47-agent-reclaim.timer ak47-devops-weekly.timer"
 
 # ---- uninstall -----------------------------------------------------------------
 if [ "$UNINSTALL" = 1 ]; then
@@ -79,7 +81,7 @@ echo "state: $AK47_STATE"
 echo "units: $UNIT_DIR"
 echo
 
-for f in tick.sh status.sh census.sh weekly-review.sh guards/guard-producers.sh; do
+for f in tick.sh status.sh census.sh weekly-review.sh guards/guard-producers.sh guards/agent-reclaim.sh; do
   [ -x "$AK47_ROOT/$f" ] || { echo "install.sh: $f is missing or not executable" >&2; exit 1; }
 done
 command -v systemctl >/dev/null || { echo "install.sh: no systemctl on this box" >&2; exit 1; }
@@ -158,6 +160,18 @@ else
   fi
   echo "first tick ok: $(tail -n 1 "$AK47_STATE/devops.log" 2>/dev/null)"
 fi
+# The reclaim's first run is a dry run: it proves the census can read every home
+# before the timer is trusted, and it stops nothing.
+if [ "$DRY" = 1 ]; then
+  echo "would: $AK47_ROOT/guards/agent-reclaim.sh --dry-run"
+else
+  if ! "$AK47_ROOT/guards/agent-reclaim.sh" --dry-run; then
+    echo "install.sh: the first agent reclaim dry run failed; the timers are NOT enabled" >&2
+    echo "install.sh: inspect $AK47_STATE/agent-reclaim.log and re-run after fixing" >&2
+    exit 1
+  fi
+  echo "first reclaim ok: $(tail -n 1 "$AK47_STATE/agent-reclaim.log" 2>/dev/null)"
+fi
 
 # ---- census baseline -----------------------------------------------------------
 # Recorded once, here, so the guard's dynamic check has a reference that the
@@ -173,7 +187,7 @@ fi
 # ---- enable --------------------------------------------------------------------
 echo
 echo "== enabling =="
-for u in ak47-devops.timer ak47-devops-weekly.timer; do
+for u in $TIMERS; do
   run systemctl --user enable "$u"
   [ "$START" = 1 ] && run systemctl --user start "$u"
 done
@@ -184,9 +198,10 @@ if [ "$DRY" = 1 ]; then
   echo "Dry run: nothing was changed."
   exit 0
 fi
-systemctl --user list-timers 'ak47-devops*' --no-pager 2>/dev/null || true
+systemctl --user list-timers 'ak47-*' --no-pager 2>/dev/null || true
 echo
 echo "Read the budget:   $AK47_ROOT/status.sh --print"
 echo "Read the log:      tail -n 20 $AK47_STATE/devops.log"
 echo "Check the guards:  $AK47_ROOT/guards/guard-producers.sh"
+echo "Read the reclaim:  $AK47_ROOT/guards/agent-reclaim.sh --dry-run --print"
 echo "Take it off:       $AK47_ROOT/install.sh --uninstall"

@@ -1,0 +1,12 @@
+[Unit]
+Description=ak47: agent reclaim every 15 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+AccuracySec=1min
+# A missed run is not worth a catch-up burst: the next run sees the same agents.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

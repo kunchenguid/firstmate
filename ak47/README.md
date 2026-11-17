@@ -19,7 +19,7 @@ paying for it. This directory is the rest of the answer.
 | 1 | A budget with numbers | `budget.conf`, rendered by `status.sh` |
 | 2 | A producer census that stops growth at source | `census.sh`, `census-producers.conf`, `bin/fm-spawn.sh` |
 | 3 | A deterministic tick | `tick.sh`, `units/ak47-devops.timer` |
-| 4 | A guard on each producer | `guards/guard-producers.sh`, `guards/cleanup-patterns.conf` |
+| 4 | A guard on each producer, and an agent reclaim | `guards/guard-producers.sh`, `guards/cleanup-patterns.conf`, `guards/agent-reclaim.sh`, `units/ak47-agent-reclaim.timer` |
 | 5 | Codification and self-monitoring | `hdevops/`, and the tick's own `loop_gap` |
 | 6 | A weekly review that proposes diffs | `weekly-review.sh`, `units/ak47-devops-weekly.timer` |
 
@@ -94,7 +94,8 @@ $ ak47/status.sh --print
 | `tmp_gb` | 20 | a week of live scratch fits in 20 GB; 163 GB was leaked test scratch |
 | `root_disk_pct` | 85 | ext4 fragments badly past 85%; 540 GB of headroom remains |
 | `tmux_core_pct` | 100 | the tmux server idles at ~74% of one core with 81 panes |
-| `agent_count` | 160 | 160 agents is where per-agent CPU share crosses the load ceiling |
+| `agent_count` | 96 | 3 per thread; 2026-11-17 hit load 121 with 218-232 resident agents, because per-agent polling scales with count, not work |
+| `home_children` | 6 | 2026-11-17 one secondmate home held 42 child agents and another 29; a home's `config/*-cap` file overrides |
 | `pids_pct` | 80 | 2026-11-14 the uid hit 12000 of 12000 tasks and every fork failed for 5 h; 80% is where ordinary bursts still fit |
 
 A ceiling without a reason is a number nobody can defend, so `budget.conf`
@@ -265,6 +266,31 @@ Four independent checks:
   fails here instead of shipping stale code to a rebuild.
 
 Without this, the source fix rots and the sweeper becomes load-bearing again.
+
+### The agent reclaim
+
+Agents are a producer too.
+On 2026-11-17 the box reached load 121 on 32 threads with 218-232 resident
+agents, dozens of them leftovers whose task no home still recorded or that had
+not reported for a day.
+The load came from per-agent polling, which scales with how many agents are
+resident, not with how much work they do.
+
+```
+$ ak47/guards/agent-reclaim.sh --dry-run --print   # what the next run would stop, and why
+$ ak47/guards/agent-reclaim.sh --stop-watcher <home>  # a dead home's own watcher, by its recorded pid
+```
+
+Every 15 minutes the reclaim maps each resident agent to its home and task, then
+stops an orphan (no task record in any home), an idle task (no report for a
+day), and the oldest excess over `agent_count` or a home's `home_children` cap,
+finished work first.
+A working agent, a chair, a secondmate's own agent, a task whose `*.check.sh` is
+armed, and anything on `~/.config/ak47/reclaim-keep` is never stopped.
+It never deletes a worktree, tears down a task, or sends `SIGKILL`; every stop
+is one `reap.log` line with its revert, and what it cannot settle is a finding.
+The script's header (`--help`) owns the exact classes, vetoes, knobs, and exit
+codes.
 
 ## 5. Codification and self-monitoring
 
@@ -506,7 +532,7 @@ run, so the trend is provable without a second source.
 
 ```
 $ ak47/install.sh --dry-run     # show every action
-$ ak47/install.sh               # install, run one tick, record the baseline
+$ ak47/install.sh               # install, run one tick and one dry-run reclaim, record the baseline
 $ ak47/install.sh --uninstall   # remove the units, keep every log
 ```
 
@@ -529,6 +555,7 @@ default. Absent keys take the default in the right-hand column.
 | `fat_process_gb` | 3 | the RSS a process must hold to count as fat |
 | `fat_process_min` | 10 | minutes a fat process must hold it before it is reported |
 | `interval_seconds` | 300 | the timer's period, so the tick can notice its own loop has stopped |
+| `reclaim_*` | see `--help` | the agent reclaim's thresholds; `guards/agent-reclaim.sh --help` owns the list |
 
 A fat process that ignores `SIGTERM` is `SIGKILL`ed after five minutes. The
 escalation clock is `~/.local/state/ak47/fat.term`, so it survives across ticks,
@@ -543,8 +570,9 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-121 tests across seven files: the budget, the census, the guards, the guarded
-delete, the big-entry take-down, the tick, and the weekly review. They are
+135 tests across eight files: the budget, the census, the guards, the agent
+reclaim, the guarded delete, the big-entry take-down, the tick, and the weekly
+review. They are
 hermetic — no tmux, no network, no live fleet state — and registered as
 `pure-contract-unit` in `bin/fm-test-run.sh`.
 
