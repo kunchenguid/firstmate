@@ -142,6 +142,17 @@ printf 'host=%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_LOG"
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
+    # Opt-in per-call reply sequence: FM_TEST_GH_GRAPHQL_SEQ_DIR holds reply
+    # files 1, 2, ... served in order with a .n counter; callers without it
+    # (every existing case) keep the default block below unchanged.
+    if [ -n "${FM_TEST_GH_GRAPHQL_SEQ_DIR:-}" ] && [ -d "$FM_TEST_GH_GRAPHQL_SEQ_DIR" ]; then
+      n=$(cat "$FM_TEST_GH_GRAPHQL_SEQ_DIR/.n" 2>/dev/null || printf '0')
+      printf '%s\n' "$((n + 1))" > "$FM_TEST_GH_GRAPHQL_SEQ_DIR/.n"
+      if [ -f "$FM_TEST_GH_GRAPHQL_SEQ_DIR/$((n + 1))" ]; then
+        cat "$FM_TEST_GH_GRAPHQL_SEQ_DIR/$((n + 1))"
+        exit 0
+      fi
+    fi
     printf '%s\n' \
       "state=${FM_TEST_GH_GRAPHQL_STATE:-MERGED}" \
       "merged=${FM_TEST_GH_GRAPHQL_MERGED:-true}" \
@@ -181,6 +192,11 @@ case " $* " in
     printf '%s\n' '[[]]'
     ;;
   *" api --paginate repos/"*"/rules/branches/"*merge_queue*)
+    # Opt-in merge-queue rules for the queue-at-green arm; the default case
+    # (no file) keeps answering that the base has no merge queue.
+    if [ -n "${FM_TEST_GH_QUEUE_RULES:-}" ] && [ -f "$FM_TEST_GH_QUEUE_RULES" ]; then
+      cat "$FM_TEST_GH_QUEUE_RULES"
+    fi
     ;;
   *" api --paginate repos/"*"/rules/branches/"*)
     printf '%s\n' '[]'
@@ -852,6 +868,162 @@ test_github_merge_arms_a_deploy_watch_that_wakes_once() {
     [ ! -e "$state/$id.deploy-watch" ] || fail "the $id deploy watch was not retired"
   done
   pass "a recorded GitHub merge arms a deploy watch that wakes once with its verdicts"
+}
+
+# A no-mistakes state database whose runs row covers the given head exactly,
+# so bin/fm-nm-run-lib.sh's coverage read (NM_HOME) answers covered for the
+# run id the fake no-mistakes prints (RUNFIXTURE). Args: dir [head]
+write_arm_nm_coverage() {
+  local dir=$1 head=${2:-$(printf '%040d' 91)}
+  mkdir -p "$dir/nm"
+  python3 - "$dir/nm/state.sqlite" "$head" <<'PY'
+import sqlite3, sys
+database, head = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, branch TEXT,"
+               " status TEXT, head_sha TEXT, review_approved_head_sha TEXT)")
+    db.execute("INSERT OR REPLACE INTO runs"
+               " (id, branch, status, head_sha, review_approved_head_sha)"
+               " VALUES ('RUNFIXTURE', 'fm/task', 'completed', ?, ?)", (head, head))
+PY
+}
+
+queue_arm_wake_rows() {  # <state>
+  awk -F'\t' 'index($5, "check: ") == 1 && index($5, " queue arm ") > 0 { print $5 }' \
+    "$1/.wake-queue" 2>/dev/null
+}
+
+test_registration_arms_the_merge_queue_at_green() {
+  local dir state url head rc
+  dir=$(make_case queue-arm-registration)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/99
+  head=$(printf '%040d' 91)
+  write_task_meta "$dir"
+  printf 'yolo=on\n' >> "$state/task-a.meta"
+  printf 'merge_method=SQUASH\n' > "$dir/github-queue-rules"
+  write_arm_nm_coverage "$dir" "$head"
+  mkdir -p "$dir/graphql-seq"
+  printf 'id=PR_99\nstate=OPEN\nmerged=false\nqueued=false\nentry=\nhead=%s\nbranch=fm/task\nremoved_at=\nremoved_reason=\n' \
+    "$head" > "$dir/graphql-seq/1"
+  printf 'id=PR_99\nstate=OPEN\nmerged=false\nqueued=true\nentry=AWAITING_CHECKS\nhead=%s\nbranch=fm/task\nremoved_at=\nremoved_reason=\n' \
+    "$head" > "$dir/graphql-seq/2"
+
+  set +e
+  FM_TEST_GH_GRAPHQL_SEQ_DIR="$dir/graphql-seq" FM_TEST_GH_QUEUE_RULES="$dir/github-queue-rules" \
+    FM_TEST_GH_HEAD="$head" NM_HOME="$dir/nm" \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-arm-registration: registration with an arm must succeed"
+  [ -e "$state/task-a.check.sh" ] \
+    || fail "queue-arm-registration: the task check was not published"
+  assert_grep "pr merge 99 --repo o/r --match-head-commit $head --auto --squash" \
+    "$dir/gh.log" "queue-arm-registration: the merge-when-ready request was not bound to the verified head"
+  [ -f "$state/task-a.queue-arm" ] \
+    || fail "queue-arm-registration: registration did not leave a queue-arm record"
+  assert_grep "head=$head" "$state/task-a.queue-arm" \
+    "queue-arm-registration: the arm record does not bind the verified head"
+  assert_grep 'reenqueues=0' "$state/task-a.queue-arm" \
+    "queue-arm-registration: the arm record already spent its requeue"
+  [ -f "$state/task-a.merge-authority" ] \
+    || fail "queue-arm-registration: the arm did not persist the merge authority"
+  assert_grep 'queue arm: ' "$dir/stderr" \
+    "queue-arm-registration: the arm reported nothing on stderr"
+  assert_no_grep 'queue arm' "$dir/stdout" \
+    "queue-arm-registration: the arm wrote to stdout, which registration owns"
+  pass "registration arms a merge queue at green bound to the verified head"
+}
+
+test_registration_leaves_no_queue_arm_without_yolo_a_merge_rerecord_or_a_queue() {
+  local dir state url head rc
+  url=https://github.com/o/r/pull/99
+  head=$(printf '%040d' 91)
+
+  # Yolo off: a captain approves each merge, so nothing is armed.
+  dir=$(make_case queue-arm-no-yolo)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'yolo=off\n' >> "$state/task-a.meta"
+  set +e
+  FM_TEST_GH_HEAD="$head" run_check_entry "$dir" task-a "$url" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "queue-arm-no-yolo: a non-yolo registration must succeed"
+  [ ! -e "$state/task-a.queue-arm" ] \
+    || fail "queue-arm-no-yolo: an arm was left without the yolo posture"
+  assert_no_grep 'pr merge' "$dir/gh.log" "queue-arm-no-yolo: gh pr merge ran"
+  assert_grep 'queue arm: https://github.com/o/r/pull/99 was not armed: the task is not in the yolo posture' \
+    "$dir/stderr" "queue-arm-no-yolo: the skipped arm reported nothing"
+
+  # The merge re-record path must not arm again.
+  dir=$(make_case queue-arm-merge-rerecord)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'yolo=on\n' >> "$state/task-a.meta"
+  set +e
+  FM_PR_CHECK_MERGE=1 FM_TEST_GH_HEAD="$head" run_check_entry "$dir" task-a "$url" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "queue-arm-merge-rerecord: the merge re-record must succeed"
+  [ ! -e "$state/task-a.queue-arm" ] \
+    || fail "queue-arm-merge-rerecord: the merge re-record armed the queue"
+  assert_no_grep 'pr merge' "$dir/gh.log" "queue-arm-merge-rerecord: gh pr merge ran"
+
+  # A project without a merge queue rule arms nothing and is not an error.
+  dir=$(make_case queue-arm-no-queue)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  printf 'yolo=on\n' >> "$state/task-a.meta"
+  set +e
+  FM_TEST_GH_HEAD="$head" run_check_entry "$dir" task-a "$url" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "queue-arm-no-queue: a queue-less project must register fine"
+  [ ! -e "$state/task-a.queue-arm" ] \
+    || fail "queue-arm-no-queue: an arm was left without a merge queue rule"
+  assert_no_grep 'pr merge' "$dir/gh.log" "queue-arm-no-queue: gh pr merge ran"
+  assert_grep 'was not armed: base branch main has no merge queue rule' \
+    "$dir/stderr" "queue-arm-no-queue: the skipped arm reported nothing"
+  pass "registration leaves no queue arm without yolo, on a merge re-record, or without a merge queue"
+}
+
+test_queue_arm_sweep_wakes_once_on_the_second_failed_checks_ejection() {
+  local dir state url head rc
+  dir=$(make_case queue-arm-sweep)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/99
+  head=$(printf '%040d' 91)
+  write_poll_meta "$state" task-a "$url" 'kind=ship' 'mode=no-mistakes'
+  printf 'head=%s\narmed=1700000000\nreenqueues=1\nbaseline=2026-09-14T10:00:00Z\n' \
+    "$head" > "$state/task-a.queue-arm"
+  chmod 0600 "$state/task-a.queue-arm"
+  mkdir -p "$dir/graphql-seq"
+  printf 'id=PR_99\nstate=OPEN\nmerged=false\nqueued=false\nentry=\nhead=%s\nbranch=fm/task\nremoved_at=2026-09-14T11:00:00Z\nremoved_reason=failed_checks\n' \
+    "$head" > "$dir/graphql-seq/1"
+
+  rm -f "$state/.wake-queue" "$state/.watcher-down"
+  set +e
+  FM_TEST_GH_GRAPHQL_SEQ_DIR="$dir/graphql-seq" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "queue-arm-sweep: the watch cycle failed: rc=$rc $(head -3 "$dir/watch.err")"
+  [ "$(queue_arm_wake_rows "$state" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "queue-arm-sweep: the arm did not wake exactly once: $(queue_arm_wake_rows "$state")"
+  case "$(queue_arm_wake_rows "$state")" in
+    "check: task-a queue arm blocked: $url left the merge queue a second time after failed checks at head $head; firstmate decides the next step") ;;
+    *) fail "queue-arm-sweep: the wake did not report the second ejection: $(queue_arm_wake_rows "$state")" ;;
+  esac
+  [ ! -e "$state/task-a.queue-arm" ] \
+    || fail "queue-arm-sweep: the spent arm record survived its terminal wake"
+  pass "the queue-arm sweep wakes once with a second failed-checks ejection"
 }
 
 test_ado_conflict_wakes_once_per_conflict() {
@@ -3663,7 +3835,10 @@ test_authority_persistence_refuses_rebound_metadata() {
 SH
   chmod +x "$dir/rebind.sh"
   set +e
-  FM_TEST_GH_MERGE_HOOK="$dir/rebind.sh" \
+  # FM_PR_CHECK_MERGE=1: this re-record runs inside a merge's gh call
+  # (simulated by the fake-gh hook), so its fm-pr-check must take the
+  # merge-context path and not arm the queue while the merge holds the lock.
+  FM_TEST_GH_MERGE_HOOK="$dir/rebind.sh" FM_PR_CHECK_MERGE=1 \
     FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
     FM_TEST_GH_GRAPHQL_QUEUED=true \
     run_merge_entry "$dir" task-a "$url_a" > "$dir/merge.out" 2> "$dir/merge.err"
@@ -4237,6 +4412,9 @@ test_ado_conflict_wakes_once_per_conflict
 test_merged_outcome_row_carries_poll_detail
 test_deploy_poll_verdicts
 test_github_merge_arms_a_deploy_watch_that_wakes_once
+test_registration_arms_the_merge_queue_at_green
+test_registration_leaves_no_queue_arm_without_yolo_a_merge_rerecord_or_a_queue
+test_queue_arm_sweep_wakes_once_on_the_second_failed_checks_ejection
 test_github_enterprise_config_resolution
 test_github_enterprise_hosts
 test_gitlab_merge_watch

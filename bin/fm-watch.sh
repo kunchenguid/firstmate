@@ -4666,6 +4666,42 @@ EOF
       touch "$STATE/.last-check"
       wake "$reason"
     done
+    # Queue-at-green arms written by fm-pr-merge.sh's --queue-at-green mode
+    # outlive the registration turn, so like deploy watches they are swept
+    # here rather than as task checks. bin/fm-pr-merge.sh --queue-requeue owns
+    # the whole decision (still waiting for green checks, queued, merged, a
+    # head that moved, one automatic re-enqueue after a failed-checks
+    # ejection at the unchanged head, a second ejection reported) and retires
+    # the arm record itself on every terminal outcome; its stdout is exactly
+    # one terminal line when the arm ends, which wakes once, and nothing
+    # otherwise. Only an arm whose task no longer records a pr= is retired
+    # here, quietly, because no pull request remains to sweep. The mode runs
+    # under the same CHECK_TIMEOUT as every checked observation.
+    for queue_arm in "$STATE"/*.queue-arm; do
+      [ -e "$queue_arm" ] || [ -L "$queue_arm" ] || continue
+      id=$(basename "$queue_arm" .queue-arm)
+      if ! fm_pr_task_id_valid "$id"; then
+        rm -f "$queue_arm"
+        triage_log "removed unreadable queue arm $queue_arm"
+        continue
+      fi
+      url=$(fm_meta_get "$STATE/$id.meta" pr)
+      if [ -z "$url" ]; then
+        rm -f "$queue_arm"
+        triage_log "queue arm for $id retired quietly: the task records no pr="
+        continue
+      fi
+      run_check_capture "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" --queue-requeue || exit 1
+      out=${FM_CHECK_RESULT%%$'\n'*}
+      case "$out" in
+        'queue arm disarmed: '*|'queue arm blocked: '*) ;;
+        *) continue ;;
+      esac
+      reason="check: $id $out"
+      fm_wake_append check "queue-arm-$id-$url" "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1

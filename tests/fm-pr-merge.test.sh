@@ -2934,6 +2934,83 @@ assert_nothing_enqueued_or_merged() {
   assert_no_grep 'pr merge' "$case_dir/gh.log" "$label: gh pr merge ran"
 }
 
+# A no-mistakes run record whose review covers the queue head exactly, the way
+# bin/fm-nm-run-lib.sh reads it: <case>/nm/state.sqlite holds the runs table
+# (FM_PR_MERGE_NM_* reads it through NM_HOME), and nm-status answers
+# `axi status` with that run id driving the task branch through CI, so the
+# arm's FM-3 step ends it with a handoff. A verdict of stale stores an
+# approved head that is not the armed head; unverified stores no row at all.
+# Args: case_dir [covered|stale|unverified] [head]
+write_nm_run_coverage() {
+  local case_dir=$1 verdict=${2:-covered} head=${3:-$QUEUE_HEAD}
+  mkdir -p "$case_dir/nm"
+  python3 - "$case_dir/nm/state.sqlite" "$head" "$verdict" <<'PY'
+import sqlite3, sys
+database, head, verdict = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.execute("CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, branch TEXT,"
+               " status TEXT, head_sha TEXT, review_approved_head_sha TEXT)")
+    if verdict == "covered":
+        db.execute("INSERT OR REPLACE INTO runs"
+                   " (id, branch, status, head_sha, review_approved_head_sha)"
+                   " VALUES ('01RUN', 'fm/queue-branch', 'ci', ?, ?)", (head, head))
+    elif verdict == "stale":
+        db.execute("INSERT OR REPLACE INTO runs"
+                   " (id, branch, status, head_sha, review_approved_head_sha)"
+                   " VALUES ('01RUN', 'fm/queue-branch', 'ci', ?, ?)",
+                   (head, "f" + head[1:]))
+PY
+  printf 'run:\n  id: "01RUN"\n  branch: fm/queue-branch\n  status: ci\n  head_sha: %s\n' "$head" \
+    > "$case_dir/nm-status"
+}
+
+# A queue case whose task is in the yolo posture with its run's review
+# covering the queue head: everything --queue-at-green needs in order to arm.
+make_arm_case() {  # <name>
+  local name=$1 case_dir
+  case_dir=$(make_queue_case "$name")
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=on"
+  write_nm_run_coverage "$case_dir" covered
+  printf '%s\n' "$case_dir"
+}
+
+# A queue case whose task already records the pull request, ready for a
+# --queue-requeue sweep. Args: case_dir <reenqueues> <baseline>
+seed_queue_arm() {
+  local case_dir=$1 reenqueues=$2 baseline=$3
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "pr=$QUEUE_URL"
+  printf 'head=%s\narmed=1700000000\nreenqueues=%s\nbaseline=%s\n' \
+    "$QUEUE_HEAD" "$reenqueues" "$baseline" > "$case_dir/state/task-x1.queue-arm"
+  chmod 0600 "$case_dir/state/task-x1.queue-arm"
+}
+
+run_arm_mode() {  # <case_dir>
+  local case_dir=$1
+  shift
+  NM_HOME="$case_dir/nm" \
+    run_pr_merge "$case_dir" task-x1 "$QUEUE_URL" --queue-at-green \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+}
+
+run_requeue_mode() {  # <case_dir>
+  local case_dir=$1
+  shift
+  run_pr_merge "$case_dir" task-x1 "$QUEUE_URL" --queue-requeue \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+}
+
 test_github_queue_base_enqueues_and_waits_until_merged() {
   local case_dir rc posture
   for posture in attended away; do
@@ -3426,6 +3503,297 @@ test_github_queue_ignores_a_run_on_another_branch_or_none() {
   expect_code 0 "$rc" "queue-monitor-none: a task with no run must merge"
   assert_no_grep '^axi handoff' "$case_dir/nm.log" "queue-monitor-none: a handoff ran with no run"
   pass "fm-pr-merge leaves alone a no-mistakes run that is not on the queued branch"
+}
+
+test_github_queue_at_green_arms_enqueues() {
+  local case_dir rc
+  case_dir=$(make_arm_case queue-arm-green)
+  # CI is still running at the head being armed - that is exactly what a
+  # queue-at-green arm is for.
+  write_github_rollup_json "$case_dir" "$QUEUE_HEAD" \
+    "$(check_run ci IN_PROGRESS -)"
+  write_queue_read "$case_dir" 1 OPEN false false ''
+  write_queue_read "$case_dir" 2 OPEN false true AWAITING_CHECKS
+
+  set +e
+  run_arm_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-arm-green: arming a verified pull request must succeed"
+  assert_grep "pr merge 91 --repo example/repo --match-head-commit $QUEUE_HEAD --auto --squash" \
+    "$case_dir/gh.log" "queue-arm-green: the merge-when-ready request was not bound to the verified head"
+  assert_grep "queue arm: $QUEUE_URL is armed at head $QUEUE_HEAD (merge-when-ready, method squash)" \
+    "$case_dir/stderr" "queue-arm-green: the arm was not reported"
+  assert_no_grep 'queue arm' "$case_dir/stdout" \
+    "queue-arm-green: the arm wrote to stdout, which registration owns"
+  [ "$(grep -c '^enqueue' "$case_dir/events.log")" -eq 0 ] \
+    || fail "queue-arm-green: the arm enqueued directly instead of leaving the queue to GitHub"
+  grep -q '^handoff$' "$case_dir/events.log" \
+    || fail "queue-arm-green: the arm did not end the branch-driving no-mistakes run"
+  [ -f "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-arm-green: no queue-arm record was written"
+  assert_grep "head=$QUEUE_HEAD" "$case_dir/state/task-x1.queue-arm" \
+    "queue-arm-green: the arm record does not bind the verified head"
+  assert_grep 'reenqueues=0' "$case_dir/state/task-x1.queue-arm" \
+    "queue-arm-green: the arm record already spent its requeue"
+  assert_grep 'baseline=-' "$case_dir/state/task-x1.queue-arm" \
+    "queue-arm-green: the arm record did not baseline on no prior ejection"
+  [ -f "$case_dir/state/task-x1.merge-authority" ] \
+    || fail "queue-arm-green: the arm did not persist the accepted merge authority"
+  assert_grep "pr=$QUEUE_URL" "$case_dir/state/task-x1.meta" \
+    "queue-arm-green: the pull request was not recorded"
+  pass "fm-pr-merge --queue-at-green arms merge-when-ready bound to the verified head"
+}
+
+test_github_queue_at_green_failed_check_refuses() {
+  local case_dir rc
+  case_dir=$(make_arm_case queue-arm-red)
+  write_github_rollup_json "$case_dir" "$QUEUE_HEAD" \
+    "$(check_run ci COMPLETED FAILURE)"
+
+  set +e
+  run_arm_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "queue-arm-red: a completed failing check must refuse the arm"
+  assert_grep "refusing to arm the merge queue for $QUEUE_URL" "$case_dir/stderr" \
+    "queue-arm-red: the refusal did not name the pull request"
+  assert_grep "check 'ci' has failed" "$case_dir/stderr" \
+    "queue-arm-red: the failing check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "queue-arm-red: gh pr merge ran"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-arm-red: a refused arm still wrote a queue-arm record"
+  pass "fm-pr-merge --queue-at-green refuses a check that completed failing while pending checks are allowed"
+}
+
+test_github_queue_at_green_no_queue_rule_no_arm() {
+  local case_dir rc
+  case_dir=$(make_arm_case queue-arm-no-rule)
+  : > "$case_dir/github-rules"
+  write_queue_read "$case_dir" 1 OPEN false false ''
+
+  set +e
+  run_arm_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-arm-no-rule: a project without a merge queue is not an error"
+  assert_grep "queue arm: $QUEUE_URL was not armed: base branch main has no merge queue rule" \
+    "$case_dir/stderr" "queue-arm-no-rule: the missing queue rule was not reported"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "queue-arm-no-rule: gh pr merge ran"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-arm-no-rule: an arm record was written without a merge queue"
+  pass "fm-pr-merge --queue-at-green arms nothing on a project without a merge queue rule"
+}
+
+test_github_queue_at_green_requires_yolo_and_coverage() {
+  local case_dir rc
+  # Yolo off: a captain approves each merge, so nothing is armed and nothing
+  # is even read from the forge.
+  case_dir=$(make_queue_case queue-arm-no-yolo)
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "kind=ship" "mode=no-mistakes" "yolo=off"
+
+  set +e
+  run_arm_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-arm-no-yolo: a non-yolo task is not an error"
+  assert_grep "queue arm: $QUEUE_URL was not armed: the task is not in the yolo posture" \
+    "$case_dir/stderr" "queue-arm-no-yolo: the yolo gate did not report itself"
+  assert_no_grep 'pr view\|pr merge\|api graphql' "$case_dir/gh.log" \
+    "queue-arm-no-yolo: the yolo-off arm still read from the forge"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-arm-no-yolo: an arm record was written without yolo"
+
+  # Yolo on but the recorded review approved an older head: the arm refuses,
+  # because nothing here reviewed the exact head GitHub would enqueue.
+  case_dir=$(make_arm_case queue-arm-stale)
+  write_nm_run_coverage "$case_dir" stale
+  write_github_rollup_json "$case_dir" "$QUEUE_HEAD" \
+    "$(check_run ci IN_PROGRESS -)"
+  write_queue_read "$case_dir" 1 OPEN false false ''
+
+  set +e
+  run_arm_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "queue-arm-stale: stale review coverage must refuse the arm"
+  assert_grep "review coverage for head $QUEUE_HEAD is stale, not covered" "$case_dir/stderr" \
+    "queue-arm-stale: the coverage refusal did not name the verdict"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "queue-arm-stale: gh pr merge ran"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-arm-stale: an arm record was written without coverage"
+  pass "fm-pr-merge --queue-at-green requires the yolo posture and covered review at the exact head"
+}
+
+test_github_queue_requeue_failed_checks_once() {
+  local case_dir rc arm
+  case_dir=$(make_queue_case queue-requeue-once)
+  seed_queue_arm "$case_dir" 0 2026-09-14T10:00:00Z
+  write_nm_run "$case_dir" fm/queue-branch ci
+  # The first ejection at the unchanged head.
+  write_queue_read "$case_dir" 1 OPEN false false '' 2026-09-14T11:00:00Z failed_checks
+  # The read back after the re-enqueue.
+  write_queue_read "$case_dir" 2 OPEN false true AWAITING_CHECKS
+
+  set +e
+  run_requeue_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-requeue-once: the requeue sweep must succeed"
+  [ "$(cat "$case_dir/stdout")" = '' ] \
+    || fail "queue-requeue-once: a healthy requeue wrote to stdout: $(cat "$case_dir/stdout")"
+  [ "$(grep -c '^enqueue' "$case_dir/events.log")" -eq 1 ] \
+    || fail "queue-requeue-once: the pull request was not re-enqueued exactly once"
+  assert_grep "oid=$QUEUE_HEAD" "$case_dir/events.log" \
+    "queue-requeue-once: the re-enqueue was not bound to the armed head"
+  grep -q '^handoff$' "$case_dir/events.log" \
+    || fail "queue-requeue-once: the requeue did not replay the FM-3 release"
+  arm="$case_dir/state/task-x1.queue-arm"
+  [ -f "$arm" ] || fail "queue-requeue-once: the arm record was retired instead of rewritten"
+  assert_grep 'reenqueues=1' "$arm" \
+    "queue-requeue-once: the rewritten record did not mark the requeue spent"
+  assert_grep 'baseline=2026-09-14T11:00:00Z' "$arm" \
+    "queue-requeue-once: the rewritten record did not baseline on the first ejection"
+  assert_grep "head=$QUEUE_HEAD" "$arm" \
+    "queue-requeue-once: the rewritten record changed the armed head"
+  assert_grep 'armed=1700000000' "$arm" \
+    "queue-requeue-once: the rewritten record changed the arming epoch"
+  [ -f "$case_dir/state/task-x1.merge-authority" ] \
+    || fail "queue-requeue-once: the re-enqueue did not persist the merge authority"
+  pass "fm-pr-merge --queue-requeue re-enqueues once after failed checks at the unchanged head"
+}
+
+test_github_queue_requeue_second_failure_wakes() {
+  local case_dir rc
+  case_dir=$(make_queue_case queue-requeue-twice)
+  seed_queue_arm "$case_dir" 1 2026-09-14T11:00:00Z
+  write_queue_read "$case_dir" 1 OPEN false false '' 2026-09-14T12:00:00Z failed_checks
+
+  set +e
+  run_requeue_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-requeue-twice: a blocked wake is not a failure"
+  [ "$(cat "$case_dir/stdout")" = \
+    "queue arm blocked: $QUEUE_URL left the merge queue a second time after failed checks at head $QUEUE_HEAD; firstmate decides the next step" ] \
+    || fail "queue-requeue-twice: the second ejection did not print its one terminal line: $(cat "$case_dir/stdout")"
+  [ "$(grep -c '^enqueue' "$case_dir/events.log")" -eq 0 ] \
+    || fail "queue-requeue-twice: a second ejection was re-enqueued"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-requeue-twice: the spent arm record survived its terminal outcome"
+  pass "fm-pr-merge --queue-requeue reports a second failed-checks ejection as a blocked wake"
+}
+
+test_github_queue_requeue_changed_head_disarms() {
+  local case_dir rc moved
+  moved=5151515151515151515151515151515151515151
+  case_dir=$(make_queue_case queue-requeue-moved)
+  seed_queue_arm "$case_dir" 0 2026-09-14T10:00:00Z
+  QUEUE_READ_HEAD=$moved write_queue_read "$case_dir" 1 OPEN false false ''
+
+  set +e
+  run_requeue_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-requeue-moved: a disarmed arm is not a failure"
+  [ "$(cat "$case_dir/stdout")" = \
+    "queue arm disarmed: $QUEUE_URL moved from head $QUEUE_HEAD to $moved, so the armed merge-when-ready no longer matches; the changed head follows the ordinary merge path" ] \
+    || fail "queue-requeue-moved: the changed head did not print its one terminal line: $(cat "$case_dir/stdout")"
+  assert_grep "pr merge 91 --repo example/repo --disable-auto" "$case_dir/gh.log" \
+    "queue-requeue-moved: GitHub's merge-when-ready was not disarmed"
+  [ "$(grep -c '^enqueue' "$case_dir/events.log")" -eq 0 ] \
+    || fail "queue-requeue-moved: the changed head was enqueued"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-requeue-moved: the disarmed arm record survived"
+  pass "fm-pr-merge --queue-requeue disarms and reports a head that moved"
+}
+
+test_github_queue_requeue_silent_until_terminal() {
+  local case_dir rc arm
+  # Armed and still waiting for green checks: no ejection after the baseline,
+  # so the sweep says nothing at all.
+  case_dir=$(make_queue_case queue-requeue-waiting)
+  seed_queue_arm "$case_dir" 0 2026-09-14T10:00:00Z
+  write_queue_read "$case_dir" 1 OPEN false false '' 2026-09-14T10:00:00Z
+
+  set +e
+  run_requeue_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-requeue-waiting: a waiting arm must succeed"
+  [ "$(cat "$case_dir/stdout")" = '' ] \
+    || fail "queue-requeue-waiting: a waiting arm wrote to stdout: $(cat "$case_dir/stdout")"
+  [ -f "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-requeue-waiting: a waiting arm record was retired"
+  [ "$(grep -c '^enqueue' "$case_dir/events.log")" -eq 0 ] \
+    || fail "queue-requeue-waiting: a waiting arm enqueued"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" "queue-requeue-waiting: a waiting arm touched the forge's merge state"
+
+  # Queued already: nothing to decide, nothing to say.
+  case_dir=$(make_queue_case queue-requeue-queued)
+  seed_queue_arm "$case_dir" 0 -
+  write_queue_read "$case_dir" 1 OPEN false true AWAITING_CHECKS
+
+  set +e
+  run_requeue_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-requeue-queued: a queued arm must succeed"
+  [ "$(cat "$case_dir/stdout")" = '' ] \
+    || fail "queue-requeue-queued: a queued arm wrote to stdout: $(cat "$case_dir/stdout")"
+  [ -f "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-requeue-queued: a queued arm record was retired"
+
+  # Merged: the merge poll owns the landing, so the sweep retires quietly.
+  case_dir=$(make_queue_case queue-requeue-merged)
+  seed_queue_arm "$case_dir" 0 -
+  write_queue_read "$case_dir" 1 MERGED true false ''
+
+  set +e
+  run_requeue_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-requeue-merged: a merged arm must succeed"
+  [ "$(cat "$case_dir/stdout")" = '' ] \
+    || fail "queue-requeue-merged: a merged arm wrote to stdout: $(cat "$case_dir/stdout")"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-requeue-merged: a merged arm record survived"
+  pass "fm-pr-merge --queue-requeue stays silent through waiting, queued and merged states"
+}
+
+test_github_queue_requeue_non_failed_reason_disarms() {
+  local case_dir rc
+  case_dir=$(make_queue_case queue-requeue-other-reason)
+  seed_queue_arm "$case_dir" 0 -
+  write_queue_read "$case_dir" 1 OPEN false false '' 2026-09-14T11:00:00Z merged
+
+  set +e
+  run_requeue_mode "$case_dir"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "queue-requeue-other-reason: a non-retryable ejection is not a failure"
+  [ "$(cat "$case_dir/stdout")" = \
+    "queue arm disarmed: $QUEUE_URL left the merge queue (GitHub reason: merged), which this arm does not retry; firstmate decides" ] \
+    || fail "queue-requeue-other-reason: the ejection did not print its one terminal line: $(cat "$case_dir/stdout")"
+  [ "$(grep -c '^enqueue' "$case_dir/events.log")" -eq 0 ] \
+    || fail "queue-requeue-other-reason: a non-failed-checks ejection was retried"
+  [ ! -e "$case_dir/state/task-x1.queue-arm" ] \
+    || fail "queue-requeue-other-reason: the disarmed arm record survived"
+  pass "fm-pr-merge --queue-requeue retires and reports an ejection whose reason is not failed_checks"
 }
 
 test_distinct_merged_prs_keep_distinct_wakes() {
@@ -5239,6 +5607,15 @@ test_away_auto_enqueue_shapes_without_a_proven_method_are_refused
 test_github_queue_ends_the_ci_monitor_before_enqueueing
 test_github_queue_refuses_while_a_pipeline_could_still_push
 test_github_queue_ignores_a_run_on_another_branch_or_none
+test_github_queue_at_green_arms_enqueues
+test_github_queue_at_green_failed_check_refuses
+test_github_queue_at_green_no_queue_rule_no_arm
+test_github_queue_at_green_requires_yolo_and_coverage
+test_github_queue_requeue_failed_checks_once
+test_github_queue_requeue_second_failure_wakes
+test_github_queue_requeue_changed_head_disarms
+test_github_queue_requeue_silent_until_terminal
+test_github_queue_requeue_non_failed_reason_disarms
 test_distinct_merged_prs_keep_distinct_wakes
 test_uncommitted_marker_retry_is_never_silent
 test_secondmate_without_parent_binding_is_loud

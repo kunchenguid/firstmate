@@ -20,6 +20,14 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# A GitHub registration whose project uses a merge queue also hands the pull
+# request to bin/fm-pr-merge.sh --queue-at-green after the poll is armed: that
+# guarded arm mode (never the merge-time re-record) verifies the pull request
+# at its exact head, proves review coverage, and asks GitHub for
+# merge-when-ready, so the pull request enters the merge queue when its
+# required checks are green without waiting for a firstmate turn. Every arm
+# refusal is additive - the ordinary merge-turn path is unchanged - and
+# registration itself never fails because of it.
 # The recorded pr= also frees the task's place in a declared project capacity
 # (bin/fm-project-capacity-lib.sh).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
@@ -278,6 +286,33 @@ if command -v jq >/dev/null 2>&1; then
     || printf 'contributions: observation not armed; coverage is unconfirmed\n' >&2
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
+fi
+# Queue at green, GitHub merge queues only: after the poll and the
+# contribution observer are armed, registration also hands the pull request
+# to bin/fm-pr-merge.sh's guarded arm mode (--queue-at-green), which re-reads
+# the live pull request at the exact head (open, not a draft, conflict-free,
+# every required check reported, and no check that has completed with a
+# failing conclusion - checks still pending are the point and are allowed),
+# proves no-mistakes review coverage for that head from the task's run
+# record, confirms a single merge-queue method on the base branch, ends any
+# branch-pushing no-mistakes run, and only then asks GitHub for
+# merge-when-ready bound to that head, so the pull request enters the merge
+# queue when its required checks turn green without waiting for a firstmate
+# turn; one failed-checks ejection at that head re-enqueues itself and a new
+# push disarms it (bin/fm-watch.sh sweeps the arm record). The arm is
+# strictly additive: every refusal leaves the ordinary merge-turn path
+# exactly as it was, registration itself never fails because of it, and the
+# merge-time re-record (FM_PR_CHECK_MERGE=1) never arms, so recording a
+# merge cannot enqueue anything new. The arm's own notes go to stderr;
+# registration's stdout is unchanged.
+if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] \
+  && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  queue_arm_status=0
+  "$SCRIPT_DIR/fm-pr-merge.sh" "$ID" "$URL" --queue-at-green || queue_arm_status=$?
+  if [ "$queue_arm_status" -ne 0 ]; then
+    printf 'queue arm: %s was not armed (rc=%s); the ordinary merge path still applies\n' \
+      "$URL" "$queue_arm_status" >&2
+  fi
 fi
 # Opt-in config/ready-after-green: a no-mistakes PR is ready only once the
 # child's own status holds the checks-green report naming this exact PR, so a

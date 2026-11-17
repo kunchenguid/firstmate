@@ -15,6 +15,8 @@
 # Usage:
 #   fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check>]
 #     [--allow-missing <check>] [--allow-no-pipeline] [-- <forge merge flags>]
+#   fm-pr-merge.sh <task-id> <pr-url> --queue-at-green
+#   fm-pr-merge.sh <task-id> <pr-url> --queue-requeue
 #   fm-pr-merge.sh -h | --help
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
@@ -114,6 +116,55 @@
 # landed or queued yet, or, when the merge command itself failed, that auto-merge
 # was only requested; both are read from the caller's own arguments rather than
 # from the forge's prose.
+#
+# --queue-at-green is the registration-time arm bin/fm-pr-check.sh invokes
+# once a task's PR is recorded (never the merge-time re-record, and never on
+# a forge other than GitHub, which is the only forge with a merge queue): it
+# merges nothing and enqueues nothing by itself. It re-verifies the live
+# pull request at the exact head (open, not a draft, conflict-free, every
+# required check reported, and - the one difference from the merge verify -
+# no check that has COMPLETED with a failing conclusion, because checks still
+# pending are the point), proves no-mistakes review coverage for that exact
+# head from the run record the same way a merge turn's supervision session
+# would (fm_nm_review_coverage), requires the task's yolo posture (with yolo
+# off a captain approves each merge, so nothing is armed), requires a single
+# recognised merge-queue method on the base branch (no merge_queue rule at
+# all means the project has no merge queue: nothing is armed and that is not
+# an error; conflicting, unrecognised or unreadable rules refuse), ends any
+# branch-pushing no-mistakes run exactly as the queue route does (FM-3), and
+# only then asks gh for merge-when-ready: --auto --<queue method> bound to
+# the verified head with --match-head-commit, so GitHub itself puts the pull
+# request into the merge queue the moment its required checks are green,
+# without waiting for a firstmate turn. The result is read back live: merged
+# or queued proves the arm (an already-green pull request may enter the queue
+# at once); anything else - an approval-required pull request, a forge-side
+# refusal, an unreadable state - is disarmed again with --disable-auto before
+# refusing, so no arm this script cannot prove is left live. A proved arm
+# persists the accepted merge authority, records itself in the away queue
+# list while away exactly like the queue route, and writes the private
+# $STATE/<ID>.queue-arm record (fm_queue_arm_write) the watcher sweeps. A
+# record that cannot be written disarms the arm too: an arm the sweep cannot
+# see could neither requeue once nor disarm on a new push. The arm writes to
+# stderr only; registration owns stdout, and an arm that refuses never fails
+# the registration that asked for it.
+#
+# --queue-requeue is the watcher's sweep over that record
+# (bin/fm-watch.sh runs it under its check timeout, and it takes the control
+# lock through a bounded wait: a task owned by a live merge turn or poll is
+# left for the next sweep). Merged retires the arm quietly (the merge poll
+# owns the landing wake); a head that moved disarms GitHub's request and
+# reports it, because GitHub does not disarm a push from this write
+# credential by itself and nothing verified the new head; a pull request no
+# longer open, and an ejection whose reason is anything but failed_checks,
+# retire and report; an ejection with reason failed_checks at the unchanged
+# head re-enqueues itself once, replaying the queue route's own FM-3 and
+# authority discipline (including the away queue list), and a second such
+# ejection retires and reports as an ordinary blocked wake for firstmate to
+# decide. An arm still waiting for its checks - not queued, no new ejection
+# event since the baseline recorded at arm time - stays silent, and so does
+# every lock or read this sweep cannot take: it does nothing and the next
+# sweep retries. Its stdout is exactly one terminal line when the arm ends,
+# which is the watcher's wake reason, and nothing otherwise.
 # Every refusal that follows a merge command which returned success quotes that
 # command's own output, marked as the forge's text and kept apart from this
 # script's verdict, including the refusal for an outcome that cannot be read;
@@ -296,6 +347,30 @@ if [ "$PROVIDER" = gerrit ]; then
   exit 2
 fi
 shift 2
+# The two sweep-owned modes. --queue-at-green is what a registration arms
+# (bin/fm-pr-check.sh): it never merges and never enqueues by itself, it only
+# hands GitHub a merge-when-ready request bound to the exact head this run
+# verifies, so the pull request enters the base branch's merge queue when its
+# required checks turn green without waiting for a firstmate turn.
+# --queue-requeue is the watcher's follow-up sweep over that arm
+# (bin/fm-watch.sh): it re-enqueues once after a failed-checks ejection at an
+# unchanged head and reports a second ejection as an ordinary blocked wake.
+# Both take no further arguments, and both are refused on any forge but
+# GitHub, the only forge here with a merge queue to address.
+MODE=merge
+case "${1:-}" in
+  --queue-at-green|--queue-requeue)
+    if [ "$#" -ne 1 ]; then
+      echo "error: $1 takes no further arguments" >&2
+      exit 2
+    fi
+    if [ "$PROVIDER" != github ]; then
+      echo "error: $1 applies only to GitHub pull requests" >&2
+      exit 2
+    fi
+    MODE=${1#--queue-}
+    ;;
+esac
 ATTENDED_OVERRIDE=false
 ALLOW_NO_PIPELINE=false
 ALLOW_RED=()
@@ -566,7 +641,44 @@ merge_control_cleanup() {
 }
 trap merge_control_cleanup EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
-fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
+if [ "$MODE" = requeue ] || [ "$MODE" = at-green ]; then
+  # The requeue sweep runs under the watcher's check timeout, so its control
+  # lock wait is bounded: when a merge turn or a poll owns the task, the sweep
+  # exits silent and the next sweep retries. The arm is opportunistic in the
+  # same way: registration arms the queue only when the task is free, because
+  # a lock held there means a merge turn or a poll cycle already owns the
+  # task and the ordinary merge path still applies; blocking inside it would
+  # stall that owner's cycle (an fm-pr-check nested in a poll or a merge
+  # re-record must never wait on the lock that owner holds). Every other mode
+  # waits as long as the task takes.
+  if [ "$MODE" = requeue ]; then
+    queue_lock_wait=${FM_PR_QUEUE_REQUEUE_LOCK_WAIT:-10}
+  else
+    queue_lock_wait=${FM_PR_QUEUE_ARM_LOCK_WAIT:-0}
+  fi
+  case "$queue_lock_wait" in
+    ''|*[!0-9]*|0)
+      if [ "$MODE" = requeue ]; then
+        queue_lock_wait=10
+      else
+        queue_lock_wait=0
+      fi
+      ;;
+  esac
+  [ "$queue_lock_wait" -le 120 ] || queue_lock_wait=$([ "$MODE" = requeue ] && echo 10 || echo 0)
+  if ! fm_lock_acquire_wait_max "$MERGE_CONTROL_LOCK" "$queue_lock_wait"; then
+    if [ "$MODE" = requeue ]; then
+      MERGE_CONTROL_LOCK=
+      exit 0
+    fi
+    printf 'queue arm: %s was not armed: the task control lock is held, so a merge or poll owns it and the ordinary merge path still applies\n' \
+      "$URL" >&2
+    MERGE_CONTROL_LOCK=
+    exit 1
+  fi
+else
+  fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
+fi
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   echo "error: task $ID changed while waiting to merge; refusing: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -1001,6 +1113,69 @@ github_checks_not_green() {
   ' 2>/dev/null || return 1
 }
 
+# The arm-time reading of the same rollup, for --queue-at-green: a check that
+# is still running - a QUEUED or IN_PROGRESS check run, or a PENDING or
+# EXPECTED commit status - has not failed yet, so it does not block arming;
+# GitHub's merge-when-ready is exactly what waits for it to finish. A check
+# blocks the arm only when it has COMPLETED with a conclusion outside the
+# same green set, or reported ERROR or FAILURE as a commit status, judged
+# per name on the current run with the same supersession rule as the merge
+# verify, so a failure a later green run superseded does not block either.
+# Like github_checks_not_green it prints one failed check name per line and
+# refuses the whole read if the rollup itself is unreadable.
+github_checks_failed() {
+  local json=$1
+  printf '%s' "$json" | jq -r '
+    def settled_at:
+      if type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+      then . else null end;
+    if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
+    | [ .statusCheckRollup
+        | to_entries[]
+        | .key as $i
+        | .value
+        | if .__typename == "CheckRun" then
+            {
+              kind: "check_run",
+              name: (.name // ""),
+              completed: (.status == "COMPLETED"),
+              ok: (.status != "COMPLETED" or (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")),
+              at: (.startedAt | settled_at)
+            }
+            | . + {group: (if .name == "" then ["", $i] else [.name, -1] end)}
+          else
+            {kind: "status_context", name: (.context // ""), ok: (.state == "SUCCESS" or .state == "PENDING" or .state == "EXPECTED")}
+          end
+      ]
+    | . as $entries
+    | (
+        ($entries[]
+          | select(.kind == "status_context" and (.ok | not))
+          | .name
+        ),
+        ($entries
+          | [.[] | select(.kind == "check_run")]
+          | group_by(.group)[]
+          | {
+              name: .[0].name,
+              reds: [.[] | select(.ok | not)],
+              newest_green: ([.[] | select(.ok) | .at | select(. != null)] | max)
+            }
+          | select(
+              (.reds | length) > 0
+              and (
+                .newest_green == null
+                or any(.reds[]; (.completed | not) or .at == null)
+                or ([.reds[] | .at] | max) >= .newest_green
+              )
+            )
+          | .name
+        )
+      )
+    | if . == "" then "(unnamed check)" else . end
+  ' 2>/dev/null || return 1
+}
+
 FM_PR_GITHUB_REQUIRED=
 FM_PR_GITHUB_REQUIRED_ERROR=
 github_read_required_contexts() {
@@ -1235,6 +1410,153 @@ EOF
     return 1
   fi
   printf 'verified: %s is open and mergeable, with every unwaived required check reported and every unwaived check green at head %s\n' \
+    "$URL" "$live_head" >&2
+  FM_PR_MERGE_HEAD=$live_head
+  FM_PR_GITHUB_BASE=$base
+}
+
+# The arm-time verify for --queue-at-green: the same live read, the same field
+# parse and the same required-checks proof as github_verify_mergeable, with
+# the one difference a registration at PR-creation time needs - a check that
+# is still running has not failed, so github_checks_failed owns the rollup
+# reading and checks still pending do not block. A draft, a closed pull
+# request, a conflict (mergeable CONFLICTING or mergeStateStatus DIRTY), a
+# check that COMPLETED with a failing conclusion, and a required check that
+# has not reported all still refuse the arm: arming one of those would either
+# wait forever or queue a pull request nothing here verified. It reads the
+# same json once, so it is its own function rather than a mode flag inside
+# the merge verify. There are no waivers: an arm runs unattended, so it takes
+# no --allow-red and no --allow-missing. mergeable UNKNOWN alone still
+# returns 3 for the caller's bounded retry; a read that cannot produce all
+# five named fields refuses outright, exactly like the merge verify. Sets
+# FM_PR_MERGE_HEAD and FM_PR_GITHUB_BASE on success.
+github_verify_armable() {
+  local json fields line failed name missing unreported producers runs
+  local total=0 named=0 refusals='' mergeable_refusal=''
+  local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+    || [ -z "$json" ]; then
+    echo "error: could not read the GitHub pull request state before arming the merge queue" >&2
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" then
+        "state=" + ((.state // "") | tostring),
+        "mergeable=" + ((.mergeable // "") | tostring),
+        "merge_state=" + ((.mergeStateStatus // "") | tostring),
+        "head=" + ((.headRefOid // "") | tostring),
+        "base=" + ((.baseRefName // "") | tostring)
+      else
+        error("pull request payload is not an object")
+      end' 2>/dev/null); then
+    echo "error: could not read the GitHub pull request state before arming the merge queue" >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      mergeable=*) mergeable=${line#mergeable=} ;;
+      merge_state=*) merge_state=${line#merge_state=} ;;
+      head=*) live_head=${line#head=} ;;
+      base=*) base=${line#base=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ] || [ -z "$base" ]; then
+    echo "error: could not read the GitHub pull request state before arming the merge queue" >&2
+    return 1
+  fi
+
+  draft=$(fm_pr_json_draft_state "$json")
+  if ! fm_pr_head_valid "$live_head"; then
+    echo "error: could not read the GitHub pull request head commit before arming the merge queue" >&2
+    return 1
+  fi
+  if ! failed=$(github_checks_failed "$json"); then
+    echo "error: could not read the GitHub pull request state before arming the merge queue" >&2
+    return 1
+  fi
+
+  case "$state" in
+    [oO][pP][eE][nN]) ;;
+    *)
+      refusals="$refusals  - state is \"${state:-unreadable}\", not open
+"
+      ;;
+  esac
+  [ "$draft" = false ] \
+    || refusals="$refusals  - the pull request is a draft
+"
+  [ "$mergeable" = MERGEABLE ] \
+    || mergeable_refusal="  - mergeable is \"${mergeable:-unreadable}\", not MERGEABLE
+"
+  [ "$merge_state" != DIRTY ] \
+    || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
+"
+
+  unreported=''
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    refusals="$refusals  - check '$name' has failed
+"
+  done <<EOF
+$failed
+EOF
+
+  if ! github_read_required_contexts "$base"; then
+    while IFS= read -r line; do
+      refusals="$refusals  - $line, so a required check that has not reported cannot be ruled out
+"
+    done <<EOF
+$FM_PR_GITHUB_REQUIRED_ERROR
+EOF
+  fi
+  producers='[]'
+  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
+    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
+      || [ -z "$runs" ] \
+      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
+        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
+          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
+            then . else error("invalid check producer") end ]' 2>/dev/null); then
+      producers='[]'
+      refusals="$refusals  - required check producers at head $live_head could not be read
+"
+    fi
+  fi
+  if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
+    refusals="$refusals  - the GitHub pull request check rollup could not be read
+"
+  else
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      refusals="$refusals  - required check '$name' has not reported at head $live_head
+"
+      unreported="${unreported:+$unreported, }$name"
+    done <<EOF
+$missing
+EOF
+  fi
+
+  if [ -n "$mergeable_refusal" ]; then
+    if [ -z "$refusals" ] && [ "$mergeable" = UNKNOWN ]; then
+      return 3
+    fi
+    refusals="$refusals$mergeable_refusal"
+  fi
+
+  if [ -n "$refusals" ]; then
+    printf 'error: refusing to arm the merge queue for %s\n' "$URL" >&2
+    printf '%s' "$refusals" >&2
+    [ -z "$unreported" ] || printf 'error: these required checks have not reported: %s\n' "$unreported" >&2
+    return 1
+  fi
+  printf 'verified: %s is open, not a draft, and conflict-free, with every required check reported and no check failed at head %s; checks still pending may finish\n' \
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
@@ -2022,6 +2344,343 @@ github_state_is_open_value() {
   esac
 }
 
+# The arm's own review-coverage proof. A merge turn gets its coverage from
+# the supervision session that decided to merge; an arm that will let GitHub
+# enqueue on its own does not, so it reads the coverage the record keeps: the
+# task's no-mistakes run (axi status names the run id) must hold a completed
+# review whose approved head is exactly the head being armed
+# (fm_nm_review_coverage). A task with no run record, a run without a review,
+# or a review of an older head prints unverified or stale and is not armed -
+# its merge waits for a merge turn exactly as before. The verdict is left in
+# FM_PR_ARM_COVERAGE for the refusal line.
+FM_PR_ARM_COVERAGE=
+github_arm_review_coverage() {  # <head>
+  local head=$1 kind wt timeout out run_id
+  FM_PR_ARM_COVERAGE=unverified
+  kind=$(sed -n 's/^kind=//p' "$META" | tail -n 1)
+  [ "${kind:-ship}" = ship ] || return 1
+  wt=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+  case "$wt" in
+    /*) ;;
+    *) wt="$PWD/$wt" ;;
+  esac
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  timeout=$(github_queue_setting "${FM_PR_MERGE_NM_TIMEOUT:-}" 10 600)
+  out=$(fm_nm_run "$wt" "$timeout" axi status)
+  [ -n "$out" ] || return 1
+  run_id=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  case "$run_id" in
+    ''|*[!A-Za-z0-9._/-]*) return 1 ;;
+  esac
+  FM_PR_ARM_COVERAGE=$(cd "$wt" && fm_nm_review_coverage "$run_id" "$head") \
+    || FM_PR_ARM_COVERAGE=unverified
+  [ "$FM_PR_ARM_COVERAGE" = covered ]
+}
+
+# --queue-at-green, the registration-time arm bin/fm-pr-check.sh invokes.
+# Every guard a merge turn runs is here in the form an unattended arm needs:
+# the live PR verified by github_verify_armable; review coverage for the
+# exact head; a single recognised merge-queue method on the base branch (no
+# merge_queue rule at all means the project has no merge queue: nothing is
+# armed and that is not an error, because without a queue there is nothing to
+# wait for green); a fresh queue read at the verified head with the removed-
+# from-queue timestamp recorded as the arm's baseline; the away-record lock
+# with a re-read of the merge authority, exactly as a merge; and FM-3,
+# github_release_branch_before_enqueue, so nothing here can rebase or push
+# the branch once it is armed for the queue. Only then does the arm run, as
+# gh's merge-when-ready request --auto --<queue method> bound to the verified
+# head with --match-head-commit: nothing is merged or enqueued by this script,
+# GitHub itself puts the pull request into the merge queue when the required
+# checks turn green. The result is read back live: merged or queued proves the
+# arm (an already-green pull request may enter the queue at once); anything
+# else - an approval-required pull request, a forge-side refusal, an
+# unreadable state - is disarmed again with --disable-auto before refusing,
+# so no arm this script cannot prove is left live. A proved arm persists the
+# accepted merge authority, records itself in the away queue list while away
+# (the away archive can then dequeue it), and writes the private
+# $STATE/$ID.queue-arm record the watcher sweeps with --queue-requeue; a
+# record that cannot be written disarms the arm too, because an arm the sweep
+# cannot see could neither requeue once nor disarm on a new push. The mode
+# writes to stderr only and never fails the registration that invoked it.
+github_arm_queue_at_green() {
+  local verify_status=1 attempt=1 arm_status=0 merge_output
+  local queue_method arm_baseline
+  # mergeable reads UNKNOWN for a short while after a push, exactly as in the
+  # merge route; retry bounded so a just-pushed pull request can still be
+  # armed.
+  local retry_delay=${FM_PR_GITHUB_MERGEABLE_RETRY_DELAY:-3}
+  case "$retry_delay" in
+    [0-9] | 10) ;;
+    *) retry_delay=3 ;;
+  esac
+  while :; do
+    verify_status=0
+    github_verify_armable || verify_status=$?
+    if [ "$verify_status" -eq 0 ] || [ "$verify_status" -ne 3 ] || [ "$attempt" -ge 5 ]; then
+      break
+    fi
+    sleep "$retry_delay"
+    attempt=$((attempt + 1))
+  done
+  [ "$verify_status" -eq 0 ] || exit 1
+  # The queue itself is proved first, before any review-coverage read: a
+  # project without a merge queue has nothing to arm whatever its coverage,
+  # and reading coverage needs state this script must not demand there.
+  github_read_queue_method
+  case "$FM_PR_GITHUB_QUEUE_STATUS" in
+    none)
+      printf 'queue arm: %s was not armed: base branch %s has no merge queue rule, so the pull request follows the ordinary merge path\n' \
+        "$URL" "${FM_PR_GITHUB_BASE:-<unreadable>}" >&2
+      exit 0
+      ;;
+    single)
+      case "$FM_PR_GITHUB_QUEUE_METHOD" in
+        MERGE) queue_method=merge ;;
+        SQUASH) queue_method=squash ;;
+        REBASE) queue_method=rebase ;;
+        *)
+          printf 'error: base branch %s requires the merge queue, but its configured merge method (%s) is not one this script recognises, so %s was not armed\n' \
+            "${FM_PR_GITHUB_BASE:-<unreadable>}" "${FM_PR_GITHUB_QUEUE_METHOD:-<unset>}" "$URL" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    conflicting)
+      printf 'error: base branch %s has conflicting merge queue methods (%s), so %s was not armed\n' \
+        "${FM_PR_GITHUB_BASE:-<unreadable>}" "${FM_PR_GITHUB_QUEUE_METHODS//,/, }" "$URL" >&2
+      exit 1
+      ;;
+    unrecognised)
+      printf 'error: base branch %s requires the merge queue, but its configured merge method (%s) is not one this script recognises, so %s was not armed\n' \
+        "${FM_PR_GITHUB_BASE:-<unreadable>}" "${FM_PR_GITHUB_QUEUE_METHOD:-<unset>}" "$URL" >&2
+      exit 1
+      ;;
+    *)
+      printf 'error: the branch rules for base branch %s could not be read, so a merge queue cannot be proved for %s and it was not armed\n' \
+        "${FM_PR_GITHUB_BASE:-<unreadable>}" "$URL" >&2
+      exit 1
+      ;;
+  esac
+  if ! github_arm_review_coverage "$FM_PR_MERGE_HEAD"; then
+    printf 'error: review coverage for head %s is %s, not covered, so %s was not armed; its merge waits for a merge turn\n' \
+      "$FM_PR_MERGE_HEAD" "$FM_PR_ARM_COVERAGE" "$URL" >&2
+    exit 1
+  fi
+  hold_away_record_for_merge || exit 1
+  away_status=0
+  require_current_away_authority || away_status=$?
+  if [ "$away_status" -ne 0 ]; then
+    exit "$away_status"
+  fi
+  github_require_queue_entry_ready
+  arm_baseline=${FM_PR_QUEUE_REMOVED_AT:--}
+  if [ "$FM_PR_QUEUE_QUEUED" = true ]; then
+    printf 'queue arm: %s is already in the merge queue at head %s, so nothing was armed; the merge poll owns its landing\n' \
+      "$URL" "$FM_PR_MERGE_HEAD" >&2
+    fm_afk_contract_lock_release || true
+    exit 0
+  fi
+  github_release_branch_before_enqueue || exit 1
+  merge_output=
+  arm_status=0
+  if ! merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    --match-head-commit "$FM_PR_MERGE_HEAD" --auto "--$queue_method" 2>&1); then
+    arm_status=$?
+  fi
+  if [ "$arm_status" -ne 0 ]; then
+    [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+    printf 'error: the merge-when-ready request for %s was refused, so nothing was armed; a merge turn can still merge it once its checks are green\n' \
+      "$URL" >&2
+    exit 1
+  fi
+  if ! github_queue_read; then
+    gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 || true
+    printf 'error: the merge queue state of %s could not be read after arming, so the arm was undone and nothing was armed\n' \
+      "$URL" >&2
+    exit 1
+  fi
+  if [ "$FM_PR_QUEUE_MERGED" != true ] && [ "$FM_PR_QUEUE_QUEUED" != true ]; then
+    gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 || true
+    printf 'error: %s did not enter the merge queue after the merge-when-ready request (state=%s, merged=%s, isInMergeQueue=%s), so the arm was undone; re-check its review and branch-protection requirements\n' \
+      "$URL" "${FM_PR_QUEUE_STATE:-<unreadable>}" "${FM_PR_QUEUE_MERGED:-<unreadable>}" "${FM_PR_QUEUE_QUEUED:-<unreadable>}" >&2
+    exit 1
+  fi
+  if ! persist_accepted_merge_authority; then
+    printf 'actionable: %s was armed for the merge queue but its merge authority could not be persisted, so firstmate must record it; the merge poll remains armed\n' \
+      "$URL" >&2
+    exit 1
+  fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && ! record_away_queue_enqueue; then
+    printf 'actionable: %s was armed for the merge queue under away authority but could not be recorded in the away queue list, so the away archive cannot dequeue it; firstmate must record it\n' \
+      "$URL" >&2
+    exit 1
+  fi
+  if [ "$FM_PR_QUEUE_MERGED" = true ]; then
+    fm_afk_contract_lock_release || true
+    printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s); its checks were already green, so the merge-when-ready request merged it at once and the merge poll reports the landing\n' \
+      "$URL" "${FM_PR_QUEUE_STATE:-<unreadable>}" "${FM_PR_QUEUE_MERGED:-<unreadable>}" "${FM_PR_QUEUE_QUEUED:-<unreadable>}" >&2
+    exit 0
+  fi
+  if ! fm_queue_arm_write "$STATE" "$ID" "$FM_PR_MERGE_HEAD" "$(date +%s)" 0 "$arm_baseline"; then
+    gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 || true
+    printf 'actionable: %s was armed for the merge queue but its queue-arm record could not be written, so the arm was undone and GitHub will not enqueue it; the merge poll remains armed and a merge turn can re-arm it\n' \
+      "$URL" >&2
+    exit 1
+  fi
+  fm_afk_contract_lock_release || true
+  printf 'queue arm: %s is armed at head %s (merge-when-ready, method %s); GitHub enqueues it in the merge queue when the required checks are green, one failed-checks ejection at this head re-enqueues itself, and a new push disarms it\n' \
+    "$URL" "$FM_PR_MERGE_HEAD" "$queue_method" >&2
+  exit 0
+}
+
+# --queue-requeue, the watcher's sweep over a $STATE/$ID.queue-arm record.
+# The control lock is already held (through a bounded wait). Everything here
+# is silent on stdout unless a terminal observation ends the arm, which
+# prints exactly one line for the watcher's wake reason. The steady states -
+# merged (the merge poll owns the landing wake), queued, or armed and still
+# waiting for green checks (no removed-from-queue event after the recorded
+# baseline) - stay silent. A head that moved disarms GitHub's request and
+# reports the change, because GitHub does not disarm a push from this write
+# credential by itself and nothing verified the new head; a pull request no
+# longer open, and an ejection whose reason is anything but failed_checks,
+# retire and report; a failed_checks ejection at the unchanged head
+# re-enqueues itself once, replaying the queue route's own FM-3 and authority
+# discipline (including the away queue list), and a second such ejection
+# retires and reports as an ordinary blocked wake for firstmate to decide.
+# Every lock or authority read that cannot be taken is silent too: the sweep
+# does nothing and the next sweep retries, because a re-enqueue on an
+# unproven authority is the one mistake this mode must never make. A
+# re-enqueue this script cannot prove (forge refused it, or the read-back
+# cannot confirm it) disarms and reports instead.
+github_queue_requeue_once() {
+  local arm_path="$STATE/$ID.queue-arm"
+  local ejected_removed_at
+  if ! fm_queue_arm_read "$arm_path"; then
+    rm -f "$arm_path"
+    printf 'queue arm blocked: the queue-arm record for %s is unreadable; firstmate decides whether to arm it again\n' \
+      "$URL"
+    return 0
+  fi
+  if ! github_queue_read; then
+    return 0
+  fi
+  if [ "$FM_PR_QUEUE_MERGED" = true ]; then
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    return 0
+  fi
+  if [ "$FM_PR_QUEUE_HEAD" != "$FM_QUEUE_ARM_HEAD" ]; then
+    gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 \
+      || printf 'actionable: could not disable the armed merge-when-ready for %s after its head moved; disable it manually if it re-enters the queue\n' \
+        "$URL" >&2
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm disarmed: %s moved from head %s to %s, so the armed merge-when-ready no longer matches; the changed head follows the ordinary merge path\n' \
+      "$URL" "$FM_QUEUE_ARM_HEAD" "${FM_PR_QUEUE_HEAD:-<unreadable>}"
+    return 0
+  fi
+  if ! github_state_is_open_value "$FM_PR_QUEUE_STATE"; then
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm disarmed: %s is %s, no longer open, so the merge queue will never take it\n' \
+      "$URL" "${FM_PR_QUEUE_STATE:-<unreadable>}"
+    return 0
+  fi
+  if [ "$FM_PR_QUEUE_QUEUED" = true ]; then
+    return 0
+  fi
+  if [ "$FM_PR_QUEUE_REMOVED_AT" = "$FM_QUEUE_ARM_BASELINE" ]; then
+    return 0
+  fi
+  if [ "$FM_PR_QUEUE_REMOVED_REASON" != failed_checks ]; then
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm disarmed: %s left the merge queue (GitHub reason: %s), which this arm does not retry; firstmate decides\n' \
+      "$URL" "${FM_PR_QUEUE_REMOVED_REASON:-<no reason reported>}"
+    return 0
+  fi
+  if [ "$FM_QUEUE_ARM_REENQUEUES" = 1 ]; then
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm blocked: %s left the merge queue a second time after failed checks at head %s; firstmate decides the next step\n' \
+      "$URL" "$FM_QUEUE_ARM_HEAD"
+    return 0
+  fi
+  ejected_removed_at=$FM_PR_QUEUE_REMOVED_AT
+  # The one automatic re-enqueue, at the unchanged head the arm verified. A
+  # lock or authority read that cannot be taken here stays silent and
+  # retries next sweep: never enqueue on an unproven authority.
+  if ! hold_away_record_for_merge; then
+    return 0
+  fi
+  away_status=0
+  require_current_away_authority || away_status=$?
+  if [ "$away_status" -ne 0 ]; then
+    fm_afk_contract_lock_release || true
+    return 0
+  fi
+  if ! github_release_branch_before_enqueue; then
+    fm_afk_contract_lock_release || true
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm blocked: %s could not be re-enqueued after failed checks because a no-mistakes run could still push to its branch; firstmate decides\n' \
+      "$URL"
+    return 0
+  fi
+  FM_PR_MERGE_HEAD=$FM_QUEUE_ARM_HEAD
+  if ! github_enqueue_pull_request; then
+    if ! github_queue_read || [ "$FM_PR_QUEUE_QUEUED" != true ]; then
+      gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 || true
+      fm_afk_contract_lock_release || true
+      fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+        "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+      printf 'queue arm blocked: re-enqueueing %s after failed checks did not put it back in the merge queue; firstmate decides\n' \
+        "$URL"
+      return 0
+    fi
+  else
+    if ! github_queue_read || [ "$FM_PR_QUEUE_QUEUED" != true ] \
+      || [ "$FM_PR_QUEUE_HEAD" != "$FM_QUEUE_ARM_HEAD" ]; then
+      gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 || true
+      fm_afk_contract_lock_release || true
+      fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+        "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+      printf 'queue arm blocked: re-enqueueing %s after failed checks did not put it back in the merge queue; firstmate decides\n' \
+        "$URL"
+      return 0
+    fi
+  fi
+  if ! persist_accepted_merge_authority; then
+    fm_afk_contract_lock_release || true
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm blocked: %s was re-enqueued after failed checks but its merge authority could not be persisted; firstmate must record it\n' \
+      "$URL"
+    return 0
+  fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && ! record_away_queue_enqueue; then
+    fm_afk_contract_lock_release || true
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm blocked: %s was re-enqueued after failed checks under away authority but could not be recorded in the away queue list; firstmate must record it\n' \
+      "$URL"
+    return 0
+  fi
+  if ! fm_queue_arm_write "$STATE" "$ID" "$FM_QUEUE_ARM_HEAD" \
+    "$FM_QUEUE_ARM_ARMED" 1 "${ejected_removed_at:--}"; then
+    gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 || true
+    fm_afk_contract_lock_release || true
+    fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
+      "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
+    printf 'queue arm blocked: %s was re-enqueued after failed checks but its queue-arm record could not be rewritten; firstmate must re-arm it\n' \
+      "$URL"
+    return 0
+  fi
+  fm_afk_contract_lock_release || true
+  return 0
+}
+
 gitlab_confirm_merged() {
   local json state
   if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
@@ -2067,6 +2726,26 @@ away_status=0
 require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
+# The requeue sweep dispatches before the recording gates: its stdout is the
+# watcher's wake line and must stay empty while the arm is healthy, and
+# record_pr_metadata re-records through fm-pr-check, whose own stdout belongs
+# to the registration it reports to. A captain hold on the task backs the
+# sweep off silently: a captain is already deciding.
+if [ "$MODE" = requeue ]; then
+  require_released_captain_hold || exit 1
+  github_queue_requeue_once
+  exit $?
+fi
+# --queue-at-green is a yolo posture only: with yolo off, a captain approves
+# each merge, so nothing is armed and the merge-turn path is unchanged. A
+# missing or unreadable yolo= is off. (The arm mode reads no --allow-red or
+# --allow-missing: an arm runs unattended.)
+if [ "$MODE" = at-green ] \
+  && [ "$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)" != on ]; then
+  printf 'queue arm: %s was not armed: the task is not in the yolo posture, so a captain approves each merge\n' \
+    "$URL" >&2
+  exit 0
+fi
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
 
@@ -2076,6 +2755,12 @@ require_released_captain_hold || exit 1
 # the orphaned forge child can still merge on the lapsed away authority.
 case "$PROVIDER" in
   github)
+    if [ "$MODE" = at-green ]; then
+      github_arm_queue_at_green
+      # shellcheck disable=SC2317 # the arm exits on every path; this guard
+      # keeps a returning arm from falling into the merge-turn path.
+      exit $?
+    fi
     merge_output=
     merge_args=()
     if ! caller_has_merge_method "$@"; then

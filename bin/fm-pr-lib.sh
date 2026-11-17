@@ -525,6 +525,111 @@ fm_ado_az_bin() {
   return 1
 }
 
+# A queue-at-green arm (bin/fm-pr-merge.sh --queue-at-green) writes
+# $STATE/<id>.queue-arm, the private record bin/fm-watch.sh sweeps with
+# fm-pr-merge.sh --queue-requeue: the exact head the arm is bound to, the
+# epoch it was armed, whether the one automatic re-enqueue after a
+# failed-checks ejection has been spent, and the removed-from-queue event
+# timestamp the arm started from (the same baseline technique the queue merge
+# route uses), so a later ejection is told apart from one that was already
+# recorded when the arm went in. Private and single-link like every state
+# sidecar; the sweep and teardown retire it.
+fm_queue_arm_write() {  # <state> <task-id> <head> <armed-epoch> <reenqueues> <baseline>
+  local state=${1-} id=${2-} head=${3-} armed=${4-} reenqueues=${5-} baseline=${6--} dest tmp
+  local LC_ALL=C
+  fm_pr_task_id_valid "$id" || return 2
+  [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || return 2
+  case "$armed" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  [ "${#armed}" -le 12 ] || return 2
+  case "$reenqueues" in
+    0|1) ;;
+    *) return 2 ;;
+  esac
+  case "$baseline" in
+    ''|*[[:space:]]*) baseline=- ;;
+  esac
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  dest="$state/$id.queue-arm"
+  fm_pr_regular_destination_or_absent "$dest" || return 1
+  tmp=$(mktemp "$state/.$id.queue-arm.XXXXXX") || return 1
+  if chmod 0600 "$tmp" \
+    && printf 'head=%s\narmed=%s\nreenqueues=%s\nbaseline=%s\n' \
+      "$head" "$armed" "$reenqueues" "$baseline" > "$tmp" \
+    && mv -f "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# Read one queue-arm record into FM_QUEUE_ARM_HEAD, FM_QUEUE_ARM_ARMED,
+# FM_QUEUE_ARM_REENQUEUES and FM_QUEUE_ARM_BASELINE, refusing anything but a
+# regular single-link file holding exactly those four well-formed lines.
+fm_queue_arm_read() {  # <path>
+  local path=${1-} head armed reenqueues baseline
+  local LC_ALL=C
+  FM_QUEUE_ARM_HEAD=
+  FM_QUEUE_ARM_ARMED=
+  FM_QUEUE_ARM_REENQUEUES=
+  FM_QUEUE_ARM_BASELINE=
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  [ "$(fm_pr_file_link_count "$path")" = 1 ] || return 1
+  {
+    IFS= read -r head || return 1
+    IFS= read -r armed || return 1
+    IFS= read -r reenqueues || return 1
+    IFS= read -r baseline || return 1
+    if IFS= read -r _; then
+      return 1
+    fi
+  } < "$path" || return 1
+  case "$head" in
+    head=*) ;;
+    *) return 1 ;;
+  esac
+  head=${head#head=}
+  [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || return 1
+  case "$armed" in
+    armed=*[!0-9]*|armed=) return 1 ;;
+  esac
+  armed=${armed#armed=}
+  [ "${#armed}" -le 12 ] || return 1
+  case "$reenqueues" in
+    reenqueues=0|reenqueues=1) reenqueues=${reenqueues#reenqueues=} ;;
+    *) return 1 ;;
+  esac
+  case "$baseline" in
+    baseline=) return 1 ;;
+  esac
+  baseline=${baseline#baseline=}
+  case "$baseline" in
+    *[[:space:]]*) return 1 ;;
+  esac
+  FM_QUEUE_ARM_HEAD=$head
+  FM_QUEUE_ARM_ARMED=$armed
+  FM_QUEUE_ARM_REENQUEUES=$reenqueues
+  # shellcheck disable=SC2034 # Consumed by bin/fm-pr-merge.sh.
+  FM_QUEUE_ARM_BASELINE=$baseline
+}
+
+# Remove a queue-arm record only while it still holds the exact content the
+# caller acted on, so a record re-armed for a newer head is never retired by
+# the older decision's result. An unreadable record is removed outright,
+# exactly as fm_deploy_watch_retire treats its own.
+fm_queue_arm_retire() {  # <path> <head> <armed> <reenqueues> <baseline>
+  local path=${1-}
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if fm_queue_arm_read "$path"; then
+      [ "$FM_QUEUE_ARM_HEAD" = "${2-}" ] && [ "$FM_QUEUE_ARM_ARMED" = "${3-}" ] \
+        && [ "$FM_QUEUE_ARM_REENQUEUES" = "${4-}" ] \
+        && [ "$FM_QUEUE_ARM_BASELINE" = "${5-}" ] || return 0
+    fi
+    rm -f "$path"
+  fi
+}
+
 fm_pr_head_valid() {
   local head=${1-}
   local LC_ALL=C
