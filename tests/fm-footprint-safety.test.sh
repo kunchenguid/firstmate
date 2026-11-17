@@ -532,7 +532,9 @@ at_step() {
   shift 3
   local wait_for="[ ! -e '$go.fired' ] && [ ! -e '$dir' ]"
   local release
-  release=$(cat <<SH
+  # Written through a file: bash 3.2 cannot parse a case inside a here
+  # document inside a command substitution.
+  cat > "$FB/release.part" <<SH
       : > "$go.fired"
       : > "$go"
       n=0
@@ -542,7 +544,7 @@ at_step() {
         sleep .05; n=\$((n + 1))
       done
 SH
-)
+  release=$(cat "$FB/release.part")
   if [ "$step" = delete ]; then
     cat > "$FB/remove-hook" <<SH
 #!/usr/bin/env bash
@@ -583,7 +585,7 @@ SH
 }
 
 unhook() {
-  command rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink" "$FB/cat" "$FB/chmod" "$FB/rm" "$FB/python3" "$FB/remove-hook" "$FB/hidden-pids"
+  command rm -f "$FB/lsof" "$FB/ps" "$FB/find" "$FB/readlink" "$FB/cat" "$FB/chmod" "$FB/rm" "$FB/python3" "$FB/remove-hook" "$FB/hidden-pids" "$FB/release.part"
   unset FM_FOOTPRINT_TEST_REMOVE_HOOK
 }
 
