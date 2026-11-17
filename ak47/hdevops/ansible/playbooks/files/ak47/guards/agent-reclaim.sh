@@ -49,8 +49,9 @@
 # read that fails any other way - including no usable no-mistakes binary - keeps
 # every task in that repository, because it cannot prove none is running.
 # A task that still holds unfinished work for someone is kept too, because a
-# stop is now permanent (see Actions): a keyed needs-decision or blocked line
-# with no later resolved line for that key; a last status line that is
+# stop is now permanent (see Actions): an open decision from the shared status
+# classifier (status_open_decisions in bin/fm-classify-lib.sh); a last status
+# line that is
 # needs-decision, blocked, waiting, or paused, or that says it awaits a review,
 # approval, decision, or merge; a GitHub PR (the record's pr= or a PR URL in the
 # last status line) that `gh pr view` reads as open, or cannot read at all, or a
@@ -121,8 +122,8 @@
 # AK47_RECLAIM_SCOPE (tests only) restricts the census to agents working under
 # one directory, so a test never sees the box's real agents.
 # AK47_NO_MISTAKES (tests only) points the validation read at a fake binary;
-# AK47_LEAVE_STOPPED and AK47_GH do the same for the left-stopped mark and the
-# PR state read.
+# AK47_LEAVE_STOPPED, AK47_GH, and AK47_CLASSIFY_LIB do the same for the
+# left-stopped mark, the PR state read, and the status classifier.
 #
 # Exit: 0 the run completed (a finding or a stop that did not take is not a
 # failure), 1 a step failed, 2 bad usage or a malformed knob.
@@ -156,6 +157,15 @@ FM_LOCK=$FM_CODE/bin/fm-lock.sh
 LEAVE_STOPPED=${AK47_LEAVE_STOPPED:-$FM_CODE/bin/fm-leave-stopped.sh}
 GH=${AK47_GH:-gh}
 FM_WAKE_LIB=$FM_CODE/bin/fm-wake-lib.sh
+CLASSIFY_LIB=${AK47_CLASSIFY_LIB:-$FM_CODE/bin/fm-classify-lib.sh}
+CLASSIFY_OK=0
+if [ -r "$CLASSIFY_LIB" ]; then
+  # shellcheck source=../../bin/fm-classify-lib.sh
+  # shellcheck disable=SC1090
+  if . "$CLASSIFY_LIB" >/dev/null 2>&1; then
+    declare -F status_open_decisions >/dev/null && CLASSIFY_OK=1
+  fi
+fi
 
 ORPHAN_MIN=$(ak47_conf reclaim_orphan_min 120)
 IDLE_MIN=$(ak47_conf reclaim_idle_min 1440)
@@ -498,16 +508,24 @@ declare -A PR_STATE=()
 held_work() {
   local home=$1 id=$2 cwd=$3 st=$1/state/$2.status meta=$1/state/$2.meta wt pr out n merged=0
   HELD=
+  if [ "$CLASSIFY_OK" != 1 ]; then
+    HELD="decision state unreadable"
+    return 0
+  fi
   if [ -f "$st" ]; then
+    if ! out=$(status_open_decisions "$st"); then
+      HELD="decision state unreadable"
+      return 0
+    fi
+    if [ -n "$out" ]; then
+      out=${out%%$'\n'*}
+      HELD="open decision ${out%%$'\t'*}"
+      return 0
+    fi
     if ! out=$(awk '
       { l = $0; sub(/^[0-9][0-9TZ:.+-]* /, "", l) }
-      l ~ /^(needs-decision|blocked|resolved)[ :[]/ && match(l, /\[key=[^]]*\]/) {
-        k = substr(l, RSTART + 5, RLENGTH - 6)
-        if (l ~ /^resolved/) delete open[k]; else open[k] = 1
-      }
       l ~ /[^[:space:]]/ { last = l }
       END {
-        for (k in open) { print "open decision " k; exit }
         s = last; sub(/[ :[].*/, "", s)
         if (s ~ /^(needs-decision|blocked|waiting|paused)$/) { print "last status " s; exit }
         if (tolower(last) ~ /(^|[^a-z])(await|waiting|ready|needs?|pending)[a-z]* (to |for |on )?([^ ]+ ){0,3}(review|approval|decision|merge|be merged)([^a-z]|$)/) print "last status awaits review or decision"

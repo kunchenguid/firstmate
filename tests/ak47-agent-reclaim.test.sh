@@ -11,6 +11,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 GUARD="$ROOT/ak47/guards/agent-reclaim.sh"
+export AK47_CLASSIFY_LIB=$ROOT/bin/fm-classify-lib.sh
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -524,14 +525,16 @@ test_unfinished_work_vetoes_a_stop() {
   reset
   local t s
   declare -A A=()
-  local kept="open-decision last-blocked awaits-review ready-to-merge needs-review pending-approval waiting-pr-merge ready-to-be-merged captain-approval pr-open pr-unreadable pr-gitlab unpushed dirty"
+  local kept="open-decision unkeyed-open last-waiting awaits-review ready-to-merge needs-review pending-approval waiting-pr-merge ready-to-be-merged captain-approval pr-open pr-unreadable pr-gitlab unpushed dirty"
   local unreadable=
-  local stopped="resolved-decision pr-merged already-merged ready-and-merged pushed"
+  local stopped="resolved-decision captain-held-stopped pr-merged already-merged ready-and-merged pushed"
   for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
   s=$FM_HOME/state
   printf 'needs-decision [key=k1]: keep both cards or hide one\nworking: waiting meanwhile\n' >"$s/open-decision.status"
+  printf 'needs-decision: pick API shape\nworking: wiring it up\n' >"$s/unkeyed-open.status"
   printf 'needs-decision [key=k2]: which copy\nresolved [key=k2]: copy chosen\ndone: copy shipped\n' >"$s/resolved-decision.status"
-  printf 'blocked: needs a token\n' >"$s/last-blocked.status"
+  printf 'needs-decision [key=held]: choose\ncaptain-held [key=held]: tracked by hold:1\n' >"$s/captain-held-stopped.status"
+  printf 'waiting: a human answer\n' >"$s/last-waiting.status"
   printf 'done: renders ready, awaiting your review\n' >"$s/awaits-review.status"
   printf 'done: PR ready to merge\n' >"$s/ready-to-merge.status"
   printf 'done: needs review\n' >"$s/needs-review.status"
@@ -570,10 +573,22 @@ test_unfinished_work_vetoes_a_stop() {
     grep -qF 'status unreadable' "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the unreadable status veto"
   fi
   grep -q gitlab "$GH_LOG" && fail "a GitLab merge request was handed to gh"
-  for r in 'open decision k1' 'last status blocked' 'awaits review' 'PR open' 'PR state unreadable' 'PR on a forge the reclaim cannot read' 'commit(s) on no pushed branch' 'uncommitted changes'; do
+  for r in 'open decision k1' 'open decision default' 'last status waiting' 'awaits review' 'PR open' 'PR state unreadable' 'PR on a forge the reclaim cannot read' 'commit(s) on no pushed branch' 'uncommitted changes'; do
     grep -qF "$r" "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the veto '$r'"
   done
   pass "an open decision, a waiting or review-bound last status, an open or unreadable PR, and unpushed or uncommitted work each veto a stop"
+}
+
+test_missing_classify_lib_keeps_tasks() {
+  reset
+  add_task main missing-classify '-30 hours'
+  spawn_agent "$WT/missing-classify"; local p=$AGENT
+  AK47_CLASSIFY_LIB=$SANDBOX/missing run --apply
+  [ "$(cat "$SANDBOX/rc")" = 0 ] || fail "missing classify lib run exited $(cat "$SANDBOX/rc"): $(cat "$SANDBOX/out")"
+  sleep 0.3
+  alive "$p" || fail "a task was stopped without a readable decision classifier"
+  grep -qF 'decision state unreadable' "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the unreadable decision state"
+  pass "a missing status classifier keeps every task"
 }
 
 test_armed_check_vetoes_and_finished_work_goes_first() {
@@ -612,6 +627,7 @@ test_stops_are_marked_left_stopped
 test_unfinished_work_vetoes_a_stop
 test_over_cap_home_stops_oldest_idle_first
 test_box_cap_reads_budget
+test_missing_classify_lib_keeps_tasks
 test_armed_check_vetoes_and_finished_work_goes_first
 test_chairs_and_check_monitors_are_never_touched
 test_dead_chair_watcher_stops_only_after_two_runs
