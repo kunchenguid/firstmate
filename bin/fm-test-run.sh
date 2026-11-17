@@ -428,7 +428,7 @@ family_for_basename() {
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
-    fm-goal.test.sh|fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|\
+    fm-goal.test.sh|fm-drive-board.test.sh|fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|\
     fm-supervision-host.test.sh|fm-supervision-host-drain.test.sh|\
     fm-supervision-host-hook.test.sh|fm-supervision-host-park.test.sh|\
     fm-host-mirror.test.sh)
@@ -747,6 +747,7 @@ portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-account-seat.test.sh 30000
 tests/fm-goal.test.sh 20000
+tests/fm-drive-board.test.sh 16000
 tests/fm-afk-contract.test.sh 15645
 tests/fm-afk-inject-e2e.test.sh 41958
 tests/fm-afk-pi-herdr-return-e2e.test.sh 117
@@ -1935,8 +1936,13 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-bearings-board.test.sh
       printf '%s\n' __script__:fm-live-board.test.sh
       ;;
+    bin/fm-drive-board.sh|.agents/skills/drive-goal/assets/drive-board-template.html)
+      # The drive board generator and the page it injects its payload into.
+      printf '%s\n' __script__:fm-drive-board.test.sh
+      ;;
     bin/fm-lavish-board-lib.sh)
       # The shared serve/bind/arm sequence behind the captain-facing boards.
+      printf '%s\n' __script__:fm-drive-board.test.sh
       printf '%s\n' __script__:fm-bearings-board.test.sh
       printf '%s\n' __script__:fm-bearings-board-render.test.sh
       printf '%s\n' __script__:fm-live-board.test.sh

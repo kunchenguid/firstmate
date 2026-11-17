@@ -125,6 +125,7 @@
 #   fm-goal.sh brief
 #   fm-goal.sh active
 #   fm-goal.sh startable
+#   fm-goal.sh export [<id>]
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
 #
@@ -144,6 +145,18 @@
 # the goal's started epoch for an item no mark touched) - and nothing when no
 # item is startable; it is the machine read the watcher's goal-stall tick uses
 # (bin/fm-watch.sh), so that tick never invents what startable means.
+#
+# `export` is the JSON read of the same projection, for a renderer that is not
+# bash (bin/fm-drive-board.sh, the Miko cockpit panel). It prints one compact
+# object {schema: "fm-goal-export.v1", goals: [...]} for every active goal, or
+# for the one named id (rc 1 when that id is not active), and an empty goals
+# array when none is active. A goal carries id, title, state, named_by, plan,
+# done_when, started_epoch, last_progress_epoch (null when no mark exists),
+# progress {total, closed, at_target, with_target} and items. An item carries
+# id, owner, class, title, state (the folded mark state), task, project,
+# target, stage, stage_at, since, until (each null when absent), after,
+# waiting_on and stop_on (lists), and the booleans startable, target_reached
+# and landing_hint. It is read-only, takes no lock, and needs jq.
 #
 # Exit codes: 0 success; 1 operational refusal (unknown goal or item, items
 # still open, unwritable channel, no active goal); 2 usage error (bad flags,
@@ -2160,6 +2173,77 @@ cmd_startable() {
   return 0
 }
 
+# One active goal as a JSON object on stdout: the record fields, the folded
+# progress counts, and one object per item carrying its projection (see the
+# `export` paragraph in the header for the contract).
+_fm_goal_export_one() {  # <id>
+  local now i startable reached landing stopon items=''
+  now=$(date +%s)
+  _fm_goal_open_record "$1" || return 1
+  fm_goal_fold "$1" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$now"
+  i=0
+  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+    _fm_goal_item_waiting "$i"
+    if _fm_goal_item_startable "$i"; then startable=true; else startable=false; fi
+    if _fm_goal_item_target_reached "$i"; then reached=true; else reached=false; fi
+    if _fm_goal_item_landing "$i" "$FM_GOAL_STATE"; then landing=true; else landing=false; fi
+    stopon=${FM_GOAL_ITEMS_STOPONS[$i]}
+    items="$items$(jq -cn \
+      --arg id "${FM_GOAL_ITEMS_IDS[$i]}" --arg owner "${FM_GOAL_ITEMS_OWNERS[$i]}" \
+      --arg class "${FM_GOAL_ITEMS_CLASSES[$i]}" --arg task "${FM_GOAL_ITEMS_TASKS[$i]}" \
+      --arg project "${FM_GOAL_ITEMS_PROJECTS[$i]}" --arg target "${FM_GOAL_ITEMS_TARGETS[$i]}" \
+      --arg stage "${FM_GOAL_S_STAGES[$i]}" --arg stage_at "${FM_GOAL_S_ATS[$i]}" \
+      --arg state "${FM_GOAL_M_STATES[$i]}" --arg since "${FM_GOAL_M_ATS[$i]}" \
+      --arg after "${FM_GOAL_ITEMS_AFTERS[$i]}" --arg waiting "$FM_GOAL_WAITING" \
+      --arg until "${FM_GOAL_ITEMS_UNTILS[$i]}" --arg stopon "$stopon" \
+      --arg title "${FM_GOAL_ITEMS_TITLES[$i]}" \
+      --argjson startable "$startable" --argjson reached "$reached" --argjson landing "$landing" '
+      def csv: if . == "" then [] else split(",") end;
+      def epoch: if . == "" then null else tonumber end;
+      {id: $id, owner: $owner, class: $class, title: $title, state: $state,
+       task: (if $task == "" then null else $task end),
+       project: (if $project == "" then null else $project end),
+       target: (if $target == "" then null else $target end),
+       stage: (if $stage == "" then null else $stage end),
+       stage_at: ($stage_at | epoch), since: ($since | epoch),
+       after: ($after | csv), waiting_on: ($waiting | csv),
+       until: ($until | epoch), stop_on: ($stopon | csv),
+       startable: $startable, target_reached: $reached, landing_hint: $landing}')"$'\n'
+    i=$((i + 1))
+  done
+  printf '%s' "$items" | jq -cs \
+    --arg id "$FM_GOAL_REC_ID" --arg title "$FM_GOAL_REC_TITLE" --arg state "$FM_GOAL_REC_STATE" \
+    --arg named_by "$FM_GOAL_REC_NAMED_BY" --arg plan "$FM_GOAL_REC_PLAN" \
+    --arg done_when "$FM_GOAL_REC_DONE_WHEN" --argjson started "$FM_GOAL_REC_STARTED_EPOCH" \
+    --arg last "${FM_GOAL_FOLD_LAST_AT:-}" '
+    {id: $id, title: $title, state: $state, named_by: $named_by, plan: $plan,
+     done_when: $done_when, started_epoch: $started,
+     last_progress_epoch: (if $last == "" then null else ($last | tonumber) end),
+     progress: {total: length, closed: ([.[] | select(.state == "done" or .state == "dropped")] | length),
+                at_target: ([.[] | select(.target_reached)] | length),
+                with_target: ([.[] | select(.target != null)] | length)},
+     items: .}'
+}
+
+cmd_export() {
+  local path id goals='' one
+  command -v jq >/dev/null 2>&1 || _fm_goal_die 1 'export needs jq'
+  [ "$#" -le 1 ] || _fm_goal_usage_error 'export takes at most one goal id'
+  if [ "$#" -eq 1 ]; then
+    fm_goal_id_valid "$1" || _fm_goal_usage_error "unsafe goal id: '$1'"
+    one=$(_fm_goal_export_one "$1") || exit 1
+    goals=$one$'\n'
+  else
+    while IFS= read -r path; do
+      id=${path##*/}
+      id=${id%.goal}
+      one=$(_fm_goal_export_one "$id" 2>/dev/null) || continue
+      goals="$goals$one"$'\n'
+    done < <(fm_goal_active_records 2>/dev/null)
+  fi
+  printf '%s' "$goals" | jq -cs '{schema: "fm-goal-export.v1", goals: .}'
+}
+
 cmd_exists() {
   [ "$#" -eq 1 ] || _fm_goal_usage_error 'exists needs a goal id'
   fm_goal_id_valid "$1" || _fm_goal_usage_error "unsafe goal id: '$1'"
@@ -2448,7 +2532,7 @@ main() {
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'needs a subcommand'
   shift
   case "$cmd" in
-    start|edit|mark|probe|show|brief|active|startable|exists|window|close) ;;
+    start|edit|mark|probe|show|brief|active|startable|export|exists|window|close) ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;
   esac

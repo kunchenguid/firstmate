@@ -514,7 +514,30 @@ test_target_close_and_brief() {
   pass 'close --done and the brief hold an item to its target; a dropped item owes none'
 }
 
+test_export() {
+  probe_fixture
+  local out
+  out=$(goal export)
+  assert_equals fm-goal-export.v1 "$(jq -r .schema <<< "$out")" 'export names its schema'
+  assert_equals I1 "$(jq -r '.goals[0].id' <<< "$out")" 'export lists the active goal'
+  assert_equals '0 2 1' "$(jq -r '.goals[0].progress | "\(.closed) \(.total) \(.with_target)"' <<< "$out")" 'export counts items and targets'
+  assert_equals 'miko deployed true false' \
+    "$(jq -r '.goals[0].items[0] | "\(.project) \(.target) \(.startable) \(.target_reached)"' <<< "$out")" 'an item carries its project, target and projection'
+  assert_equals 'a' "$(jq -r '.goals[0].items[1].waiting_on | join(",")' <<< "$out")" 'a waiting item names what it waits on'
+  assert_equals 'prod-deploy-failed,spend' "$(jq -r '.goals[0].items[0].stop_on | join(",")' <<< "$out")" 'stop-on words come out as a list'
+  goal mark I1 a running --stage deployed -- 'live on dev' >/dev/null
+  out=$(goal export I1)
+  assert_equals 'deployed true running' \
+    "$(jq -r '.goals[0].items[0] | "\(.stage) \(.target_reached) \(.state)"' <<< "$out")" 'a stage mark reaches the target in the export'
+  assert_equals '1' "$(jq -r '.goals[0].progress.at_target' <<< "$out")" 'progress counts items at target'
+  expect_rc 1 goal export nosuch
+  expect_rc 2 goal export a b
+  fixture
+  assert_equals '{"schema":"fm-goal-export.v1","goals":[]}' "$(goal export)" 'no active goal exports an empty list'
+  pass 'export is the JSON read of the projection: items, targets, stages, progress, empty and unknown ids'
+}
+
 fm_test_run test_start test_validation test_marks test_local_mate test_remote_mate \
   test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
-  test_probe_pr_merged test_limits test_target_close_and_brief
+  test_probe_pr_merged test_limits test_target_close_and_brief test_export

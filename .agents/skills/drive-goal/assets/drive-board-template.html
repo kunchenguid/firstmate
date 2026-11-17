@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en" data-lavish-annotate="off" style="background:#0f1115;color-scheme:dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="supported-color-schemes" content="dark">
+<title>Drive board</title>
+<style>
+:root { color-scheme: dark; --bg:#0f1115; --card:#181b22; --raise:#20242d; --line:#2a303b; --text:#e6e8ee; --mut:#9aa3b2; --acc:#6ea8fe; --ok:#4cc38a; --warn:#e3b341; --bad:#f26d6d; }
+html { background:#0f1115; color:#e6e8ee; color-scheme:dark; }
+body { background:#0f1115; color:#e6e8ee; margin:0; padding:12px 12px 250px; font:15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow-wrap:anywhere; }
+* { box-sizing:border-box; }
+h1 { font-size:20px; margin:4px 0 2px; }
+h2 { font-size:13px; letter-spacing:.06em; text-transform:uppercase; color:#9aa3b2; margin:22px 0 8px; }
+.sub { color:#9aa3b2; font-size:13px; margin:0 0 10px; }
+.chip { display:inline-block; padding:1px 8px; border-radius:999px; font-size:12px; background:#20242d; color:#e6e8ee; border:1px solid #2a303b; margin:0 4px 2px 0; }
+.chip.ok { color:#4cc38a; border-color:#2f6b52; }
+.chip.warn { color:#e3b341; border-color:#7a6320; }
+.chip.bad { color:#f26d6d; border-color:#7a3535; }
+.chip.acc { color:#6ea8fe; border-color:#2f4f82; }
+.card { background:#181b22; border:1px solid #2a303b; border-radius:12px; padding:12px; margin:0 0 12px; min-width:0; }
+.card h3 { font-size:16px; margin:0 0 4px; }
+.mono { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; }
+.mut { color:#9aa3b2; }
+.bar { display:block; width:100%; height:12px; margin:8px 0 4px; }
+.row { display:grid; grid-template-columns:minmax(0,1fr); gap:6px; padding:10px 0; border-top:1px solid #2a303b; min-width:0; }
+.row:first-of-type { border-top:0; }
+.row.off { opacity:.55; }
+.head { display:flex; gap:10px; align-items:flex-start; min-width:0; }
+.head label { display:flex; gap:10px; align-items:flex-start; min-width:0; flex:1 1 auto; }
+.head input[type=checkbox] { width:22px; height:22px; margin:1px 0 0; flex:0 0 auto; accent-color:#6ea8fe; }
+.title { min-width:0; }
+.pick { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.pick span { color:#9aa3b2; font-size:13px; }
+select { background:#20242d; color:#e6e8ee; border:1px solid #2a303b; border-radius:8px; padding:8px 10px; font:inherit; max-width:100%; min-width:0; color-scheme:dark; }
+select option { background:#20242d; color:#e6e8ee; }
+svg.rail { display:block; width:100%; height:auto; max-height:44px; }
+#order { position:fixed; left:0; right:0; bottom:0; background:#181b22; border-top:1px solid #2a303b; padding:10px 12px 12px; z-index:5; }
+#order .line { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 6px; }
+#order label { display:flex; gap:8px; align-items:center; font-size:14px; }
+#order input[type=checkbox] { width:20px; height:20px; accent-color:#6ea8fe; }
+button { background:#6ea8fe; color:#0b1220; border:0; border-radius:10px; padding:9px 16px; font:600 15px system-ui, sans-serif; min-height:42px; }
+button.ghost { background:#20242d; color:#e6e8ee; border:1px solid #2a303b; }
+button[disabled] { background:#2a303b; color:#7c8696; }
+#msg { font-size:12px; min-height:16px; margin:0 0 4px; color:#e3b341; }
+#sent { display:none; margin:0 0 6px; padding:6px; font-size:12px; background:#0f1115; border:1px solid #2a303b; border-radius:8px; }
+#sent.on { display:block; }
+#err { background:#2a1517; border:1px solid #7a3535; color:#f6b4b4; border-radius:10px; padding:12px; }
+</style>
+</head>
+<body style="background:#0f1115;color:#e6e8ee">
+<h1>Drive board</h1>
+<p class="sub" id="sub"></p>
+<div id="away"></div>
+<div id="goals"></div>
+<div id="cands"></div>
+<div id="order" hidden>
+  <p id="msg" role="status" aria-live="polite"></p>
+  <div id="sent"><span class="mut">Answer to send:</span> <code class="mono" id="sentText"></code></div>
+  <div class="line">
+    <select id="goalSel" name="goal" aria-label="Goal to drive"></select>
+    <span class="mut" id="count"></span>
+  </div>
+  <div class="line"><label><input type="checkbox" id="awayOpt" name="away"> Also enter /afk and drive it while I am away</label></div>
+  <div class="line">
+    <button type="button" id="send">Send drive order</button>
+    <button type="button" class="ghost" id="copy">Copy answer</button>
+  </div>
+</div>
+<noscript><div id="err">This board needs JavaScript to render.</div></noscript>
+<script id="drive-data" type="application/json">
+__FM_DRIVE_BOARD_DATA__
+</script>
+<script>
+(function () {
+  "use strict";
+  var COLORS = { ok: "#4cc38a", acc: "#6ea8fe", mut: "#2a303b", txt: "#9aa3b2", warn: "#e3b341", bg: "#181b22" };
+  var STATE_CLASS = { done: "ok", running: "acc", waiting: "warn", blocked: "bad", dropped: "", open: "" };
+  var data;
+  try { data = JSON.parse(document.getElementById("drive-data").textContent); }
+  catch (e) { fail("The board data could not be read"); return; }
+  if (!data || data.schema !== "fm-drive-board.v1") { fail("Unknown board schema"); return; }
+
+  function fail(text) {
+    var d = document.createElement("div"); d.id = "err"; d.textContent = text;
+    document.body.appendChild(d);
+  }
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = text;
+    return n;
+  }
+  function chip(text, kind) { return el("span", "chip" + (kind ? " " + kind : ""), text); }
+  function age(epoch) {
+    if (!epoch) return "never";
+    var s = Math.max(0, data.now_epoch - epoch);
+    if (s < 90) return s + "s ago";
+    if (s < 5400) return Math.round(s / 60) + "m ago";
+    if (s < 172800) return Math.round(s / 3600) + "h ago";
+    return Math.round(s / 86400) + "d ago";
+  }
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function svg(tag, attrs) {
+    var n = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function ladderOf(project) { return (project && data.ladders && data.ladders[project]) || []; }
+  function rank(ladder, stage) { return stage ? ladder.indexOf(stage) : -1; }
+
+  /* progress bar: closed items in green, then items at target in blue */
+  function progressBar(g) {
+    var p = g.progress, total = Math.max(p.total, 1), w = 300;
+    var reachedOpen = g.items.filter(function (it) {
+      return it.target_reached && it.state !== "done" && it.state !== "dropped";
+    }).length;
+    var s = svg("svg", { "class": "bar", viewBox: "0 0 " + w + " 12", preserveAspectRatio: "none", role: "img",
+      "aria-label": p.closed + " of " + p.total + " items done, " + reachedOpen + " more at target" });
+    s.appendChild(svg("rect", { x: 0, y: 0, width: w, height: 12, rx: 6, fill: COLORS.mut }));
+    var blue = w * (p.closed + reachedOpen) / total, green = w * p.closed / total;
+    if (reachedOpen) s.appendChild(svg("rect", { x: 0, y: 0, width: blue, height: 12, rx: 6, fill: COLORS.acc }));
+    if (p.closed) s.appendChild(svg("rect", { x: 0, y: 0, width: green, height: 12, rx: 6, fill: COLORS.ok }));
+    return s;
+  }
+
+  /* stage rail: one dot per ladder rung, reached rungs filled, target ringed */
+  function stageRail(ladder, stage, target) {
+    var n = ladder.length, w = 340, h = 40, pad = 26;
+    var s = svg("svg", { "class": "rail", viewBox: "0 0 " + w + " " + h, role: "img",
+      "aria-label": "stage " + (stage || "none") + (target ? ", target " + target : "") });
+    var cur = rank(ladder, stage), tg = rank(ladder, target);
+    var step = n > 1 ? (w - 2 * pad) / (n - 1) : 0;
+    s.appendChild(svg("line", { x1: pad, y1: 12, x2: w - pad, y2: 12, stroke: COLORS.mut, "stroke-width": 3 }));
+    if (cur > 0) s.appendChild(svg("line", { x1: pad, y1: 12, x2: pad + step * cur, y2: 12, stroke: COLORS.ok, "stroke-width": 3 }));
+    ladder.forEach(function (name, i) {
+      var x = n > 1 ? pad + step * i : w / 2;
+      var reached = i <= cur;
+      if (i === tg) s.appendChild(svg("circle", { cx: x, cy: 12, r: 10, fill: "none", stroke: COLORS.acc, "stroke-width": 2 }));
+      s.appendChild(svg("circle", { cx: x, cy: 12, r: 6, fill: reached ? COLORS.ok : COLORS.bg, stroke: reached ? COLORS.ok : COLORS.txt, "stroke-width": 2 }));
+      var t = svg("text", { x: x, y: 36, "text-anchor": "middle", "font-size": 11, fill: i === tg ? COLORS.acc : COLORS.txt, "font-family": "system-ui, sans-serif" });
+      t.textContent = name.length > 13 ? name.slice(0, 12) + "…" : name;
+      s.appendChild(t);
+    });
+    return s;
+  }
+
+  /* one item row; `goalId` is '' for a candidate not yet in any goal */
+  function itemRow(it, goalId) {
+    var ladder = ladderOf(it.project);
+    var closed = it.state === "done" || it.state === "dropped";
+    var captain = it.class === "captain";
+    var row = el("div", "row" + (closed || captain ? " off" : ""));
+    var head = el("div", "head");
+    var label = el("label");
+    var box = el("input"); box.type = "checkbox";
+    box.setAttribute("data-item", it.id); box.name = "pick-" + it.id; box.setAttribute("data-goal", goalId || "");
+    box.disabled = closed || captain;
+    var title = el("div", "title");
+    var idn = el("span", "mono mut", it.id + "  "); title.appendChild(idn);
+    title.appendChild(document.createTextNode(it.title));
+    label.appendChild(box); label.appendChild(title);
+    head.appendChild(label);
+    row.appendChild(head);
+    var meta = el("div");
+    meta.appendChild(chip(it.owner));
+    if (goalId) {
+      meta.appendChild(chip(it.state, STATE_CLASS[it.state] || ""));
+      if (captain) meta.appendChild(chip("captain only", "warn"));
+      else if (it.startable) meta.appendChild(chip("startable", "acc"));
+      else if (!closed && it.waiting_on && it.waiting_on.length) meta.appendChild(chip("waits on " + it.waiting_on.join(","), "warn"));
+      if (it.target_reached) meta.appendChild(chip("target reached", "ok"));
+    }
+    if (it.project) meta.appendChild(chip(it.project));
+    row.appendChild(meta);
+    if (ladder.length) {
+      row.appendChild(stageRail(ladder, it.stage, it.target));
+      var pick = el("div", "pick");
+      pick.appendChild(el("span", "", "Drive to"));
+      var sel = el("select"); sel.setAttribute("data-target-for", it.id); sel.name = "target-" + it.id;
+      sel.setAttribute("aria-label", "Target stage for " + it.id);
+      var none = el("option", "", "- choose a stage -"); none.value = ""; sel.appendChild(none);
+      ladder.forEach(function (name) {
+        var o = el("option", "", name); o.value = name;
+        if (name === it.target) o.selected = true;
+        sel.appendChild(o);
+      });
+      sel.disabled = closed || captain;
+      pick.appendChild(sel);
+      row.appendChild(pick);
+    } else if (!closed && !captain) {
+      row.appendChild(el("div", "mut", it.project ? "No stage ladder for " + it.project + ": the item drives with no target." : "No project, so no target stage."));
+    }
+    return row;
+  }
+
+  /* header and away record */
+  document.getElementById("sub").textContent = data.home + " - " + data.generated;
+  var away = document.getElementById("away");
+  var ac = el("div", "card");
+  if (data.away && data.away.state === "away") {
+    ac.appendChild(chip("AWAY", "ok"));
+    ac.appendChild(el("span", "", " since " + (data.away.entered || "?")));
+    var line = el("div", "mut", "Driving: " + ((data.away.drive_goals && data.away.drive_goals.length) ? data.away.drive_goals.join(", ") : "every active goal") +
+      (data.away.spend_cap ? " - worker cap " + data.away.spend_cap : "") +
+      (data.away.expected_return ? " - back " + data.away.expected_return : ""));
+    ac.appendChild(line);
+  } else {
+    ac.appendChild(chip("ATTENDED", "acc"));
+    ac.appendChild(el("span", "mut", " Tick the box below the picks to enter /afk with the goal."));
+  }
+  away.appendChild(ac);
+
+  /* goals */
+  var goalsEl = document.getElementById("goals");
+  goalsEl.appendChild(el("h2", "", "Goals"));
+  if (!data.goals.length) goalsEl.appendChild(el("div", "card mut", "No active goal. Pick items below to start one."));
+  data.goals.forEach(function (g) {
+    var card = el("div", "card");
+    card.appendChild(el("h3", "", g.id + " - " + g.title));
+    var p = g.progress;
+    card.appendChild(progressBar(g));
+    var stats = el("div");
+    stats.appendChild(chip(p.closed + "/" + p.total + " done", p.closed === p.total && p.total ? "ok" : ""));
+    if (p.with_target) stats.appendChild(chip(p.at_target + "/" + p.with_target + " at target", p.at_target === p.with_target ? "ok" : "acc"));
+    stats.appendChild(chip("last update " + age(g.last_progress_epoch)));
+    card.appendChild(stats);
+    card.appendChild(el("div", "mut", "Done when: " + g.done_when));
+    g.items.forEach(function (it) { card.appendChild(itemRow(it, g.id)); });
+    goalsEl.appendChild(card);
+  });
+
+  /* candidates */
+  var candsEl = document.getElementById("cands");
+  if (data.candidates.length) {
+    candsEl.appendChild(el("h2", "", "Available to drive"));
+    var cc = el("div", "card");
+    data.candidates.forEach(function (it) { cc.appendChild(itemRow(it, "")); });
+    candsEl.appendChild(cc);
+  }
+
+  /* order bar */
+  var bar = document.getElementById("order"), goalSel = document.getElementById("goalSel");
+  var sendBtn = document.getElementById("send"), copyBtn = document.getElementById("copy");
+  var msg = document.getElementById("msg"), count = document.getElementById("count");
+  var sent = document.getElementById("sent"), sentText = document.getElementById("sentText");
+  var awayBox = document.getElementById("awayOpt");
+  data.goals.forEach(function (g) { var o = el("option", "", "Edit " + g.id); o.value = g.id; goalSel.appendChild(o); });
+  if (data.new_goal) { var no = el("option", "", "Start new goal " + data.new_goal.id); no.value = data.new_goal.id; goalSel.appendChild(no); }
+  var boxes = Array.prototype.slice.call(document.querySelectorAll("input[data-item]"));
+  if (goalSel.options.length && boxes.length) bar.hidden = false;
+
+  function picks() {
+    var out = [];
+    boxes.forEach(function (b) {
+      if (!b.checked || b.disabled) return;
+      var s = document.querySelector('select[data-target-for="' + b.getAttribute("data-item") + '"]');
+      out.push({ id: b.getAttribute("data-item"), stage: s && s.value ? s.value : "", hasLadder: !!s });
+    });
+    return out;
+  }
+  function refresh() {
+    var chosen = goalSel.value;
+    boxes.forEach(function (b) {
+      var g = b.getAttribute("data-goal");
+      var other = g && g !== chosen;
+      var cls = b.closest(".row");
+      var s = cls.querySelector("select");
+      if (other) { b.checked = false; cls.classList.add("off"); }
+      else if (!b.disabled) cls.classList.remove("off");
+      if (s && !b.disabled) s.disabled = false;
+    });
+    var p = picks();
+    count.textContent = p.length + " picked";
+    sent.classList.remove("on");
+    msg.textContent = "";
+  }
+  function answer() {
+    var p = picks();
+    if (!p.length) { msg.textContent = "Pick at least one item."; return null; }
+    for (var i = 0; i < p.length; i++) {
+      if (p[i].hasLadder && !p[i].stage) { msg.textContent = "Choose a target stage for " + p[i].id + "."; return null; }
+    }
+    var a = "goal=" + goalSel.value + " pick=" + p.map(function (x) { return x.id + "@" + (x.stage || "-"); }).join(",") +
+      " away=" + (awayBox.checked ? "yes" : "no");
+    if (a.length > 480) { msg.textContent = "Too many items for one order. Send fewer."; return null; }
+    return a;
+  }
+  goalSel.addEventListener("change", function () {
+    boxes.forEach(function (b) { var g = b.getAttribute("data-goal"); if (g && g !== goalSel.value) b.checked = false; });
+    refresh();
+  });
+  /* an item of an existing goal picks that goal */
+  function onPick(b) {
+    var g = b.getAttribute("data-goal");
+    if (b.checked && g && goalSel.value !== g) {
+      goalSel.value = g;
+      refresh();           /* unchecks the previous goal's picks, and this box */
+      b.checked = true;
+    }
+    count.textContent = picks().length + " picked";
+    sent.classList.remove("on");
+    msg.textContent = "";
+  }
+  boxes.forEach(function (b) {
+    b.addEventListener("change", function () { onPick(b); });
+    var s = b.closest(".row").querySelector("select");
+    if (s) s.addEventListener("change", function () { if (s.value) b.checked = true; onPick(b); });
+  });
+  awayBox.addEventListener("change", function () { sent.classList.remove("on"); });
+  sendBtn.addEventListener("click", function () {
+    var a = answer(); if (!a) return;
+    if (window.lavish && window.lavish.queuePrompt) {
+      sent.classList.remove("on");
+      window.lavish.queuePrompt("Drive order - " + a,
+        { tag: "choice", text: "Drive: " + a, element: bar, queueKey: "drive.go",
+          data: { question: "drive.go", answer: a } });
+      msg.textContent = "Queued. Press Send to Agent to deliver it.";
+    } else {
+      sentText.textContent = a; sent.classList.add("on");
+      msg.textContent = "Not connected to Lavish. Copy the answer and paste it to the agent.";
+    }
+  });
+  copyBtn.addEventListener("click", function () {
+    var a = answer(); if (!a) return;
+    sentText.textContent = a; sent.classList.add("on");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(a).then(function () { msg.textContent = "Copied."; }, function () { msg.textContent = "Copy it from the box above."; });
+    } else { msg.textContent = "Copy it from the box above."; }
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

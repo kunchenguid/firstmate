@@ -46,6 +46,16 @@ After every landing, and after any change to one of its items, the item's owner 
 Steer by that duty, not by hope: an `unrecorded landing` line in the GOAL section is the gap, and the owner's next mark closes it.
 Before retiring a second mate that owns items, reassign those items first through `edit`, so no item's owner stream disappears underneath the projection.
 
+## The drive board
+
+When the captain wants to pick items and a target stage on a phone, or asks to "show the drive board", build it with `bin/fm-drive-board.sh build --candidates <file>` and tell the captain the page opened.
+Candidates are the items not yet in a goal that the captain may add; compose that array from the backlog or the plan, and `bin/fm-drive-board.sh --help` owns its shape, the payload contract and the answer grammar.
+The page is `data/drive-board/drive-board.html`, and its one keyed answer is `drive.go`.
+The runner announces that answer as an ordinary board wake, because the keyed-answer intake skips a key that is no captain-held task.
+On that wake run `bin/fm-drive-board.sh apply --result <result-file>` as main: it starts or edits the goal through `fm-goal.sh` and, when the captain ticked the box, enters `/afk` through `fm-afk-launch.sh enter --drive-goal`.
+Then finish the `/afk` entry as the afk skill says, rebuild the board so it shows the new state, and echo every action in chat.
+A refusal names its reason and leaves the goal and the away record untouched, so relay it instead of forcing the answer.
+
 ## Showing and closing
 
 On "show goal", relay `bin/fm-goal.sh show <id>` in outcome language: how far it is, what is startable, and what waits on whom.
