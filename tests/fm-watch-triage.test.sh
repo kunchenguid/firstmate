@@ -2426,6 +2426,151 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
   pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
 }
 
+# A pane that renders nothing cannot be wedged. A backend can answer a pruned
+# endpoint with a SUCCESSFUL empty capture - herdr's capture only proves its
+# server is up, never that the pane still exists - and hashing that constant
+# walked a window whose pane was already gone up the escalation ladder until it
+# demanded a deep inspection of a closed task. Empty content carries no evidence
+# of a wedge, so it ends the episode instead.
+test_empty_pane_capture_ends_the_wedge_episode() {
+  local dir state fakebin out capture window key round flavor pid
+  for flavor in zero-byte whitespace-only; do
+    dir=$(wedge_threshold_fixture "empty-pane-capture-$flavor" 'working: still compiling' 0 500)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    window="test:fm-wedge"; key=$(watch_window_key "$window")
+    printf '2\n' > "$state/.wedge-escalations-$key"
+    case "$flavor" in
+      zero-byte)       : > "$capture" ;;
+      whitespace-only) printf ' \n\t\n   \n\n' > "$capture" ;;
+    esac
+    round=1
+    # Three polls, not one: the escalation ladder reaches its threshold on the
+    # THIRD identical hash (the first sight resets the counter, the second arms it),
+    # so a two-round loop would pass even without the empty-capture guard.
+    while [ "$round" -le 3 ]; do
+      : > "$out"
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+        FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+        FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+        FM_STALE_ESCALATE_SECS=0 "$WATCH" > "$out" &
+      pid=$!
+      wait_poll_cycle "$state" "$pid" \
+        || { reap "$pid"; fail "the watcher did not finish a poll over a $flavor pane capture: $(cat "$out")"; }
+      reap "$pid"
+      ack_stopped_cycle "$state" || fail "could not acknowledge $flavor empty-capture round $round"
+      [ ! -s "$out" ] || fail "a $flavor pane capture raised a wake on round $round: $(cat "$out")"
+      [ ! -s "$state/.wake-queue" ] || fail "a $flavor pane capture queued a durable wake on round $round"
+      [ ! -e "$state/.wedge-escalations-$key" ] \
+        || fail "a $flavor pane capture kept the wedge escalation count on round $round"
+      [ ! -e "$state/.stale-since-$key" ] \
+        || fail "a $flavor pane capture kept a wedge timer armed on round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "a pane that renders nothing, byte-empty or whitespace-only, ends its wedge episode instead of escalating"
+}
+
+# The away daemon saved a blocking-dialog name while the picker was up, then the
+# pane went blank. An empty capture shows no composer dialog, so the
+# empty-capture branch has to drop the saved name just as the ordinary stale path
+# does; otherwise the next stale wake still names a dialog that is already gone.
+test_empty_pane_capture_drops_saved_dialog_name() {
+  local dir state fakebin out capture window pid
+  dir=$(wedge_threshold_fixture empty-pane-dialog 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-wedge"
+  : > "$capture"
+  printf '%s' 'Claude background-task exit picker' > "$state/.subsuper-dialog-wedge"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_STALE_ESCALATE_SECS=0 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail "the watcher did not finish a poll over an empty pane capture: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -e "$state/.subsuper-dialog-wedge" ] \
+    || fail "an empty pane capture kept a saved dialog name"
+  [ ! -s "$out" ] \
+    || fail "an empty pane capture with a saved dialog name raised a wake: $(cat "$out")"
+  pass "an empty pane capture drops a saved dialog name instead of carrying it to the next stale"
+}
+
+# What an empty capture may NOT drop is the report memory. `.stale-<key>` holds
+# the one hash this window's stale was already surfaced at, and every surface
+# decision compares the current hash to it, so clearing it with the rest of the
+# wedge episode handed a lane whose pane came back byte-identical a second alarm
+# for a report the captain already had - the repeat that record exists to stop.
+# A blank read renders nothing of that content, so it says nothing about it.
+test_empty_pane_capture_keeps_the_report_it_already_spent() {
+  local dir state fakebin out capture pane window key surfaced
+  local idle='state: idle · source: pane · the prompt is sitting there'
+  window="test:fm-wedge"; key=$(watch_window_key "$window")
+  dir=$(wedge_threshold_fixture empty-pane-stale-memory 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  pane="$dir/pane.reported"
+  cp "$capture" "$pane"
+  surfaced=$(cat "$state/.stale-$key")
+  [ -n "$surfaced" ] || fail "fixture: this stale was never marked as already surfaced"
+
+  # The blank read itself: nothing to report, and the wedge episode ends.
+  : > "$capture"
+  FM_TEST_STALE_ESCALATE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$idle" absorb \
+    || fail "a blank capture over a reported pane raised a wake: $(cat "$out")"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$surfaced" ] \
+    || fail "a blank capture dropped the report of content it rendered nothing of"
+
+  # The pane renders that same content again and reaches the threshold, which is
+  # three polls: the first sight re-arms the hash, the second is the consult.
+  : > "$out"
+  cp "$pane" "$capture"
+  FM_TEST_STALE_ESCALATE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$idle" absorb \
+    || fail "the reported pane never reached the threshold again after a blank capture: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "content the captain was already told about woke them again after a blank capture: $(cat "$state/.wake-queue")"
+  [ ! -s "$out" ] \
+    || fail "a blank capture bought a second report of byte-identical content: $(cat "$out")"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$surfaced" ] \
+    || fail "the pane that came back replaced the hash the captain was already told about"
+  pass "an empty pane capture ends the wedge episode without re-arming a report that was already made"
+}
+
+# The other direction, because keeping that memory could as easily have muted
+# reporting altogether: content that was never reported still reports, once, on
+# the first threshold it reaches after the blank read.
+test_empty_pane_capture_still_reports_content_it_never_reported() {
+  local dir state fakebin out capture window key surfaced
+  local idle='state: idle · source: pane · the prompt is sitting there'
+  window="test:fm-wedge"; key=$(watch_window_key "$window")
+  dir=$(wedge_threshold_fixture empty-pane-new-stale 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  surfaced=$(cat "$state/.stale-$key")
+  : > "$capture"
+  FM_TEST_STALE_ESCALATE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$idle" absorb \
+    || fail "a blank capture raised a wake: $(cat "$out")"
+
+  printf '%s' 'a different pane, never reported' > "$capture"
+  : > "$out"
+  FM_TEST_STALE_ESCALATE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$idle" exit \
+    || fail "content nobody had ever reported stayed silent after a blank capture: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null \
+    || fail "the report for the new content did not name its window: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the new content queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  [ "$(cat "$state/.stale-$key")" != "$surfaced" ] \
+    || fail "the new content did not take over the report memory"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the report for the new content"
+
+  # One report per distinct hash, unchanged: the same content on a later
+  # threshold has nothing left to say.
+  : > "$out"
+  FM_TEST_STALE_ESCALATE=999999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$idle" absorb \
+    || fail "the new content re-alarmed on a later threshold: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the new content queued a repeat wake: $(cat "$state/.wake-queue")"
+  pass "content an empty pane capture never saw still reports itself exactly once"
+}
+
 # The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
 # as it did before, and so must every verdict short of proof: an unattributable
 # foreground process (`ambiguous`) and an unreadable endpoint keep the identical
@@ -5516,6 +5661,10 @@ fm_test_run \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \
   test_wedge_escalation_resets_when_pane_becomes_active \
   test_gone_endpoint_reports_once_instead_of_escalating_forever \
+  test_empty_pane_capture_ends_the_wedge_episode \
+  test_empty_pane_capture_drops_saved_dialog_name \
+  test_empty_pane_capture_keeps_the_report_it_already_spent \
+  test_empty_pane_capture_still_reports_content_it_never_reported \
   test_live_and_unproven_endpoints_still_wedge_escalate \
   test_wedge_guards_absent_config_keeps_the_unchanged_ladder \
   test_wedge_guard_critical_defers_one_window_at_a_time_up_to_the_cap \

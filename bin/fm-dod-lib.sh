@@ -958,10 +958,14 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
 }
 
 # 0 when the worker copy holds the result of its own passed no-mistakes run:
-# the run's outcome is passed, passed-with-skips or passed-with-override (the
-# passing set bin/fm-crew-state.sh reads), that pipeline owns no unreturned work (branch_sync.next_action.code is neither
+# the run's outcome is passed, passed-with-skips or passed-with-override, that
+# pipeline owns no unreturned work (branch_sync.next_action.code is neither
 # recover_custody nor continue_active_run) and HEAD's tree equals the tree of the
-# pipeline's current head resolved in this copy. On a Gerrit project push is
+# pipeline's current head resolved in this copy. This passing set is deliberately
+# narrower than the terminal-green set bin/fm-crew-state.sh reads: a `handed_off`
+# run reads green there and is refused here, because a handoff ends the run with
+# its PR left open for human review, so it proves no delivered result this copy
+# may publish on top of. On a Gerrit project push is
 # skipped, so a fix round's commits stay in the gate until custody is recovered,
 # and a copy that publishes before recovering has a server patch set that agrees
 # with its own unfixed HEAD - the published-tree check alone accepts it. Trees
