@@ -464,7 +464,9 @@ ok - claude 2.1.326 (Claude Code): unregistered channel prompts; registered chan
 
 The guard refreshes this version-dependent evidence and fails naming the installed Claude version if either arm diverges.
 Portable scope, atomic-refusal, and spawn integration coverage lives in `tests/fm-claude-trust.test.sh`.
-This registration applies to ship/scout channels on every runtime backend through their common Claude launch preparation; secondmate and lab trust registration retain their existing interfaces.
+Firstmate's common Claude launch preparation registers ship/scout channels in the invoking user's store; secondmate and lab trust registration retain their existing interfaces.
+A launcher that executes Claude inside a separate container must perform registration in that worker context too: a host write does not update a container-private `.claude.json`.
+The PTY guard above proves same-context registration only, not propagation across a container boundary.
 
 ### Workspace and external-import approval
 
