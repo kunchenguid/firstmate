@@ -15,7 +15,7 @@
 # parent's staging directory. A return killed outright, or signalled while the
 # slot release itself runs, can still strand that staging; cleanup on handled
 # interruption is the whole contract here.
-# A refusal returns before anything moves, so there is nothing to put back.
+# A refusal before the first move leaves nothing to put back.
 # A payload path that carries tracked files is left in place and refuses the
 # return, so a home whose tree tracks any of them keeps its checkout intact
 # instead of being dirtied into a failed return.
