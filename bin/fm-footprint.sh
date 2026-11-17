@@ -680,7 +680,7 @@ fp_in_use() {  # <out> <dir>...
     proc=${FM_PROC_ROOT_OVERRIDE:-/proc}
     while IFS= read -r p; do
       st=
-      read -r st < "$p/stat" 2>/dev/null || continue
+      { read -r st < "$p/stat"; } 2>/dev/null || continue
       st=${st##*) }
       case "${st%% *}" in Z|X|'') continue ;; esac
       fds+=("$p/fd")
