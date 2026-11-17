@@ -197,6 +197,59 @@ SH
   pass "window_to_task resolves every recorded window exactly as the grep/tail/cut pipeline did"
 }
 
+test_pending_reply_get_matches_the_grep_pipeline() {
+  local script="$TMP_ROOT/pending-get.sh" dir="$TMP_ROOT/pending-records"
+  mkdir -p "$dir/dir.rec"
+  printf 'phase=sent\nphase=delivered\nphase=resolved\n' > "$dir/last-wins"
+  printf 'task_id=alpha\ntask_id=\n' > "$dir/empty-last"
+  printf 'request_summary=a=b = c\n' > "$dir/equals"
+  printf 'request_summary=  two  spaces \t\n' > "$dir/spaces"
+  printf 'phase=sent\r\n' > "$dir/crlf"
+  printf 'task_id=x\nphase=unterminated' > "$dir/unterminated"
+  printf 'task_id_old=x\n task_id=y\nxtask_id=z\ntask_id:w\n' > "$dir/near-keys"
+  # shellcheck disable=SC2016 # The value must stay unexpanded.
+  printf 'request_summary=back\\slash *glob* $HOME `x`\n' > "$dir/literal"
+  printf 'request_summary=caf\303\251 caf\351\n' > "$dir/non-utf8"
+  printf 'phase=sent\n\n\nphase=\n' > "$dir/blank-lines"
+  : > "$dir/empty"
+  printf 'phase=sent\n' > "$dir/unreadable"
+  chmod 000 "$dir/unreadable"
+  cat > "$script" <<'SH'
+set -eu
+. "$1/bin/fm-pending-reply-lib.sh"
+# The replaced pipeline, always under the C locale: under a UTF-8 locale GNU
+# grep suppresses a matching line holding invalid UTF-8, so that read came back
+# empty while the C locale and the in-shell read return the bytes.
+reference() {
+  [ -f "$1" ] || return 0
+  LC_ALL=C grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+for rec in "$2"/* "$2/missing"; do
+  for key in phase task_id request_summary; do
+    got=$(fm_pending_reply_get "$rec" "$key"; printf x)
+    want=$(reference "$rec" "$key"; printf x)
+    [ "$got" = "$want" ] || printf '%s %s: helper %q, pipeline %q\n' "${rec##*/}" "$key" "$got" "$want"
+  done
+done
+expect() {
+  got=$(fm_pending_reply_get "$2/$3" "$4")
+  [ "$got" = "$1" ] || printf '%s %s: got %q, want %q\n' "$3" "$4" "$got" "$1"
+}
+rec=$2
+expect resolved "$rec" last-wins phase
+expect '' "$rec" empty-last task_id
+expect 'a=b = c' "$rec" equals request_summary
+expect $'  two  spaces \t' "$rec" spaces request_summary
+expect $'sent\r' "$rec" crlf phase
+expect unterminated "$rec" unterminated phase
+expect '' "$rec" near-keys task_id
+expect $'caf\303\251 caf\351' "$rec" non-utf8 request_summary
+SH
+  run_everywhere "fm_pending_reply_get" "$script" "$dir"
+  chmod 600 "$dir/unreadable"
+  pass "fm_pending_reply_get returns the same bytes as the grep | tail -1 | cut pipeline for every record shape"
+}
+
 test_classify_stat_helpers_read_the_kernel_name_once() {
   local script="$TMP_ROOT/uname.sh" shim="$TMP_ROOT/uname-shim" log="$TMP_ROOT/uname.log" file="$TMP_ROOT/sized"
   mkdir -p "$shim"
@@ -284,6 +337,7 @@ else
     test_signal_seen_path_and_lock_abs_path_are_unchanged \
     test_recovery_marker_read_accepts_exactly_one_newline \
     test_window_to_task_matches_the_meta_pipeline \
+    test_pending_reply_get_matches_the_grep_pipeline \
     test_classify_stat_helpers_read_the_kernel_name_once \
     test_status_identity_and_size_read_with_one_stat
 fi
