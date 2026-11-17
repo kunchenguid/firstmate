@@ -694,17 +694,25 @@ fp_in_use() {  # <out> <dir>...
         </dev/null > "$out.paths" 2> "$out.err"
       lrc=$?
       [ "$lrc" != 124 ] || rc=1
-      # A process that exited meanwhile is gone; any other error means an fd
-      # directory could not be read, so the listing is incomplete.
-      ! grep -v 'No such file or directory' "$out.err" | grep -q . || rc=1
-      grep -Fqx -- "$probe" "$out.paths" || rc=1
       readlink -- "${cwds[@]}" >> "$out.paths" 2>/dev/null || true
-      # File-backed memory mappings, which outlive their descriptor: the path
-      # is everything after the fifth field of a maps line.
-      fm_run_timed 120 cat -- "${maps[@]}" </dev/null 2> "$out.err" |
-        awk 'NF >= 6 { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]+ +/, "", p); if (p ~ /^\//) print p }' >> "$out.paths"
-      ! grep -v 'No such file or directory' "$out.err" | grep -q . || rc=1
-      rm -f "$out.err"
+      # File-backed memory mappings, which outlive their descriptor.
+      fm_run_timed 120 cat -- "${maps[@]}" </dev/null 2>> "$out.err" | fp_maps_paths >> "$out.paths"
+      # A process that exited meanwhile is gone. A process caught part-way
+      # through an exec briefly refuses its fd directory or maps, so each
+      # refused one is read again; it counts only once it reads in full or is
+      # gone. Any other error, or a refusal that persists, means the listing
+      # is incomplete.
+      grep -v 'No such file or directory' "$out.err" > "$out.err2" || true
+      if grep -v 'Permission denied' "$out.err2" | grep -q .; then
+        rc=1
+      else
+        while IFS= read -r p; do
+          case "$p" in "$proc"/[0-9]*) ;; *) rc=1; continue ;; esac
+          fp_proc_reread "$p" "$out.paths" || rc=1
+        done < <(grep -Eo "$proc/[0-9]+/(fd|maps)" "$out.err2" | sed 's|/[a-z]*$||' | sort -u)
+      fi
+      grep -Fqx -- "$probe" "$out.paths" || rc=1
+      rm -f "$out.err" "$out.err2"
     fi
   fi
   exec 9>&-
@@ -728,6 +736,39 @@ fp_in_use() {  # <out> <dir>...
   [ "$rc" = 0 ] || : > "$out"
   rm -f "$out.dirs" "$out.paths"
   return "$rc"
+}
+
+# fp_maps_paths: reads /proc maps lines and prints each mapped file's path,
+# everything after the fifth field.
+fp_maps_paths() {
+  awk 'NF >= 6 { p = $0; for (i = 1; i <= 5; i++) sub(/^[^ ]+ +/, "", p); if (p ~ /^\//) print p }'
+}
+
+# fp_proc_reread <proc-pid-dir> <paths-out>: reads one process's fd links and
+# maps again, for up to about two seconds, appending what it holds to
+# <paths-out>. Returns 0 once both read cleanly, or once the process is gone
+# or a zombie; 1 when they stay unreadable.
+fp_proc_reread() {  # <proc-pid-dir> <paths-out>
+  local p=$1 n=0 st
+  while [ "$n" -lt 20 ]; do
+    [ -e "$p" ] || return 0
+    st=
+    { read -r st < "$p/stat"; } 2>/dev/null || return 0
+    st=${st##*) }
+    case "${st%% *}" in Z|X|'') return 0 ;; esac
+    if find "$p/fd" -mindepth 1 -maxdepth 1 -type l -exec readlink -- {} + </dev/null > "$2.one" 2> "$2.oneerr" &&
+      cat -- "$p/maps" 2>> "$2.oneerr" </dev/null | fp_maps_paths >> "$2.one" &&
+      ! grep -v 'No such file or directory' "$2.oneerr" | grep -q .; then
+      cat "$2.one" >> "$2"
+      rm -f "$2.one" "$2.oneerr"
+      return 0
+    fi
+    [ -e "$p" ] || { rm -f "$2.one" "$2.oneerr"; return 0; }
+    sleep 0.1
+    n=$((n + 1))
+  done
+  rm -f "$2.one" "$2.oneerr"
+  return 1
 }
 
 # fp_settle_one <aside> <dir>: runs the removal boundary for one set-aside

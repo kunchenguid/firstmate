@@ -886,6 +886,32 @@ SH
   rm -f "$FB/lsof" "$FB/readlink"
   assert_present "$s/inner/held.log" "an area must be kept when the listing left out a process"
   assert_contains "$out" "because the running processes could not be listed" "the pass must say the listing was incomplete"
+  if [ "$(uname -s)" = Linux ]; then
+    # A process caught part-way through an exec refuses its fd directory only
+    # for a moment: it is read again, and the holder it then shows keeps the
+    # area for its own reason rather than an incomplete listing.
+    cat > "$FB/readlink" <<SH
+#!/usr/bin/env bash
+keep=()
+for a in "\$@"; do
+  case "\$a" in
+    */proc/$holder/fd/*)
+      if [ ! -e "$TMP_ROOT/partial-listing/refused" ]; then
+        echo "readlink: \$a: Permission denied" >&2
+        continue
+      fi ;;
+  esac
+  keep+=("\$a")
+done
+: > "$TMP_ROOT/partial-listing/refused"
+[ "\${#keep[@]}" -eq 0 ] || exec "$real_readlink" "\${keep[@]}"
+SH
+    chmod +x "$FB/readlink"
+    out=$(fp sweep)
+    rm -f "$FB/readlink"
+    assert_present "$s/inner/held.log" "an area must be kept for a holder found on the second read"
+    assert_contains "$out" "a running process still works in or holds open" "a refusal that clears must lead to the holder"
+  fi
   # Control: the full listing finds the holder and keeps the area for it.
   out=$(fp sweep)
   assert_present "$s/inner/held.log" "the full listing must find the open file"
