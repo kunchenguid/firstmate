@@ -66,6 +66,14 @@ fm_home_payload_restore() {  # <home> <staging> [<lock-receipt>]
   fm_home_payload_check_devices "$staging" "$home" || return 1
   for path in "${FM_HOME_PAYLOAD_PATHS[@]}"; do
     if [ -e "$staging/$path" ] || [ -L "$staging/$path" ]; then
+      # A process still running in the home recreates an empty payload dir -
+      # sourcing fm-wake-lib mkdir -p's the state dir - while the staged move
+      # or the slot release is in flight. rmdir clears only an empty directory,
+      # so that bare recreation cannot refuse the restore; a path carrying real
+      # new content still hits the refusal below.
+      if [ -d "$home/$path" ] && [ ! -L "$home/$path" ]; then
+        rmdir -- "$home/$path" 2>/dev/null || true
+      fi
       [ ! -e "$home/$path" ] && [ ! -L "$home/$path" ] || {
         echo "error: cannot restore staged payload path $path for durable home $home; it exists again" >&2
         return 1

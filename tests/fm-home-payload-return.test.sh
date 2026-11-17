@@ -62,9 +62,14 @@ assert_absent "$gitdir/firstmate-home-lock" 'successful return retained receipt'
 # instead of coming back stripped and unretirable. The move is shimmed slow
 # enough to signal; the shim reports its parent - the process performing the
 # return, which owns the restore trap - because fm_home_payload_return is a
-# subshell and the background job around it holds no traps.
+# subshell and the background job around it holds no traps. The signal lands
+# after the state's outbound move: a process still running in the home
+# recreates an empty state/ the moment the staged move removes it, the way
+# sourcing fm-wake-lib's mkdir -p does, and the restore has to put the staged
+# payload back over that bare directory.
 mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
 printf 'durable data\n' > "$home/data/notes"
+printf 'live\n' > "$home/state/alive"
 printf 'mate\n' > "$home/.fm-secondmate-home"
 printf '%s\n' "$parent" > "$home/.fm-secondmate-parent"
 fm_home_worktree_lock_acquire "$home" mate "$parent"
@@ -74,11 +79,18 @@ mkdir -p "$TMP_ROOT/fakebin"
 real_mv=$(command -v mv)
 cat > "$TMP_ROOT/fakebin/mv" <<SH
 #!/usr/bin/env bash
-if [ ! -e "\$FM_TEST_MOVER_MARKER" ]; then
+sleep 0.2
+"$real_mv" "\$@"
+rc=\$?
+# The state's outbound move is the point the interrupt must land after: a
+# process still running in the home recreates an empty state/ the moment the
+# staged move removes it, the way sourcing fm-wake-lib's mkdir -p does, and
+# the restore has to put the staged payload back over that bare directory.
+if [ "\$rc" -eq 0 ] && [ "\${2:-}" = "$home/state" ]; then
+  mkdir -p "$home/state"
   printf '%s\n' "\$PPID" > "\$FM_TEST_MOVER_MARKER"
 fi
-sleep 0.2
-exec "$real_mv" "\$@"
+exit "\$rc"
 SH
 chmod +x "$TMP_ROOT/fakebin/mv"
 mover_marker="$TMP_ROOT/mover.pid"
@@ -90,7 +102,7 @@ interrupt_job=$!
 waits=0
 while [ ! -s "$mover_marker" ]; do
   waits=$((waits + 1))
-  [ "$waits" -lt 400 ] || { kill -KILL "$interrupt_job" 2>/dev/null || true; fail 'the return never started its payload move'; }
+  [ "$waits" -lt 400 ] || { kill -KILL "$interrupt_job" 2>/dev/null || true; fail 'the return never moved state/'; }
   sleep 0.05
 done
 mover_pid=$(cat "$mover_marker")
@@ -105,6 +117,7 @@ interrupt_status=0
 wait "$interrupt_job" || interrupt_status=$?
 [ "$interrupt_status" = 143 ] || fail "interrupted return exited $interrupt_status instead of 143"
 [ "$(cat "$home/data/notes")" = 'durable data' ] || fail 'handled interrupt lost data'
+[ "$(cat "$home/state/alive")" = 'live' ] || fail 'handled interrupt lost state payload'
 [ "$(cat "$home/.fm-secondmate-home")" = mate ] || fail 'handled interrupt lost identity'
 [ "$(cat "$home/.fm-secondmate-parent")" = "$parent" ] || fail 'handled interrupt lost parent binding'
 assert_present "$gitdir/locked" 'handled interrupt lost protection'
