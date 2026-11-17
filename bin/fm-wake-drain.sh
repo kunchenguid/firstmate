@@ -1073,8 +1073,9 @@ if [ -n "$ACK_THROUGH" ]; then
     fi
   fi
   ACK_REMOVED=$(( $(awk 'END { print NR }' "$FM_WAKE_QUEUE") - $(awk 'END { print NR }' "$DRAIN_TMP") ))
-  # Pending results retire only with the episode that presented them, so a
-  # replayed earlier acknowledgement cannot retire a newer result.
+  # Pending results retire only with the episode that presented them and only
+  # when the cutoff covers every presented row, so a replayed earlier
+  # acknowledgement cannot retire a newer result.
   RESULTS_ACK_MATCHED=false
   if [ "$ACTOR" = main ] && status_result_replay_enabled \
     && fm_recovery_marker_snapshot "$RECOVERY_MARKER" \
@@ -1114,8 +1115,7 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  if [ "$RESULTS_ACK_MATCHED" = true ] \
-    && { [ "$ACK_REMOVED" -gt 0 ] || [ "$PRESENTED_MAX" -le "$ACK_THROUGH" ]; } \
+  if [ "$RESULTS_ACK_MATCHED" = true ] && [ "$PRESENTED_MAX" -le "$ACK_THROUGH" ] \
     && ! status_retire_shown_results "$STATE"; then
     echo "wake drain: handled results could not be retired safely; they repeat on the next drain" >&2
     exit 1

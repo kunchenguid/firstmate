@@ -227,6 +227,32 @@ test_stale_acknowledgement_does_not_retire_a_newer_result() {
   pass "an acknowledgement from an earlier episode cannot retire a newer result"
 }
 
+test_partial_acknowledgement_keeps_the_unacknowledged_rows_result() {
+  local dir state
+  dir=$(make_case partial-ack)
+  state="$dir/state"
+  printf 'working: row one\n' > "$state/early.status"
+  append_wake "$state" signal early.status 'signal: early.status' || fail "could not queue row one"
+  drain "$state" "$dir/first.out" "$dir/first.err" || fail "first drain failed"
+  printf 'done: row two result\n' > "$state/late.status"
+  append_wake "$state" signal late.status 'signal: late.status' || fail "could not queue row two"
+  drain "$state" "$dir/second.out" "$dir/second.err" || fail "second drain failed"
+  grep -F 'late done: row two result' "$dir/second.out" >/dev/null \
+    || fail "the second drain did not present row two's result: $(cat "$dir/second.out")"
+  # The first drain's command covers row one only; row two stays queued.
+  ack_drain_err "$state" "$dir/first.err" >/dev/null 2>&1 || fail "the row one acknowledgement failed"
+  drain "$state" "$dir/third.out" "$dir/third.err" || fail "third drain failed"
+  grep -F 'signal: late.status' "$dir/third.out" >/dev/null \
+    || fail "the partial acknowledgement consumed row two: $(cat "$dir/third.out")"
+  replay_body "$dir/third.out" | grep -Fx 'late done: row two result' >/dev/null \
+    || fail "a partial acknowledgement retired the result of a row it did not cover: $(cat "$dir/third.out")"
+  ack_drain_err "$state" "$dir/third.err" >/dev/null 2>&1 || fail "the full acknowledgement failed"
+  drain "$state" "$dir/fourth.out" "$dir/fourth.err" || fail "fourth drain failed"
+  [ ! -s "$dir/fourth.out" ] && [ ! -s "$dir/fourth.err" ] \
+    || fail "the fully acknowledged result was not silent: $(cat "$dir/fourth.out" "$dir/fourth.err")"
+  pass "an acknowledgement that stops below a presented row leaves that row's result repeating"
+}
+
 test_replay_is_bounded_and_names_what_it_drops() {
   local dir state i body
   dir=$(make_case bounded)
@@ -281,4 +307,5 @@ test_result_appended_after_presentation_is_not_acknowledged
 test_replaced_status_file_keeps_the_pending_result
 test_branch_reader_neither_creates_nor_retires_main_results
 test_stale_acknowledgement_does_not_retire_a_newer_result
+test_partial_acknowledgement_keeps_the_unacknowledged_rows_result
 test_replay_is_bounded_and_names_what_it_drops

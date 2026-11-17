@@ -986,11 +986,14 @@ Age-based retention works independently of the selected backlog backend and keep
 
 The optional local, gitignored `config/result-replay` presence flag opts this home into repeating a completed result until its handling is acknowledged.
 Create it with `touch "$FM_HOME/config/result-replay"`; remove it to restore the default.
-It is off by default: without the flag, a drain presents each status line once, and a completed result whose handling turn was interrupted does not repeat.
+It is off by default: without the flag, a drain presents each status line once.
+An interrupted handling turn then keeps its queued wake row, but the completed result's text does not repeat.
 With the flag present, a main drain records each `done:` line it presents, through a signal annotation or the outcome backstop, in the status presentation receipt.
-Every later main drain repeats that line under `UNHANDLED RESULTS` until main runs the `WAKE_ACK_REQUIRED` acknowledgement for the same recovery generation.
+Every later main drain repeats that line under `UNHANDLED RESULTS` until main runs the `WAKE_ACK_REQUIRED` acknowledgement for the same recovery generation that covers every wake row presented to main.
 A drain that holds such a result with no queued wake still prints that acknowledgement, with `--ack-through 0`.
-An acknowledgement from an earlier generation retires nothing, and supervision-branch drains neither add nor retire these results.
+An acknowledgement from an earlier generation retires no result.
+An acknowledgement whose sequence stops below a presented wake row consumes its rows and retires no result.
+Supervision-branch drains neither add nor retire these results.
 The receipt keeps each result's text, so a replaced status log neither changes nor loses it.
 It keeps the four newest results per task, and the drain names the count of any older result it drops.
 A drain repeats at most 4000 bytes of results and names the rest as omitted, and an omitted result stays pending through that acknowledgement.
