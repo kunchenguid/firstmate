@@ -47,10 +47,12 @@ EOF
 chmod +x "$BIN/fake-fm-control"
 export AK47_FM_CONTROL=$BIN/fake-fm-control
 # A fake no-mistakes: `runs` prints the worktree's .nm-out and exits with its
-# .nm-rc, so each test repository states its own validation history.
+# .nm-rc, so each test repository states its own validation history. Extra
+# arguments such as --limit are accepted, as the real CLI accepts them.
 cat >"$BIN/fake-no-mistakes" <<'EOF'
 #!/usr/bin/env bash
 [ "${1:-}" = runs ] || exit 2
+shift
 cat .nm-out 2>/dev/null
 exit "$(cat .nm-rc 2>/dev/null || echo 0)"
 EOF
@@ -231,21 +233,24 @@ test_unread_steering_and_running_validation_veto() {
   reset
   local t
   declare -A A=()
-  for t in steered validating validated unreadable unmanaged; do add_task main "$t" '-30 hours'; done
+  for t in steered validating validated stale unreadable unmanaged; do add_task main "$t" '-30 hours'; done
   mkdir -p "$FM_HOME/state/steered.inbox"
   printf 'schema=fm-task-inbox.v1\n--\nplease rebase\n' >"$FM_HOME/state/steered.inbox/001.msg"
   git_task validating fm/validating '  running      fm/validating 5e9a9c97  2026-11-17 09:15'
   git_task validated fm/validated "  completed    fm/validated 3532408f  2026-11-17 10:48  https://x/pull/1
   running      fm/someone-else 1111111  2026-11-17 10:00"
+  git_task stale fm/stale "  completed    fm/stale 3532408f  2026-11-17 10:48  https://x/pull/2
+  running      fm/stale 5e9a9c97  2026-11-16 09:15"
   git_task unreadable fm/unreadable 'daemon not reachable' 1
   git_task unmanaged fm/unmanaged "repo not initialized (run 'no-mistakes init' first)" 1
-  for t in steered validating validated unreadable unmanaged; do spawn_agent "$WT/$t"; A[$t]=$AGENT; done
+  for t in steered validating validated stale unreadable unmanaged; do spawn_agent "$WT/$t"; A[$t]=$AGENT; done
   run --apply
   sleep 0.3
   alive "${A[steered]}" || fail "a task with an unread steering message was stopped"
   alive "${A[validating]}" || fail "a task whose branch has a running validation was stopped"
   alive "${A[unreadable]}" || fail "a task whose validation state could not be read was stopped"
   alive "${A[validated]}" && fail "a task whose own validation finished was kept because another branch's run is active"
+  alive "${A[stale]}" && fail "a task was kept by an old running row below its branch's completed newest row"
   alive "${A[unmanaged]}" && fail "a task in a repository without no-mistakes was kept as if validating"
   for t in steered validating unreadable; do
     grep -q "task=$t " "$AK47_STATE/reap.log" 2>/dev/null && fail "$t has a stop recorded"
