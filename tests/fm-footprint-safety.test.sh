@@ -988,17 +988,18 @@ claims_removed() {
   return 1
 }
 
-# during_removal <action>: runs "<action> <set-aside copy>" once, at the
-# moment the removal starts on the copy's own entries: through the engine's
-# test hook once it has made the copy's top directory writable, or through
-# rm when a removal deletes by path. The action only changes the copy; the
-# removal then goes on with its own arguments.
+# during_removal <action> [<rel-dir>]: runs "<action> <set-aside copy>"
+# once, at the moment the removal starts on the entries of <rel-dir> (the
+# copy's top directory by default): through the engine's test hook once it
+# has made that directory writable, or through rm when a removal deletes by
+# path. The action only changes the copy; the removal then goes on with its
+# own arguments.
 during_removal() {
   local real_rm
   real_rm=$(command -v rm)
   cat > "$FB/remove-hook" <<SH
 #!/usr/bin/env bash
-[ "\$2" = . ] && [ ! -e "$TMP_ROOT/during.done" ] || exit 0
+[ "\$2" = "${2:-.}" ] && [ ! -e "$TMP_ROOT/during.done" ] || exit 0
 : > "$TMP_ROOT/during.done"
 "$1" "\$1"
 exit 0
@@ -1026,7 +1027,7 @@ SH
 }
 
 test_a_directory_swapped_for_a_link_during_removal_removes_nothing_outside() {
-  local mode t out victim
+  local mode t out victim sub
   for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
     new_home "swap-$mode"
     victim="$TMP_ROOT/swap-$mode/outside/victim"
@@ -1034,18 +1035,21 @@ test_a_directory_swapped_for_a_link_during_removal_removes_nothing_outside() {
     printf 'precious\n' > "$victim/index.js"
     printf 'precious\n' > "$victim/README.md"
     t=$(target "$mode" task-s1)
-    mkdir -p "$t/pkg"
-    printf 'x\n' > "$t/pkg/index.js"
-    printf 'x\n' > "$t/pkg/README.md"
+    # The review's shape: node_modules/pkg (the apply entry is node_modules
+    # itself).
+    if [ "$mode" = apply ]; then sub=.; else sub=node_modules; fi
+    mkdir -p "$t/$sub/pkg"
+    printf 'x\n' > "$t/$sub/pkg/index.js"
+    printf 'x\n' > "$t/$sub/pkg/README.md"
     # A process the checks cannot see runs a package link at the worst
-    # moment: the directory is renamed and a link to a checkout put in its
-    # place.
+    # moment: the package directory is renamed and a link to a checkout put
+    # in its place.
     cat > "$FB/swap" <<SH
 #!/usr/bin/env bash
-"$(command -v mv)" "\$1/pkg" "\$1/pkg.old" && "$(command -v ln)" -s "$victim" "\$1/pkg" && : > "$TMP_ROOT/swap-$mode/swapped"
+"$(command -v mv)" "\$1/$sub/pkg" "\$1/$sub/pkg.old" && "$(command -v ln)" -s "$victim" "\$1/$sub/pkg" && : > "$TMP_ROOT/swap-$mode/swapped"
 SH
     chmod +x "$FB/swap"
-    during_removal "$FB/swap"
+    during_removal "$FB/swap" "$sub"
     out=$(run_target "$mode" task-s1 "$t")
     unhook
     assert_present "$TMP_ROOT/swap-$mode/swapped" "the swap must have happened during the $mode removal"
