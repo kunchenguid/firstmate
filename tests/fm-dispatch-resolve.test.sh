@@ -506,6 +506,20 @@ seat_quota 5 1 through_reset 90 > "$TMP_ROOT/claude2-quota.json"
 weekly_run
 expect_code 0 "$code" "below threshold starts: $out"
 assert_contains "$out" 'weekly_estimate=95%used+1.3%committed+1.3%new/98%' 'configured plan estimate includes live workers'
+# The census folds each live log through the cursor-backed fold: a full
+# re-fold of a long secondmate log took ~50 s and pushed the resolver past the
+# review wrappers' 60 s limit. A logged worker still classifies, and the run
+# leaves the fold cursor that proves the incremental path; a later run folds
+# only the appended bytes.
+awk 'BEGIN {for (i = 1; i <= 2000; i++) printf "working [at=%d]: step %d\n", 1893456000 + i, i}' > "$HOME_DIR/state/weekly-live.status"
+weekly_run
+expect_code 0 "$code" "a logged live worker still counts the worker: $out"
+assert_contains "$out" 'weekly_estimate=95%used+1.3%committed+1.3%new/98%' 'a working log stays committed demand'
+assert_present "$HOME_DIR/state/.weekly-live.open-decisions-cursor" 'the census uses the incremental status fold'
+printf 'done [at=1893476001]: shipped\n' >> "$HOME_DIR/state/weekly-live.status"
+weekly_run
+assert_contains "$out" 'weekly_estimate=95%used+0%committed+1.3%new/98%' 'a terminal line appended after the cursor makes the worker idle'
+rm -f "$HOME_DIR/state/weekly-live.status" "$HOME_DIR/state/.weekly-live.open-decisions-cursor"
 # At 96% a new worker fits alone; the existing worker tips it over.
 seat_quota 4 1 through_reset 90 > "$TMP_ROOT/claude2-quota.json"
 weekly_run

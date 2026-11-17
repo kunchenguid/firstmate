@@ -1222,8 +1222,19 @@ status_open_decisions() {  # <status-file> [<kind>]
 # the latest recognized event, stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
-  local open key verb note current=''
-  open=$(status_open_decisions "$1" "$2")
+  _fm_status_current_from_open "$1" "$(status_open_decisions "$1" "$2")"
+}
+
+# status_current_line through the cursor-backed fold, for per-pass callers that
+# read every live log: a full re-fold of a long secondmate log took ~50 s and
+# pushed the dispatch resolver past the review wrappers' 60 s limit. The kind
+# comes from the log's sibling .meta, so callers must have one.
+status_current_line_incremental() {  # <status-file>
+  _fm_status_current_from_open "$1" "$(status_open_decisions_incremental "$1")"
+}
+
+_fm_status_current_from_open() {  # <status-file> <open-set>
+  local open=$2 key verb note current=''
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in ?*) current="$verb [key=$key]: $note" ;; esac
   done <<EOF

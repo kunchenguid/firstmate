@@ -1006,7 +1006,7 @@ if [ "$SQ" != true ]; then
       provider=$(jq -r --arg h "$harness" '.[$h] // ""' <<<"$PMAP")
     fi
     [ -n "$seat" ] || seat="home:$provider"
-    status_line=$(status_current_line "${meta%.meta}.status" "$(awk -F= '$1 == "kind" {print $2; exit}' "$meta")")
+    status_line=$(status_current_line_incremental "${meta%.meta}.status")
     if status_is_terminal_verb "$status_line" || status_is_paused_or_captain_held "$status_line"; then
       weekly_census+="$seat"$'\t'idle$'\n'
       continue
