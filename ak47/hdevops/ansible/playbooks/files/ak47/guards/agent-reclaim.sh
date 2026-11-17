@@ -498,7 +498,7 @@ held_work() {
   local home=$1 id=$2 cwd=$3 st=$1/state/$2.status meta=$1/state/$2.meta wt pr out n
   HELD=
   if [ -f "$st" ]; then
-    out=$(awk '
+    if ! out=$(awk '
       { l = $0; sub(/^[0-9][0-9TZ:.+-]* /, "", l) }
       l ~ /^(needs-decision|blocked|resolved)[ :[]/ && match(l, /\[key=[^]]*\]/) {
         k = substr(l, RSTART + 5, RLENGTH - 6)
@@ -510,7 +510,10 @@ held_work() {
         s = last; sub(/[ :[].*/, "", s)
         if (s ~ /^(needs-decision|blocked|waiting|paused)$/) { print "last status " s; exit }
         if (tolower(last) ~ /(await|waiting|ready)[a-z]* (to |for |on )?(a |the |your |captain.s )?(review|approval|decision|merge)/) print "last status awaits review or decision"
-      }' "$st" 2>/dev/null)
+      }' "$st" 2>/dev/null); then
+      HELD="status unreadable"
+      return 0
+    fi
     [ -n "$out" ] && { HELD=$out; return 0; }
   fi
   pr=$(sed -n 's/^pr=//p' "$meta" 2>/dev/null | head -1)
@@ -528,7 +531,10 @@ held_work() {
   wt=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | head -1)
   [ -d "$wt" ] || wt=$cwd
   [ -d "$wt" ] || return 0
-  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  if ! git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    [ -e "$wt/.git" ] && HELD="git state unreadable"
+    return 0
+  fi
   git -C "$wt" rev-parse --verify -q HEAD >/dev/null 2>&1 || return 0   # no commit yet
   n=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || { HELD="git state unreadable"; return 0; }
   [ "$n" -gt 0 ] && { HELD="$n commit(s) on no pushed branch"; return 0; }

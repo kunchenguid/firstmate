@@ -523,6 +523,7 @@ test_unfinished_work_vetoes_a_stop() {
   local t s
   declare -A A=()
   local kept="open-decision last-blocked awaits-review ready-to-merge pr-open pr-unreadable unpushed dirty"
+  local unreadable=
   local stopped="resolved-decision pr-merged pushed"
   for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
   s=$FM_HOME/state
@@ -531,6 +532,13 @@ test_unfinished_work_vetoes_a_stop() {
   printf 'blocked: needs a token\n' >"$s/last-blocked.status"
   printf 'done: renders ready, awaiting your review\n' >"$s/awaits-review.status"
   printf 'done: PR ready to merge\n' >"$s/ready-to-merge.status"
+  if [ "$(id -u)" != 0 ]; then
+    add_task main status-unreadable '-30 hours'
+    printf 'needs-decision [key=secret]: choose\n' >"$s/status-unreadable.status"
+    chmod 000 "$s/status-unreadable.status"
+    unreadable=status-unreadable
+    kept="$kept $unreadable"
+  fi
   echo 'pr=https://github.com/o/r/pull/1' >>"$s/pr-open.meta"; echo OPEN >"$SANDBOX/gh/1"
   echo 'pr=https://github.com/o/r/pull/2' >>"$s/pr-merged.meta"; echo MERGED >"$SANDBOX/gh/2"
   printf 'done: PR https://github.com/o/r/pull/3\n' >"$s/pr-unreadable.status"
@@ -547,6 +555,9 @@ test_unfinished_work_vetoes_a_stop() {
   for t in $stopped; do
     alive "${A[$t]}" && fail "$t holds no unfinished work but was kept: $(grep " $t " "$AK47_STATE/agent-reclaim-latest.md")"
   done
+  if [ -n "$unreadable" ]; then
+    grep -qF 'status unreadable' "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the unreadable status veto"
+  fi
   for r in 'open decision k1' 'last status blocked' 'awaits review' 'PR open' 'PR state unreadable' 'commit(s) on no pushed branch' 'uncommitted changes'; do
     grep -qF "$r" "$AK47_STATE/agent-reclaim-latest.md" || fail "report does not name the veto '$r'"
   done
