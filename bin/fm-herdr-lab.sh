@@ -15,9 +15,14 @@
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
-# A session whose <herdr config>/sessions/<session>/herdr-client.sock path
-# would exceed the 103-byte sun_path limit is refused by name, prepare and
-# provision.
+# Socket paths exceeding the 103-byte sun_path limit automatically use an
+# owned mode-0700 /tmp/fmh.XXXXXX directory with a herdr symlink to the same
+# configuration, so fleet discovery continues to see the live sessions.
+# The helper routes lab calls and the viewer through that alias; callers keep
+# the original configuration environment unchanged through teardown.
+# Names that cannot fit even through the short alias are refused.
+# Teardown removes the alias directory and its <session>.socket-dir state
+# record only after confirming lab removal and an unchanged fleet tripwire.
 # The herdr config root is $XDG_CONFIG_HOME/herdr when XDG_CONFIG_HOME is set,
 # otherwise $HOME/.config/herdr, the same root herdr resolves.
 # The length is counted in bytes, not characters.
@@ -88,6 +93,11 @@ fm_herdr_lab_check_socket_path() { # <session>
   fi
 }
 
+fm_herdr_lab_check_usable_path() { # <session>
+  fm_herdr_lab_check_socket_path "$1" 2>/dev/null && return 0
+  XDG_CONFIG_HOME=/tmp/fmh.XXXXXX fm_herdr_lab_check_socket_path "$1"
+}
+
 fm_herdr_lab_state_dir() {
   printf '%s' "${FM_HERDR_LAB_STATE_DIR:-${TMPDIR:-/tmp}/fm-herdr-lab-${UID}}"
 }
@@ -96,8 +106,61 @@ fm_herdr_lab_tripwire_path() { # <session>
   printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_state_dir)" "$1"
 }
 
+fm_herdr_lab_short_record() { printf '%s/%s.socket-dir' "$(fm_herdr_lab_state_dir)" "$1"; }
+
+fm_herdr_lab_short_dir() { # <session>
+  local record dir mode owner
+  record=$(fm_herdr_lab_short_record "$1")
+  [ -f "$record" ] || return 1
+  dir=$(cat "$record")
+  case "$dir" in /tmp/fmh.[A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9][A-Za-z0-9]) ;; *) return 1 ;; esac
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  case "$(uname -s)" in
+    Darwin) mode=$(stat -f '%Lp' "$dir"); owner=$(stat -f '%u' "$dir") ;;
+    *) mode=$(stat -c '%a' "$dir"); owner=$(stat -c '%u' "$dir") ;;
+  esac
+  [ "$mode" = 700 ] && [ "$owner" = "$(id -u)" ] || return 1
+  [ -L "$dir/herdr" ] && [ "$(readlink "$dir/herdr")" = "$(fm_herdr_lab_config_dir)" ] || return 1
+  printf '%s' "$dir"
+}
+
+fm_herdr_lab_short_prepare() { # <session>
+  local name=$1 dir record config link
+  fm_herdr_lab_check_socket_path "$name" 2>/dev/null && return 0
+  # Check the longest path under the fixed-length mktemp prefix before writing.
+  fm_herdr_lab_check_usable_path "$name" || return 1
+  config=$(fm_herdr_lab_config_dir)
+  case "$config" in /*) ;; *) fm_herdr_lab_error "Herdr config directory must be absolute"; return 1 ;; esac
+  link="$config/sessions/$name"
+  [ ! -e "$link" ] && [ ! -L "$link" ] || { fm_herdr_lab_error "session directory already exists for '$name'"; return 1; }
+  record=$(fm_herdr_lab_short_record "$name")
+  [ ! -e "$record" ] && [ ! -L "$record" ] || { fm_herdr_lab_error "socket directory record already exists for '$name'"; return 1; }
+  mkdir -p "$config/sessions" || return 1
+  dir=$(mktemp -d /tmp/fmh.XXXXXX) || return 1
+  if ! { chmod 700 "$dir" && ln -s "$config" "$dir/herdr" \
+    && (umask 077; printf '%s\n' "$dir" > "$record"); }; then
+    [ ! -L "$dir/herdr" ] || unlink "$dir/herdr"
+    rmdir "$dir" 2>/dev/null || true
+    return 1
+  fi
+}
+
+fm_herdr_lab_short_cleanup() { # <session>
+  local name=$1 record dir
+  record=$(fm_herdr_lab_short_record "$name")
+  [ -e "$record" ] || return 0
+  dir=$(fm_herdr_lab_short_dir "$name") || { fm_herdr_lab_error "unsafe socket directory record for '$name'"; return 1; }
+  unlink "$dir/herdr" && rmdir "$dir" && rm -f "$record"
+}
+
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
-  local name=$1 i
+  local name=$1 i short record
+  record=$(fm_herdr_lab_short_record "$name")
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    short=$(fm_herdr_lab_short_dir "$name") || { fm_herdr_lab_error "unsafe socket directory record for '$name'"; return 1; }
+    local XDG_CONFIG_HOME=$short
+    export XDG_CONFIG_HOME
+  fi
   shift
   local -a args=("$@")
   for ((i = 0; i < ${#args[@]}; i++)); do
@@ -155,7 +218,7 @@ fm_herdr_lab_fleet_state() { # <session>
 fm_herdr_lab_prepare() { # <session>
   local name=$1 sessions state_dir tripwire
   fm_herdr_lab_validate_name "$name" || return 1
-  fm_herdr_lab_check_socket_path "$name" || return 1
+  fm_herdr_lab_check_usable_path "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
 
@@ -175,8 +238,10 @@ fm_herdr_lab_prepare() { # <session>
     fm_herdr_lab_error "tripwire already exists for '$name'; refusing ambiguous ownership"
     return 1
   }
+  fm_herdr_lab_short_prepare "$name" || return 1
   fm_herdr_lab_fleet_state "$name" > "$tripwire" || {
     rm -f "$tripwire"
+    fm_herdr_lab_short_cleanup "$name" || true
     return 1
   }
 }
@@ -330,7 +395,7 @@ fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
 }
 
 fm_herdr_lab_viewer_start() { # <session>
-  local name=$1 record log launcher launcher_pid waited attempt reason pid interrupt_traps=0 timeout=$fm_herdr_lab_viewer_timeout_seconds
+  local name=$1 record log launcher launcher_pid waited attempt reason pid short interrupt_traps=0 timeout=$fm_herdr_lab_viewer_timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
@@ -351,6 +416,10 @@ fm_herdr_lab_viewer_start() { # <session>
 
   launcher=$(fm_herdr_lab_viewer_launcher_path)
   [ -f "$launcher" ] || { fm_herdr_lab_error "missing viewer launcher at $launcher"; return 1; }
+  short=${XDG_CONFIG_HOME:-${HOME:-}/.config}
+  if [ -e "$(fm_herdr_lab_short_record "$name")" ]; then
+    short=$(fm_herdr_lab_short_dir "$name") || return 1
+  fi
   log=$(fm_herdr_lab_viewer_log_path "$name")
   mkdir -p "$(fm_herdr_lab_state_dir)" || return 1
   launcher_pid=
@@ -359,7 +428,7 @@ fm_herdr_lab_viewer_start() { # <session>
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
   fi
-  nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  XDG_CONFIG_HOME="$short" nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
   launcher_pid=$!
 
   waited=0
@@ -480,7 +549,7 @@ fm_herdr_lab_server_log_tail() { # <log>
 fm_herdr_lab_provision() { # <session>
   local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds server_log
   fm_herdr_lab_validate_name "$name" || return 1
-  fm_herdr_lab_check_socket_path "$name" || return 1
+  fm_herdr_lab_check_usable_path "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
 
@@ -594,7 +663,9 @@ fm_herdr_lab_teardown() { # <session>
     return 1
   }
   if ! printf '%s' "$sessions" | jq -e --arg name "$name" '.sessions[]? | select(.name == $name)' >/dev/null 2>&1; then
-    fm_herdr_lab_verify_tripwire "$name"
+    fm_herdr_lab_check_tripwire "$name" || return 1
+    fm_herdr_lab_short_cleanup "$name" || return 1
+    rm -f "$tripwire"
     return
   fi
   fm_herdr_lab_stop "$name" >/dev/null 2>&1 || true
@@ -613,7 +684,9 @@ fm_herdr_lab_teardown() { # <session>
     fi
     return 1
   fi
-  fm_herdr_lab_verify_tripwire "$name"
+  fm_herdr_lab_check_tripwire "$name" || return 1
+  fm_herdr_lab_short_cleanup "$name" || return 1
+  rm -f "$tripwire"
 }
 
 fm_herdr_lab_name() { # <label>
@@ -625,7 +698,7 @@ fm_herdr_lab_name() { # <label>
   [ -n "$label" ] || label=lab
   local name
   name=$(printf 'fm-lab-%s-%s-%s' "$label" "$$" "$RANDOM")
-  fm_herdr_lab_check_socket_path "$name" || return 1
+  fm_herdr_lab_check_usable_path "$name" || return 1
   printf '%s\n' "$name"
 }
 

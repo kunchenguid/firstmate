@@ -59,6 +59,12 @@ case "$1 ${2:-}" in
     fi
     ;;
   "server --session")
+    if [ -n "${FM_FAKE_HERDR_REAL_SESSION_DIR:-}" ]; then
+      printf '%s\n' "$XDG_CONFIG_HOME" > "$state/$session.config-root"
+      session_dir="${XDG_CONFIG_HOME}/herdr/sessions/$session"
+      [ ! -L "$session_dir" ] || exit 95
+      mkdir -p "$session_dir"
+    fi
     if [ -n "${FM_FAKE_HERDR_SERVER_NOISE:-}" ]; then
       head -c "$FM_FAKE_HERDR_SERVER_NOISE" /dev/zero | tr '\0' x >&2
       exit 1
@@ -78,6 +84,7 @@ case "$1 ${2:-}" in
     fi
     ;;
   "status --json")
+    [ -z "${FM_FAKE_HERDR_REAL_SESSION_DIR:-}" ] || printf '%s\n' "$XDG_CONFIG_HOME" > "$state/$session.status-config-root"
     if [ "$lab_state" = running ]; then
       printf '%s\n' '{"server":{"running":true}}'
     else
@@ -121,6 +128,7 @@ run_with_fake() {
     FM_FAKE_HERDR_FLEET="${FM_FAKE_HERDR_FLEET:-}" \
     FM_FAKE_HERDR_SERVER_FAIL="${FM_FAKE_HERDR_SERVER_FAIL:-}" \
     FM_FAKE_HERDR_SERVER_STAY="${FM_FAKE_HERDR_SERVER_STAY:-}" \
+    FM_FAKE_HERDR_REAL_SESSION_DIR="${FM_FAKE_HERDR_REAL_SESSION_DIR:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -146,8 +154,8 @@ test_refuses_names_over_the_socket_path_limit() {
   fm_herdr_lab_check_socket_path "$name" || fail "a name exactly at the sun_path limit was refused"
   fm_herdr_lab_check_socket_path "${name}a" 2>"$err" && fail "a name over the sun_path limit was accepted"
   assert_contains "$(cat "$err")" "103-byte sun_path limit" "the refusal must name the limit"
-  HOME=/home/test/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_name long-label >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "name must refuse a label that overflows the socket path"
+  HOME=/home/test/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_name long-label >/dev/null \
+    || fail "name should allow a relocatable socket path"
   # Multibyte config root: fewer than 103 characters but more than 103 bytes.
   local wide chars
   wide=/home/test/$(printf 'é%.0s' $(seq 1 30))
@@ -161,14 +169,30 @@ test_refuses_names_over_the_socket_path_limit() {
     || fail "a short XDG_CONFIG_HOME was refused because of a long HOME"
   XDG_CONFIG_HOME=/x/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
     && fail "a long XDG_CONFIG_HOME was accepted"
-  status=0
-  run_with_fake fm_herdr_lab_prepare "${name}a" >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "prepare must refuse an over-limit name"
-  status=0
-  run_with_fake fm_herdr_lab_provision "${name}a" >/dev/null 2>&1 || status=$?
-  expect_code 1 "$status" "provision must refuse an over-limit name"
-  [ ! -f "$FAKE_STATE/${name}a" ] || fail "provision started a server for an over-limit name"
-  pass "fm-herdr-lab: names whose client socket path exceeds sun_path are refused"
+  name=fm-lab-$(printf 'a%.0s' $(seq 1 100))
+  run_with_fake fm_herdr_lab_provision "$name" > /dev/null 2>"$err" && fail "unrelocatable name accepted"
+  assert_contains "$(cat "$err")" "103-byte sun_path limit" "unrelocatable name must retain diagnostic"
+  pass "fm-herdr-lab: only unrelocatable socket paths are refused"
+}
+
+test_long_config_relocates_and_cleans_up() {
+  local name="fm-lab-long-$$" long dir
+  long="$TMP_ROOT/$(printf 'x%.0s' $(seq 1 90))"
+  mkdir -p "$long/herdr/sessions"
+  XDG_CONFIG_HOME="$long" FM_FAKE_HERDR_REAL_SESSION_DIR=1 run_with_fake "$ROOT/bin/fm-herdr-lab.sh" provision "$name" || fail "long config provision failed"
+  dir=$(cat "$TRIPWIRES/$name.socket-dir")
+  [ "$(XDG_CONFIG_HOME="$long" run_with_fake fm_herdr_lab_short_dir "$name")" = "$dir" ] || fail "short directory is not private"
+  [ -d "$long/herdr/sessions/$name" ] && [ ! -L "$long/herdr/sessions/$name" ] || fail "session directory is not discoverable"
+  [ "$(readlink "$dir/herdr")" = "$long/herdr" ] || fail "short directory does not reach Herdr config"
+  [ "$(cat "$FAKE_STATE/$name.config-root")" = "$dir" ] || fail "server did not use the short path"
+  XDG_CONFIG_HOME="$long" FM_FAKE_HERDR_REAL_SESSION_DIR=1 run_with_fake "$ROOT/bin/fm-herdr-lab.sh" run "$name" status --json >/dev/null || fail "run failed"
+  [ "$(cat "$FAKE_STATE/$name.status-config-root")" = "$dir" ] || fail "run did not use the short path"
+  printf '%s\n' '/changed/fleet.sock' > "$FAKE_STATE/default-socket"
+  XDG_CONFIG_HOME="$long" run_with_fake "$ROOT/bin/fm-herdr-lab.sh" teardown "$name" >/dev/null 2>&1 && fail "relocation hid a fleet change"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  XDG_CONFIG_HOME="$long" run_with_fake "$ROOT/bin/fm-herdr-lab.sh" teardown "$name" || fail "teardown failed"
+  [ ! -e "$dir" ] && [ ! -e "$TRIPWIRES/$name.socket-dir" ] || fail "short directory was not removed"
+  pass "fm-herdr-lab: long config uses and removes a private short directory"
 }
 
 test_noisy_server_log_is_bounded() {
@@ -724,6 +748,7 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 
 test_refuses_unsafe_names
 test_refuses_names_over_the_socket_path_limit
+test_long_config_relocates_and_cleans_up
 test_failed_server_start_reports_its_error_quickly
 test_noisy_server_log_is_bounded
 test_captured_provision_returns_promptly
