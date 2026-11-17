@@ -6581,6 +6581,69 @@ SH
   pass "post-reap proof retains late work and retry records on ordinary and Orca paths, preserving clean/force/scout behavior"
 }
 
+test_empty_worker_scratch_is_removed() {
+  local case_dir rc=0
+  case_dir=$(make_case empty-worker-scratch)
+  write_meta "$case_dir" local-only ship
+  printf '/.fm-scratch/\n' >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+  mkdir "$case_dir/wt/.fm-scratch"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "empty scratch teardown failed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/wt/.fm-scratch" 'empty worker scratch survived teardown'
+  pass 'teardown removes an unused empty worker scratch root'
+}
+
+test_unreadable_git_worker_scratch_reaches_removal() {
+  local backend kind case_dir rc
+  for backend in tmux orca; do
+    for kind in ship scout; do
+      case_dir=$(make_case "unreadable-scratch-$backend-$kind")
+      write_meta "$case_dir" local-only "$kind"
+      printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$case_dir/state/task-x1.meta"
+      if [ "$backend" = orca ]; then
+        sed 's/^window=.*/window=fm-task-x1/' "$case_dir/state/task-x1.meta" > "$case_dir/meta-new"
+        mv "$case_dir/meta-new" "$case_dir/state/task-x1.meta"
+        printf 'backend=orca\nterminal=term-test\norca_worktree_id=wt-test::/orca/wt-test\n' >> "$case_dir/state/task-x1.meta"
+      fi
+      mkdir -p "$case_dir/data/task-x1" "$case_dir/wt/.fm-scratch"
+      printf 'report\n' > "$case_dir/data/task-x1/report.md"
+      printf 'scratch\n' > "$case_dir/wt/.fm-scratch/output"
+      printf 'gitdir: %s/missing-gitdir\n' "$case_dir" > "$case_dir/wt/.git"
+      cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'return\n' >> "$FM_SCRATCH_CASE/removal.log"
+exit 0
+SH
+      cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'worktree show')
+    printf '{"ok":true,"result":{"worktree":{"id":"wt-test::/orca/wt-test","path":"%s"}}}\n' "$FM_SCRATCH_CASE/wt" ;;
+  'worktree rm')
+    printf 'remove\n' >> "$FM_SCRATCH_CASE/removal.log"
+    printf '{"ok":true,"result":{}}\n' ;;
+  *) printf '{"ok":true,"result":{}}\n' ;;
+esac
+SH
+      chmod +x "$case_dir/fakebin/treehouse" "$case_dir/fakebin/orca"
+      rc=0
+      if [ "$kind" = ship ]; then
+        FM_HOME="$case_dir" FM_SCRATCH_CASE="$case_dir" \
+          run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      else
+        FM_HOME="$case_dir" FM_SCRATCH_CASE="$case_dir" \
+          run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      fi
+      expect_code 0 "$rc" "$backend/$kind unreadable copy teardown failed: $(cat "$case_dir/stderr")"
+      assert_present "$case_dir/removal.log" "$backend/$kind never reached copy removal"
+      assert_absent "$case_dir/state/task-x1.meta" "$backend/$kind retained task metadata"
+    done
+  done
+  pass 'forced and scout teardown reach removal with unreadable Git metadata on tmux and Orca'
+}
+
+test_empty_worker_scratch_is_removed
+test_unreadable_git_worker_scratch_reaches_removal
 test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved

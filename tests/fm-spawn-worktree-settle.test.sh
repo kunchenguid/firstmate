@@ -346,6 +346,39 @@ test_worker_scratch_collisions_refuse_launch() {
   pass "spawn refuses scratch path collisions and project rules that defeat its exclusion"
 }
 
+test_gate_worktree_scratch_uses_tracked_exclusion() {
+  local case_dir primary gate lab rc
+  case_dir="$TMP_ROOT/gate-scratch"
+  primary="$case_dir/primary"
+  gate="$case_dir/gate-wt"
+  fm_git_init_commit "$primary"
+  cp "$ROOT/.gitignore" "$primary/.gitignore"
+  git -C "$primary" add .gitignore
+  git -C "$primary" commit -qm 'ignore reserved scratch'
+  printf '/.worker-only/\n' >> "$primary/.git/info/exclude"
+  git clone -q --bare "$primary" "$case_dir/gate.git"
+  git --git-dir="$case_dir/gate.git" worktree add -q "$gate" -b gate
+  mkdir -p "$gate/.worker-only" "$gate/.fm-scratch/arbitrary worker name" "$gate/src/.fm-scratch"
+  rc=0
+  git -C "$gate" check-ignore -q .worker-only/ || rc=$?
+  expect_code 1 "$rc" 'gate fixture inherited the worker-only exclusion'
+  lab=$(mktemp -d "$gate/.fm-scratch/fm-lab.XXXXXX")
+  "$ROOT/bin/fm-lab-home.sh" create "$lab" >/dev/null || fail 'gate lab creation failed'
+  assert_present "$lab/.fm-lab-home" 'gate lab marker missing'
+  printf 'proof\n' > "$gate/.fm-scratch/arbitrary worker name/output.bin"
+  git init -q "$gate/.fm-scratch/nested-clone"
+  printf 'nested proof\n' > "$gate/.fm-scratch/nested-clone/output.bin"
+  printf 'project content\n' > "$gate/src/.fm-scratch/keep.txt"
+  [ -z "$(git -C "$gate" status --porcelain --untracked-files=all -- .fm-scratch)" ] \
+    || fail 'gate scratch leaked into git status'
+  git -C "$gate" add -A || fail 'gate git add -A failed'
+  [ -z "$(git -C "$gate" diff --cached --name-only -- .fm-scratch)" ] \
+    || fail 'gate git add -A staged scratch or lab markers'
+  git -C "$gate" diff --cached --name-only -- src/.fm-scratch/keep.txt | grep -q keep.txt \
+    || fail 'gate exclusion hid a project path outside the reserved root'
+  pass 'gate scratch and lab markers stay ignored without worker info/exclude'
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
@@ -353,5 +386,6 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_unborn_head_project_is_refused_at_once
 test_worker_scratch_is_excluded_from_status_and_staging
 test_worker_scratch_collisions_refuse_launch
+test_gate_worktree_scratch_uses_tracked_exclusion
 
 echo "# all fm-spawn-worktree-settle tests passed"

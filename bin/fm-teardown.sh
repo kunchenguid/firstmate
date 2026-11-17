@@ -2139,6 +2139,7 @@ report_worktree_dirt() {
 # Remove only the reserved ignored worker root after the safety checks pass.
 teardown_clean_worker_scratch() {
   local wt=$1 tracked
+  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   [ -e "$wt/.fm-scratch" ] || [ -L "$wt/.fm-scratch" ] || return 0
   tracked=$(git -C "$wt" ls-files -- .fm-scratch) || return 1
   # Older tasks may belong to a project already tracking this path. It was
