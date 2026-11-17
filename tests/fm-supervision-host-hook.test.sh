@@ -422,6 +422,36 @@ test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record() {
 }
 
 
+# The live failure (2026-11-17): an attended branch turn handled a finished
+# scout's wake, recorded a captain outcome, and cleaned up that scout, the last
+# task in flight. The host handed the outcome back, but the Stop hook read the
+# vanished supervision need as nothing left to deliver and closed clean, so
+# main heard of the outcome only when the captain asked.
+test_claude_stop_hook_rewakes_main_once_for_an_outcome_that_ended_the_fleet() {
+  local home
+  home=$(make_primary_home hook-outcome-last-task)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo captain-last > "$home/stub-mode"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "outcome ended the fleet: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'report ready'
+  wait_until_deadline 60 hook_exited "$home" || fail "outcome ended the fleet: the Stop hook never closed: $(cat "$home/state/.supervision-host.log")"
+  assert_absent "$home/state/demo.meta" "fixture: the branch turn left the task in flight"
+  assert_re '^supervision-host: branch-outcome: ' "$home/hook.err" "the host must hand its captain outcome to main"
+  assert_rewoke_main "$home" "outcome ended the fleet"
+  main_drain "$home" > "$home/main-drain.out"
+  assert_grep ' ago] demo: stub escalated: ' "$home/main-drain.out" "main's drain must present the captain outcome"
+  # shellcheck disable=SC2086 # the printed acknowledgement arguments
+  [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || fail "outcome ended the fleet: main's acknowledgement failed: $MAIN_ACK"
+  turn_end "$home"
+  wait_until_deadline 60 hook_exited "$home" || fail "outcome ended the fleet: main's next Stop hook never finished"
+  expect_code 0 "$(cat "$home/hook.rc")" "main's next turn end must not rewake it for the same outcome: $(cat "$home/hook.err")"
+  pass "host+hook: a captain outcome whose turn ended the last task in flight rewakes main once"
+}
+
+
 # Default-on for Claude (docs/configuration.md "Supervision host"): through the
 # real Stop hook and mirror writer, a Claude primary home with no
 # config/supervision-host runs the host at the default engine, mirrors the
@@ -704,6 +734,7 @@ fm_test_run \
   test_claude_stop_hook_delivers_a_main_only_pass_through \
   test_claude_stop_hook_rewakes_main_for_an_inbox_note_after_a_handled_wake \
   test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record \
+  test_claude_stop_hook_rewakes_main_once_for_an_outcome_that_ended_the_fleet \
   test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out \
   test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn \
   test_successor_left_at_the_turn_survives_the_hook_process_group_teardown \
