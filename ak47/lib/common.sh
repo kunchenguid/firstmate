@@ -322,6 +322,7 @@ ak47_metric() {
     root_disk_pct) ak47_root_disk_pct ;;
     tmux_core_pct) ak47_tmux_core_pct ;;
     agent_count)   ak47_agent_count ;;
+    home_children) ak47_home_children ;;
     pids_pct)      ak47_pids_pct ;;
     *) return 1 ;;
   esac
@@ -392,6 +393,57 @@ ak47_breach() {
     if (d == "max") exit (v > c) ? 0 : 1
     exit (v < c) ? 0 : 1
   }'
+}
+
+# ak47_home_children - the largest resident child-agent count of any secondmate
+# home, as measured by the last guards/agent-reclaim.sh census. It is read from
+# that census rather than re-walked here, because mapping agents to homes needs
+# every home's task records and is too slow for a board refresh. A census older
+# than one hour is not a sample.
+ak47_home_children() {
+  local f="$AK47_STATE/agent-reclaim.children" v
+  [ -r "$f" ] || return 1
+  [ $(( $(ak47_epoch) - $(stat -c %Y "$f" 2>/dev/null || echo 0) )) -le 3600 ] || return 1
+  read -r v <"$f" || return 1
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$v"
+}
+
+# ak47_deliver_findings <find-log> <label> <board> <key|line>...
+# The one ak47 finding path for findings a table cannot settle: durable in
+# <find-log>, rate-limited to one note per key per 6 h, and delivered to the
+# chair's inbox as an automated note, which firstmate receives as a check wake.
+# The dedupe key under $AK47_STATE/keys is committed only after the note is
+# actually delivered: a key touched before a failed send silences the finding
+# for six hours. fm-inbox accepts only a fixed class vocabulary (captain:
+# text|voice; automated: sentry|lane-tick|ci|watch|health) and an unknown class
+# exits 1, which this gate reads as "not delivered" - that is how every ak47
+# finding once went undelivered while the gate kept reporting FAILED.
+# Returns 0 when nothing was due or the note was delivered, 1 when it was not.
+ak47_deliver_findings() {
+  local log=$1 label=$2 board=$3 f key msg kf body class=${AK47_INBOX_CLASS:-health}
+  shift 3
+  [ "$#" -gt 0 ] || return 0
+  mkdir -p "$AK47_STATE/keys" 2>/dev/null || true
+  local -a fresh=() freshkeys=()
+  for f in "$@"; do
+    key=${f%%|*}; msg=${f#*|}
+    kf="$AK47_STATE/keys/$key"
+    if [ ! -f "$kf" ] || [ $(( $(ak47_epoch) - $(stat -c %Y "$kf" 2>/dev/null || echo 0) )) -gt 21600 ]; then
+      ak47_log "$log" "$key $msg"
+      fresh+=("$msg"); freshkeys+=("$kf")
+    fi
+  done
+  [ "${#fresh[@]}" -gt 0 ] || return 0
+  body=$(printf '%s; ' "${fresh[@]}")
+  if [ -x "$FM_HOME/bin/fm-inbox.sh" ] && \
+     "$FM_HOME/bin/fm-inbox.sh" note --source "$class" \
+       "$label: ${body}board $board" >/dev/null 2>&1; then
+    for kf in "${freshkeys[@]}"; do touch "$kf" 2>/dev/null || true; done
+    return 0
+  fi
+  ak47_log "$log" "DELIVERY-FAILED ${#fresh[@]} finding(s) not delivered; dedupe keys not committed"
+  return 1
 }
 
 # swap_run <budget|-> <command> [args...] - run a root-only swap command.

@@ -12,7 +12,8 @@
 #   files/ak47/tick.sh            the deterministic 5-minute tick
 #   files/ak47/status.sh          the budget, rendered against live samples
 #   files/ak47/census.sh          which producer creates the growth
-#   files/ak47/guards/            a check per producer that fails when it stops cleaning up
+#   files/ak47/guards/            a check per producer that fails when it stops cleaning up,
+#                                 and the 15-minute agent reclaim (guards/agent-reclaim.sh)
 #   files/ak47/weekly-review.sh   proposes threshold diffs, never applies them
 #   files/ak47/tmp-takedown.sh    the manual, bounded take-down for a huge /tmp
 #   files/ak47/swap-reclaim.sh    the on-demand unit's bounded swap reclaim
@@ -32,7 +33,7 @@
 # try to apply workstation units to cluster nodes.
 #
 # Revert (<1 min, keeps every log and every quarantine directory):
-#   systemctl --user disable --now ak47-devops.timer ak47-devops-weekly.timer
+#   systemctl --user disable --now ak47-devops.timer ak47-agent-reclaim.timer ak47-devops-weekly.timer
 #   rm ~/.config/systemd/user/ak47-devops{,-weekly}.{service,timer}
 #   rm ~/.config/systemd/user/ak47-swap-reclaim.service
 #   systemctl --user daemon-reload
@@ -294,6 +295,8 @@
       loop:
         - ak47-devops.service
         - ak47-devops.timer
+        - ak47-agent-reclaim.service
+        - ak47-agent-reclaim.timer
         - ak47-devops-weekly.service
         - ak47-devops-weekly.timer
         - ak47-swap-reclaim.service
@@ -315,6 +318,7 @@
         enabled: true
       loop:
         - ak47-devops.timer
+        - ak47-agent-reclaim.timer
         - ak47-devops-weekly.timer
 
     # ---- prove it -----------------------------------------------------------

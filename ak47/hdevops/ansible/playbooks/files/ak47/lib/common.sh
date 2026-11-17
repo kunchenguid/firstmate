@@ -125,7 +125,7 @@ ak47_cache_age() {
 ak47_tmp_gb() {
   local ttl=${AK47_DU_TTL:-1800} budget=${AK47_DU_BUDGET:-300} v
   local retry=${AK47_DU_RETRY:-900} marker="$AK47_STATE/.tmp-gb-walk-failed" retrying=0
-  # A failed walk is remembered for a while. Retrying a 90 s timeout on every
+  # A failed walk is remembered for a while. Retrying a 300 s timeout on every
   # call is how the tick spent its whole interval failing to measure: the retry
   # interval is deliberate, not a sigh of relief.
   if [ -r "$marker" ]; then
@@ -194,11 +194,10 @@ ak47_tmp_gb() {
 # so the walk always returns.
 #
 # Returns 0 when every entry was measured, 1 when the budget ran out first. In
-# both cases the partial total is printed and AK47_TMP_GB_COVERED /
-# AK47_TMP_GB_ENTRIES describe the coverage.
+# both cases the partial total is printed and tmp_gb_partial records the coverage.
 ak47_tmp_gb_walk() {
   local budget=${1:-300} root=${AK47_TMP_ROOT:-/tmp} start elapsed
-  local list total=0 covered=0 entries=0 kb batch=()
+  local list total=0 covered=0 entries=0 kb rc batch=()
   start=$(ak47_epoch)
   list=$(mktemp) || return 1
   find "$root" -mindepth 1 -maxdepth 1 -print0 >"$list" 2>/dev/null || true
@@ -208,31 +207,30 @@ ak47_tmp_gb_walk() {
     batch+=("$p")
     if [ "${#batch[@]}" -ge 25 ]; then
       elapsed=$(( $(ak47_epoch) - start ))
-      kb=$(timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
-             | awk '{s+=$1} END{print s+0}')
-      # A batch that failed or was cut off measured nothing: counting it as
-      # covered would let a walk that never finished claim the whole tree.
+      kb=$( { timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
+             | awk '{s+=$1} END{print s+0}'; exit "${PIPESTATUS[0]}"; } )
+      rc=$?
+      # A batch that failed or was cut off may have measured only some of its
+      # entries: its total is still a lower bound, but it cannot count as full
+      # coverage or a walk that never finished could claim the whole tree.
       [ -n "${kb:-}" ] && [ "${kb:-0}" -gt 0 ] || { batch=(); break; }
       total=$(( total + kb ))
-      covered=$(( covered + ${#batch[@]} ))
+      [ "$rc" -eq 0 ] && covered=$(( covered + ${#batch[@]} ))
       batch=()
       [ $(( $(ak47_epoch) - start )) -ge "$budget" ] && break
     fi
   done <"$list"
   if [ "${#batch[@]}" -gt 0 ]; then
     elapsed=$(( $(ak47_epoch) - start ))
-    kb=$(timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
-           | awk '{s+=$1} END{print s+0}')
+    kb=$( { timeout $(( budget - elapsed + 5 )) du -sx --block-size=1K "${batch[@]}" 2>/dev/null \
+           | awk '{s+=$1} END{print s+0}'; exit "${PIPESTATUS[0]}"; } )
+    rc=$?
     if [ -n "${kb:-}" ] && [ "${kb:-0}" -gt 0 ]; then
       total=$(( total + kb ))
-      covered=$(( covered + ${#batch[@]} ))
+      [ "$rc" -eq 0 ] && covered=$(( covered + ${#batch[@]} ))
     fi
   fi
   rm -f "$list" 2>/dev/null || true
-  # shellcheck disable=SC2034  # read by the tick's stale-size finding
-  AK47_TMP_GB_COVERED=$covered
-  # shellcheck disable=SC2034  # read by the tick's stale-size finding
-  AK47_TMP_GB_ENTRIES=$entries
   ak47_cache_put tmp_gb_partial "$covered/$entries"
   printf '%s' $(( total / 1048576 ))
   [ "$covered" -ge "$entries" ]
@@ -324,6 +322,7 @@ ak47_metric() {
     root_disk_pct) ak47_root_disk_pct ;;
     tmux_core_pct) ak47_tmux_core_pct ;;
     agent_count)   ak47_agent_count ;;
+    home_children) ak47_home_children ;;
     pids_pct)      ak47_pids_pct ;;
     *) return 1 ;;
   esac
@@ -394,6 +393,57 @@ ak47_breach() {
     if (d == "max") exit (v > c) ? 0 : 1
     exit (v < c) ? 0 : 1
   }'
+}
+
+# ak47_home_children - the largest resident child-agent count of any secondmate
+# home, as measured by the last guards/agent-reclaim.sh census. It is read from
+# that census rather than re-walked here, because mapping agents to homes needs
+# every home's task records and is too slow for a board refresh. A census older
+# than one hour is not a sample.
+ak47_home_children() {
+  local f="$AK47_STATE/agent-reclaim.children" v
+  [ -r "$f" ] || return 1
+  [ $(( $(ak47_epoch) - $(stat -c %Y "$f" 2>/dev/null || echo 0) )) -le 3600 ] || return 1
+  read -r v <"$f" || return 1
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$v"
+}
+
+# ak47_deliver_findings <find-log> <label> <board> <key|line>...
+# The one ak47 finding path for findings a table cannot settle: durable in
+# <find-log>, rate-limited to one note per key per 6 h, and delivered to the
+# chair's inbox as an automated note, which firstmate receives as a check wake.
+# The dedupe key under $AK47_STATE/keys is committed only after the note is
+# actually delivered: a key touched before a failed send silences the finding
+# for six hours. fm-inbox accepts only a fixed class vocabulary (captain:
+# text|voice; automated: sentry|lane-tick|ci|watch|health) and an unknown class
+# exits 1, which this gate reads as "not delivered" - that is how every ak47
+# finding once went undelivered while the gate kept reporting FAILED.
+# Returns 0 when nothing was due or the note was delivered, 1 when it was not.
+ak47_deliver_findings() {
+  local log=$1 label=$2 board=$3 f key msg kf body class=${AK47_INBOX_CLASS:-health}
+  shift 3
+  [ "$#" -gt 0 ] || return 0
+  mkdir -p "$AK47_STATE/keys" 2>/dev/null || true
+  local -a fresh=() freshkeys=()
+  for f in "$@"; do
+    key=${f%%|*}; msg=${f#*|}
+    kf="$AK47_STATE/keys/$key"
+    if [ ! -f "$kf" ] || [ $(( $(ak47_epoch) - $(stat -c %Y "$kf" 2>/dev/null || echo 0) )) -gt 21600 ]; then
+      ak47_log "$log" "$key $msg"
+      fresh+=("$msg"); freshkeys+=("$kf")
+    fi
+  done
+  [ "${#fresh[@]}" -gt 0 ] || return 0
+  body=$(printf '%s; ' "${fresh[@]}")
+  if [ -x "$FM_HOME/bin/fm-inbox.sh" ] && \
+     "$FM_HOME/bin/fm-inbox.sh" note --source "$class" \
+       "$label: ${body}board $board" >/dev/null 2>&1; then
+    for kf in "${freshkeys[@]}"; do touch "$kf" 2>/dev/null || true; done
+    return 0
+  fi
+  ak47_log "$log" "DELIVERY-FAILED ${#fresh[@]} finding(s) not delivered; dedupe keys not committed"
+  return 1
 }
 
 # swap_run <budget|-> <command> [args...] - run a root-only swap command.

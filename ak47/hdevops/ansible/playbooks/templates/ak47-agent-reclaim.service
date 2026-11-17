@@ -1,0 +1,16 @@
+[Unit]
+Description=ak47: reclaim resident agents nobody is using (orphans, day-idle tasks, over-cap homes)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=FM_HOME=%h/Projects/firstmate
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=%h/.local/lib/ak47/guards/agent-reclaim.sh --apply
+# Below every interactive process on the box: reclaiming agents must never be
+# the reason a working agent's turn is slow.
+Nice=19
+IOSchedulingClass=idle
+# A census, a 20 s CPU sample, and at most 20 bounded stops (each exit is capped
+# at 120 s inside the script). Bound the whole run so the timer keeps firing.
+TimeoutStartSec=900
