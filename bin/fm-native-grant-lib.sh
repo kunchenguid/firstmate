@@ -9,9 +9,9 @@
 # A native resume grant is the record a host restart writes for each stopped
 # crew so its next launch may continue that crew's own native conversation.
 # Its producer and its consumer (the slot dispatcher, which deletes the file
-# when a launch reaches it) live outside this repository. This library does
-# not consume the file; it only decides whether the grant licenses the one
-# thing granted recovery may skip, the new-work dispatchability gate.
+# when a launch reaches it) live outside this repository. This library
+# validates the file and records the spend. The external dispatcher owns file
+# consumption and native conversation continuation.
 #
 # Grant contract (all of it required, nothing else accepted):
 #   - The file is a regular non-symlink file of at most 4096 bytes named
@@ -20,12 +20,14 @@
 #     session and written, no key repeated, every value a scalar.
 #   - task equals the task id, agent equals the task record's harness, and
 #     pane equals the task record's herdr_pane_id, all as exact strings.
-#   - session is a lowercase native conversation UUID.
+#   - session is a lowercase native conversation UUID. The validator checks
+#     its shape; the dispatcher owns the session used for continuation.
 #   - written is an integer Unix time no later than now and no older than
 #     43200 seconds (the producer's window).
 #   - The grant's byte fingerprint is not already recorded in the task's
 #     spend ledger, state/<id>.native-grant-spent. One grant licenses one
 #     recovery attempt, whether or not that attempt then launches.
+#     bin/fm-teardown.sh removes the ledger with the task's state.
 # Any other shape - a second mate's owner_home/secondmate_home grant included -
 # is refused, so an unrecognized grant can never widen what it bypasses.
 #

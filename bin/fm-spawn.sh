@@ -104,16 +104,17 @@
 #   under the same task and metadata locks, and on top of them it requires a
 #   herdr task whose recorded pane classified `dead` (an adoptable pane, never a
 #   rebind or a live, unknown or unreadable agent) and a grant that passes
-#   bin/fm-native-grant-lib.sh's strict contract against this task's record. A
-#   checked grant is recorded as spent before launch, so one grant licenses one
-#   attempt. It bypasses exactly one thing: the backlog dispatchability gate,
+#   bin/fm-native-grant-lib.sh's strict contract against this task's record.
+#   Once the grant and recorded account pass validation, spawn records the
+#   spend before checking backlog eligibility or launching the agent. A later
+#   backlog refusal or launch failure therefore still uses up that attempt.
+#   The grant bypasses only the backlog dispatchability gate,
 #   so a held or blocked Queued or In flight item may be recovered. The item
 #   must still exist, read cleanly and be open work (a Done or unknown item
 #   still refuses), and no backlog transition runs, so holds and rows stay
-#   exactly as they were. A captain-kind hold is never bypassed: authority is
-#   explicit, so a grant never stands in for the captain's word. The grant file
-#   itself is left for its consumer, the native launch dispatcher. Without the
-#   flag nothing about relaunch changes and the gate applies as before.
+#   exactly as they were. A captain-kind hold still requires the captain's
+#   authority. Without the flag, ordinary relaunch keeps its existing
+#   backlog rules. See bin/fm-native-grant-lib.sh for grant file ownership.
 #   Every fresh ship/scout launch and replacement explicitly enters the recorded
 #   worktree immediately before trust setup and brief delivery, and a pre-launch
 #   cwd check refuses any endpoint that still reports another copy; a Herdr shell
