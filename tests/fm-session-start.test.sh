@@ -2404,7 +2404,7 @@ SH
 # --- context re-emit (--reemit) ----------------------------------------------
 
 test_reemit_fits_the_hook_output_cap_and_points_to_bulky_sections() {
-  local rec root home fakebin reemit normal head2k label
+  local rec root home fakebin reemit normal head2k label i id
   rec=$(new_world reemit-cap)
   IFS='|' read -r root home fakebin <<FIXTURE
 $rec
@@ -2418,10 +2418,15 @@ FIXTURE
     for (i = 0; i < 150; i++) printf "- [ ] in-flight-%03d example task title with padding padding\n", i
     print "\n## Queued\n"
   }' > "$home/data/backlog.md"
-  printf 'kind=ship\n' > "$home/state/task-big.meta"
-  awk 'BEGIN { for (i = 0; i < 50; i++) printf "working [at=%d]: status event %03d padding padding padding\n", 1700000000 + i, i }' \
-    > "$home/state/task-big.status"
-  append_wake "$home/state" signal task-big "done: queued before the re-emit" || fail "seed wake failed"
+  for i in $(seq -w 1 20); do
+    printf 'kind=ship\nwindow=fm-task-0%s\n' "$i" > "$home/state/task-0$i.meta"
+    awk 'BEGIN { for (i = 0; i < 50; i++) printf "working [at=%d]: status event %03d padding padding padding\n", 1700000000 + i, i }' \
+      > "$home/state/task-0$i.status"
+  done
+  for i in $(seq -w 1 5); do
+    printf 'done: status event 001\n' > "$home/state/orphan-0$i.status"
+  done
+  append_wake "$home/state" signal task-001 "done: queued before the re-emit" || fail "seed wake failed"
 
   normal=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_not_contains "$normal" "RE-EMIT CUE" "a normal start printed the re-emit cue"
@@ -2436,7 +2441,7 @@ FIXTURE
   assert_contains "$head2k" "RE-EMIT CUE" "the re-emit cue is not inside the first 2000 characters"
   assert_not_contains "$reemit" "read that whole file" "the re-emit cue still asks for the whole saved output"
 
-  for label in "$home/data/captain.md" "$home/data/learnings.md" "$home/data/backlog.md" "$home/state/task-big.status"; do
+  for label in "$home/data/captain.md" "$home/data/learnings.md" "$home/data/backlog.md" "$home/state/<id>.status"; do
     assert_contains "$reemit" "$label" "the re-emit did not point to $label"
   done
   assert_not_contains "$reemit" "preference line 0000" "the re-emit inlined captain preferences"
@@ -2448,7 +2453,16 @@ FIXTURE
   assert_contains "$reemit" "LOCK" "the re-emit dropped the lock result"
   assert_contains "$reemit" "done: queued before the re-emit" "the re-emit dropped the queued wake"
   assert_contains "$reemit" "WAKE_ACK_REQUIRED:" "the re-emit dropped the wake acknowledgement instruction"
-  assert_contains "$reemit" "task-big" "the re-emit dropped the work-under-way identity"
+  for i in $(seq -w 1 20); do
+    assert_contains "$reemit" "--- task-0$i ---" "the re-emit dropped the work-under-way identity task-0$i"
+  done
+  for i in $(seq -w 1 5); do
+    assert_contains "$reemit" "--- orphan-0$i ---" "the re-emit dropped the orphan status log orphan-0$i"
+  done
+  assert_not_contains "$reemit" "Follow the supervision operating instructions block above" \
+    "the re-emit NEXT STEP points at a supervision block it did not print"
+  assert_contains "$reemit" "Print the supervision instructions with the command" \
+    "the re-emit NEXT STEP does not say to print the supervision instructions"
 
   pass "--reemit stays under the hook output cap, keeps the safety lines inline, and points to each bulky section"
 }

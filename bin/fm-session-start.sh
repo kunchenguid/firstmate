@@ -584,11 +584,7 @@ print_backlog_compact() {
 
 print_status_tail() {
   local status=$1 line
-  if [ "$REEMIT" -eq 1 ]; then
-    printf 'status log: '
-    print_reemit_pointer "$status" "for wake-EVENT history; bin/fm-crew-state.sh <id> owns current state"
-    return 0
-  fi
+  [ "$REEMIT" -eq 0 ] || return 0
   printf 'status tail (last %s line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
     "$STATUS_TAIL" "$FM_LINE_CAP_DEFAULT" "$status"
   # A crewmate writes its own status lines, so their length is unbounded: one
@@ -959,18 +955,18 @@ section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
 subsection "Work under way (state/*.meta)"
+if [ "$REEMIT" -eq 1 ]; then
+  printf 'Per task, only its endpoint is reprinted in a context re-emit. Its fields are in\n'
+  printf '%s/<id>.meta and its wake-EVENT history in <id>.status (bin/fm-crew-state.sh <id>\n' "$STATE"
+  printf 'owns current state); read one only when this turn needs it.\n'
+fi
 META_FOUND=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
   META_FOUND=1
   id=$(basename "$meta" .meta)
   printf '\n--- %s ---\n' "$id"
-  if [ "$REEMIT" -eq 1 ]; then
-    printf 'meta: '
-    print_reemit_pointer "$meta" "when this task's fields matter"
-  else
-    cat "$meta"
-  fi
+  [ "$REEMIT" -eq 1 ] || cat "$meta"
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
@@ -996,13 +992,14 @@ for meta in "$STATE"/*.meta; do
   status="$STATE/$id.status"
   if [ -f "$status" ]; then
     print_status_tail "$status"
-  else
+  elif [ "$REEMIT" -eq 0 ]; then
     printf 'status tail: (no status file yet: %s)\n' "$status"
   fi
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "Orphan status logs (state/*.status without matching .meta)"
+[ "$REEMIT" -eq 0 ] || printf 'Only ids are reprinted in a context re-emit; each log is %s/<id>.status.\n' "$STATE"
 ORPHAN_STATUS_FOUND=0
 for status in "$STATE"/*.status; do
   [ -f "$status" ] || continue
@@ -1099,6 +1096,9 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
 section "NEXT STEP"
+FOLLOW_SUPERVISION="Follow the supervision operating instructions block above"
+[ "$REEMIT" -eq 0 ] || FOLLOW_SUPERVISION="Print the supervision instructions with the command in the
+SUPERVISION OPERATING INSTRUCTIONS section above, then follow them"
 if [ "$READ_ONLY" -eq 1 ]; then
   cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
@@ -1107,30 +1107,30 @@ with verified fleet-lock ownership may perform mutable follow-up.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_MODE" = quiet ]; then
-  cat <<'EOF'
-Quiet mode is active. Follow the supervision operating instructions block
-above: load /quiet and ensure the daemon is running, because the daemon owns
+  cat <<EOF
+Quiet mode is active. $FOLLOW_SUPERVISION:
+load /quiet and ensure the daemon is running, because the daemon owns
 watcher supervision. Ordinary captain chat does not exit it; only an
 explicit /quiet off does.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then
-  cat <<'EOF'
-Away mode is active. Follow the supervision operating instructions block above:
+  cat <<EOF
+Away mode is active. $FOLLOW_SUPERVISION:
 load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then
   cat <<EOF
-Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+$FOLLOW_SUPERVISION for harness '$PRIMARY_HARNESS'.
 X mode is active, so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
 
 EOF
 else
 cat <<EOF
-Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
+$FOLLOW_SUPERVISION for harness '$PRIMARY_HARNESS'.
 This script never starts supervision itself.
 
 EOF
