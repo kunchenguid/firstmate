@@ -25,10 +25,12 @@
 # Report: the first line is machine-readable, one space-separated key=value
 # list in this fixed order:
 #   capacity: free_lanes=<N|unknown> reason=<reason> lanes=<N> target=<N|none|invalid>
-#     secondmates=<N> load1=<X|unknown> cores=<N|unknown>
+#     secondmates=<N> load1=<X|unknown> load5=<X|unknown> cores=<N|unknown>
 #     mem_free_pct=<N|unknown> disk_free_mb=<N|unknown>
-# (one physical line). A short human summary follows it. load1, cores,
-# mem_free_pct and disk_free_mb are always this host's own probes.
+# (one physical line). A short human summary follows it. load1, load5, cores,
+# mem_free_pct and disk_free_mb are always this host's own probes. load1 is
+# reported only; every load decision reads load5 (docs/configuration.md "Lane
+# capacity" owns why).
 #
 # lanes counts task metadata records whose kind is not secondmate (ship and
 # scout work, including records not yet reconciled after an endpoint died).
@@ -42,14 +44,15 @@
 # With a target, free_lanes is target minus lanes (never below 0), unless a
 # constraint holds, in which case free_lanes=0 and reason names every
 # constraint, comma-separated, in this order:
-#   cpu       probe basis: 1-minute load average >= logical cores
+#   cpu       probe basis: 5-minute load average >= logical cores
 #   memory    probe basis: free-memory percentage < 10; or, with min-avail-gb
 #             set, available memory minus min-avail-gb is under the 1 GB a
 #             default lane needs
 #   disk      probe basis: free space on the filesystem holding FM_HOME
 #             < 5120 MB; or a disk row under min-disk-gb
 #   pressure  beat basis: the pressure level is warn or critical
-#   load      load1 is at or over max-load1
+#   load      the 5-minute load is at or over max-load5 (max-load1, its old
+#             name, is accepted as the same setting)
 #   reserve   a reserve-flag file exists
 #   battery   a fresh beat reports the machine on battery
 # Otherwise reason is ok when free_lanes > 0 and full when it is 0.
@@ -67,7 +70,8 @@
 # fresh file the basis is probe, and the level is warn when a cpu, memory, or
 # disk probe constraint holds, else ok; with no probe at all it is none and
 # the level unknown. Reading beats needs jq; without jq every beat is skipped.
-# A fresh beat missing load, memory, or disk rows leaves max-load1,
+# A fresh beat supplies the 5-minute load from its machine.load.l5; one
+# missing it, or memory or disk rows, leaves max-load5,
 # min-avail-gb, and min-disk-gb judged on this host's own probes.
 #
 # Probes degrade gracefully: an unavailable probe prints unknown and its
@@ -85,8 +89,8 @@
 #   cap {target (number or null), status ok|none|invalid},
 #   projects (clone directory names under projects/),
 #   pressure {level ok|warn|critical|unknown, why[], basis beat|probe|none,
-#     beat_age_s, avail_gb, total_gb, runq_per_core (probe basis: load1 over
-#     cores), swap_rate_pps_1m, mem_stall_pct, load1, on_battery,
+#     beat_age_s, avail_gb, total_gb, runq_per_core (probe basis: load5 over
+#     cores), swap_rate_pps_1m, mem_stall_pct, load5, on_battery,
 #     disks[{label, free_gb}]},
 #   uptime_s, boot_id, boots[] (boot epochs, last 10: the current boot is
 #     appended when boot_id differs from the previously published document's),
@@ -98,7 +102,7 @@
 #   quota null | {provider, runway} (the all_models runway status from
 #     quota-axi --json --provider <p> --max-age 15m, bounded to 5 s; unknown
 #     when it cannot be read),
-#   limits {min_avail_gb, min_disk_gb, max_load1} (null when unset),
+#   limits {min_avail_gb, min_disk_gb, max_load5} (null when unset),
 #   verdict {admit, free_lanes, reasons[]}.
 # verdict.admit is true only with a valid cap, lanes under it, and no
 # constraint, or in auto mode as below; its reasons are the constraints in
@@ -152,7 +156,7 @@
 #             min-avail-gb, else the larger of 10% of RAM and 2 GB, and
 #             available is the live probe, or the lower of it and a fresh
 #             pressure-file beat when both report, so a beat never adds room
-#     cpu     floor((cores x 0.85 - max(load1, load5) - young x F_cpu) / F_cpu);
+#     cpu     floor((cores x 0.85 - load5 - young x F_cpu) / F_cpu);
 #             inside WSL the load is at least the Windows host CPU share
 #     disk    per filesystem (the home's, then each one holding a worktree),
 #             floor((free - kept - young x F_disk) / F_disk), kept min-disk-gb
@@ -177,8 +181,8 @@
 #   it was closed at the previous publish: then an unknown reading never counts
 #   as clean, and the gate stays closed with its clean count held until a real
 #   reading clears it.
-#     cpu             load1/cores >= 1; reopens < 0.8 with load5/cores < 0.85
-#     load            load1 >= max-load1; reopens < 0.9 x max-load1
+#     cpu             load5/cores >= 1; reopens < 0.8
+#     load            load5 >= max-load5; reopens < 0.9 x max-load5
 #     memory-pressure Linux PSI memory some avg10 >= 10 or full avg10 >= 5,
 #                     reopens some avg60 < 5 and full avg10 < 1; macOS vm
 #                     pressure level >= 2, reopens at 1
@@ -324,7 +328,7 @@ target_error=
 cap_mode=fixed
 min_avail_gb=
 min_disk_gb=
-max_load1=
+max_load5=
 max_lanes=
 min_gpu_free_gb=
 admit_spawns=0
@@ -345,7 +349,7 @@ config_error() {  # <lineno|-> <published reason> [stderr-only detail]
   target_error="$target_reason${3:+ $3}"
 }
 parse_lane_config() {
-  local line lineno=0 key value rest path seen=
+  local line lineno=0 key canon value rest path seen=
   target=
   while IFS= read -r line || [ -n "$line" ]; do
     lineno=$((lineno + 1))
@@ -366,7 +370,7 @@ parse_lane_config() {
     [ "$key" = "$line" ] || rest=$(printf '%s' "${line#* }" | sed 's/^ *//')
     value=${rest%% *}
     case "$key" in
-      min-avail-gb|min-disk-gb|max-load1|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
+      min-avail-gb|min-disk-gb|max-load5|max-load1|captain-idle|quota-provider|pressure-file|reserve-flag) ;;
       admit-spawns) ;;
       max-lanes|min-gpu-free-gb)
         [ "$cap_mode" = auto ] || { config_error "$lineno" "$key needs auto on the first line"; return 1; }
@@ -376,8 +380,11 @@ parse_lane_config() {
     case "$key" in
       pressure-file|reserve-flag) ;;
       *)
-        case " $seen " in *" $key "*) config_error "$lineno" "$key appears more than once"; return 1 ;; esac
-        seen="$seen $key"
+        # max-load1 is the old name of max-load5: one setting, so either counts once.
+        canon=$key
+        [ "$key" != max-load1 ] || canon=max-load5
+        case " $seen " in *" $canon "*) config_error "$lineno" "$key appears more than once"; return 1 ;; esac
+        seen="$seen $canon"
         case "$key" in
           admit-spawns) [ -z "$rest" ] || { config_error "$lineno" "$key takes no value"; return 1; } ;;
           *) [ "$value" = "$rest" ] || { config_error "$lineno" "$key takes one value"; return 1 ;} ;;
@@ -385,12 +392,12 @@ parse_lane_config() {
         ;;
     esac
     case "$key" in
-      min-avail-gb|min-disk-gb|max-load1|min-gpu-free-gb)
+      min-avail-gb|min-disk-gb|max-load5|max-load1|min-gpu-free-gb)
         is_num "$value" || { config_error "$lineno" "$key needs a non-negative number"; return 1; }
         case "$key" in
           min-avail-gb) min_avail_gb=$value ;;
           min-disk-gb) min_disk_gb=$value ;;
-          max-load1) max_load1=$value ;;
+          max-load5|max-load1) max_load5=$value ;;
           min-gpu-free-gb) min_gpu_free_gb=$value ;;
         esac
         ;;
@@ -430,7 +437,7 @@ if [ -e "$LANE_CONFIG" ]; then
     target_error="config/lane-capacity: $target_error"
     target_reason="config/lane-capacity: $target_reason"
     target=invalid
-    min_avail_gb='' min_disk_gb='' max_load1='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
+    min_avail_gb='' min_disk_gb='' max_load5='' captain_idle='' quota_provider='' pressure_files='' reserve_flags=''
     cap_mode=fixed max_lanes='' min_gpu_free_gb=''
   fi
 fi
@@ -461,13 +468,16 @@ os=$(uname -s 2>/dev/null) || os=unknown
 windows=0
 case "$os" in MINGW*|MSYS*) windows=1 ;; esac
 
-load1=unknown
+load1=unknown load5=unknown
 if [ "$os" = Darwin ]; then
-  v=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1}')
+  v=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}')
 else
-  v=$(awk '{print $1}' "$PROC_ROOT/loadavg" 2>/dev/null)
+  v=$(cat "$PROC_ROOT/loadavg" 2>/dev/null)
 fi
-case "$v" in [0-9]*) load1=$v ;; esac
+# shellcheck disable=SC2086
+set -- $v
+case "${1:-}" in [0-9]*) load1=$1 ;; esac
+case "${2:-}" in [0-9]*) load5=$2 ;; esac
 
 cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null) || cores=
 is_uint "$cores" || cores=$(sysctl -n hw.logicalcpu 2>/dev/null) || cores=
@@ -516,7 +526,7 @@ add_why() {  # <detail> [published text, default the detail; empty publishes not
 basis=none
 level=unknown
 beat_age_s=
-avail_gb='' total_gb='' runq_per_core='' swap_rate='' mem_stall='' p_load1='' on_battery=''
+avail_gb='' total_gb='' runq_per_core='' swap_rate='' mem_stall='' p_load5='' on_battery=''
 disks=
 first_host=
 nfiles=$(printf '%s' "$pressure_files" | grep -c . 2>/dev/null) || nfiles=0
@@ -544,7 +554,7 @@ while IFS= read -r pfile; do
          ((.machine.pressure.level // "") | s),
          (.machine.mem.avail_gb | n), (.machine.mem.total_gb | n),
          (.machine.load.runq_per_core | n), (.machine.mem.swap_rate_pps_1m | n),
-         (.machine.mem.psi_some10 | n), (.machine.load.l1 | n),
+         (.machine.mem.psi_some10 | n), (.machine.load.l5 | n),
          (if .machine.on_battery == true then "true" elif .machine.on_battery == false then "false" else "" end)
        ] | join("\u001f")),
       ((.machine.pressure.why // [])[] | "why\u001f" + s),
@@ -556,7 +566,7 @@ while IFS= read -r pfile; do
     foreign*) add_why "$label: not a lookout.beat 1.x document"; continue ;;
     *) add_why "$label: beat unreadable"; continue ;;
   esac
-  IFS=$'\x1f' read -r _ host interval blevel b_avail b_total b_runq b_swap b_stall b_l1 b_batt <<EOF
+  IFS=$'\x1f' read -r _ host interval blevel b_avail b_total b_runq b_swap b_stall b_l5 b_batt <<EOF
 $(printf '%s\n' "$parsed" | head -1)
 EOF
   case "$host" in *[!A-Za-z0-9._-]*) host= ;; esac
@@ -600,7 +610,7 @@ EOF
   if [ "$basis" != beat ]; then
     basis=beat beat_age_s=$age
     avail_gb=$b_avail total_gb=$b_total runq_per_core=$b_runq swap_rate=$b_swap
-    mem_stall=$b_stall p_load1=$b_l1
+    mem_stall=$b_stall p_load5=$b_l5
     [ "$b_batt" != false ] || [ -n "$on_battery" ] || on_battery=false
   fi
 done <<EOF
@@ -608,8 +618,8 @@ $pressure_files
 EOF
 
 probe_cpu=0 probe_mem=0 probe_disk=0
-if [ "$load1" != unknown ] && [ "$cores" != unknown ] &&
-  awk -v l="$load1" -v c="$cores" 'BEGIN{exit !(l >= c)}'; then
+if [ "$load5" != unknown ] && [ "$cores" != unknown ] &&
+  awk -v l="$load5" -v c="$cores" 'BEGIN{exit !(l >= c)}'; then
   probe_cpu=1
 fi
 [ "$mem_free_pct" != unknown ] && [ "$mem_free_pct" -lt "$MEM_FREE_MIN_PCT" ] && probe_mem=1
@@ -617,15 +627,15 @@ fi
 
 if [ "$basis" = beat ]; then
   case "$worst" in 0) level=ok ;; 1) level=warn ;; 2) level=critical ;; esac
-elif [ "$load1" != unknown ] || [ "$mem_free_pct" != unknown ] || [ "$disk_free_mb" != unknown ]; then
+elif [ "$load5" != unknown ] || [ "$mem_free_pct" != unknown ] || [ "$disk_free_mb" != unknown ]; then
   basis=probe level=ok
-  [ "$load1" = unknown ] || p_load1=$load1
+  [ "$load5" = unknown ] || p_load5=$load5
   avail_gb=$probe_avail_gb total_gb=$probe_total_gb
-  if [ "$load1" != unknown ] && [ "$cores" != unknown ]; then
-    runq_per_core=$(awk -v l="$load1" -v c="$cores" 'BEGIN{printf "%.2f", l / c}')
+  if [ "$load5" != unknown ] && [ "$cores" != unknown ]; then
+    runq_per_core=$(awk -v l="$load5" -v c="$cores" 'BEGIN{printf "%.2f", l / c}')
   fi
   disks=$probe_disks
-  [ "$probe_cpu" -eq 0 ] || { level=warn; add_why "load $load1 on $cores cores"; }
+  [ "$probe_cpu" -eq 0 ] || { level=warn; add_why "5-minute load $load5 on $cores cores"; }
   [ "$probe_mem" -eq 0 ] || { level=warn; add_why "memory $mem_free_pct% free"; }
   [ "$probe_disk" -eq 0 ] || { level=warn; add_why "disk $disk_free_mb MB free"; }
 fi
@@ -781,7 +791,7 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
 | ($avail != null) as $measurable
 | (if $cfg.min_avail != null then $cfg.min_avail elif $total != null then ([$total * 0.10, 2] | max) else 2 end) as $min_avail
 | (if $avail == null then null else (($avail - $min_avail - $young * $fp.mem_gb) / $fp.mem_gb | floor) end) as $mem_open
-| ([$load1, $vit.load5] | nn | max) as $loadavg
+| ($load5 // $vit.load5) as $loadavg
 | (if $vit.wsl and $h != null and $h.cpu_pct != null and $cores != null
    then ([$loadavg, ($h.cpu_pct / 100 * $cores)] | nn | max) else $loadavg end) as $cpu_load
 | (if $cores == null or $cpu_load == null then null
@@ -814,12 +824,12 @@ def dur: if . == null then "?" elif . >= 86400 then "\(. / 86400 | floor)d" elif
           else {name: $name, state: "closed", since_epoch: $g.since_epoch, clear_count: $n, what: $what} end
       else {name: $name, state: "open", since_epoch: ($g.since_epoch // null), clear_count: 0, what: $what} end;
   def held($name; $what): gate($name; null; false; $what) | select(.state == "closed");
-  [ gate("cpu"; (if $load1 == null or $cores == null then null else ($load1 / $cores >= 1) end);
-      ($load1 != null and $cores != null and ($load1 / $cores) < 0.8 and ($vit.load5 == null or ($vit.load5 / $cores) < 0.85));
-      "load \($load1 | n2) on \($cores) cores"),
-    (if $cfg.max_load1 == null then empty else
-      gate("load"; (if $load1 == null then null else $load1 >= $cfg.max_load1 end);
-        ($load1 != null and $load1 < 0.9 * $cfg.max_load1); "load \($load1 | n2), max-load1 \($cfg.max_load1)") end),
+  [ gate("cpu"; (if $loadavg == null or $cores == null then null else ($loadavg / $cores >= 1) end);
+      ($loadavg != null and $cores != null and ($loadavg / $cores) < 0.8);
+      "5-minute load \($loadavg | n2) on \($cores) cores"),
+    (if $cfg.max_load5 == null then empty else
+      gate("load"; (if $loadavg == null then null else $loadavg >= $cfg.max_load5 end);
+        ($loadavg != null and $loadavg < 0.9 * $cfg.max_load5); "5-minute load \($loadavg | n2), max-load5 \($cfg.max_load5)") end),
     (if $vit.psi_mem10 != null then
       gate("memory-pressure"; ($vit.psi_mem10 >= 10 or ($vit.psi_memfull10 // 0) >= 5);
         ((($vit.psi_mem60 // $vit.psi_mem10) < 5) and (($vit.psi_memfull10 // 0) < 1)); "memory stall \($vit.psi_mem10)%")
@@ -1006,8 +1016,10 @@ auto_budget() {
     [ -n "$probe_total_gb" ] || probe_total_gb=$2
     if [ "$cores" = unknown ] && is_uint "$5" && [ "$5" -gt 0 ]; then cores=$5; fi
     if [ "$cores" != unknown ]; then
-      v=$(awk -v p="$4" -v c="$cores" -v l="$load1" 'BEGIN { x = p / 100 * c; if (l != "unknown" && l + 0 > x) x = l; printf "%.2f", x }')
-      load1=$v
+      # Each load is at least the host's CPU share.
+      host_share() { awk -v p="$1" -v c="$cores" -v l="$2" 'BEGIN { x = p / 100 * c; if (l != "unknown" && l + 0 > x) x = l; printf "%.2f", x }'; }
+      load1=$(host_share "$4" "$load1")
+      load5=$(host_share "$4" "$load5")
     fi
     case "$6" in ac) LV_ON_AC=true ;; battery) LV_ON_AC=false ;; esac
   elif [ "$LV_WSL" = 1 ] && [ -n "$host" ] && [ -z "$LV_ON_AC" ]; then
@@ -1036,9 +1048,9 @@ auto_budget() {
   fi
 
   cfg=$(jq -cn --arg max_lanes "$max_lanes" --arg min_avail "$min_avail_gb" --arg min_disk "$min_disk_gb" \
-    --arg max_load1 "$max_load1" --arg gpu_min "$min_gpu_free_gb" '
+    --arg max_load5 "$max_load5" --arg gpu_min "$min_gpu_free_gb" '
     def num: if . == "" then null else tonumber end;
-    {max_lanes: ($max_lanes | num), min_avail: ($min_avail | num), min_disk: ($min_disk | num), max_load1: ($max_load1 | num),
+    {max_lanes: ($max_lanes | num), min_avail: ($min_avail | num), min_disk: ($min_disk | num), max_load5: ($max_load5 | num),
      gpu_min: ($gpu_min | num)}')
   vit=$(jq -cn --arg load5 "$LV_LOAD5" --arg c10 "$LV_PSI_CPU10" --arg m10 "$LV_PSI_MEM10" --arg m60 "$LV_PSI_MEM60" \
     --arg mf10 "$LV_PSI_MEMFULL10" --arg io10 "$LV_PSI_IO10" --arg io60 "$LV_PSI_IO60" --arg swapin "$LV_SWAPIN" \
@@ -1056,7 +1068,7 @@ auto_budget() {
     --argjson cfg "$cfg" --argjson vit "$vit" --argjson young_s "$YOUNG_S" --argjson reopen "$GATE_REOPEN_SAMPLES" \
     --argjson grow "$( [ "$mode" = publish ] && echo 2 || echo 0)" \
     --argjson cores "$( [ "$cores" = unknown ] && echo null || echo "$cores")" \
-    --argjson load1 "$( [ "$load1" = unknown ] && echo null || echo "$load1")" \
+    --argjson load5 "$( [ "$load5" = unknown ] && echo null || echo "$load5")" \
     --argjson avail "${lim_avail:-null}" --argjson total "${total_gb:-${probe_total_gb:-null}}" \
     --argjson beat_battery "${on_battery:-null}" --arg notes "$auto_notes" --argjson attr_ok "$attr_ok" "$AUTO_JQ" 2>"$tmp/jq.err") || out=
   if [ -z "$out" ]; then
@@ -1103,13 +1115,13 @@ add_constraint() {  # <name> <reason> [published reason, default the reason]
 }
 if [ "$basis" = probe ]; then
   # In auto mode the gates own cpu, with hysteresis, and the budget owns memory and disk.
-  [ "$probe_cpu" -eq 0 ] || [ "$cap_mode" = auto ] || add_constraint cpu "cpu: load $load1 on $cores cores"
+  [ "$probe_cpu" -eq 0 ] || [ "$cap_mode" = auto ] || add_constraint cpu "cpu: 5-minute load $load5 on $cores cores"
   [ "$probe_mem" -eq 0 ] || [ "$cap_mode" = auto ] || add_constraint memory "memory: $mem_free_pct% free"
   [ "$probe_disk" -eq 0 ] || [ "$cap_mode" = auto ] || add_constraint disk "disk: $disk_free_mb MB free"
 fi
 lim_avail=${avail_gb:-$probe_avail_gb}
-lim_load1=$p_load1
-[ -n "$lim_load1" ] || [ "$load1" = unknown ] || lim_load1=$load1
+lim_load5=$p_load5
+[ -n "$lim_load5" ] || [ "$load5" = unknown ] || lim_load5=$load5
 lim_disks=${disks:-$probe_disks}
 if [ "$cap_mode" != auto ] && [ -n "$min_avail_gb" ] && [ -n "$lim_avail" ]; then
   if num_lt "$(awk -v a="$lim_avail" -v k="$min_avail_gb" 'BEGIN{print a - k}')" "$LANE_FOOTPRINT_GB"; then
@@ -1129,8 +1141,8 @@ case "$level" in
     [ "$basis" != beat ] || add_constraint pressure "pressure $level${pressure_why:+: $pressure_why}" "pressure $level"
     ;;
 esac
-if [ "$cap_mode" != auto ] && [ -n "$max_load1" ] && [ -n "$lim_load1" ] && ! num_lt "$lim_load1" "$max_load1"; then
-  add_constraint load "load: $lim_load1 over its max-load1 $max_load1"
+if [ "$cap_mode" != auto ] && [ -n "$max_load5" ] && [ -n "$lim_load5" ] && ! num_lt "$lim_load5" "$max_load5"; then
+  add_constraint load "load: 5-minute load $lim_load5 over its max-load5 $max_load5"
 fi
 [ "$reserve_flag" != present ] || add_constraint reserve "captain reserve: $reserve_label"
 [ "$on_battery" != true ] || [ "$cap_mode" = auto ] || add_constraint battery "on battery"
@@ -1182,8 +1194,8 @@ if [ "$mode" = report ]; then
   elif [ "$cap_mode" = auto ]; then
     auto_tail=" mode=auto budget=unknown"
   fi
-  printf 'capacity: free_lanes=%s reason=%s lanes=%s target=%s secondmates=%s load1=%s cores=%s mem_free_pct=%s disk_free_mb=%s%s\n' \
-    "$free_lanes" "$reason" "$lanes" "$target" "$secondmates" "$load1" "$cores" "$mem_free_pct" "$disk_free_mb" "$auto_tail"
+  printf 'capacity: free_lanes=%s reason=%s lanes=%s target=%s secondmates=%s load1=%s load5=%s cores=%s mem_free_pct=%s disk_free_mb=%s%s\n' \
+    "$free_lanes" "$reason" "$lanes" "$target" "$secondmates" "$load1" "$load5" "$cores" "$mem_free_pct" "$disk_free_mb" "$auto_tail"
 
   if [ -n "$auto_doc" ]; then
     printf '%s' "$auto_doc" | jq -r --arg lanes "$lanes" '
@@ -1207,7 +1219,7 @@ if [ "$mode" = report ]; then
   [ "$secondmates" -eq 0 ] || echo "Secondmates: $secondmates (hold no lane)."
   mem_text="${mem_free_pct}%"; [ "$mem_free_pct" != unknown ] || mem_text=unknown
   disk_text="$disk_free_mb MB"; [ "$disk_free_mb" != unknown ] || disk_text=unknown
-  echo "Host: load $load1 on $cores cores, memory free $mem_text, disk free $disk_text."
+  echo "Host: load $load1 (1 min), $load5 (5 min) on $cores cores, memory free $mem_text, disk free $disk_text."
   if [ -n "$pressure_files" ]; then
     why_text=$(printf '%s' "$why" | paste -sd ';' - | sed 's/;/; /g')
     echo "Pressure: $level from $basis${why_text:+ ($why_text)}."
@@ -1317,13 +1329,13 @@ doc=$(jq -n \
   --arg target "$target" --arg cap_status "$cap_status" --arg projects "$project_names" \
   --arg level "$level" --arg why "$pub_why" --arg basis "$basis" --arg beat_age "$beat_age_s" \
   --arg avail "$avail_gb" --arg total "$total_gb" --arg runq "$runq_per_core" \
-  --arg swap "$swap_rate" --arg stall "$mem_stall" --arg load1 "$p_load1" \
+  --arg swap "$swap_rate" --arg stall "$mem_stall" --arg load5 "$p_load5" \
   --arg battery "$on_battery" --arg disks "$disks" \
   --arg uptime "$uptime_s" --arg boot_id "$boot_id" --argjson prev_boots "$prev_boots" \
   --arg new_boot "$new_boot" --argjson kept "$BOOTS_KEPT" --arg watcher_age "$watcher_age" \
   --arg reserve_flag "$reserve_flag" --arg reserve_label "$reserve_label" \
   --arg captain "$captain" --argjson quota "$quota_json" \
-  --arg min_avail "$min_avail_gb" --arg min_disk "$min_disk_gb" --arg max_load1 "$max_load1" \
+  --arg min_avail "$min_avail_gb" --arg min_disk "$min_disk_gb" --arg max_load5 "$max_load5" \
   --arg admit "$admit" --arg free_lanes "$free_lanes" --arg reasons "$verdict_reasons" \
   --argjson auto "${auto_doc:-null}" --arg cap_mode "$cap_mode" '
   def num: if . == "" then null else tonumber + 0 end;
@@ -1334,7 +1346,7 @@ doc=$(jq -n \
    projects: ($projects | lines),
    pressure: {level: $level, why: ($why | lines), basis: $basis, beat_age_s: ($beat_age | num),
      avail_gb: ($avail | num), total_gb: ($total | num), runq_per_core: ($runq | num),
-     swap_rate_pps_1m: ($swap | num), mem_stall_pct: ($stall | num), load1: ($load1 | num),
+     swap_rate_pps_1m: ($swap | num), mem_stall_pct: ($stall | num), load5: ($load5 | num),
      on_battery: (if $battery == "" then null else $battery == "true" end),
      disks: [$disks | lines[] | split("\t") | {label: .[0], free_gb: (.[1] // "" | num)}]},
    uptime_s: ($uptime | num), boot_id: (if $boot_id == "" then null else $boot_id end),
@@ -1342,7 +1354,7 @@ doc=$(jq -n \
    watcher_beat_age_s: ($watcher_age | num),
    reserve: {flag: $reserve_flag, label: (if $reserve_label == "" then null else $reserve_label end)},
    captain: $captain, quota: $quota,
-   limits: {min_avail_gb: ($min_avail | num), min_disk_gb: ($min_disk | num), max_load1: ($max_load1 | num)},
+   limits: {min_avail_gb: ($min_avail | num), min_disk_gb: ($min_disk | num), max_load5: ($max_load5 | num)},
    verdict: {admit: ($admit == "true"), free_lanes: ($free_lanes | if . == "unknown" then null else tonumber end),
      reasons: ($reasons | lines)}}
   | if $cap_mode != "auto" then . else (.cap.mode = "auto") + ($auto // {budget: null}) end') || {

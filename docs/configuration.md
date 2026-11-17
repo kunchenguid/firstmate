@@ -904,7 +904,8 @@ The file is a home-local site choice and is not inherited by secondmate homes; `
 ## Lane capacity (config/lane-capacity)
 
 The optional local, gitignored `config/lane-capacity` file says how many ship and scout lanes this home should run at once, and when it should stop taking more.
-`bin/fm-capacity.sh` reads it to report how many lanes are open for queued work, alongside running lanes, 1-minute load against logical cores, free memory, and free disk.
+`bin/fm-capacity.sh` reads it to report how many lanes are open for queued work, alongside running lanes, the 5-minute load average against logical cores, free memory, and free disk.
+Every load decision reads the 5-minute average rather than the 1-minute one, which spikes past the core count whenever a burst of short processes starts, such as a CI job's tests on the same host, while the CPU is mostly idle.
 With the file absent nothing changes: the report prints counts and host figures only, never invents a target, never advises holding dispatch, and nothing is published; a malformed value is reported as invalid rather than guessed.
 Persistent secondmates hold no lane.
 The file is a per-machine choice and is not inherited by secondmate homes, so each home owns its own numbers.
@@ -920,12 +921,13 @@ pressure-file ~/.cache/lookout-beat/beat.json      # repeatable; a lookout.beat 
 reserve-flag /var/run/fm-reserved.flag host reserved by the captain   # repeatable; admit nothing while the file exists
 captain-idle 300       # opt-in, macOS: the captain counts as present when input was idle under 300 s
 quota-provider claude  # opt-in: publish that provider's quota runway
-max-load1 20           # keep a raw 1-minute load rule while beats replace it
+max-load5 20           # keep a raw 5-minute load rule while beats replace it
 admit-spawns           # opt-in: bin/fm-spawn.sh defers a fresh ship or scout this verdict does not admit
 ```
 
 `pressure-file` and `reserve-flag` may repeat and take an absolute or `~/` path; a `reserve-flag` path may be followed by the label it is reported by.
 Every other key may appear at most once.
+`max-load1` is the old name of `max-load5` and is still accepted as the same setting, now judged on the 5-minute load; a file naming both repeats one key.
 An unknown key, a repeated single key, or a malformed value makes the whole file invalid: the report exits 1 naming the line, and the published facts carry the cap as invalid, because the captain's limits are never guessed.
 
 A pressure file is any producer of the `lookout.beat` 1.x shape, read by its own file age on this machine; a missing, stale, or unreadable one is skipped with its reason and the host's own probes stand in, so a broken beat never blocks anything.
@@ -942,7 +944,7 @@ max-lanes 16           # the one optional ceiling for this machine's lanes
 min-gpu-free-gb 4      # only for work that uses the GPU; agent workers do not
 ```
 
-`max-lanes` and `min-gpu-free-gb` are valid only with `auto`; `min-avail-gb`, `min-disk-gb`, and `max-load1` keep their meaning as the captain's safety floor.
+`max-lanes` and `min-gpu-free-gb` are valid only with `auto`; `min-avail-gb`, `min-disk-gb`, and `max-load5` keep their meaning as the captain's safety floor.
 There are no per-lane pins: the script samples each lane's process tree while the watcher publishes, learns the per-lane memory, CPU, and disk cost from this machine's last 30 measured lanes once five are recorded, and keeps that ledger in `state/lane-footprint.json`.
 A lane whose process tree was never attributed is left out of that learning, so a backend that runs its agent outside the recorded worktree cannot teach a near-zero footprint.
 Pressure stall, swap-in rate, macOS memory pressure, thermal limits, battery, and under WSL2 the Windows host's own memory close admission at once and reopen only after three clean readings, and growth after a reopen is damped, so admission does not flap.

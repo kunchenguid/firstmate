@@ -206,11 +206,16 @@ test_gates_reopen_after_three_publishes() {
   fakebin=$(make_probes "$p")
   printf 'auto\n' > "$home/config/lane-capacity"
   set_v "$p" memlevel 90
+  # A 1-minute spike alone, with the 5-minute load under the cores, leaves the gate open.
   set_v "$p" load1 9.00
+  run_cap "$home" "$fakebin" --publish >/dev/null
+  assert_equals '"open"' "$(jq -c '.gates[] | select(.name == "cpu") | .state' "$home/state/lane-capacity.json")" \
+    "a 1-minute spike with load5 under the cores must not close the cpu gate"
+  set_v "$p" load5 9.00
   run_cap "$home" "$fakebin" --publish >/dev/null
   assert_equals '["closed",0,false]' "$(jq -c '[(.gates[] | select(.name == "cpu") | .state), .verdict.free_lanes, .verdict.admit]' "$home/state/lane-capacity.json")" \
     "an overloaded run queue must close the cpu gate at once"
-  set_v "$p" load1 1.00
+  set_v "$p" load5 1.00
   for i in 1 2; do
     run_cap "$home" "$fakebin" --publish >/dev/null
     assert_equals "[\"closed\",$i]" "$(jq -c '[.gates[] | select(.name == "cpu") | .state, .clear_count]' "$home/state/lane-capacity.json")" \
@@ -224,7 +229,7 @@ test_gates_reopen_after_three_publishes() {
   assert_equals '[4,true]' "$(jq -c '[.verdict.free_lanes, .budget.damped]' "$home/state/lane-capacity.json")" "growth must stay damped to 2 per publish"
   run_cap "$home" "$fakebin" --publish >/dev/null
   assert_equals '[5,false]' "$(jq -c '[.verdict.free_lanes, .budget.damped]' "$home/state/lane-capacity.json")" "damping must end at the raw budget"
-  set_v "$p" load1 9.00
+  set_v "$p" load5 9.00
   run_cap "$home" "$fakebin" --publish >/dev/null
   assert_equals '0' "$(jq -c '.verdict.free_lanes' "$home/state/lane-capacity.json")" "a gate must close again at once"
   pass "gates close at once, reopen after three clean publishes, and growth is damped"
@@ -565,7 +570,7 @@ SH
   chmod +x "$fakebin"/*
   printf 'auto\n' > "$home/config/lane-capacity"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" 2>&1)
-  assert_contains "$(printf '%s\n' "$out" | head -1)" 'free_lanes=2 reason=ok lanes=0 target=none secondmates=0 load1=4.00 cores=16 ' \
+  assert_contains "$(printf '%s\n' "$out" | head -1)" 'free_lanes=2 reason=ok lanes=0 target=none secondmates=0 load1=4.00 load5=4.00 cores=16 ' \
     "native Windows must take memory, cores, and the load proxy from the host view"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_PROC_ROOT_OVERRIDE="$proc" "$CAPACITY" --json 2>/dev/null |
     jq -c '[.vitals.windows, .vitals.wsl, .vitals.host.cores, .vitals.on_ac, .budget.by.memory, .budget.by.cpu, .budget.binding, ([.gates[].name] | index("host-memory"))]')
@@ -591,9 +596,9 @@ test_admission_honours_the_damped_budget() {
   fakebin=$(make_probes "$p")
   printf 'auto\n' > "$home/config/lane-capacity"
   set_v "$p" memsize $((64 * GIB))
-  set_v "$p" load1 9.00
+  set_v "$p" load5 9.00
   run_cap "$home" "$fakebin" --publish >/dev/null
-  set_v "$p" load1 1.00
+  set_v "$p" load5 1.00
   run_cap "$home" "$fakebin" --publish >/dev/null
   run_cap "$home" "$fakebin" --publish >/dev/null
   run_cap "$home" "$fakebin" --publish >/dev/null
