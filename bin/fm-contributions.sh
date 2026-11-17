@@ -82,6 +82,12 @@
 # modulo their count, without stored scheduling state or freshness-based
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
+# With any live URL, poll makes one forge search before the first read for the authenticated
+# user's PRs and issues updated since the last completed sweep (stored in
+# state/.contributions-sweep; an hour back when absent) and reads the live
+# URLs it returns ahead of the rotation, which orders the rest. The stored time
+# advances only when every returned live URL was read, and a failed or
+# rate-limited search leaves the rotation as the only order.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct supported
 # URL is attempted at most once per poll and its observation applied to every owner.
@@ -637,6 +643,30 @@ clear_unsupported_errors() {
     | [$task,.url] | @tsv')
 }
 
+SWEEP_FILE="$STATE/.contributions-sweep"
+SWEEP_LIMIT=100
+SWEEP_SKEW=120
+
+search_updated() { # since-iso: canonical URLs of our PRs and issues updated since, one per line
+  FORGE_ERR="$TMP/search.err" forge search issues --include-prs --author @me --updated ">=$1" \
+    --limit "$SWEEP_LIMIT" --json url --jq '.[].url'
+}
+
+sweep_since() { # last stored sweep time, widened by the clock skew; an hour back when none is stored
+  local since=''
+  [ ! -f "$SWEEP_FILE" ] || [ -L "$SWEEP_FILE" ] || IFS= read -r since < "$SWEEP_FILE" || true
+  jq -nr --arg since "$since" --argjson epoch "$EPOCH" --argjson skew "$SWEEP_SKEW" '
+    (try ($since | fromdateiso8601 | select(. <= $epoch)) // ($epoch - 3600)) - $skew | todateiso8601'
+}
+
+store_sweep() {
+  local staged
+  [ ! -L "$SWEEP_FILE" ] || return 0
+  staged=$(umask 077; mktemp "$STATE/.contributions-sweep.XXXXXX")
+  printf '%s\n' "$NOW" > "$staged"
+  mv -f -- "$staged" "$SWEEP_FILE"
+}
+
 poll() {
   local task url old kind error observed why unreported=$'\n'
   local -a row
@@ -690,12 +720,23 @@ poll() {
     | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
+  : > "$TMP/attempted.txt"
+  : > "$TMP/updated-live.txt"
+  local swept=0
+  if [ -s "$TMP/live.tsv" ] && search_updated "$(sweep_since)" > "$TMP/updated.txt" 2> /dev/null; then
+    swept=1
+    cut -f1 "$TMP/live.tsv" | grep -Fxf "$TMP/updated.txt" > "$TMP/updated-live.txt" || true
+    { awk -F'\t' 'FILENAME == ARGV[1] { u[$0]; next } $1 in u' "$TMP/updated-live.txt" "$TMP/known.tsv"
+      awk -F'\t' 'FILENAME == ARGV[1] { u[$0]; next } !($1 in u)' "$TMP/updated-live.txt" "$TMP/known.tsv"; } > "$TMP/ordered.tsv"
+    mv -f -- "$TMP/ordered.tsv" "$TMP/known.tsv"
+  fi
   while IFS=$'\t' read -r -a row; do
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
     url=${row[0]}
     observed=0
     observe "$url" || observed=$?
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
+    printf '%s\n' "$url" >> "$TMP/attempted.txt"
     why='no failing step recorded'
     [ ! -s "$TMP/why" ] || IFS= read -r why < "$TMP/why"
     # Wake once per failure episode: only when no owner has a prior error.
@@ -744,6 +785,12 @@ poll() {
       terminal_hold_event "$task" "$url"
     done
   done < "$TMP/known.tsv"
+  # The next search starts where this one did only when every updated URL it
+  # returned was read; otherwise the unread ones stay inside the next window.
+  if [ "$swept" -eq 1 ] && [ "$(wc -l < "$TMP/updated.txt")" -lt "$SWEEP_LIMIT" ] \
+    && ! grep -vFxf "$TMP/attempted.txt" "$TMP/updated-live.txt" > /dev/null; then
+    store_sweep
+  fi
 }
 
 arm() {
