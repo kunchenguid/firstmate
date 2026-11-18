@@ -246,6 +246,7 @@ The first recovery marks that generation announced, and later empty-queue arms l
 A non-successor watcher start checks the durable queue and recovery marker under their locks.
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
+A watcher whose startup recovered a stale watch lock asks that same queued-row question, because a recovered lock proves only that an earlier cycle died mid-flight: an empty queue leaves the recovered episode silent instead of resurfacing it on every cycle.
 A Codex foreground checkpoint skips the announced-episode reopen transition, so an already-announced generation stays announced while the checkpoint continues its bounded supervision.
 Its ordinary arm check still announces a never-announced generation, including one made pending by a durable queue append during the checkpoint.
 
@@ -522,6 +523,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
 - A handling successor that resurfaces a row appended between its predecessor's close and its own startup handoff.
+- A recovered stale watch lock that must stay silent when nothing is queued.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.
