@@ -11,6 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Ship quality setup and the independent verifier | [Quality profile](#quality-profile-configquality-profile-configverifier-harness) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Calm preference](#calm-preference-configcalm), and [worker step display](#worker-step-display-configstep-display) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
@@ -1005,6 +1006,38 @@ An absent or blank file changes nothing, while a present path that is not a read
 The text is static and never executed or expanded; secondmate charters never take it, and the file is local to each home rather than part of secondmate inherited configuration.
 
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
+
+## Quality profile (config/quality-profile, config/verifier-harness)
+
+The optional local, gitignored `config/quality-profile` selects one of two setups for this home.
+`default` is the standard Firstmate setup.
+`pstack` adds the parts adopted from the pstack agent setup.
+To go back to the standard setup, write `default` or remove the file.
+
+### Values and effects
+
+| Value or file state | Result |
+| --- | --- |
+| Absent | Same as `default`. |
+| `default` | Briefs, skills, and script output stay exactly as they are without the file. |
+| `pstack` | Ship briefs gain a `# Project verify skill` section, and firstmate runs the independent verifier step. |
+| Any other value, an empty file, two value lines, or a path that is not a readable regular file | `bin/fm-quality-profile.sh` stops with exit 2 and an error, and a ship scaffold stops before it writes a brief. |
+
+Blank lines and lines that start with `#` are ignored, and white space around the value is removed.
+
+Under `pstack`, the ship brief section tells the worker to load the project's `verify-<app>` skill when one exists, to reproduce a bug before the fix and for the live check.
+The verifier step, its risk class, and how its result is used are owned by the agent-only [`pstack-verifier`](../.agents/skills/pstack-verifier/SKILL.md) skill.
+
+### Verifier runtime
+
+The optional local, gitignored `config/verifier-harness` names the runtime for the verifier scout as one line, `<harness> [<model>] [<effort>]`.
+When the file is absent, the verifier runs on `codex` with its own model and effort defaults.
+The verifier must run on a model family other than Claude, so `bin/fm-quality-profile.sh verifier` refuses an unverified adapter, the `claude` adapter, and a model name that names a Claude family.
+It also refuses a harness that can run models from several providers when no model is named; only `codex`, `grok`, `kimi`, and `gemini` can omit the model.
+When the setting refuses or the runtime is not usable, firstmate reports that and continues without the verifier; it never uses a Claude model in its place.
+
+Both files are local to each home and are not part of secondmate inherited configuration.
+`bin/fm-quality-profile.sh`'s header owns how both files are parsed.
 
 ## Worker launch environment (config/launch-env-allowlist)
 

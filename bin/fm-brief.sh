@@ -132,6 +132,10 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# Ship scaffolds read the home's quality profile through bin/fm-quality-profile.sh.
+# The default profile adds nothing. The pstack profile adds one "# Project verify
+# skill" section before the Definition of done. An unknown value stops the ship
+# scaffold before anything is written. Scout and secondmate scaffolds do not read it.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -356,6 +360,24 @@ append_brief_include() {
     "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
     "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
 }
+
+# The quality profile (docs/configuration.md "Quality profile") shapes ship
+# briefs only. bin/fm-quality-profile.sh owns parsing; an unknown value stops
+# the scaffold here, before anything is written. The default profile adds
+# nothing, so a default ship brief is byte-for-byte the pre-profile brief.
+VERIFY_SKILL_BLOCK=
+if [ "$KIND" = ship ]; then
+  QUALITY_PROFILE=$(FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-quality-profile.sh" profile) || exit 1
+  if [ "$QUALITY_PROFILE" = pstack ]; then
+    IFS= read -r -d '' VERIFY_SKILL_BLOCK <<'EOF' || true
+# Project verify skill
+When this project has a `verify-<app>` skill, load it before you change code.
+Use it to reproduce a reported bug before the fix, and use it again for the live check of your change.
+When the project has no such skill, this section does not apply.
+
+EOF
+  fi
+fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -742,7 +764,7 @@ $WAIT_BLOCK$INBOX_SECTION
 A project's \`AGENTS.md\` or \`CLAUDE.md\` is loaded into every agent session in that project, so edit it only to correct information that is factually wrong - including information your own change made wrong - and never to add knowledge because it is missing.
 A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`, create either file, or add sections, headings, or pointers alongside it.
 
-$DOD
+$VERIFY_SKILL_BLOCK$DOD
 EOF
 append_brief_include
 if [ "$FORGE" = none ]; then

@@ -573,6 +573,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/pstack-verifier/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/ship-landing/SKILL.md",
       "audience": "agent-runtime"
     },

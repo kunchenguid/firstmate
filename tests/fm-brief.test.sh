@@ -1542,6 +1542,86 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+# config/quality-profile (docs/configuration.md "Quality profile"). Render one
+# scaffold kind into a home and print it with that home's path replaced by a
+# fixed token, so briefs from different homes compare byte for byte.
+render_profile_brief() {  # <home> <kind> <id>
+  local home=$1 kind=$2 id=$3
+  mkdir -p "$home/data"
+  case "$kind" in
+    scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 ;;
+    secondmate) FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate alpha >/dev/null 2>&1 ;;
+    *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1 ;;
+  esac || fail "fm-brief.sh $kind scaffold exited non-zero in $home"
+  sed "s#$home#<HOME>#g" "$home/data/$id/brief.md"
+}
+
+profile_home() {  # <name> <value|absent>
+  local home="$TMP_ROOT/profile-$1"
+  mkdir -p "$home/config"
+  [ "$2" = absent ] || printf '%s\n' "$2" > "$home/config/quality-profile"
+  printf '%s\n' "$home"
+}
+
+# With the setting absent or set to default, every scaffold kind is exactly the
+# brief it was before the setting existed.
+test_quality_profile_default_leaves_briefs_unchanged() {
+  local absent default kind a d
+  absent=$(profile_home absent absent)
+  default=$(profile_home default default)
+  for kind in no-mistakes direct-PR local-only scout secondmate; do
+    a=$(render_profile_brief "$absent" "$kind" "qp-$kind")
+    d=$(render_profile_brief "$default" "$kind" "qp-$kind")
+    [ -n "$a" ] || fail "$kind brief rendered empty"
+    [ "$a" = "$d" ] || fail "$kind brief differs between an absent setting and default: $(diff <(printf '%s\n' "$a") <(printf '%s\n' "$d") | head -5)"
+    assert_not_contains "$a" "verify-<app>" "$kind brief carries the pstack verify block under the default profile"
+  done
+  pass "fm-brief: the default quality profile leaves every brief unchanged"
+}
+
+# With pstack, a ship brief gains exactly one contiguous block and nothing else;
+# scout and secondmate scaffolds stay unchanged.
+test_quality_profile_pstack_adds_exactly_the_verify_block() {
+  local default pstack kind d p delta added
+  default=$(profile_home default-cmp default)
+  pstack=$(profile_home pstack pstack)
+  for kind in no-mistakes direct-PR local-only; do
+    d=$(render_profile_brief "$default" "$kind" "qp-$kind")
+    p=$(render_profile_brief "$pstack" "$kind" "qp-$kind")
+    delta=$(diff <(printf '%s\n' "$d") <(printf '%s\n' "$p"))
+    [ -n "$delta" ] || fail "$kind brief under pstack is identical to default; the verify block is missing"
+    [ "$(printf '%s\n' "$delta" | grep -c '^[0-9]')" = 1 ] \
+      || fail "$kind brief under pstack differs in more than one place: $delta"
+    printf '%s\n' "$delta" | grep -q '^[0-9][0-9]*a[0-9]' \
+      || fail "$kind brief under pstack changed or removed default lines instead of only adding a block: $delta"
+    ! printf '%s\n' "$delta" | grep -q '^<' \
+      || fail "$kind brief under pstack lost default lines: $delta"
+    added=$(printf '%s\n' "$delta" | sed -n 's/^> //p')
+    assert_contains "$added" "verify-" "$kind pstack block does not name the project verify skill"
+    assert_contains "$added" "reproduce" "$kind pstack block does not ask to reproduce a bug before the fix"
+    assert_contains "$added" "live check" "$kind pstack block does not ask to use the skill for the live check"
+  done
+  for kind in scout secondmate; do
+    d=$(render_profile_brief "$default" "$kind" "qp-$kind")
+    p=$(render_profile_brief "$pstack" "$kind" "qp-$kind")
+    [ "$d" = "$p" ] || fail "$kind brief changed under pstack; the block belongs to ship briefs only"
+  done
+  pass "fm-brief: the pstack quality profile adds exactly the verify block to ship briefs"
+}
+
+# An unknown value stops the ship scaffold before anything is written.
+test_quality_profile_unknown_value_refuses() {
+  local home out rc
+  home=$(profile_home unknown fancy)
+  mkdir -p "$home/data"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" qp-unknown some-proj --mode no-mistakes 2>&1); rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-brief.sh accepted an unknown quality profile"
+  assert_contains "$out" "fancy" "the refusal does not name the unknown value"
+  assert_absent "$home/data/qp-unknown/brief.md" "a refused profile still wrote a brief"
+  pass "fm-brief: an unknown quality profile refuses the ship scaffold"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1580,3 +1660,6 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_quality_profile_default_leaves_briefs_unchanged
+test_quality_profile_pstack_adds_exactly_the_verify_block
+test_quality_profile_unknown_value_refuses
