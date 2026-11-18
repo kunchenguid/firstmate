@@ -503,7 +503,7 @@ cmd_note() {
 }
 
 cmd_announce() {
-  local json=0 id summary path state rc=0
+  local json=0 id summary path state announced rc=0
   if [ "${1:-}" = "--json" ]; then
     json=1
     shift
@@ -516,11 +516,9 @@ cmd_announce() {
   state=$(note_announce_state "$id" "$path")
   if [ "$path" = "$INBOX/handled/$id.note" ]; then
     if [ "$json" -eq 1 ]; then
-      if [ "$state" = true ]; then
-        emit_note_json replay "$id" "" 1 1 "$path" 1
-      else
-        emit_note_json replay "$id" "" 1 0 "$path" 1
-      fi
+      announced=0
+      [ "$state" = true ] && announced=1
+      emit_note_json replay "$id" "" 1 "$announced" "$path" 1
     else
       printf 'already-acknowledged %s\n' "$id"
     fi
