@@ -237,12 +237,12 @@ fi
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
   if [ "$ALL_LANDED" = 1 ]; then
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json) || exit $?
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 "$FLEET" --json --display-activity) || exit $?
   else
-    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json) || exit $?
+    SNAP=$(FM_SNAPSHOT_NOW="$NOW" FM_SNAPSHOT_SECONDMATES=0 "$FLEET" --json --display-activity) || exit $?
   fi
 else
-  SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json) || exit $?
+  SNAP=$(FM_SNAPSHOT_NOW="$NOW" "$FLEET" --json --display-activity) || exit $?
 fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
@@ -509,11 +509,11 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.backlog.current_role != "program")
        | select(.backlog.current_role != "held" or .current_state.state == "working")
        | {id, kind,
-        state: .current_state.state,
+        state: (.display_activity // .current_state).state,
         repo:(.backlog.repo // .project // null),
         name:((.backlog.title // "") as $name
               | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
-        doing: ((.current_state.detail // "") as $d
+        doing: (((.display_activity // .current_state).detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
      + [ $secondmate_views[] as $m

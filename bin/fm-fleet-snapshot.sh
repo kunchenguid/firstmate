@@ -294,8 +294,9 @@ EOF
 }
 
 OUTPUT_MODE=json
+DISPLAY_ACTIVITY=0
 case "${1:---json}" in
-  --json) ;;
+  --json) [ "${2:-}" != --display-activity ] || DISPLAY_ACTIVITY=1 ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
   -h|--help) usage; exit 0 ;;
@@ -636,6 +637,30 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
   fi
 }
 
+# Display-only observation, shown only where the canonical crew state is exactly
+# unknown: a Herdr-backed Codex worker's exact native working/done status as
+# {state,source,detail}. It never enters current_state, so every supervision
+# consumer reads the same verdict as before, and any other canonical state
+# (declaration, pause, decision, done, failed, run step) is displayed unchanged.
+codex_display_activity_json() {  # <meta> <backend> <target> <id>
+  local meta=$1 backend=$2 target=$3 id=$4 harness native
+  harness=$(meta_value "$meta" harness)
+  case "$harness" in codex*) ;; *) return 0 ;; esac
+  [ "$backend" = herdr ] && [ -n "$target" ] || return 0
+  # shellcheck disable=SC2016 # single quotes intentional: expanded by the inner bash
+  native=$(fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" bash -c '
+    . "$1/fm-backend.sh" && fm_backend_source herdr 2>/dev/null || exit 1
+    native=$(fm_backend_herdr_codex_native_state "$2")
+    case "$native" in busy|idle) ;; *) exit 1 ;; esac
+    fm_backend_target_exists herdr "$2" "fm-$3" >/dev/null 2>&1 || exit 1
+    printf "%s" "$native"
+  ' _ "$SCRIPT_DIR" "$target" "$id" 2>/dev/null) || return 0
+  case "$native" in
+    busy) jq -n '{state:"working",source:"herdr-native",detail:"Herdr reports the Codex pane working"}' ;;
+    idle) jq -n '{state:"idle",source:"herdr-native",detail:"Herdr reports the Codex pane done"}' ;;
+  esac
+}
+
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture report_path report_capture open_file
@@ -687,10 +712,15 @@ prefetch_task_observations() {  # <meta> <id>
   # still outstanding rather than after every read has finished.
   status_open_decisions "$status_capture" "$kind" > "$open_file" || current_rc=1
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
+  rm -f -- "$SNAPSHOT_TASK_DIR/$id.display"
+  if [ "$DISPLAY_ACTIVITY" = 1 ] && [ "$kind" != secondmate ] && [ "$endpoint_exists" = true ] && [ "$current_rc" -eq 0 ] \
+    && [ "$(jq -r '.state // ""' "$current_file" 2>/dev/null)" = unknown ]; then
+    codex_display_activity_json "$meta" "$backend" "$target" "$id" > "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null || true
+  fi
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$report_capture" "$SNAPSHOT_TASK_DIR/$id.display"
     : > "$open_file" || current_rc=1
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
@@ -767,7 +797,7 @@ task_json_row() {  # <captured-meta> <id>
   local remote_host remote_root current_file endpoint_file observation_line
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json display_json
 
   original_meta="$STATE/$id.meta"
   kind=$(meta_value "$meta" kind)
@@ -806,6 +836,9 @@ task_json_row() {  # <captured-meta> <id>
 
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   current_json=$(<"$current_file") || return 1
+  display_json=null
+  [ -s "$SNAPSHOT_TASK_DIR/$id.display" ] && display_json=$(jq -c . "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null) || true
+  [ -n "$display_json" ] || display_json=null
   event_json=$(status_event_json "$status_log" "$STATE/$id.status")
   last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
   read -r current_state current_source < <(
@@ -888,6 +921,7 @@ task_json_row() {  # <captured-meta> <id>
     --arg observed_at "$SNAPSHOT_NOW" \
     --arg last_event_raw "$last_event_raw" \
     --argjson current_state "$current_json" \
+    --argjson display_activity "$display_json" \
     --argjson meta_path "$meta_json" \
     --argjson status_log "$status_json" \
     --argjson report "$report_json" \
@@ -941,7 +975,7 @@ task_json_row() {  # <captured-meta> <id>
            steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
            return_channel_note:null}
         end)
-    }'
+    } + (if $display_activity == null then {} else {display_activity:$display_activity} end)'
 }
 
 task_json_lines() {
