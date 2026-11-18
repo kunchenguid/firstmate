@@ -6568,8 +6568,10 @@ SH
 }
 
 test_released_branch_safety_and_reassigned_copy() {
-  local case_dir head moved rc pr=https://github.com/example/repo/pull/7
+  local case_dir head moved rc pr=https://github.com/example/repo/pull/7 FM_HOME
   case_dir=$(make_case released-safety)
+  # The released-branch project lock belongs to the fixture's root home.
+  export FM_HOME="$case_dir"
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt released
   head=$(git -C "$case_dir/wt" rev-parse HEAD)

@@ -117,8 +117,9 @@
 #     retried when the lane lock is free; outcome reports survive task teardown;
 #   - the outcome lines detached actions published since the last tick are
 #     collected with this tick's close lines;
-#   - each parked lane gets one forge read; a trigger relaunches it, a merge is
-#     left to the merge poll, and a close without merge is reported once;
+#   - each parked or released lane gets one forge read; a trigger starts resume,
+#     a merge is left to the merge poll, and a close without merge is reported
+#     once. An eligible parked lane with no trigger is released when configured;
 #   - with any of those flags, each other idle ship lane
 #     with pr= and an armed merge poll gets one forge read:
 #     a close without merge is reported once (marker
@@ -154,7 +155,8 @@
 # Parked lanes use only the first half of the tick, reserving the rest for
 # unparked lanes.
 #
-# list prints each parked lane: id, PR, parked head, and when it parked.
+# list prints each parked or released lane, including pending stops, releases
+# in progress, and relaunch failures that need a manual resume.
 #
 # The record is key=value lines (pr, head, parked_at, slot_leased, pending
 # until the stop is confirmed, release journal fields, and resume_error after a failed relaunch), mode

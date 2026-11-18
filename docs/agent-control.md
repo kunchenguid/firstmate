@@ -91,7 +91,7 @@ For a [lane released on review](configuration.md#park-on-review), use the park c
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
 3. **Record the note.**
-   A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
+   A ship or scout relaunch requires a note, which is appended to the brief so the replacement can continue from the recorded worktree.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition, or use the [recorded tmux closure proof](#reclaiming-a-task-whose-endpoint-is-gone) during review resume.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
@@ -197,7 +197,7 @@ The worktree and the task's records are unaffected either way.
   t3code is refused before anything is stopped: a T3 thread keeps its conversation, so a new turn or a provider change on it continues the same agent rather than launching a fresh one.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts; a Rex `unreadable` acts only once the absence proof above settles it.
-- `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
+- `relaunch` inherits the composer-empty check whenever it stops the agent through `exit`.
 - `fm-spawn --relaunch` independently requires a surviving `dead` endpoint or [positive proof of absence](#reclaiming-a-task-whose-endpoint-is-gone) before creating a replacement.
   For a ship or scout it also refuses, by name, a recorded worktree that is the home, the code root, or the recorded project repository's primary checkout (the worktree's git dir is the recorded project's common git dir - the same boundary fresh spawn's isolation check draws, so a standalone clone passes this isolation check), so a worker only ever comes back in its own task worktree.
   This check lives only in the launch owner, so on the `relaunch` verb it fires after the old agent has stopped and the transaction ends as a failed launch.

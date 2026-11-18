@@ -2047,10 +2047,9 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree> [probe-custom]
 # is released by the very event that makes a task record stale - the worker
 # exiting - so a slot whose lease has lapsed reads identical whether it is still
 # this task's or has since been handed to another one. Firstmate therefore keeps
-# its own claim on top: one file naming the task that took the slot, written by
-# bin/fm-spawn.sh under the same project lock that allocates the slot and
-# released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
-# the remaining crewmate spawns onto the durable lease is separate follow-up work.
+# its own claim on top: one file naming the task that took the slot. Spawn
+# and review parking or reacquisition write it under the project lock;
+# teardown and review release clear it when the slot goes back to the pool.
 #
 # For the default layout the claim is a sibling of the checkout; for a custom
 # path it is in that linked worktree's Git administrative directory. Neither

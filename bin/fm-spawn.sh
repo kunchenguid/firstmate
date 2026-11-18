@@ -2535,10 +2535,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           exception is the matching unused closure proof written by
   #           release-on-review, after that action closed the exact endpoint.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
-  # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
-  # owns that vocabulary). The proof itself lives in one place for the whole
-  # control plane - fm_control_endpoint_absence_verdict - so `exit` and
-  # `relaunch` cannot reach two different answers about one endpoint.
+  # and refuses (bin/fm-backend.sh's fm_backend_agent_state owns that
+  # vocabulary). fm_control_endpoint_absence_verdict owns the live check used
+  # by `exit` and `relaunch`; fm_control_release_closed owns the tmux exception.
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   if [ "$RELAUNCH_STATE" = missing ] && fm_control_release_closed "$RELAUNCH_META" "$BACKEND" "$RELAUNCH_TARGET"; then
     RELAUNCH_STATE=missing
