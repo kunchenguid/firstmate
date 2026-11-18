@@ -23,7 +23,8 @@ STATE="$LAB/state"
 WORK="$LAB/work"
 mkdir -p "$STATE" "$WORK"
 gen=$("$ROOT/bin/fm-busy-event.sh" arm "$STATE" live) || fail 'busy arm failed'
-"$ROOT/bin/fm-copilot-plugin.sh" "$STATE" live "$gen" || fail 'plugin writer failed'
+"$ROOT/bin/fm-copilot-plugin.sh" "$STATE" live "$gen" "$WORK" || fail 'plugin writer failed'
+export COPILOT_HOME="$STATE/live.copilot-home"
 # Test-only handshake: the submit hook holds the turn open after it has written
 # busy, until the driver has seen that record and touched the release file. The
 # latest-value record file can then never be missed by sampling.
