@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Calm preference](#calm-preference-configcalm), and [worker step display](#worker-step-display-configstep-display) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -90,6 +90,7 @@ Each effective `FM_HOME` contains private operational directories.
 - One-shot Bearings reconcile requests under `state/reconcile-notify/`.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
+- Per-task worker step records `state/<id>.step` for the fleet view (`bin/fm-step-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
@@ -579,6 +580,24 @@ The optional local, gitignored `config/wait-no-turns` presence flag opts this ho
 With it present, ship and scout briefs gain the `# Waiting` section and the foreground no-mistakes drive text, every brief's inbox section keeps the natural-checkpoint check and adds that a waiting worker does not poll or list its inbox because a waiting instruction rings, a pending-reply recovery waits while that mate has its own open decision or blocker, and a fire-and-forget steer whose doorbell did not land gets one later ring.
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
+
+## Worker step display (config/step-display)
+
+The optional local, gitignored `config/step-display` file selects whether the fleet view shows which plan step each worker is on.
+It holds `on` or `off`.
+An absent or empty file means `on`.
+Any other value counts as `off` and prints a warning that names the file, so a mistyped fallback still falls back.
+
+With the display on, each ship and scout brief tells the worker to write a numbered plan first and to run `bin/fm-step.sh` as it starts each step.
+That command appends to the task's `state/<id>.step` record and never writes a status line, so a step change never wakes firstmate.
+`bin/fm-fleet-view.sh` then shows a Step column, a per-task checklist with `--steps <task-id>`, and a redrawing view with `--watch`.
+During a no-mistakes run the Step column shows the review step from the task's current state instead of the worker's record.
+A task with no record shows "step not reported", and the view never guesses a step from pane text.
+Teardown removes the record with the other per-task state.
+
+With `off`, generated briefs and the fleet table are byte for byte the same as before the step display existed, and `--steps` and `--watch` only report that the display is off.
+The setting is a home-local preference and is not inherited by secondmate homes.
+`bin/fm-step-lib.sh` owns the switch and the record format, and `bin/fm-fleet-view.sh --help` owns the view options.
 
 ## No-mistakes pipeline spend (config/pipeline-spend)
 

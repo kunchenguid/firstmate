@@ -30,6 +30,9 @@
 #   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
+#   While config/step-display is on (bin/fm-step-lib.sh), ship and scout briefs
+#   carry one status-rule line: write a numbered plan, then record each step
+#   start with bin/fm-step.sh. With the switch off that line is absent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
@@ -152,6 +155,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-step-lib.sh
+. "$SCRIPT_DIR/fm-step-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -419,6 +424,14 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
   WAIT_BLOCK="$WAIT_SECTION"$'\n\n'
 fi
 
+# The one plan-step line in the ship and scout status rule, emitted only while
+# config/step-display is on (bin/fm-step-lib.sh owns the switch and the record).
+# When off it is empty, so the brief is byte for byte the brief without it.
+STEP_LINE=
+if [ "$(fm_step_display_mode "$CONFIG")" = on ]; then
+  STEP_LINE=$'\n'"   Write a numbered plan first, then run \`$(shell_quote "$FM_ROOT/bin/fm-step.sh") --record $(shell_quote "$(fm_step_record_path "$STATE" "$ID")") <n> <m> '<step name>'\` as you start each step; it feeds the fleet view and never wakes firstmate."
+fi
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -631,7 +644,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
-   FYI progress lines; firstmate reads your pane for that.
+   FYI progress lines; firstmate reads your pane for that.$STEP_LINE
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
@@ -708,7 +721,7 @@ $RULE1
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
-   firstmate reads your pane for that.
+   firstmate reads your pane for that.$STEP_LINE
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.

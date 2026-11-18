@@ -805,6 +805,29 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   pass "teardown honors config/backlog-backend=manual and still finishes cleanly"
 }
 
+# The worker's step record (state/<id>.step, bin/fm-step-lib.sh) is per-task
+# state: teardown removes the torn-down task's record and leaves another task's.
+test_teardown_removes_step_record() {
+  local case_dir rc wt_head
+  case_dir=$(make_case step-record)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf '1700000000\t1\t2\tWrite tests\n' > "$case_dir/state/task-x1.step"
+  printf '1700000000\t1\t2\tWrite tests\n' > "$case_dir/state/task-y2.step"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "step-record: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.step" "teardown left the torn-down task's step record behind"
+  assert_present "$case_dir/state/task-y2.step" "teardown removed another task's step record"
+  pass "teardown removes the task's step record and leaves another task's record alone"
+}
+
 test_local_only_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case truly-unpushed)
@@ -5040,6 +5063,7 @@ test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_teardown_removes_step_record
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

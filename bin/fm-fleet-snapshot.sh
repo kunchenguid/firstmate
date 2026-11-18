@@ -68,6 +68,11 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
+#     step is the worker's own plan-step record, state/<id>.step, as
+#     bin/fm-step-lib.sh's fm_step_record_json reads it: null when no step is
+#     recorded, when the display is off, or when the task generation changed
+#     during the snapshot. It is presentation data only and never current state.
+#   step_display: "on" or "off" from config/step-display (bin/fm-step-lib.sh).
 #   scout_reports[]: present data/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
@@ -231,6 +236,10 @@ esac
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-step-lib.sh
+. "$SCRIPT_DIR/fm-step-lib.sh"  # step record format and the config/step-display switch
+# The fleet view prints a mistyped-switch warning; the snapshot stays quiet.
+STEP_DISPLAY=$(fm_step_display_mode "$CONFIG" 2>/dev/null)
 
 usage() {
   cat <<'EOF'
@@ -632,7 +641,7 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
-  local status_log status_capture report_path report_capture
+  local status_log status_capture report_path report_capture step_capture
   local kind backend target endpoint_exists=null agent_alive=not_checked generation_current=1
   remote_host=$(meta_value "$meta" remote_host)
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
@@ -641,11 +650,15 @@ prefetch_task_observations() {  # <meta> <id>
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
   report_path="$DATA/$id/report.md"
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
+  step_capture="$SNAPSHOT_TASK_DIR/$id.step"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
   if [ "$generation_current" = 1 ]; then
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
+    if [ "$STEP_DISPLAY" = on ]; then
+      snapshot_capture_optional "$(fm_step_record_path "$STATE" "$id")" "$step_capture" || current_rc=1
+    fi
   fi
 
   if [ -n "$remote_host" ]; then
@@ -678,7 +691,7 @@ prefetch_task_observations() {  # <meta> <id>
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$report_capture" "$step_capture"
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
@@ -747,7 +760,7 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json step_json
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -843,6 +856,10 @@ task_json_lines() {
       return 1
     }
     [ -f "$report_path" ] && report_present=1 || report_present=0
+    step_json=$(fm_step_record_json "$SNAPSHOT_TASK_DIR/$id.step" "$SNAPSHOT_EPOCH") || {
+      snapshot_task_cleanup
+      return 1
+    }
     meta_json=$(path_present_json "$original_meta" "$meta")
     status_json=$event_json
     report_json=$(path_present_json "$DATA/$id/report.md" "$report_path")
@@ -888,6 +905,7 @@ task_json_lines() {
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
+      --argjson step "$step_json" \
       '{
         id:$id,
         kind:$kind,
@@ -914,6 +932,7 @@ task_json_lines() {
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source,head:($pr_head | if . == "" then null else . end)},
+        step:$step,
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
@@ -2054,6 +2073,7 @@ jq -n \
   --arg data "$DATA" \
   --arg config "$CONFIG" \
   --arg projects "$PROJECTS" \
+  --arg step_display "$STEP_DISPLAY" \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
@@ -2082,6 +2102,7 @@ jq -n \
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
+     step_display:$step_display,
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }
