@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--evidence-text <limit> --evidence-media <limit> --evidence-audience <limit>] [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -43,6 +43,12 @@
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
 #   refused as a flag value.
+#   A no-mistakes ship records --evidence-text, --evidence-media, and
+#   --evidence-audience values (unrestricted|none|restricted|unknown). They must
+#   match the brief's Delivery contract declarations and are recorded as
+#   evidence_text=, evidence_media=, and evidence_audience= in task metadata.
+#   Omitted values are recorded as unknown and refuse publication; other modes and worker kinds reject
+#   these flags. Relaunch reuses the recorded values.
 #   --branch-prefix is the optional prefix selected at intake for this ship's
 #   immutable branch, defaulting to "fm/". It must agree with the branch recorded
 #   in the brief, and is refused on scouts, secondmates, and relaunches. When the
@@ -1020,6 +1026,12 @@ BASE_BRANCH=
 BASE_BRANCH_SET=0
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
+EVIDENCE_TEXT=
+EVIDENCE_MEDIA=
+EVIDENCE_AUDIENCE=
+EVIDENCE_TEXT_SET=0
+EVIDENCE_MEDIA_SET=0
+EVIDENCE_AUDIENCE_SET=0
 TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
@@ -1078,6 +1090,18 @@ for a in "$@"; do
     upstream-consent)
       UPSTREAM_CONSENT=$a
       UPSTREAM_CONSENT_SET=1
+      ;;
+    evidence-text)
+      EVIDENCE_TEXT=$a
+      EVIDENCE_TEXT_SET=1
+      ;;
+    evidence-media)
+      EVIDENCE_MEDIA=$a
+      EVIDENCE_MEDIA_SET=1
+      ;;
+    evidence-audience)
+      EVIDENCE_AUDIENCE=$a
+      EVIDENCE_AUDIENCE_SET=1
       ;;
     traceparent)
       TRACEPARENT_ARG=$a
@@ -1155,6 +1179,12 @@ for a in "$@"; do
     UPSTREAM_CONSENT=${a#--upstream-consent=}
     UPSTREAM_CONSENT_SET=1
     ;;
+  --evidence-text) want_value="evidence-text" ;;
+  --evidence-text=*) EVIDENCE_TEXT=${a#--evidence-text=}; EVIDENCE_TEXT_SET=1 ;;
+  --evidence-media) want_value="evidence-media" ;;
+  --evidence-media=*) EVIDENCE_MEDIA=${a#--evidence-media=}; EVIDENCE_MEDIA_SET=1 ;;
+  --evidence-audience) want_value="evidence-audience" ;;
+  --evidence-audience=*) EVIDENCE_AUDIENCE=${a#--evidence-audience=}; EVIDENCE_AUDIENCE_SET=1 ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -1276,6 +1306,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded upstream consent; --upstream-consent cannot override it" >&2
     exit 1
   }
+  if [ "$EVIDENCE_TEXT_SET" -eq 1 ] || [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ]; then
+    echo "error: --relaunch reuses the task's recorded evidence limits; evidence-limit flags cannot override them" >&2
+    exit 1
+  fi
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -1308,6 +1342,16 @@ else
       exit 1
       ;;
     esac
+    if [ "$MODE" = no-mistakes ]; then
+      [ "$EVIDENCE_TEXT_SET" -eq 1 ] || EVIDENCE_TEXT=unknown
+      [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || EVIDENCE_MEDIA=unknown
+      [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ] || EVIDENCE_AUDIENCE=unknown
+    fi
+    if [ "$MODE" != no-mistakes ] && { [ "$EVIDENCE_TEXT_SET" -eq 1 ] || [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ]; }; then
+      echo "error: fm-spawn.sh: evidence-limit flags apply only to mode=no-mistakes" >&2
+      exit 1
+    fi
+    fm_evidence_limits_valid_for_mode "$EVIDENCE_TEXT" "$EVIDENCE_MEDIA" "$EVIDENCE_AUDIENCE" "$MODE" "fm-spawn.sh" || exit 1
     if [ "$UPSTREAM_CONSENT_SET" -eq 1 ]; then
       if [ "$MODE" = local-only ]; then
         echo "error: --upstream-consent is meaningless on local-only, which publishes nothing; drop it" >&2
@@ -1340,6 +1384,10 @@ else
       echo "error: --upstream-consent applies only to ship spawns; a scout publishes nothing and a secondmate records no delivery contract" >&2
       exit 1
     }
+    if [ "$EVIDENCE_TEXT_SET" -eq 1 ] || [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ]; then
+      echo "error: evidence-limit flags apply only to no-mistakes ship spawns" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -2181,6 +2229,9 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
+  [ "$EVIDENCE_TEXT_SET" -eq 0 ] || shared_args+=(--evidence-text "$EVIDENCE_TEXT")
+  [ "$EVIDENCE_MEDIA_SET" -eq 0 ] || shared_args+=(--evidence-media "$EVIDENCE_MEDIA")
+  [ "$EVIDENCE_AUDIENCE_SET" -eq 0 ] || shared_args+=(--evidence-audience "$EVIDENCE_AUDIENCE")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   [ "$ACCOUNT_SET" -eq 0 ] || shared_args+=(--account "$ACCOUNT_ARG")
   for pair in "${POS[@]}"; do
@@ -2574,6 +2625,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   UPSTREAM_CONSENT=$(fm_meta_get "$RELAUNCH_META" upstream_consent)
+  EVIDENCE_TEXT=$(fm_meta_get "$RELAUNCH_META" evidence_text)
+  EVIDENCE_MEDIA=$(fm_meta_get "$RELAUNCH_META" evidence_media)
+  EVIDENCE_AUDIENCE=$(fm_meta_get "$RELAUNCH_META" evidence_audience)
+  fm_evidence_limits_valid_for_mode "$EVIDENCE_TEXT" "$EVIDENCE_MEDIA" "$EVIDENCE_AUDIENCE" "$MODE" "fm-spawn.sh --relaunch" || exit 1
   if [ "$KIND" = ship ]; then
     BRANCH=$(fm_meta_get "$RELAUNCH_META" branch)
     [ -n "$BRANCH" ] || BRANCH="fm/$ID"
@@ -4487,6 +4542,20 @@ if [ "$KIND" = ship ]; then
   fi
   [ -n "$STANDING_PR" ] || STANDING_PR=auto
   [ "$MODE" = no-mistakes ] || STANDING_PR=auto
+  BRIEF_EVIDENCE_TEXT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]evidence-text=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_EVIDENCE_MEDIA=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]evidence-media=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_EVIDENCE_AUDIENCE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]evidence-audience=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  if [ "$MODE" = no-mistakes ] && [ -z "$BRIEF_EVIDENCE_TEXT$BRIEF_EVIDENCE_MEDIA$BRIEF_EVIDENCE_AUDIENCE" ] \
+    && [ "$EVIDENCE_TEXT/$EVIDENCE_MEDIA/$EVIDENCE_AUDIENCE" = unknown/unknown/unknown ]; then
+    BRIEF_EVIDENCE_TEXT=unknown
+    BRIEF_EVIDENCE_MEDIA=unknown
+    BRIEF_EVIDENCE_AUDIENCE=unknown
+    echo "warning: $SOURCE_BRIEF predates evidence-limit declarations; recording all three as unknown, which refuses publication until the brief and spawn carry explicit supported values" >&2
+  fi
+  if [ "$BRIEF_EVIDENCE_TEXT" != "$EVIDENCE_TEXT" ] || [ "$BRIEF_EVIDENCE_MEDIA" != "$EVIDENCE_MEDIA" ] || [ "$BRIEF_EVIDENCE_AUDIENCE" != "$EVIDENCE_AUDIENCE" ]; then
+    echo "error: evidence-limit mismatch for $ID: $SOURCE_BRIEF records text=${BRIEF_EVIDENCE_TEXT:-missing} media=${BRIEF_EVIDENCE_MEDIA:-missing} audience=${BRIEF_EVIDENCE_AUDIENCE:-missing}, but this spawn passed text=${EVIDENCE_TEXT:-missing} media=${EVIDENCE_MEDIA:-missing} audience=${EVIDENCE_AUDIENCE:-missing}; correct the flags or re-scaffold the brief" >&2
+    exit 1
+  fi
   BRIEF_PR=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]pr=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   [ -n "$BRIEF_PR" ] || BRIEF_PR=auto
   if [ "$BRIEF_PR" != "$STANDING_PR" ]; then
@@ -7326,7 +7395,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent evidence_text evidence_media evidence_audience forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7351,6 +7420,9 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
+  [ -z "$EVIDENCE_TEXT" ] || echo "evidence_text=$EVIDENCE_TEXT"
+  [ -z "$EVIDENCE_MEDIA" ] || echo "evidence_media=$EVIDENCE_MEDIA"
+  [ -z "$EVIDENCE_AUDIENCE" ] || echo "evidence_audience=$EVIDENCE_AUDIENCE"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
   [ "$EXTERNAL_REVIEW" = 0 ] || echo "forge=external"
   [ -z "$EXTERNAL_BACKUP_REMOTE" ] || echo "backup_remote=$EXTERNAL_BACKUP_REMOTE"

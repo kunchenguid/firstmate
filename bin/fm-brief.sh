@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--evidence-text <limit> --evidence-media <limit> --evidence-audience <limit>] [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -78,6 +78,13 @@
 # on `external` that rule names no forge CLI, because the home's review tool is
 # the only publishing tool. A forge on --mode local-only is refused, because that
 # mode publishes nothing, and `external` also refuses no-mistakes.
+# A no-mistakes ship records --evidence-text, --evidence-media, and
+# --evidence-audience declarations. Each is unrestricted|none|restricted|unknown;
+# an omitted value is recorded as unknown and later refuses publication rather
+# than becoming permission.
+# They are recorded on the Delivery contract line, checked against spawn flags,
+# and copied into supervisor-owned task metadata for bin/fm-role.sh evidence.
+# The flags are refused on every mode that does not run no-mistakes.
 # --pr names who writes the pull request's title and body, defaults to auto, and
 # is the explicit task-side form of the registry's `pr=manual` token exactly as
 # --forge is of `forge=`: read from data/projects.md at intake and passed here,
@@ -238,6 +245,12 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+EVIDENCE_TEXT=
+EVIDENCE_MEDIA=
+EVIDENCE_AUDIENCE=
+EVIDENCE_TEXT_SET=0
+EVIDENCE_MEDIA_SET=0
+EVIDENCE_AUDIENCE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -254,6 +267,9 @@ for a in "$@"; do
       pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      evidence-text) EVIDENCE_TEXT=$a; EVIDENCE_TEXT_SET=1 ;;
+      evidence-media) EVIDENCE_MEDIA=$a; EVIDENCE_MEDIA_SET=1 ;;
+      evidence-audience) EVIDENCE_AUDIENCE=$a; EVIDENCE_AUDIENCE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -280,6 +296,12 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --evidence-text) want_value="evidence-text" ;;
+    --evidence-text=*) EVIDENCE_TEXT=${a#--evidence-text=}; EVIDENCE_TEXT_SET=1 ;;
+    --evidence-media) want_value="evidence-media" ;;
+    --evidence-media=*) EVIDENCE_MEDIA=${a#--evidence-media=}; EVIDENCE_MEDIA_SET=1 ;;
+    --evidence-audience) want_value="evidence-audience" ;;
+    --evidence-audience=*) EVIDENCE_AUDIENCE=${a#--evidence-audience=}; EVIDENCE_AUDIENCE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -323,6 +345,16 @@ esac
 if [ "$KIND" = ship ]; then
   fm_forge_valid_for_mode "$FORGE" "$MODE" "fm-brief.sh --forge" || exit 1
   fm_pr_text_valid "$PR_TEXT" "$MODE" "$FORGE" "fm-brief.sh --pr" || exit 1
+  if [ "$MODE" = no-mistakes ]; then
+    [ "$EVIDENCE_TEXT_SET" -eq 1 ] || EVIDENCE_TEXT=unknown
+    [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || EVIDENCE_MEDIA=unknown
+    [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ] || EVIDENCE_AUDIENCE=unknown
+  fi
+  if [ "$MODE" != no-mistakes ] && { [ "$EVIDENCE_TEXT_SET" -eq 1 ] || [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ]; }; then
+    echo "error: fm-brief.sh: evidence-limit flags apply only to mode=no-mistakes" >&2
+    exit 1
+  fi
+  fm_evidence_limits_valid_for_mode "$EVIDENCE_TEXT" "$EVIDENCE_MEDIA" "$EVIDENCE_AUDIENCE" "$MODE" "fm-brief.sh" || exit 1
   if [ "$FORGE" = gerrit ]; then
     [ "$SHAPE_SET" -eq 1 ] || SHAPE=squash
     case "$SHAPE" in
@@ -346,8 +378,8 @@ if [ "$KIND" = ship ]; then
   else
     FORGE_RULE_LINE="Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations."
   fi
-elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ] || [ "$PR_TEXT_SET" -eq 1 ]; then
-  echo "error: --forge, --shape, and --pr apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ] || [ "$PR_TEXT_SET" -eq 1 ] || [ "$EVIDENCE_TEXT_SET" -eq 1 ] || [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ]; then
+  echo "error: --forge, --shape, --pr, and evidence-limit flags apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
 if [ "$BASE_BRANCH_SET" -eq 1 ]; then
@@ -778,7 +810,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT" "$EVIDENCE_TEXT" "$EVIDENCE_MEDIA" "$EVIDENCE_AUDIENCE") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

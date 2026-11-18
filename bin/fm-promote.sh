@@ -48,7 +48,12 @@
 # no-mistakes mode only (bin/fm-project-mode.sh --pr; bin/fm-dod-lib.sh's
 # fm_pr_text_valid owns where it is accepted); the ship's Definition of done then
 # carries it.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--upstream-consent <host>/<owner>/<repo>]
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--evidence-text <limit> --evidence-media <limit> --evidence-audience <limit>] [--branch-prefix <prefix>] [--upstream-consent <host>/<owner>/<repo>]
+# A no-mistakes promotion records --evidence-text, --evidence-media, and
+# --evidence-audience declarations (unrestricted|none|restricted|unknown).
+# Promotion records them in the generated delivery contract and task metadata;
+# omitted values become unknown and refuse publication, and other modes reject
+# the flags.
 # --upstream-consent records the captain's one-off approval for this task to
 # publish to firstmate's own upstream repository; promotion applies the same
 # self-repository publication gate as bin/fm-spawn.sh (bin/fm-role-lib.sh), so
@@ -90,6 +95,12 @@ FORGE=none
 PR_TEXT=auto
 UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
+EVIDENCE_TEXT=
+EVIDENCE_MEDIA=
+EVIDENCE_AUDIENCE=
+EVIDENCE_TEXT_SET=0
+EVIDENCE_MEDIA_SET=0
+EVIDENCE_AUDIENCE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -102,6 +113,9 @@ for a in "$@"; do
       yolo) YOLO=$a; YOLO_SET=1 ;;
       branch-prefix) BRANCH_PREFIX=$a ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
+      evidence-text) EVIDENCE_TEXT=$a; EVIDENCE_TEXT_SET=1 ;;
+      evidence-media) EVIDENCE_MEDIA=$a; EVIDENCE_MEDIA_SET=1 ;;
+      evidence-audience) EVIDENCE_AUDIENCE=$a; EVIDENCE_AUDIENCE_SET=1 ;;
     esac
     want_value=
     continue
@@ -115,6 +129,12 @@ for a in "$@"; do
     --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=} ;;
     --upstream-consent) want_value="upstream-consent" ;;
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
+    --evidence-text) want_value="evidence-text" ;;
+    --evidence-text=*) EVIDENCE_TEXT=${a#--evidence-text=}; EVIDENCE_TEXT_SET=1 ;;
+    --evidence-media) want_value="evidence-media" ;;
+    --evidence-media=*) EVIDENCE_MEDIA=${a#--evidence-media=}; EVIDENCE_MEDIA_SET=1 ;;
+    --evidence-audience) want_value="evidence-audience" ;;
+    --evidence-audience=*) EVIDENCE_AUDIENCE=${a#--evidence-audience=}; EVIDENCE_AUDIENCE_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -139,6 +159,16 @@ case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
 esac
+if [ "$MODE" = no-mistakes ]; then
+  [ "$EVIDENCE_TEXT_SET" -eq 1 ] || EVIDENCE_TEXT=unknown
+  [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || EVIDENCE_MEDIA=unknown
+  [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ] || EVIDENCE_AUDIENCE=unknown
+fi
+if [ "$MODE" != no-mistakes ] && { [ "$EVIDENCE_TEXT_SET" -eq 1 ] || [ "$EVIDENCE_MEDIA_SET" -eq 1 ] || [ "$EVIDENCE_AUDIENCE_SET" -eq 1 ]; }; then
+  echo "error: fm-promote.sh: evidence-limit flags apply only to mode=no-mistakes" >&2
+  exit 1
+fi
+fm_evidence_limits_valid_for_mode "$EVIDENCE_TEXT" "$EVIDENCE_MEDIA" "$EVIDENCE_AUDIENCE" "$MODE" "fm-promote.sh" || exit 1
 if [ "$UPSTREAM_CONSENT_SET" -eq 1 ]; then
   [ -n "$UPSTREAM_CONSENT" ] || { echo "error: --upstream-consent requires a non-empty <host>/<owner>/<repo> value" >&2; exit 1; }
   if [ "$MODE" = local-only ]; then
@@ -280,6 +310,8 @@ PROMOTE_PR_WORDS=
 [ "$PR_TEXT" = auto ] || PROMOTE_PR_WORDS=" pr=$PR_TEXT"
 PROMOTE_CONSENT_WORDS=
 [ -z "$UPSTREAM_CONSENT" ] || PROMOTE_CONSENT_WORDS=" upstream-consent=$UPSTREAM_CONSENT"
+PROMOTE_EVIDENCE_WORDS=
+[ "$MODE" != no-mistakes ] || PROMOTE_EVIDENCE_WORDS=" evidence-text=$EVIDENCE_TEXT evidence-media=$EVIDENCE_MEDIA evidence-audience=$EVIDENCE_AUDIENCE"
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -328,7 +360,7 @@ EOF
 promote_delivery_contract() {
   cat <<EOF
 # Current delivery mode contract
-This task is now kind=ship with mode=$MODE$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS$PROMOTE_CONSENT_WORDS.
+This task is now kind=ship with mode=$MODE$PROMOTE_FORGE_WORDS$PROMOTE_PR_WORDS$PROMOTE_CONSENT_WORDS$PROMOTE_EVIDENCE_WORDS.
 This section supersedes every earlier brief instruction about delivery mode.
 These current ship instructions supersede the scout delivery rules and report-based Definition of done.
 Any earlier "Never push" or scout-only delivery language in this file is superseded.
@@ -346,7 +378,7 @@ EOF
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT"
+  fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT" "$EVIDENCE_TEXT" "$EVIDENCE_MEDIA" "$EVIDENCE_AUDIENCE"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
@@ -399,13 +431,16 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^upstream_consent=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^upstream_consent=' -e '^evidence_text=' -e '^evidence_media=' -e '^evidence_audience=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "branch=$BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
+  [ -z "$EVIDENCE_TEXT" ] || echo "evidence_text=$EVIDENCE_TEXT"
+  [ -z "$EVIDENCE_MEDIA" ] || echo "evidence_media=$EVIDENCE_MEDIA"
+  [ -z "$EVIDENCE_AUDIENCE" ] || echo "evidence_audience=$EVIDENCE_AUDIENCE"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"

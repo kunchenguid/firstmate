@@ -49,7 +49,11 @@ write_brief() {  # <home> <id> [<recorded-mode>]
   mkdir -p "$home/data/$id"
   {
     printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the delivery contract.\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\n# Definition of done\n'
-    [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
+    if [ "$mode" = no-mistakes ]; then
+      printf 'Delivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown\n'
+    elif [ -n "$mode" ]; then
+      printf 'Delivery contract: mode=%s\n' "$mode"
+    fi
   } > "$home/data/$id/brief.md"
 }
 
@@ -156,6 +160,47 @@ EOF
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
+}
+
+test_no_mistakes_evidence_limits_match_brief_and_spawn() {
+  local rec home proj fakebin id brief out status
+  rec=$(make_home evidence-agreement)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  id=evidence-agree
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes \
+    --evidence-text unrestricted --evidence-media unrestricted --evidence-audience unrestricted >/dev/null \
+    || fail "explicit evidence-limit brief did not scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship the evidence boundary." "Keep publication task-scoped."
+  brief="$home/data/$id/brief.md"
+  assert_grep 'Delivery contract: mode=no-mistakes evidence-text=unrestricted evidence-media=unrestricted evidence-audience=unrestricted' "$brief" \
+    "brief did not record all evidence limits"
+
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off \
+    --evidence-text unrestricted --evidence-media restricted --evidence-audience unrestricted)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted evidence limits that disagreed with the brief"
+  assert_contains "$out" 'evidence-limit mismatch' "mismatch refusal did not name the evidence contract"
+  assert_absent "$home/state/$id.meta" "mismatched evidence limits published task metadata"
+
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off \
+    --evidence-text unrestricted --evidence-media unrestricted --evidence-audience unrestricted)
+  assert_not_contains "$out" 'evidence-limit mismatch' "matching evidence limits were refused"
+
+  id=evidence-unknown
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null \
+    || fail "unknown evidence-limit brief did not scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" "Ship only when limits are known." "Refuse unknown publication limits."
+  assert_grep 'evidence-text=unknown evidence-media=unknown evidence-audience=unknown' "$home/data/$id/brief.md" \
+    "omitted limits were not recorded as fail-closed unknown values"
+
+  out=$(FM_HOME="$home" "$BRIEF" malformed-evidence proj --mode no-mistakes \
+    --evidence-text prose --evidence-media unrestricted --evidence-audience unrestricted 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "brief accepted a malformed evidence limit"
+  assert_contains "$out" "invalid text evidence limit 'prose'" "malformed limit refusal was not specific"
+  pass "no-mistakes evidence limits are declared, matched, and default only to refusing unknown"
 }
 
 # The registry is the captain's standing posture, so dropping below its rigor is
@@ -390,7 +435,9 @@ STUB
       || fail "$mode: promotion's delivery command did not run"
     assert_present "$payload" "$mode: promotion delivered no message to the worker"
 
-    grep -qx "Delivery contract: mode=$mode" "$payload" \
+    contract="Delivery contract: mode=$mode"
+    [ "$mode" != no-mistakes ] || contract="$contract evidence-text=unknown evidence-media=unknown evidence-audience=unknown"
+    grep -qx "$contract" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
     assert_grep "# Definition of done" "$payload" \
       "$mode: promoted worker did not receive a Definition of done"
@@ -629,7 +676,7 @@ test_pr_manual_brief_hands_the_pr_text_to_the_worker() {
   FM_HOME="$home" "$BRIEF" pr-manual-b1 proj --mode no-mistakes --pr manual >/dev/null \
     || fail "a pr=manual no-mistakes brief should scaffold"
   brief="$home/data/pr-manual-b1/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes pr=manual" "$brief" \
+  grep -qx "Delivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown pr=manual" "$brief" \
     || fail "the brief did not record pr=manual on its delivery contract line"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'Pass `--skip pr,ci` on every `no-mistakes axi run` for this task' "$brief" \
@@ -660,7 +707,7 @@ test_pr_manual_brief_hands_the_pr_text_to_the_worker() {
   FM_HOME="$home" "$BRIEF" pr-manual-b2 proj --mode no-mistakes >/dev/null \
     || fail "a default no-mistakes brief should scaffold"
   plain="$home/data/pr-manual-b2/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes" "$plain" \
+  grep -qx "Delivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown" "$plain" \
     || fail "an absent pr token changed the default delivery contract line"
   assert_no_grep 'skip pr' "$plain" "an absent pr token changed the default brief"
   pass "fm-brief: pr=manual records its contract suffix, skips pr and ci, and hands the PR text to the worker"
@@ -773,7 +820,7 @@ STUB
     && FM_TEST_CAPTURE="$payload" \
        eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
     || fail "promotion's delivery command did not run"
-  grep -qx "Delivery contract: mode=no-mistakes pr=manual" "$payload" \
+  grep -qx "Delivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown pr=manual" "$payload" \
     || fail "the promoted worker did not receive pr=manual in its delivery contract"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'Pass `--skip pr,ci` on every `no-mistakes axi run` for this task' "$payload" \
@@ -910,7 +957,7 @@ EOF
 Do not copy this Firstmate-authored constraint into intent.
 
 # Definition of done
-Delivery contract: mode=no-mistakes
+Delivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown
 Pass the entire Task as --intent.
 EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
@@ -941,7 +988,7 @@ Fix the migrated dispatch boundary.
 Preserve the existing compatibility path.
 
 # Definition of done
-Delivery contract: mode=no-mistakes
+Delivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown
 Pass the entire Task and every Firstmate requirement as --intent.
 EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
@@ -1068,16 +1115,22 @@ EOF
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Investigate why the identity check is failing." \
     "Ship the identity-check fix without adding a classifier."
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off \
+    --evidence-text unrestricted --evidence-media unrestricted --evidence-audience unrestricted 2>&1)
   status=$?
   expect_code 0 "$status" "promotion of a filled scout brief should succeed"
   assert_grep 'kind=ship' "$meta" "filled promotion did not restore ship teardown protection"
   for brief in "$home/data/$id/brief.md" "$home/data/$id/ship-instructions.md"; do
     assert_grep "$home/data/$id/brief.md" "$brief" "promotion did not point at the single proof record"
     assert_grep 'none accepted' "$brief" "promotion inferred baseline acceptance from an investigation"
-    assert_grep 'evidence <text-limit> <media-limit> <audience-limit> && no-mistakes axi run' "$brief" \
+    assert_grep 'evidence && no-mistakes axi run' "$brief" \
       "promotion omitted the pre-publication predicate"
+    assert_grep 'evidence-text=unrestricted evidence-media=unrestricted evidence-audience=unrestricted' "$brief" \
+      "promotion omitted the supervisor-declared evidence limits"
   done
+  assert_grep 'evidence_text=unrestricted' "$meta" "promotion did not record the text limit"
+  assert_grep 'evidence_media=unrestricted' "$meta" "promotion did not record the media limit"
+  assert_grep 'evidence_audience=unrestricted' "$meta" "promotion did not record the audience limit"
   brief="$home/data/$id/ship-instructions.md"
   assert_grep "Investigate why the identity check is failing." "$brief" \
     "promotion did not preserve the original Captain's intent"
@@ -1195,7 +1248,7 @@ EOF
   words=$(printf '%s\n' "Keep the literal example \`Captain, hello\` in the documentation." \
     "Stop composing Captain:, Captain's words:, Captain's ask:, and Captain's intent: into PR bodies.")
   write_brief "$home" intent-literal no-mistakes
-  printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' "$words" > "$home/data/intent-literal/brief.md"
+  printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown\n' "$words" > "$home/data/intent-literal/brief.md"
   out=$(run_spawn "$home" "$fakebin" intent-literal "$proj" claude --mode no-mistakes --yolo off)
   assert_not_contains "$out" "operator-address line" "labels mentioned mid-line were refused as address"
   authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/intent-literal/launch-brief.md")
@@ -1238,7 +1291,7 @@ EOF
     n=$((n + 1))
     id="intent-marked-$n"
     write_brief "$home" "$id" no-mistakes
-    printf '# Task\n%s %s\nDo not include this build constraint.\n%s %s\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
+    printf '# Task\n%s %s\nDo not include this build constraint.\n%s %s\n\n# Definition of done\nDelivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown\n' \
       "$marker" 'Keep the original request intact.' "$marker" 'Preserve its provenance.' > "$home/data/$id/brief.md"
     out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
     assert_present "$home/data/$id/launch-brief.md" "$marker: provenance was not accepted"
@@ -1506,7 +1559,7 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   FM_HOME="$home" "$BRIEF" forge-dod-g1 review-server-project --mode no-mistakes --forge gerrit >/dev/null \
     || fail "a gerrit no-mistakes brief should scaffold"
   brief="$home/data/forge-dod-g1/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash" "$brief" \
+  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash evidence-text=unknown evidence-media=unknown evidence-audience=unknown" "$brief" \
     || fail "the brief did not record the machine-readable forge in its delivery contract"
 
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -1801,7 +1854,7 @@ STUB
        eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
     || fail "promotion's delivery command did not run"
   assert_present "$payload" "promotion delivered no message to the worker"
-  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash" "$payload" \
+  grep -qx "Delivery contract: mode=no-mistakes forge=gerrit shape=squash evidence-text=unknown evidence-media=unknown evidence-audience=unknown" "$payload" \
     || fail "the promoted worker did not receive the forge in its delivery contract"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'Pass `--skip push,pr,ci` on every `no-mistakes axi run` for this task' "$payload" \
@@ -1983,6 +2036,7 @@ EOF
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
+test_no_mistakes_evidence_limits_match_brief_and_spawn
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract

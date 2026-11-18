@@ -58,8 +58,10 @@
 #   fm_role_gate_self_publish <home> <config> <project> <root> [consent]
 #                                        - 0 authorized, 1 refused, 2 not self-repo
 #
-#   fm_role_gate_nm_evidence <text-limit> <media-limit> <audience-limit>
-#                                        - read-only pre-publication predicate;
+#   fm_role_evidence_limit_valid <limit> - closed-set declaration check
+#   fm_role_gate_nm_evidence <state-dir> <task-id> <cwd>
+#                                        - metadata-bound, read-only
+#                                          pre-publication predicate;
 #                                          bin/fm-role.sh evidence owns its CLI
 #                                          contract and supported limits
 #
@@ -68,16 +70,77 @@
 # malformed-input reason), FM_ROLE_PUB_TARGET, FM_ROLE_PUB_AUTHORITY,
 # FM_ROLE_PUB_DENIAL.
 
-# No supplied strings are shell commands or capability receipts. This predicate
-# deliberately accepts no caller-authored claim that a restriction is enforced.
+fm_role_evidence_limit_valid() {
+  case "$1" in
+    unrestricted|none|restricted|unknown) return 0 ;;
+  esac
+  return 1
+}
+
+fm_role_meta_exact_value() {  # <meta> <key>
+  local meta=$1 key=$2 count
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ -r "$meta" ] || return 1
+  count=$(grep -c "^${key}=" "$meta" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  grep "^${key}=" "$meta" | cut -d= -f2-
+}
+
+# The caller supplies only supervisor state, the launch-owned task marker, and
+# its current directory. Limits and identities come exclusively from the exact
+# task record; no worker-authored value can widen them.
 fm_role_gate_nm_evidence() {
-  local text=$1 media=$2 audience=$3 limit version
-  for limit in "$text" "$media" "$audience"; do
-    case "$limit" in
-      unrestricted|none|restricted|unknown) ;;
-      *) printf 'refused: invalid evidence limit %s; use unrestricted|none|restricted|unknown\n' "$limit" >&2; return 1 ;;
-    esac
+  local state=$1 id=$2 cwd=$3 meta kind mode project worktree text media audience
+  local current recorded top lineage=0 version value
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) echo 'refused: FM_TASK_ID is missing or malformed' >&2; return 1 ;;
+  esac
+  meta=${state%/}/$id.meta
+  for value in kind mode project worktree evidence_text evidence_media evidence_audience; do
+    if ! fm_role_meta_exact_value "$meta" "$value" >/dev/null; then
+      printf 'refused: task %s metadata must contain exactly one non-symlinked %s= declaration\n' "$id" "$value" >&2
+      return 1
+    fi
   done
+  kind=$(fm_role_meta_exact_value "$meta" kind)
+  mode=$(fm_role_meta_exact_value "$meta" mode)
+  project=$(fm_role_meta_exact_value "$meta" project)
+  worktree=$(fm_role_meta_exact_value "$meta" worktree)
+  text=$(fm_role_meta_exact_value "$meta" evidence_text)
+  media=$(fm_role_meta_exact_value "$meta" evidence_media)
+  audience=$(fm_role_meta_exact_value "$meta" evidence_audience)
+  [ "$kind" = ship ] && [ "$mode" = no-mistakes ] || {
+    printf 'refused: task %s is recorded as kind=%s mode=%s, not a no-mistakes ship\n' "$id" "$kind" "$mode" >&2
+    return 1
+  }
+  [ -n "$project" ] && [ -n "$worktree" ] || {
+    printf 'refused: task %s has an empty recorded project or worktree\n' "$id" >&2
+    return 1
+  }
+  for value in "$text" "$media" "$audience"; do
+    fm_role_evidence_limit_valid "$value" || {
+      printf 'refused: task %s has malformed evidence limit %s\n' "$id" "$value" >&2
+      return 1
+    }
+  done
+  current=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || {
+    echo 'refused: current worktree cannot be resolved' >&2
+    return 1
+  }
+  recorded=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || {
+    printf 'refused: task %s recorded worktree is unavailable: %s\n' "$id" "$worktree" >&2
+    return 1
+  }
+  top=$(git -C "$current" rev-parse --show-toplevel 2>/dev/null) || top=
+  [ -n "$top" ] && top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || top=
+  if [ "$current" != "$recorded" ] || [ "$top" != "$recorded" ]; then
+    printf 'refused: FM_TASK_ID=%s is bound to worktree %s, not current worktree %s\n' "$id" "$recorded" "$current" >&2
+    return 1
+  fi
+  fm_role_self_repo "$recorded" "$project" || lineage=$?
+  [ "$lineage" -eq 0 ] || {
+    printf 'refused: task %s recorded project %s does not provably own worktree %s\n' "$id" "$project" "$recorded" >&2
+    return 1
+  }
   if ! version=$(no-mistakes --version 2>/dev/null); then
     echo 'refused: installed no-mistakes version cannot be established before publication' >&2
     return 1
@@ -98,7 +161,8 @@ fm_role_gate_nm_evidence() {
     printf 'refused: no verified evidence audience control for limit %s (%s); repository visibility alone does not constrain media attachments\n' "$audience" "$version" >&2
     return 1
   fi
-  printf 'evidence: no narrower tool-enforced limits requested (%s); destination authority and actual payload approval remain separate\n' "$version"
+  printf 'evidence: task %s project %s worktree %s permits text=%s media=%s audience=%s (%s); destination authority and actual payload approval remain separate\n' \
+    "$id" "$project" "$recorded" "$text" "$media" "$audience" "$version"
 }
 
 # fm_role_file <config-dir>

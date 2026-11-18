@@ -2664,6 +2664,11 @@ SH
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
     fi
     expect_code 0 "$?" "$kind worker spawn failed: $out"
+    if [ "$kind" = no-mistakes ]; then
+      assert_grep 'evidence_text=unknown' "$HOME_DIR/state/$id.meta" "$brief_kind no-mistakes spawn did not record the text limit"
+      assert_grep 'evidence_media=unknown' "$HOME_DIR/state/$id.meta" "$brief_kind no-mistakes spawn did not record the media limit"
+      assert_grep 'evidence_audience=unknown' "$HOME_DIR/state/$id.meta" "$brief_kind no-mistakes spawn did not record the audience limit"
+    fi
     launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
     envelope="$CASE_DIR/prompt-envelope"
     encoded="$CASE_DIR/encoded-prompt"

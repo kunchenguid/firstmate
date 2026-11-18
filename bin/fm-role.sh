@@ -4,7 +4,7 @@
 # Usage:
 #   bin/fm-role.sh report
 #   bin/fm-role.sh check <project-dir> [upstream-consent <scope>]
-#   bin/fm-role.sh evidence <text-limit> <media-limit> <audience-limit>
+#   bin/fm-role.sh evidence
 #
 #   report   prints one line: fm-role: <user|maintainer> [<scope>] (<source>)
 #            and, when a malformed or unverified input forced a closed result,
@@ -21,19 +21,20 @@
 #            apply). The optional `upstream-consent <scope>` argument is the
 #            recorded per-task consent a dispatcher captured.
 #
-#   evidence checks the installed no-mistakes before starting a publishing run.
-#            Each limit is explicit: unrestricted|none|restricted|unknown.
-#            Only unrestricted limits currently pass: no tool-side suppression
-#            or audience restriction is needed for the approved concrete payload.
-#            This never grants broader content permission. The check has no
-#            verified effective-config interface for enforcing narrower limits.
-#            Text includes deterministic raw-log/body embedding and evidence
-#            branches; media includes attachments AND repository storage.
-#            Audience is separate from the repository consent check above.
-#            Chain this predicate with && before the publishing command; it
-#            neither publishes nor authorizes a destination or payload itself.
-#            Nonzero means stop, not permission to skip required validation,
-#            change tools/settings, or replace controls with drafting prose.
+#   evidence checks the current worker's supervisor-owned task metadata and the
+#            installed no-mistakes before starting a publishing run. FM_TASK_ID
+#            selects the record; the current physical git root must equal its
+#            recorded worktree and share the recorded project's history. The
+#            record must contain exactly one explicit text, media and audience
+#            limit: unrestricted|none|restricted|unknown. Only unrestricted
+#            limits currently pass: no tool-side suppression or audience
+#            restriction is needed for the approved concrete payload. Text
+#            includes deterministic raw-log/body embedding and evidence branches;
+#            media includes attachments AND repository storage. Chain this
+#            predicate with && before the publishing command; it neither
+#            publishes nor authorizes a destination or payload itself. Nonzero
+#            means stop, not permission to skip required validation, change
+#            tools/settings, or replace controls with drafting prose.
 #
 # bin/fm-role-lib.sh owns the schema summary and mechanics;
 # docs/configuration.md "Firstmate role" owns the operator-facing schema.
@@ -88,11 +89,12 @@ check)
   exit 1
   ;;
 evidence)
-  [ "$#" -eq 4 ] || {
-    echo 'usage: bin/fm-role.sh evidence <text-limit> <media-limit> <audience-limit>' >&2
+  [ "$#" -eq 1 ] || {
+    echo 'usage: bin/fm-role.sh evidence' >&2
     exit 1
   }
-  fm_role_gate_nm_evidence "$2" "$3" "$4"
+  STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+  fm_role_gate_nm_evidence "$STATE" "${FM_TASK_ID:-}" "$PWD"
   ;;
 -h | --help | help)
   awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"

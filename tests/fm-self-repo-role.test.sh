@@ -715,10 +715,24 @@ test_secondmate_spawn_refuses_consent_flag() {
   pass "fm-spawn.sh: --upstream-consent is refused on secondmate charters"
 }
 
-# The evidence predicate is not a publishing wrapper. Exercise the generated
-# && calling shape with a synthetic side effect, never a forge or uploader.
+make_evidence_task() {  # <home> <id> <text> <media> <audience>
+  local home=$1 id=$2 text=$3 media=$4 audience=$5 project worktree
+  project="$home/project"
+  worktree="$home/$id-wt"
+  if [ ! -d "$project/.git" ]; then
+    git init -q "$project" || fail "could not initialize evidence project"
+    git_commit "$project" evidence-root
+  fi
+  git -C "$project" worktree add -q --detach "$worktree" || fail "could not create evidence worktree"
+  printf 'kind=ship\nmode=no-mistakes\nproject=%s\nworktree=%s\nevidence_text=%s\nevidence_media=%s\nevidence_audience=%s\n' \
+    "$project" "$worktree" "$text" "$media" "$audience" > "$home/state/$id.meta"
+  printf '%s\n' "$worktree"
+}
+
+# The predicate reads limits and identity only from supervisor metadata. Exercise
+# its && calling shape with a synthetic side effect, never a forge or uploader.
 test_evidence_limits_stop_before_publication() {
-  local home fakebin out rc text media audience reason marker
+  local home fakebin out rc text media audience reason marker worktree
   home=$(make_role_home evidence-limits)
   fakebin="$home/bin"
   marker="$home/published"
@@ -729,9 +743,10 @@ test_evidence_limits_stop_before_publication() {
 printf '%s\n' 'no-mistakes version v1.72.0 (synthetic)'
 EOF
   chmod +x "$fakebin/no-mistakes"
-  out=$(PATH="$fakebin:$PATH" run_role "$home" evidence unrestricted unrestricted unrestricted \
+  worktree=$(make_evidence_task "$home" evidence-ok unrestricted unrestricted unrestricted)
+  out=$(cd "$worktree" && FM_TASK_ID=evidence-ok PATH="$fakebin:$PATH" run_role "$home" evidence \
     && printf 'synthetic publication\n' > "$marker"); rc=$?
-  expect_code 0 "$rc" "explicitly unrestricted evidence should pass the predicate (got: $out)"
+  expect_code 0 "$rc" "recorded unrestricted evidence should pass the predicate (got: $out)"
   assert_present "$marker" "passing evidence predicate did not reach the synthetic publishing side effect"
   assert_contains "$out" 'destination authority and actual payload approval remain separate' \
     "the predicate claimed to authorize the payload or destination"
@@ -739,8 +754,9 @@ EOF
 
   while IFS='|' read -r text media audience reason; do
     [ -n "$text" ] || continue
+    worktree=$(make_evidence_task "$home" "evidence-$text-$media-$audience" "$text" "$media" "$audience")
     rc=0
-    out=$(PATH="$fakebin:$PATH" run_role "$home" evidence "$text" "$media" "$audience" \
+    out=$(cd "$worktree" && FM_TASK_ID="evidence-$text-$media-$audience" PATH="$fakebin:$PATH" run_role "$home" evidence \
       && printf 'prohibited publication\n' > "$marker") || rc=$?
     [ "$rc" -ne 0 ] || fail "evidence predicate accepted $text/$media/$audience"
     assert_contains "$out" "$reason" "evidence refusal did not name the missing control"
@@ -755,16 +771,39 @@ unrestricted|unknown|unrestricted|media limit
 unrestricted|unrestricted|none|audience control
 unrestricted|unrestricted|restricted|audience control
 unrestricted|unrestricted|unknown|audience control
-allow-by-prose|unrestricted|unrestricted|invalid evidence limit
+allow-by-prose|unrestricted|unrestricted|malformed evidence limit
 ROWS
-  pass "fm-role.sh evidence: explicit unrestricted limits pass; unsupported and unknown text/media/audience limits never publish"
+  pass "fm-role.sh evidence: recorded unrestricted limits pass; unsupported limits never publish"
 }
 
-test_evidence_requires_readable_installed_tool() {
-  local home fakebin out rc response
-  home=$(make_role_home evidence-tool)
+test_evidence_identity_and_metadata_refuse_before_publication() {
+  local home fakebin out rc marker work_a work_b meta response
+  home=$(make_role_home evidence-identity)
   fakebin="$home/bin"
+  marker="$home/published"
   mkdir -p "$fakebin"
+  printf '#!/bin/sh\nprintf "no-mistakes version v1.72.0 (synthetic)\\n"\n' > "$fakebin/no-mistakes"
+  chmod +x "$fakebin/no-mistakes"
+  work_a=$(make_evidence_task "$home" evidence-a unrestricted unrestricted unrestricted)
+  work_b=$(make_evidence_task "$home" evidence-b unrestricted unrestricted unrestricted)
+
+  rc=0
+  out=$(cd "$work_a" && FM_TASK_ID=evidence-b PATH="$fakebin:$PATH" run_role "$home" evidence \
+    && printf 'cross-task publication\n' > "$marker") || rc=$?
+  [ "$rc" -ne 0 ] || fail "cross-task worktree mismatch was accepted"
+  assert_contains "$out" 'not current worktree' "cross-task refusal did not name the worktree mismatch"
+  assert_absent "$marker" "cross-task mismatch invoked the publishing side effect"
+
+  meta="$home/state/evidence-a.meta"
+  grep -v '^evidence_audience=' "$meta" > "$meta.tmp" && mv "$meta.tmp" "$meta"
+  rc=0
+  out=$(cd "$work_a" && FM_TASK_ID=evidence-a PATH="$fakebin:$PATH" run_role "$home" evidence \
+    && printf 'missing-limit publication\n' > "$marker") || rc=$?
+  [ "$rc" -ne 0 ] || fail "missing metadata limit was accepted"
+  assert_contains "$out" 'exactly one non-symlinked evidence_audience=' "missing metadata refusal was not specific"
+  assert_absent "$marker" "missing metadata invoked the publishing side effect"
+
+  work_a=$(make_evidence_task "$home" evidence-tool unrestricted unrestricted unrestricted)
   for response in missing malformed; do
     if [ "$response" = missing ]; then
       printf '#!/bin/sh\nexit 127\n' > "$fakebin/no-mistakes"
@@ -773,17 +812,19 @@ test_evidence_requires_readable_installed_tool() {
     fi
     chmod +x "$fakebin/no-mistakes"
     rc=0
-    out=$(PATH="$fakebin:$PATH" run_role "$home" evidence unrestricted unrestricted unrestricted) || rc=$?
+    out=$(cd "$work_a" && FM_TASK_ID=evidence-tool PATH="$fakebin:$PATH" run_role "$home" evidence \
+      && printf 'unverified-tool publication\n' > "$marker") || rc=$?
     [ "$rc" -ne 0 ] || fail "$response installed tool was accepted"
     assert_contains "$out" 'refused:' "$response installed tool had no refusal explanation"
+    assert_absent "$marker" "$response installed tool invoked the publishing side effect"
   done
   rc=0
-  out=$(run_role "$home" evidence unrestricted unrestricted) || rc=$?
-  [ "$rc" -ne 0 ] || fail "an omitted audience silently defaulted to unrestricted"
-  assert_contains "$out" 'usage:' "missing explicit evidence limit had no usage explanation"
+  out=$(run_role "$home" evidence extra) || rc=$?
+  [ "$rc" -ne 0 ] || fail "caller-supplied evidence limits were accepted"
+  assert_contains "$out" 'usage:' "caller-supplied limits had no usage refusal"
   out=$(run_role "$home" --help)
-  assert_contains "$out" 'Chain this predicate with &&' "help omitted the pre-publication calling contract"
-  pass "fm-role.sh evidence: unavailable or unrecognized tool and omitted limits refuse"
+  assert_contains "$out" 'predicate with && before the publishing command' "help omitted the pre-publication calling contract"
+  pass "fm-role.sh evidence: cross-task, missing metadata and unverified tools refuse before publication"
 }
 
 # --- run --------------------------------------------------------------------
@@ -810,6 +851,6 @@ test_spawn_consent_agreement
 test_promote_gate_on_self_repo
 test_secondmate_spawn_refuses_consent_flag
 test_evidence_limits_stop_before_publication
-test_evidence_requires_readable_installed_tool
+test_evidence_identity_and_metadata_refuse_before_publication
 
 echo "# all fm-self-repo-role tests passed"
