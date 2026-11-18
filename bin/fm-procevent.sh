@@ -217,7 +217,9 @@
 # a firstmate-owned source is bound before it is armed, and an unscoped replay
 # of an old capture could close any call held since.
 # Reconcile selections use the parallel `reconciles` adapter command and the
-# binding-verified `reconcile-requests` intake, never the keyed-answer value.
+# binding-verified `reconcile-requests` intake, never the keyed-answer value,
+# under the same `--for` scope. A capture whose owner record is damaged feeds
+# neither intake, because feeding it unscoped would lift that scope.
 # External binding responses never enter either authority-bearing intake.
 #
 # Feeding is deliberately independent of handling: it never acknowledges a result
@@ -474,6 +476,16 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
 # unbound source, an adapter with no `answers` command, and a failure on either
 # side all leave the capture untouched and still announced, because this never
 # acknowledges anything (see the keyed-answer note in the header).
+# Prints the task a capture's feeds are scoped to, and nothing for a
+# firstmate-owned capture. Fails when the capture is task-owned but its owner
+# cannot be read, so no caller falls back to an unscoped feed.
+result_feed_owner() {  # <result-file>
+  local base=${1%.result}
+  if [ -e "$base.owner-task" ] || [ -L "$base.owner-task" ] || [ -e "$base.answers-pending" ]; then
+    fm_procevent_result_owner_task "$1" 2>/dev/null
+  fi
+}
+
 feed_keyed_answers() {  # <adapter> <source-id> <result-file>
   local adapter=$1 id=$2 result=$3 script origin seq owner report rc=0
   script=$(adapter_script "$adapter")
@@ -481,7 +493,7 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
   origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
-  owner=$(fm_procevent_result_owner_task "$result" 2>/dev/null) || owner=''
+  owner=$(result_feed_owner "$result") || return 1
   if [ -n "$owner" ]; then
     report=$("$script" answers "$result" 2>/dev/null \
       | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" --for "$owner" \
@@ -528,16 +540,19 @@ cmd_feed_answers() {  # <source-id>
 }
 
 feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script origin seq rows
+  local adapter=$1 id=$2 result=$3 script origin seq rows owner
+  local -a scope=()
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
+  owner=$(result_feed_owner "$result") || return 1
+  [ -z "$owner" ] || scope=(--for "$owner")
   rows=$("$script" reconciles "$result" 2>/dev/null) || return 1
   printf '%s\n' "$rows" \
     | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
-        --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
+        --source-id "$id" ${scope[@]+"${scope[@]}"} --source "the captured result $id sequence $seq" >/dev/null 2>&1
 }
 
 read_adapter() {  # <source-id>
@@ -1075,6 +1090,10 @@ cmd_start() {
   fi
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
     task_owner=$(source_owner_task "$id" 2>/dev/null || true)
+    if ! fm_pr_task_id_valid "$task_owner"; then
+      fm_procevent_source_lock_release "$id"
+      die "task-owned registration has no readable owner task: $id"
+    fi
     task_pending=$(source_pending "$id" | head -1)
     if [ -n "$task_pending" ]; then
       fm_procevent_source_lock_release "$id"

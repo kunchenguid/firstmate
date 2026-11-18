@@ -26,7 +26,7 @@
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
 #   fm-captain-hold.sh settle-pr <task-id> <PR-url>
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] [--for <task-id>] --source <provenance>   (keyed answers on stdin)
-#   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
+#   fm-captain-hold.sh reconcile-requests --source-id <source-id> [--for <task-id>] --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
@@ -116,7 +116,9 @@
 # visibly refuses it, and never passes it to `answer`, so no channel and no
 # card-declared mode can turn it into a close, release, or request. A separate
 # `reconcile-requests` intake verifies a captured source's binding before it
-# records a durable request under `state/reconcile-requests/`.
+# records a durable request under `state/reconcile-requests/`. Its `--for
+# <task-id>` is the same scope `answers --for` applies: a task not held with
+# `--origin <task-id>` is reported as `refused:` and files no request.
 #
 # `reconcile` is the verify-then-decide half. Both outcomes require the pending
 # request created by the captain's board selection. `close` is the moot outcome:
@@ -1783,9 +1785,11 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
 
 command_reconcile_requests() {
   local source_id='' source='' origin row id note provenance show show_status=0 created=0 skipped=0 tab=$'\t'
+  local for_task='' held_for
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source-id) shift; source_id=${1:-} ;;
+      --for) shift; for_task=${1:-}; validate_slug for-task "$for_task" ;;
       --source) shift; source=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -1822,6 +1826,11 @@ command_reconcile_requests() {
       skipped=$((skipped + 1))
     elif [ "$(show_field_value "$show" hold_kind)" != captain ]; then
       printf 'refused: %s (not held for the captain)\n' "$id"
+      skipped=$((skipped + 1))
+    elif [ -n "$for_task" ] \
+      && held_for=$(body_hold_origin "$(decode_shown_value "$(show_field "$show" body)")") \
+      && [ "$held_for" != "$for_task" ]; then
+      printf 'refused: %s (held for %s, not for %s)\n' "$id" "${held_for:-no recorded origin}" "$for_task"
       skipped=$((skipped + 1))
     else
       provenance=$source

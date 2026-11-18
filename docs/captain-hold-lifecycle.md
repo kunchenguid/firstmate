@@ -306,6 +306,9 @@ Every other structurally uncertain capture feeds neither intake, remains announc
 
 The adapter-agnostic runner pipes reconcile rows into `reconcile-requests` only for a bound source.
 That intake verifies the named binding again before it creates anything.
+A result captured for a board armed `--for` a task reaches that intake with `--for` that task, exactly as its keyed answers do.
+A task id whose call was not held with `--origin <task-id>` is then reported as `refused:` and files no request.
+A capture whose owner record cannot be read feeds neither intake.
 Failures remain best-effort and never acknowledge or suppress the captured result.
 
 ### The reconcile request record

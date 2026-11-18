@@ -2475,7 +2475,7 @@ SH
 # answer only the calls held for that scout: the key is author-written board
 # text, so anything wider lets one scout's board close another task's call.
 test_scout_board_answers_reach_only_its_own_held_calls() {
-  local home sid stub out show
+  local home sid stub out show rc
   home=$(make_home scout-board)
   sid=lavish-5c0a7b0a4d000001
   fm_test_track_procevent_home "$home" "$home/procevent-claims"
@@ -2537,13 +2537,18 @@ EOF
 
   # A later round is keyed by a fresh held task id and recorded at capture time
   # through the binding, still scoped to the scout the board was armed for.
+  run_captain "$home" hold scout-call-recheck --title "Call to re-check" \
+    --reason "captain re-check pending" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the scout's call to re-check"
   cat > "$home/round.txt" <<'EOF'
 session:
   status: feedback
   session_ended: false
-prompts[2]{tag,text,prompt}:
+prompts[4]{tag,text,prompt}:
   "choice","Round two: no","Context data: {\"question\":\"scout-call-2\",\"answer\":\"no\"}"
   "choice","Other: yes","Context data: {\"question\":\"other-origin-call\",\"answer\":\"yes\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"scout-call-recheck\",\"selection\":\"reconcile\",\"note\":\"\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"other-origin-call\",\"selection\":\"reconcile\",\"note\":\"\"}"
 EOF
   run_procevent "$home" register-task lavish "$sid" sample-scout -- "$stub" >/dev/null \
     || fail "could not re-arm the board for round two"
@@ -2554,6 +2559,22 @@ EOF
   assert_contains "$show" "held: yes" "a bound scout board closed a call held for another task"
   out=$(run_captain "$home" bind "$sid" 2>&1) || fail "a bind after a fed round failed: $out"
   assert_not_contains "$out" "scout-call-2" "bind replayed a round the runner had already fed: $out"
+
+  # A reconcile selection is scoped like an answer: the board files a request
+  # only on a call held for the scout it was armed for.
+  out=$(run_captain "$home" reconcile list) || fail "could not list the reconcile requests"
+  assert_contains "$out" "scout-call-recheck" \
+    "a scout board's reconcile selection on its own held call filed no request: $out"
+  assert_not_contains "$out" "other-origin-call" \
+    "a scout board filed a reconcile request on a call held for another task: $out"
+  set +e
+  out=$(printf 'other-origin-call\n' \
+    | run_captain "$home" reconcile-requests --source-id "$sid" --for sample-scout --source "captured board" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a scoped reconcile intake accepted another task's call: $out"
+  assert_contains "$out" "refused: other-origin-call (held for other-work, not for sample-scout)" \
+    "the scoped reconcile intake did not report the refusal: $out"
 
   # A capture left by an install that never marked results pending may already
   # have been fed, so a later bind must not replay it onto a call held again.
@@ -2567,6 +2588,16 @@ EOF
   out=$(run_captain "$home" bind "$sid" 2>&1) || fail "a bind over an unmarked capture failed: $out"
   show=$(tasks_in "$home" show scout-call-3 --full)
   assert_contains "$show" "held: yes" "bind replayed a capture that was never marked pending"
+
+  # A marked capture whose owner record is damaged has lost its scope, so a
+  # bind must leave it unfed instead of replaying it unscoped.
+  cp "$home/state/procevent-inbox/$sid.3.result" "$home/state/procevent-inbox/$sid.4.result"
+  printf 'lavish\n' > "$home/state/procevent-inbox/$sid.4.adapter"
+  printf 'sample-scout\nextra\n' > "$home/state/procevent-inbox/$sid.4.owner-task"
+  : > "$home/state/procevent-inbox/$sid.4.answers-pending"
+  out=$(run_captain "$home" bind "$sid" 2>&1) || true
+  show=$(tasks_in "$home" show scout-call-3 --full)
+  assert_contains "$show" "held: yes" "bind replayed a capture with a damaged owner record unscoped: $out"
 
   # A firstmate-owned board is bound before it is armed, so a capture it took
   # while unbound is never replayed: unscoped, it could close any held call.
