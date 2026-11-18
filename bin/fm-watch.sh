@@ -4379,7 +4379,7 @@ lane_capacity_publish_detached() {
 # own - through bin/fm-admission-queue.sh retry, detached for the same
 # beacon-freshness reason as the summaries above. The cross-home worker count
 # that admission reads is kept fresh the same way (bin/fm-worker-table.sh
-# --refresh owns its cadence and its lock). Both are no-ops without their file.
+# --refresh owns its cadence and its lock). Refresh is independent of admission.
 ADMISSION_RETRY_INTERVAL=${FM_ADMISSION_RETRY_INTERVAL:-60}
 case "$ADMISSION_RETRY_INTERVAL" in ''|*[!0-9]*) ADMISSION_RETRY_INTERVAL=60 ;; esac
 ADMISSION_RETRY_PID=
@@ -4407,8 +4407,38 @@ worker_table_refresh_detached() {
   fi
   touch "$STATE/.last-worker-table-refresh"
   FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
-    "$SCRIPT_DIR/fm-worker-table.sh" --refresh </dev/null >/dev/null 2>&1 &
+    "$SCRIPT_DIR/fm-worker-table.sh" --refresh --max-age 240 </dev/null >/dev/null 2>&1 &
   WORKER_TABLE_REFRESH_PID=$!
+}
+
+SECONDMATE_HEALTH_PID=
+secondmate_health_detached() {
+  local result reason meta found=0
+  for result in "$STATE"/.secondmate-health-result-*; do
+    [ -f "$result" ] && [ ! -L "$result" ] || continue
+    IFS= read -r reason < "$result" || return 1
+    fm_wake_append check "${result##*/}" "$reason" || return 1
+    rm -f -- "$result" || return 1
+    wake "$reason"
+  done
+  [ "$(age_of "$STATE/.last-secondmate-health")" -ge 60 ] || return 0
+  if [ -n "$SECONDMATE_HEALTH_PID" ]; then
+    kill -0 "$SECONDMATE_HEALTH_PID" 2>/dev/null && return 0
+    if ! wait "$SECONDMATE_HEALTH_PID" 2>/dev/null; then
+      SECONDMATE_HEALTH_PID=
+      reason='check: secondmate goal-health sweep failed; inspect fm-secondmate-health.sh and the goal projection'
+      fm_wake_append check secondmate-health-error "$reason" || return 1
+      wake "$reason"
+    fi
+  fi
+  touch "$STATE/.last-secondmate-health"
+  for meta in "$STATE"/*.meta; do
+    if grep -qx 'kind=secondmate' "$meta" 2>/dev/null; then found=1; break; fi
+  done
+  [ "$found" -eq 1 ] || return 0
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-secondmate-health.sh" </dev/null >/dev/null 2>&1 &
+  SECONDMATE_HEALTH_PID=$!
 }
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
@@ -4779,7 +4809,7 @@ while :; do
   if [ -d "$STATE/admission-queue" ] && [ "$(age_of "$STATE/.last-admission-retry")" -ge "$ADMISSION_RETRY_INTERVAL" ]; then
     admission_retry_detached
   fi
-  if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/.last-worker-table-refresh")" -ge 60 ]; then
+  if [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/secondmates.md" ] && [ "$(age_of "$STATE/.last-worker-table-refresh")" -ge 60 ]; then
     worker_table_refresh_detached
   fi
 
@@ -4839,6 +4869,11 @@ while :; do
   signal_preempt_check
   secondmate_liveness_tick || {
     echo "watcher: secondmate liveness check failed" >&2
+    exit 1
+  }
+
+  secondmate_health_detached || {
+    echo 'watcher: secondmate goal-health check failed' >&2
     exit 1
   }
 

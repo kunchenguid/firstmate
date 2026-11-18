@@ -75,9 +75,10 @@
 # secondmate home read-only and refreshes its cached copy) at the lowest CPU
 # priority, bounded by FM_WORKER_TABLE_REFRESH_TIMEOUT seconds (default 300),
 # under state/.worker-table-refresh.lock so overlapping runs do not pile up.
-# The cache age is the newest *.board-input.json mtime in the cache directory.
-# bin/fm-watch.sh runs it detached, so the cross-home count that spawn
-# admission reads (bin/fm-admission-lib.sh) stays under five minutes old.
+# Cadence uses the last successful sweep, not one home's newest cache mtime,
+# so a fresh home cannot indefinitely hide missing or stale sibling rows.
+# bin/fm-watch.sh runs it detached regardless of admission configuration;
+# successful sweeps refresh the cross-home count on a five-minute cadence.
 #
 # Read-only: apart from --refresh, the command acquires no lock, drains no wakes, arms nothing and
 # changes no operational state; it reads this home's state, the registry, the
@@ -125,21 +126,17 @@ esac
 [ "$#" -le 1 ] || { echo "$USAGE" >&2; exit 2; }
 
 if [ "$mode" = refresh ]; then
-  refresh_cache_age() {  # prints the newest cache age in seconds, or nothing
-    local f m newest=0 t
-    for f in "$CACHE_DIR"/*.board-input.json; do
-      [ -f "$f" ] || continue
-      m=$(stat -c %Y "$f" 2>/dev/null) || m=$(/usr/bin/stat -f %m "$f" 2>/dev/null) || continue
-      [ "$m" -le "$newest" ] || newest=$m
-    done
-    [ "$newest" -gt 0 ] || return 0
+  refresh_sweep_age() {  # prints the last successful sweep age, or nothing
+    local marker="$STATE/.worker-table-refresh-complete" m t
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+    m=$(stat -c %Y "$marker" 2>/dev/null) || m=$(/usr/bin/stat -f %m "$marker" 2>/dev/null) || return 0
     t=$(date +%s)
-    [ "$t" -ge "$newest" ] || t=$newest
-    printf '%s\n' $((t - newest))
+    [ "$t" -ge "$m" ] || return 0
+    printf '%s\n' $((t - m))
   }
   # Only a registered local secondmate home has rows to refresh.
   [ -f "$REGISTRY" ] && [ ! -L "$REGISTRY" ] && grep -q '^- ' "$REGISTRY" 2>/dev/null || exit 0
-  cache_age=$(refresh_cache_age)
+  cache_age=$(refresh_sweep_age)
   if [ -n "$cache_age" ] && [ "$cache_age" -lt "$refresh_max_age" ]; then
     exit 0
   fi
@@ -155,6 +152,9 @@ if [ "$mode" = refresh ]; then
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_SNAPSHOT_CACHE_DIR="$CACHE_DIR" \
     fm_run_timed "$refresh_timeout" nice -n 19 "${FM_WORKER_TABLE_SNAPSHOT:-$SCRIPT_DIR/fm-fleet-snapshot.sh}" --live-board-input \
     >/dev/null 2>&1 </dev/null || refresh_rc=$?
+  if [ "$refresh_rc" -eq 0 ]; then
+    [ ! -L "$STATE/.worker-table-refresh-complete" ] && touch "$STATE/.worker-table-refresh-complete" || refresh_rc=1
+  fi
   fm_lock_release "$refresh_lock"
   if [ "$refresh_rc" -ne 0 ]; then
     echo "fm-worker-table: the cache refresh failed (exit $refresh_rc)" >&2

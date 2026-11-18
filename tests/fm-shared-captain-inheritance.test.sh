@@ -604,6 +604,28 @@ EOF
   pass "session-start digest renders data/captain-shared.md with the shared read-only label"
 }
 
+test_autonomy_backstops_inherit() {
+  local rec primary second flag
+  rec=$(new_home_pair autonomy-backstops)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf '7\n' > "$primary/config/drive-floor"
+  : > "$primary/config/open-decision-reminders"
+  : > "$primary/config/ci-fixing-green"
+  propagate_secondmate_inheritance "$primary" "$second" >/dev/null
+  for flag in drive-floor open-decision-reminders ci-fixing-green; do
+    cmp -s "$primary/config/$flag" "$second/config/$flag" || fail "secondmate did not inherit $flag"
+  done
+  printf '9\n' > "$primary/config/drive-floor"
+  propagate_secondmate_inheritance "$primary" "$second" >/dev/null
+  [ "$(cat "$second/config/drive-floor")" = 9 ] || fail 'mid-session floor update did not converge'
+  rm -f "$primary/config/ci-fixing-green"
+  propagate_secondmate_inheritance "$primary" "$second" >/dev/null
+  [ ! -e "$second/config/ci-fixing-green" ] || fail 'proven primary removal did not converge'
+  pass 'autonomy backstops inherit, update and remove through the existing convergence path'
+}
+test_autonomy_backstops_inherit
+
 test_first_copy_readonly_and_local_files_preserved
 test_true_divergence_after_inherit_still_quarantines
 test_interrupted_publication_matching_source_does_not_quarantine

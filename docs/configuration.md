@@ -893,6 +893,7 @@ Publishing is best-effort and never changes what the watcher does.
 `bin/fm-capacity.sh --admit` is the check of the same verdict that a fresh ship or scout spawn makes (see Spawn admission below): it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
 `bin/fm-worker-table.sh` complements this home-local report with the cross-home worker table: one row per worker in this home and in every registered secondmate home, with harness and model, working / parked / idle, the age of the last meaningful progress, and the PR when there is one.
 This home's rows are read live through `bin/fm-crew-state.sh`; each secondmate's rows come from that home's cached `fm-live-board-input.v1` summary, with the cache age disclosed.
+The watcher refreshes these summaries on a five-minute successful-sweep cadence even without `config/lane-capacity`; collection failures retain their disclosed stale or unreadable state rather than claiming live counts.
 Only a `working` row counts as busy, so a parked listener is never counted as a running worker.
 The command reads no config file, never spawns work in another home, and `--json` prints the `fm-worker-table.v1` document; the script's header owns the table line and the document.
 
@@ -1088,7 +1089,7 @@ Repeats start at that interval, double after each repeat, and cap at `FM_OPEN_DE
 Both settings must be canonical positive integers of at most nine digits, with the cap at least the threshold.
 Invalid settings stop the watcher with an error when the flag is present.
 Pass them in the watcher's environment, or export them in `config/watch.env` for watchers started through `bin/fm-watch-arm.sh`.
-The flag is home-local and is not inherited by secondmate homes.
+The flag is primary-authoritative inherited config; push mid-session changes through `bin/fm-config-push.sh`.
 `bin/fm-watch.sh`'s `open_decision_reminder_tick` owns the per-key schedule, which persists across watcher restarts.
 
 ## Firstmate-imposed hold expiry
@@ -1129,7 +1130,7 @@ Scans run at most once per `FM_DRIVE_FLOOR_SCAN_SECS` seconds (default `300`) an
 Recovering to the floor, losing the last startable lane, or removing the config file drops the episode, so the next dip starts a fresh clock.
 The floor must be a canonical integer of at least 1 and at most nine digits, and the hold must be a canonical integer of at most nine digits; a present but invalid file or setting stops the watcher with an error.
 Pass them in the watcher's environment, or export them in `config/watch.env` for watchers started through `bin/fm-watch-arm.sh`.
-The flag is home-local and is not inherited by secondmate homes.
+The file is primary-authoritative inherited config; push mid-session changes through `bin/fm-config-push.sh`.
 `bin/fm-watch.sh`'s `drive_floor_tick` owns the scan and its repeats, which persist across watcher restarts; `tests/fm-watch-drive-floor.test.sh` and `tests/fm-watch-goal-stall.test.sh` are its regressions.
 
 ## Stage ladders (config/stage-ladders/<project>)
@@ -1167,7 +1168,7 @@ The wake repeats once per `FM_PAUSE_RESURFACE_SECS` while the lane stays put.
 Scans run at most once per `FM_CI_FIXING_GREEN_SCAN_SECS` seconds (default `300`) and cost one current-state read per lane plus one bounded forge read for a lane past the hold.
 A lane that leaves the reading or changes run starts a fresh clock, and removing the flag drops the ledger.
 With the flag absent the watcher spends no current-state or forge read for it.
-The flag is home-local and is not inherited by secondmate homes.
+The flag is primary-authoritative inherited config; push mid-session changes through `bin/fm-config-push.sh`.
 `bin/fm-watch.sh`'s `ci_fixing_green_tick` owns the scan and its repeats, which persist across watcher restarts, and `bin/fm-classify-lib.sh`'s `crew_ci_fixing_run` and `pr_forge_checks_green` own which verdicts and forge answers count.
 
 ## Spawn base from the primary checkout (config/spawn-base-primary-checkout)

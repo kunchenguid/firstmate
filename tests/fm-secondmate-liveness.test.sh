@@ -1022,4 +1022,94 @@ test_remote_full_probe_rex_backend_drift
 test_remote_full_probe_rex_readiness_verdicts
 test_remote_full_probe_legacy_record_defaults_herdr
 
+# Goal-idle orchestration reuses the existing proof adapters, not a new
+# harness classifier. Keep its time/progress and safety checks deterministic.
+test_goal_idle_health() (
+  local w rows id=mate f
+  w="$TMP_ROOT/goal-health"
+  mkdir -p "$w/state/mate.inbox" "$w/bin"
+  # shellcheck disable=SC2030 # This fixture deliberately owns a subshell home.
+  export FM_HOME=$w STATE=$w/state FM_SM_HEALTH_DIR=$w/bin
+  export FM_HEALTH_TEST_CALLS=$w/calls
+  fm_write_meta "$STATE/mate.meta" kind=secondmate window=s:fm-mate backend=tmux harness=pi
+  printf 'working [at=1]: ready\n' > "$STATE/mate.status"
+  rows=$'goal\titem\tmate\t-\t0'
+  . "$ROOT/bin/fm-secondmate-health-lib.sh"
+  fm_meta_get() { awk -F= -v key="$2" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$1"; }
+  fm_backend_target_of_meta() { printf 's:fm-mate'; }
+  fm_backend_of_meta() { printf tmux; }
+  agent=alive; busy=idle; composer=empty; own=1
+  fm_backend_agent_state() { printf '%s' "$agent"; }
+  fm_busy_classify_meta() { printf '%s' "$busy"; }
+  fm_backend_composer_state() { printf '%s' "$composer"; }
+  fm_task_inbox_seq_of() { printf 1; }
+  fm_task_inbox_doorbell_line() { printf 'own doorbell'; }
+  fm_task_inbox_composer_holds() { [ "$own" = 1 ]; }
+  fm_task_inbox_ring() { printf 'ring\n' >> "$FM_HEALTH_TEST_CALLS"; }
+  for f in fm-send.sh fm-secondmate-restart.sh; do
+    # shellcheck disable=SC2016 # Variables belong to the generated fixture.
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "${0##*/}" >> "$FM_HEALTH_TEST_CALLS"\nexit 0\n' > "$w/bin/$f"
+    chmod +x "$w/bin/$f"
+  done
+  fm_secondmate_health_observe "$id" "$rows" 100
+  fm_secondmate_health_observe "$id" "$rows" 1899
+  [ ! -e "$w/calls" ] || fail 'goal-idle recovery ran before its first interval'
+  fm_secondmate_health_observe "$id" "$rows" 1900
+  [ "$(cat "$w/calls")" = fm-send.sh ] || fail 'first miss did not send one durable goal steer'
+  fm_secondmate_health_observe "$id" "$rows" 3699
+  [ "$(wc -l < "$w/calls" | tr -d ' ')" = 1 ] || fail 'second interval was shortened'
+  fm_secondmate_health_observe "$id" "$rows" 3700
+  fm_secondmate_health_observe "$id" "$rows" 5500
+  [ "$(grep -c fm-secondmate-restart.sh "$w/calls")" = 1 ] || fail 'second miss must request confirmed restart exactly once'
+  grep -q completed "$STATE"/.secondmate-health-result-* || fail 'confirmed recovery result was not durable'
+
+  # New progress resets the episode; each unsafe signal independently refuses.
+  printf 'working [at=2]: next step\n' > "$STATE/mate.status"
+  fm_secondmate_health_observe "$id" "$rows" 6000
+  for agent in dead missing ambiguous unreadable unverified; do
+    fm_secondmate_health_observe "$id" "$rows" 7800
+  done
+  agent=alive
+  for busy in busy unknown; do fm_secondmate_health_observe "$id" "$rows" 7800; done
+  busy=idle
+  for composer in unknown pending-unproven pending; do fm_secondmate_health_observe "$id" "$rows" 7800; done
+  [ "$(wc -l < "$w/calls" | tr -d ' ')" = 2 ] || fail 'unsafe runtime or composer was touched'
+  printf 'delivery=fire-and-forget\n--\nunread\n' > "$STATE/mate.inbox/001.msg"
+  composer=pending; own=0
+  fm_secondmate_health_observe "$id" "$rows" 7800
+  [ "$(wc -l < "$w/calls" | tr -d ' ')" = 2 ] || fail 'unrelated composer text was touched'
+  own=1
+  fm_secondmate_health_observe "$id" "$rows" 7800
+  [ "$(tail -1 "$w/calls")" = ring ] || fail 'exact own unsent doorbell was not delegated to inbox Enter recovery'
+  [ -f "$STATE/mate.inbox/001.msg" ] || fail 'health sweep consumed an unread instruction'
+  fm_secondmate_health_observe "$id" '' 8000
+  [ ! -e "$STATE/.secondmate-health-mate" ] || fail 'no startable items must clear episode'
+
+  printf 'paused [at=3]: waiting\n' > "$STATE/mate.status"
+  fm_secondmate_health_observe "$id" "$rows" 8000
+  fm_secondmate_health_observe "$id" "$rows" 9800
+  [ "$(wc -l < "$w/calls" | tr -d ' ')" = 3 ] || fail 'declared wait was interrupted'
+  pass 'goal health: 30m ring, second-miss confirmed restart, no repeats, progress reset and fail-closed runtime/composer guards'
+)
+test_goal_idle_health
+
+test_goal_health_executable_projection() (
+  local home="$TMP_ROOT/health-executable"
+  mkdir -p "$home/state" "$home/data" "$home/config"
+  # shellcheck disable=SC2031 # Independent fixture, not the previous subshell.
+  export FM_HOME=$home FM_STATE_OVERRIDE=$home/state FM_DATA_OVERRIDE=$home/data FM_CONFIG_OVERRIDE=$home/config
+  printf 'item [id=ready] [owner=mate] [class=drive]: lab ready item\n' > "$home/items"
+  "$ROOT/bin/fm-goal.sh" start lab --title 'Lab health' --done-when 'ready is done' \
+    --named-by 'lab instruction' --plan "$home/items" --items-file "$home/items" >/dev/null \
+    || fail 'could not create executable health goal fixture'
+  fm_write_meta "$home/state/mate.meta" kind=secondmate backend=tmux window=s:fm-mate harness=pi
+  "$ROOT/bin/fm-secondmate-health.sh" || fail 'health executable did not consume canonical startable projection'
+  [ -s "$home/state/.secondmate-health-mate" ] || fail 'executable did not observe goal-owning mate'
+  "$ROOT/bin/fm-goal.sh" mark lab ready 'done' -- 'lab proof' >/dev/null || fail 'could not complete fixture item'
+  "$ROOT/bin/fm-secondmate-health.sh" || fail 'health executable failed with completed goal item'
+  [ ! -e "$home/state/.secondmate-health-mate" ] || fail 'completed goal left idle recovery armed'
+  pass 'goal health executable: canonical goal projection arms and disarms observation without endpoint mutation'
+)
+test_goal_health_executable_projection
+
 echo "# all fm-secondmate-liveness tests passed"

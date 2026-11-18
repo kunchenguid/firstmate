@@ -440,7 +440,34 @@ test_fleet_snapshot_task_model() {
   pass "fleet snapshot task rows carry the model for future caches"
 }
 
+test_refresh_sweep_cadence() {
+  local home sm_home cache snapshot
+  home=$(make_home refresh-cadence)
+  sm_home="$TMP_ROOT/refresh-second"
+  seed_secondmate_home "$sm_home" terp
+  write_registry "$home" "$(sm_line "$sm_home")"
+  cache=$(cache_path "$home/state/secondmate-summary-cache" terp "$sm_home")
+  write_cache "$cache" "$sm_home" "$NOW"
+  snapshot="$home/snapshot"
+  # shellcheck disable=SC2016 # Variables belong to the generated fixture.
+  printf '#!/usr/bin/env bash\nprintf "sweep\\n" >> "$FM_HOME/sweeps"\nexit "${FM_TEST_SNAPSHOT_RC:-0}"\n' > "$snapshot"
+  chmod +x "$snapshot"
+  # Even a just-written sibling cache is not proof of a complete fleet sweep.
+  FM_WORKER_TABLE_SNAPSHOT=$snapshot run_table "$home" --refresh || fail 'initial refresh failed'
+  FM_WORKER_TABLE_SNAPSHOT=$snapshot run_table "$home" --refresh || fail 'cadenced refresh failed'
+  [ "$(wc -l < "$home/sweeps" | tr -d ' ')" = 1 ] || fail 'successful sweep was repeated inside cadence'
+  rm -f "$home/state/.worker-table-refresh-complete"
+  if FM_TEST_SNAPSHOT_RC=1 FM_WORKER_TABLE_SNAPSHOT=$snapshot run_table "$home" --refresh >/dev/null 2>&1; then
+    fail 'failed refresh claimed success'
+  fi
+  [ ! -e "$home/state/.worker-table-refresh-complete" ] || fail 'failure suppressed later refreshes'
+  FM_WORKER_TABLE_SNAPSHOT=$snapshot run_table "$home" --refresh || fail 'failed sweep did not retry'
+  [ "$(wc -l < "$home/sweeps" | tr -d ' ')" = 3 ] || fail 'fresh sibling cache hid a missing/failed sweep'
+  pass 'fleet refresh: complete-sweep cadence, fresh sibling cannot hide missing homes, failures retry'
+}
+
 fm_test_run \
+  test_refresh_sweep_cadence \
   test_usage_exits \
   test_empty_home \
   test_main_rows_live \
