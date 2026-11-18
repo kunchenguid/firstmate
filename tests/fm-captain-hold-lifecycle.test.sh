@@ -2469,6 +2469,186 @@ SH
   pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
+# A scout arms its own board, so firstmate can only bind it after the scout says
+# the board exists, and by then the captain may already have answered. Binding
+# must replay that captured answer once, and a board armed for a scout may
+# answer only the calls held for that scout: the key is author-written board
+# text, so anything wider lets one scout's board close another task's call.
+test_scout_board_answers_reach_only_its_own_held_calls() {
+  local home sid stub out show rc
+  home=$(make_home scout-board)
+  sid=lavish-5c0a7b0a4d000001
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+  tasks_in "$home" add sample-scout "Scout the sample board" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the scout task"
+  write_origin_meta "$home" sample-scout
+  run_captain "$home" hold scout-call-1 --title "Round one call" \
+    --reason "captain round one pending" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the round-one call"
+  run_captain "$home" hold scout-call-2 --title "Round two call" \
+    --reason "captain round two pending" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the round-two call"
+  run_captain "$home" hold scout-call-closed --title "Already answered call" \
+    --reason "captain answered already" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the answered call"
+  printf 'Captain chose the first option.\n' > "$home/closed-decision.txt"
+  run_captain "$home" answer scout-call-closed --decision-file "$home/closed-decision.txt" >/dev/null \
+    || fail "could not answer the already-answered call"
+  run_captain "$home" hold other-origin-call --title "Another task's call" \
+    --reason "captain call for other work" --repo sample --origin other-work >/dev/null \
+    || fail "could not hold the other origin's call"
+
+  stub="$home/board-source.sh"
+  printf '#!/usr/bin/env bash\ncat %q\n' "$home/round.txt" > "$stub"
+  chmod +x "$stub"
+  cat > "$home/round.txt" <<'EOF'
+session:
+  status: feedback
+  session_ended: false
+prompts[5]{tag,text,prompt}:
+  "choice","Round one: yes","Context data: {\"question\":\"scout-call-1\",\"answer\":\"yes\"}"
+  "choice","Answered: again","Context data: {\"question\":\"scout-call-closed\",\"answer\":\"again\"}"
+  "choice","Other: yes","Context data: {\"question\":\"other-origin-call\",\"answer\":\"yes\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"scout-call-late-recheck\",\"selection\":\"reconcile\",\"note\":\"\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"other-origin-call\",\"selection\":\"reconcile\",\"note\":\"\"}"
+EOF
+  run_captain "$home" hold scout-call-late-recheck --title "Call to re-check before bind" \
+    --reason "captain late re-check pending" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the scout's call to re-check before bind"
+  run_procevent "$home" register-task lavish "$sid" sample-scout -- "$stub" >/dev/null \
+    || fail "could not arm the board for the scout"
+  out=$(run_procevent "$home" start "$sid" 2>&1) || fail "the unbound board round did not complete: $out"
+  assert_contains "$out" "$sid.1.result" "the unbound board round was not captured: $out"
+  show=$(tasks_in "$home" show scout-call-1 --full)
+  assert_contains "$show" "held: yes" "an unbound board recorded an answer before any bind"
+
+  # A reconcile pass the backlog cut short must leave the whole round pending,
+  # or the answer pass would retire the capture with its selection unfiled.
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ -e "$FM_HOME/wedge-late-recheck" ] && [ "${1:-} ${2:-}" = "show scout-call-late-recheck" ]; then
+  exit 124
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/wedge-late-recheck"
+  set +e
+  out=$(run_captain "$home" bind "$sid" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "bind reported success although the reconcile pass was cut short: $out"
+  show=$(tasks_in "$home" show scout-call-1 --full)
+  assert_contains "$show" "held: yes" "bind retired a round whose reconcile pass was cut short: $out"
+  rm -f "$home/wedge-late-recheck" "$home/fakebin/tasks-axi"
+
+  out=$(run_captain "$home" bind "$sid" 2>&1) || fail "bind failed while replaying the captured round: $out"
+  assert_contains "$out" "closed: scout-call-1" "bind did not replay the answer captured before it: $out"
+  assert_contains "$out" "skipped: scout-call-closed (already closed)" \
+    "a key naming a closed call lost its existing skip report: $out"
+  assert_contains "$out" "refused: other-origin-call" \
+    "a scout board's key naming another task's call was not refused: $out"
+  show=$(tasks_in "$home" show scout-call-1 --full)
+  assert_contains "$show" "state: done" "the replayed answer did not close the scout's call"
+  assert_contains "$show" "the captured result $sid sequence 1" \
+    "the replayed answer did not name the captured round that carried it"
+  show=$(tasks_in "$home" show other-origin-call --full)
+  assert_contains "$show" "held: yes" "a scout board closed a call held for another task"
+  assert_contains "$out" "reconcile: scout-call-late-recheck" \
+    "bind did not report the reconcile selection captured before it: $out"
+  out=$(run_captain "$home" reconcile list) || fail "could not list the reconcile requests"
+  [ "$(printf '%s\n' "$out" | grep -c '^scout-call-late-recheck')" = 1 ] \
+    || fail "bind did not file exactly one request for the reconcile selection captured before it: $out"
+  assert_contains "$out" "reconcile-requests: 1" \
+    "the replay filed a reconcile request on a call held for another task: $out"
+
+  out=$(run_captain "$home" bind "$sid" 2>&1) || fail "a repeat bind failed: $out"
+  assert_not_contains "$out" "scout-call-late-recheck" \
+    "a repeat bind replayed an already-filed reconcile selection: $out"
+  assert_not_contains "$out" "scout-call-1" "a repeat bind replayed an already-replayed round: $out"
+  [ "$(tasks_in "$home" show scout-call-1 --full | grep -c 'Answer: yes')" = 1 ] \
+    || fail "a repeat bind recorded the replayed answer twice"
+
+  # A later round is keyed by a fresh held task id and recorded at capture time
+  # through the binding, still scoped to the scout the board was armed for.
+  run_captain "$home" hold scout-call-recheck --title "Call to re-check" \
+    --reason "captain re-check pending" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the scout's call to re-check"
+  cat > "$home/round.txt" <<'EOF'
+session:
+  status: feedback
+  session_ended: false
+prompts[4]{tag,text,prompt}:
+  "choice","Round two: no","Context data: {\"question\":\"scout-call-2\",\"answer\":\"no\"}"
+  "choice","Other: yes","Context data: {\"question\":\"other-origin-call\",\"answer\":\"yes\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"scout-call-recheck\",\"selection\":\"reconcile\",\"note\":\"\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"other-origin-call\",\"selection\":\"reconcile\",\"note\":\"\"}"
+EOF
+  run_procevent "$home" register-task lavish "$sid" sample-scout -- "$stub" >/dev/null \
+    || fail "could not re-arm the board for round two"
+  out=$(run_procevent "$home" start "$sid" 2>&1) || fail "the bound board round did not complete: $out"
+  show=$(tasks_in "$home" show scout-call-2 --full)
+  assert_contains "$show" "state: done" "the bound round did not close its fresh held call"
+  show=$(tasks_in "$home" show other-origin-call --full)
+  assert_contains "$show" "held: yes" "a bound scout board closed a call held for another task"
+  out=$(run_captain "$home" bind "$sid" 2>&1) || fail "a bind after a fed round failed: $out"
+  assert_not_contains "$out" "scout-call-2" "bind replayed a round the runner had already fed: $out"
+
+  # A reconcile selection is scoped like an answer: the board files a request
+  # only on a call held for the scout it was armed for.
+  out=$(run_captain "$home" reconcile list) || fail "could not list the reconcile requests"
+  assert_contains "$out" "scout-call-recheck" \
+    "a scout board's reconcile selection on its own held call filed no request: $out"
+  assert_not_contains "$out" "other-origin-call" \
+    "a scout board filed a reconcile request on a call held for another task: $out"
+  set +e
+  out=$(printf 'other-origin-call\n' \
+    | run_captain "$home" reconcile-requests --source-id "$sid" --for sample-scout --source "captured board" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a scoped reconcile intake accepted another task's call: $out"
+  assert_contains "$out" "refused: other-origin-call (held for other-work, not for sample-scout)" \
+    "the scoped reconcile intake did not report the refusal: $out"
+
+  # A capture left by an install that never marked results pending may already
+  # have been fed, so a later bind must not replay it onto a call held again.
+  run_captain "$home" hold scout-call-3 --title "Re-held call" \
+    --reason "captain re-held call pending" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the re-held call"
+  sed 's/scout-call-2/scout-call-3/' "$home/state/procevent-inbox/$sid.2.result" \
+    > "$home/state/procevent-inbox/$sid.3.result"
+  printf 'lavish\n' > "$home/state/procevent-inbox/$sid.3.adapter"
+  printf 'sample-scout\n' > "$home/state/procevent-inbox/$sid.3.owner-task"
+  out=$(run_captain "$home" bind "$sid" 2>&1) || fail "a bind over an unmarked capture failed: $out"
+  show=$(tasks_in "$home" show scout-call-3 --full)
+  assert_contains "$show" "held: yes" "bind replayed a capture that was never marked pending"
+
+  # A marked capture whose owner record is damaged has lost its scope, so a
+  # bind must leave it unfed instead of replaying it unscoped.
+  cp "$home/state/procevent-inbox/$sid.3.result" "$home/state/procevent-inbox/$sid.4.result"
+  printf 'lavish\n' > "$home/state/procevent-inbox/$sid.4.adapter"
+  printf 'sample-scout\nextra\n' > "$home/state/procevent-inbox/$sid.4.owner-task"
+  : > "$home/state/procevent-inbox/$sid.4.answers-pending"
+  out=$(run_captain "$home" bind "$sid" 2>&1) || true
+  show=$(tasks_in "$home" show scout-call-3 --full)
+  assert_contains "$show" "held: yes" "bind replayed a capture with a damaged owner record unscoped: $out"
+
+  # A firstmate-owned board is bound before it is armed, so a capture it took
+  # while unbound is never replayed: unscoped, it could close any held call.
+  run_captain "$home" hold firstmate-board-call --title "Firstmate board call" \
+    --reason "captain firstmate board call pending" --repo sample >/dev/null \
+    || fail "could not hold the firstmate board call"
+  sed 's/scout-call-3/firstmate-board-call/' "$home/state/procevent-inbox/$sid.3.result" > "$home/round.txt"
+  run_procevent "$home" register lavish lavish-5c0a7b0a4d000002 -- "$stub" >/dev/null \
+    || fail "could not register the firstmate-owned board"
+  out=$(run_procevent "$home" start lavish-5c0a7b0a4d000002 2>&1) \
+    || fail "the firstmate-owned board round did not complete: $out"
+  out=$(run_captain "$home" bind lavish-5c0a7b0a4d000002 2>&1) || fail "binding the firstmate board failed: $out"
+  show=$(tasks_in "$home" show firstmate-board-call --full)
+  assert_contains "$show" "held: yes" "bind replayed an unscoped capture from a firstmate-owned board"
+  pass "a scout board's answers replay once on bind and reach only the scout's own held calls"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -5151,6 +5331,7 @@ test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
+test_scout_board_answers_reach_only_its_own_held_calls
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled

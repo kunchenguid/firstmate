@@ -25,8 +25,8 @@
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh pr-policy <task-id> <PR-url> <merged|closed|terminal> <close|release>
 #   fm-captain-hold.sh settle-pr <task-id> <PR-url>
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
-#   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] [--for <task-id>] --source <provenance>   (keyed answers on stdin)
+#   fm-captain-hold.sh reconcile-requests --source-id <source-id> [--for <task-id>] --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
 #   fm-captain-hold.sh binding <source-id>
@@ -95,10 +95,13 @@
 # record exists is reported as `refused:` under the same attended-only rule as
 # `answer --release` and feeds nothing. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
-# and feeds nothing. A replayed delivery whose answer digest and requested
-# close mode both match the newest record is reported `closed:` and is a no-op;
-# a mode mismatch is skipped. The command exits nonzero when any key was
-# skipped. `--source` is provenance text recorded in the
+# and feeds nothing. With `--for <task-id>`, a key whose task was not held with
+# `--origin <task-id>` is reported as `refused:` and feeds nothing: a channel
+# hosted by one task can answer only the calls held for that task, because its
+# keys are text the board's author wrote. A replayed delivery whose answer digest
+# and requested close mode both match the newest record is reported `closed:`
+# and is a no-op; a mode mismatch is skipped. The command exits nonzero when any
+# key was skipped or refused. `--source` is provenance text recorded in the
 # durable decision, never a behavior switch: this command has no per-channel
 # branch and no knowledge of chat, review decks, or any transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
@@ -113,7 +116,9 @@
 # visibly refuses it, and never passes it to `answer`, so no channel and no
 # card-declared mode can turn it into a close, release, or request. A separate
 # `reconcile-requests` intake verifies a captured source's binding before it
-# records a durable request under `state/reconcile-requests/`.
+# records a durable request under `state/reconcile-requests/`. Its `--for
+# <task-id>` is the same scope `answers --for` applies: a task not held with
+# `--origin <task-id>` is reported as `refused:` and files no request.
 #
 # `reconcile` is the verify-then-decide half. Both outcomes require the pending
 # request created by the captain's board selection. `close` is the moot outcome:
@@ -135,7 +140,10 @@
 # under `state/decision-bindings/`; a source with no binding feeds nothing, so
 # this whole path is opt-in per source and an unbound source behaves as if it
 # did not exist. `bind` deliberately does not require the source to exist yet,
-# so a channel can be bound BEFORE it is armed. The optional second argument
+# so a channel can be bound BEFORE it is armed. A board a worker armed is often
+# bound late, so `bind` then replays, through bin/fm-procevent.sh feed-answers,
+# each of its captured results that has not reached this intake, and prints what
+# the intake reported. The optional second argument
 # exists only for legacy pre-collapse records and callers: a concrete origin is
 # stored verbatim and used as the composition fallback above, and
 # `--any-origin` stores the same `(any)` marker a plain `bind <source-id>`
@@ -1510,6 +1518,8 @@ command_bind() {
     fail "cannot record the decision binding for $source"
   fi
   printf 'bound: %s -> %s\n' "$source" "$origin"
+  "$SCRIPT_DIR/fm-procevent.sh" feed-answers "$source" \
+    || fail "bound $source, but could not replay the results it captured before the binding; run bind again to retry"
 }
 
 command_unbind() {
@@ -1557,10 +1567,11 @@ sanitize_reconcile_provenance() {
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
-  local resolve_rc
+  local resolve_rc for_task='' held_for
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
+      --for) shift; for_task=${1:-}; validate_slug for-task "$for_task" ;;
       --any-origin) origin=$BINDING_ANY ;;
       --*) usage >&2; exit 2 ;;
       *)
@@ -1653,6 +1664,14 @@ command_answers() {
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
+    if [ -n "$for_task" ]; then
+      held_for=$(body_hold_origin "$(decode_shown_value "$body")")
+      if [ "$held_for" != "$for_task" ]; then
+        printf 'refused: %s (held for %s, not for %s)\n' "$id" "${held_for:-no recorded origin}" "$for_task"
+        skipped=$((skipped + 1))
+        continue
+      fi
+    fi
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
@@ -1766,9 +1785,11 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
 
 command_reconcile_requests() {
   local source_id='' source='' origin row id note provenance show show_status=0 created=0 skipped=0 tab=$'\t'
+  local for_task='' held_for
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source-id) shift; source_id=${1:-} ;;
+      --for) shift; for_task=${1:-}; validate_slug for-task "$for_task" ;;
       --source) shift; source=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -1805,6 +1826,11 @@ command_reconcile_requests() {
       skipped=$((skipped + 1))
     elif [ "$(show_field_value "$show" hold_kind)" != captain ]; then
       printf 'refused: %s (not held for the captain)\n' "$id"
+      skipped=$((skipped + 1))
+    elif [ -n "$for_task" ] \
+      && held_for=$(body_hold_origin "$(decode_shown_value "$(show_field "$show" body)")") \
+      && [ "$held_for" != "$for_task" ]; then
+      printf 'refused: %s (held for %s, not for %s)\n' "$id" "${held_for:-no recorded origin}" "$for_task"
       skipped=$((skipped + 1))
     else
       provenance=$source
