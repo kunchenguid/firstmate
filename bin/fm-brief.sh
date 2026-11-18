@@ -748,6 +748,7 @@ Only when the reviewed inventory is empty, run \`FM_HOME=$(shell_quote "$FM_HOME
 This exception permits only that command, not direct metadata edits, another task, or any backlog write.
 If any captain call remains, ask firstmate to register the inventory and attest completion before you report done.
 If the command refuses, report the refusal to firstmate and stop rather than bypassing the completion gate.
+Before you append \`done\`, run \`plain-check\` on your report if that tool is on PATH; fix what it reports, or wrap non-prose parts in \`<!-- ste:off -->\` / \`<!-- ste:on -->\` markers, and name the result in your \`done\` line. If the tool is absent, skip this step.
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
