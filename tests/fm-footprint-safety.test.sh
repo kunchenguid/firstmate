@@ -1658,7 +1658,8 @@ HOOK
   all_writable "$left" || fail "what is left must be writable: $(find "$left" ! -perm -u+w | head -n 3)"
   # A record whose last line was cut short by a full disk still thaws.
   mkdir -p "$TMP_ROOT/engine-dies/rec/x"
-  chmod 500 "$TMP_ROOT/engine-dies/rec/x"
+  # Frozen from 755, as a freeze leaves it: only the write bits gone.
+  chmod 555 "$TMP_ROOT/engine-dies/rec/x"
   rec="$TMP_ROOT/engine-dies/rec.modes"
   python3 - "$TMP_ROOT/engine-dies/rec/x" "$rec" <<'PY2'
 import os, sys
