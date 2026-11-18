@@ -30,8 +30,17 @@ Every captain-facing outcome that leaves durable evidence in the mate home is pu
 | Goal progress | the item change recorded by `mark` | `bin/fm-goal.sh`, whose header owns goal records and quiet progress marks |
 | Child leaving the home | its final ledger line | `bin/fm-teardown.sh`, which refuses to remove the child while that line is undelivered |
 | Child ended silently | terminal current state with a silent ledger | the existing inactive-outcome scan in `bin/fm-inactive-reconcile.sh` |
+| Captain answered a board | the captured Lavish result (`state/procevent-inbox/<session>.<round>.result`) with a feedback answer | `bin/fm-procevent.sh` at capture time, through the adapter's `parent-event` command (`bin/fm-procevent-lavish.sh`), as one `board-answer` line per round |
 | Answer to a marked request | a correlated line guarded by the pending-reply record | `bin/fm-secondmate-report.sh`, which resolves the parent channel from the mate home; the pending-reply guard repairs a line stranded in the local mate's same-basename status file before recovery or escalation |
 | An outcome that exists only in the mate's reasoning | none | the charter and the `AGENTS.md` carve-outs only |
+
+A captain's board answer is one more such fact.
+Without that publication it reaches the main firstmate only when the mate model forwards it in a later turn, which took minutes.
+The runner now appends `board-answer [at=<epoch>]: captain answered board round <N> (session <session>, owning task <task|none>)` to the channel the moment the answer is durably captured, so the parent's watcher sees it within seconds.
+`board-answer` is deliberately not a recognized status verb: the classifier surfaces an unrecognized lowercase prefix as the line itself, so the parent never absorbs it as routine, and the supervision host's handling of that line class is the host's own rule.
+The line has no key and no timestamp of its own, so its session and round make it unique per round and a replayed capture appends nothing twice.
+An empty board close, a reconnect, and an error result publish nothing.
+A main home has no parent channel, so it publishes nothing and its own capture wake remains the announcement.
 
 The ledger delivery reads files, plus a local git reachability check on a ship `done:` with no delivery record yet (`bin/fm-dod-lib.sh`): it calls no harness, no forge, and no current-state reader, so it is identical for every harness and runtime backend.
 Each delivery is keyed with the first eight hexadecimal characters of its receipt fingerprint and uses the shared append contract above, and the ledger path reuses the inactive scan's per-fingerprint receipts, so a replayed poll or restart cannot deliver an event twice while a genuinely new terminal event is delivered again.
@@ -59,6 +68,7 @@ A running mate keeps the charter copy it was seeded with, so it picks the rule u
 
 `tests/fm-inactive-reconcile.test.sh` covers the ledger delivery against real ledgers with no harness: immediate done and failed delivery with note, PR, mode, posture, and report pointer, once-only delivery across polls, a ship `done:` withheld while its named head exists only in the worker copy, a pending one still delivered after teardown removes that copy, a line still being appended, later routine status prose not minting a fresh parent event because the inactive receipt identity binds structured fields only, the remote route, the yield of the inactive path to a terminal ledger, and the real watcher poll driving it.
 `tests/fm-captain-hold-lifecycle.test.sh` covers a mate home publishing a hold, its answer, and a distinct occurrence on re-hold, and a main home publishing nothing.
+`tests/fm-captain-hold-lifecycle.test.sh` also covers the board-answer line from the real runner: one line per round naming the session, round and owner, nothing for an empty close, nothing in a main home, and the surfaced classification.
 `tests/fm-pr-merge.test.sh` covers the PR-ready line at registration and the merge outcome's upward report.
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
 It also covers the registration-time ready line and its withholding until checks are green under `config/ready-after-green`.

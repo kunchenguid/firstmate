@@ -7,6 +7,7 @@
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
 #   fm-procevent-lavish.sh answers <result-file>
+#   fm-procevent-lavish.sh parent-event <source-id> <sequence> <result-file> [<owner-task>]
 #   fm-procevent-lavish.sh reconciles <result-file>
 #   fm-procevent-lavish.sh actions <result-file>
 #   fm-procevent-lavish.sh read <result-file>
@@ -104,6 +105,23 @@
 # This is a routing lookup before the blocking call, not presence polling or a
 # second route record. Ambient/configured addresses must not retarget a reply.
 # An unreadable or missing session stops before the staged reply is consumed.
+#
+# `parent-event` is this adapter's half of the generic parent-event seam in
+#            bin/fm-procevent.sh. When the captured result is positively a
+#            captain answer - `status: feedback`, or an `ended` result that
+#            still carries a queued prompts or feedback block - it prints the one
+#            parent-channel line `board-answer: captain answered board round
+#            <sequence> (session <source-id>, owning task <owner-task|none>)`
+#            and exits 0; any other result (an empty close, a reconnect, a
+#            waiting, missing, or unreadable result) prints nothing and exits 1.
+#            The verb is deliberately not a recognized status verb: an
+#            unrecognized lowercase prefix is surfaced by the watcher as the
+#            line itself (bin/fm-classify-lib.sh), which is what makes the
+#            parent see it at once instead of absorbing it as routine. The
+#            line carries no timestamp and no key: the channel stamps it, and
+#            its session plus round make the text unique per round, so a
+#            replayed capture appends nothing twice. docs/secondmate-parent-channel.md
+#            owns where it is published and why.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
@@ -895,6 +913,25 @@ cmd_reply() {
 }
 
 cmd_answers() { cmd_choice_rows answers "$@"; }
+
+cmd_parent_event() {  # <source-id> <sequence> <result-file> [<owner-task>]
+  local id=${1-} seq=${2-} file=${3-} owner=${4-} state content_rc
+  [ -n "$id" ] && [ -n "$seq" ] && [ -n "$file" ] || usage
+  case "$seq" in *[!0-9]*) die "sequence must be a number: $seq" ;; esac
+  [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  state=$(cmd_classify "$file")
+  case "$state" in
+    feedback) ;;
+    ended)
+      result_has_queued_content "$file"
+      content_rc=$?
+      [ "$content_rc" -eq 0 ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  printf 'board-answer: captain answered board round %s (session %s, owning task %s)\n' \
+    "$seq" "$id" "${owner:-none}"
+}
 cmd_reconciles() { cmd_choice_rows reconciles "$@"; }
 
 cmd_actions() {
@@ -1035,6 +1072,7 @@ case "${1-}" in
   terminal)  shift; cmd_terminal "$@" ;;
   silent)    shift; cmd_silent "$@" ;;
   answers)   shift; cmd_answers "$@" ;;
+  parent-event) shift; cmd_parent_event "$@" ;;
   reconciles) shift; cmd_reconciles "$@" ;;
   actions)   shift; cmd_actions "$@" ;;
   read)      shift; cmd_read "$@" ;;

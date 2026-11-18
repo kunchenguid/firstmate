@@ -2585,6 +2585,97 @@ SH
   pass "a board answer reaches the keyed-answer intake and wakes firstmate"
 }
 
+# A captain's board answer is a fact recorded by the runner at capture time, so a
+# secondmate home must publish it on the parent channel itself instead of waiting
+# for a model turn to forward it (docs/secondmate-parent-channel.md). Real
+# runner, real channel, no harness: the answer's own line, one line per round,
+# nothing for an empty close, nothing in a main home, and the line surfaces as a
+# captain-relevant event for the parent's watcher.
+test_board_answer_is_published_on_the_parent_channel() {
+  local parent mate fakebin channel stub empty out lines first home
+  parent=$(make_home board-parent)
+  mate="$TMP_ROOT/board-mate-home"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  fm_test_tasks_toml "$mate/.tasks.toml"
+  printf 'board-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$mate/data/backlog.md"
+  fakebin=$(fm_fakebin "$mate")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  fm_test_track_procevent_home "$mate" "$mate/procevent-claims"
+  channel="$parent/state/board-mate.status"
+
+  stub="$mate/answer-source.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "message","","go with the north route"
+OUT
+SH
+  chmod +x "$stub"
+  empty="$mate/empty-source.sh"
+  cat > "$empty" <<'SH'
+#!/usr/bin/env bash
+printf 'session:\n  status: ended\n  session_ended: true\n'
+SH
+  chmod +x "$empty"
+
+  run_procevent "$mate" register lavish lavish-b0a4d0000000aa01 -- "$stub" >/dev/null \
+    || fail "could not register the mate board source"
+  out=$(run_procevent "$mate" start lavish-b0a4d0000000aa01 2>&1) \
+    || fail "the mate board runner did not complete: $out"
+  assert_contains "$out" "parent-event-published: lavish-b0a4d0000000aa01" \
+    "the captured board answer was not published to the parent: $out"
+  [ -f "$channel" ] || fail "the parent channel file was never written"
+  lines=$(wc -l < "$channel" | tr -d ' ')
+  [ "$lines" = 1 ] || fail "expected one channel line after round 1, found $lines"
+  first=$(cat "$channel")
+  assert_contains "$first" "board-answer [at=" "the channel line lost its stamped verb: $first"
+  assert_contains "$first" "captain answered board round 1 (session lavish-b0a4d0000000aa01, owning task none)" \
+    "the channel line does not name the round, session and owner: $first"
+  # Class contract for the parent: an unrecognized verb is surfaced as itself.
+  ( . "$ROOT/bin/fm-classify-lib.sh"; status_is_captain_relevant "$first" ) \
+    || fail "the parent watcher would absorb the board-answer line: $first"
+
+  # Round 2 is a distinct fact; republishing round 1's line appends nothing.
+  out=$(run_procevent "$mate" start lavish-b0a4d0000000aa01 2>&1) \
+    || fail "the second board round did not complete: $out"
+  lines=$(wc -l < "$channel" | tr -d ' ')
+  [ "$lines" = 2 ] || fail "expected one line per round, found $lines lines"
+  grep -F 'captain answered board round 2 (session lavish-b0a4d0000000aa01' "$channel" >/dev/null \
+    || fail "round 2 was not published as its own line"
+  ( . "$ROOT/bin/fm-parent-channel-lib.sh"
+    fm_parent_channel_report "$mate" "$mate/state" "$(printf '%s' "$first" | sed 's/ \[at=[0-9]*\]//')" ) \
+    || fail "replaying round 1's line failed"
+  lines=$(wc -l < "$channel" | tr -d ' ')
+  [ "$lines" = 2 ] || fail "replaying a published round appended a duplicate ($lines lines)"
+
+  # An empty close says nothing, so the parent hears nothing.
+  run_procevent "$mate" register lavish lavish-b0a4d0000000aa02 -- "$empty" >/dev/null \
+    || fail "could not register the empty-close source"
+  out=$(run_procevent "$mate" start lavish-b0a4d0000000aa02 2>&1) || true
+  assert_not_contains "$out" "parent-event-published" "an empty close was published: $out"
+  lines=$(wc -l < "$channel" | tr -d ' ')
+  [ "$lines" = 2 ] || fail "an empty close appended to the parent channel ($lines lines)"
+
+  # A main home has no parent channel: the capture still wakes, nothing is
+  # published, and the runner does not fail.
+  home=$(make_home board-main)
+  run_procevent "$home" register lavish lavish-b0a4d0000000aa03 -- "$stub" >/dev/null \
+    || fail "could not register the main-home board source"
+  out=$(run_procevent "$home" start lavish-b0a4d0000000aa03 2>&1) \
+    || fail "the main-home board runner failed: $out"
+  assert_not_contains "$out" "parent-event" "a main home published a parent event: $out"
+  assert_contains "$(cat "$home/state/.wake-queue" 2>/dev/null)" "check: procevent lavish lavish-b0a4d0000000aa03 1" \
+    "the main-home capture produced no wake"
+  pass "a captured board answer is published on the parent channel once per round"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
@@ -5894,6 +5985,7 @@ test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
+test_board_answer_is_published_on_the_parent_channel
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled

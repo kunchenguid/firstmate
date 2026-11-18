@@ -213,6 +213,19 @@
 # while ACTING on it is firstmate's judgement, so the capture stays unacknowledged
 # and its `check` wake reaches the handler exactly as it would have anyway.
 #
+# Parent events use one last seam of the same kind. A secondmate home's parent
+# sees only what is appended to its parent channel, and a captain's board answer
+# otherwise reaches it only through whatever the mate model forwards in a later
+# turn (docs/secondmate-parent-channel.md). So after capture, `start` calls
+# `bin/fm-procevent-<adapter>.sh parent-event <source-id> <sequence> <result-file>
+# [<owner-task>]`, and the one line it prints is appended to the home's parent
+# channel through bin/fm-parent-channel-lib.sh. Exit 1 with no output means the
+# result carries nothing the parent must hear. The runner names no adapter and
+# parses no result, a main home has no parent channel and publishes nothing (its
+# own capture wake is the announcement), a replayed capture appends nothing twice
+# because the channel's append is idempotent per line, and like feeding it never
+# acknowledges a result or suppresses a wake.
+#
 # A runner is bound to the HOME that owns it, not to the one session that armed
 # it: a persistent source is meant to outlive that session, so reconcile stops a
 # runner whose source is retired in a live home, and this lease is the backstop
@@ -263,6 +276,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
@@ -485,6 +500,27 @@ feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
   printf '%s\n' "$rows" \
     | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
         --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
+}
+
+# Publish one adapter-declared parent event on the home's parent channel. See
+# the parent-event note in the header. Best-effort for capture: a channel that
+# cannot be written is reported on stderr and leaves the capture announced.
+publish_parent_event() {  # <adapter> <source-id> <result-file>
+  local adapter=$1 id=$2 result=$3 script seq owner='' line rc=0
+  script=$(adapter_script "$adapter")
+  [ -f "$script" ] && [ ! -L "$script" ] || return 1
+  seq=$(fm_procevent_result_sequence "$result") || return 1
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  owner=$(fm_procevent_result_owner_task "$result" 2>/dev/null || true)
+  line=$("$script" parent-event "$id" "$seq" "$result" ${owner:+"$owner"} 2>/dev/null) || return 1
+  [ -n "$line" ] || return 1
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$(fm_parent_channel_clean_note "$line")" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) printf 'parent-event-failed: %s sequence %s did not reach the parent channel (rc=%s)\n' "$id" "$seq" "$rc" >&2
+       return 1 ;;
+  esac
 }
 
 read_adapter() {  # <source-id>
@@ -1429,6 +1465,10 @@ EOF
   if [ "$extension_owner" -eq 0 ] \
     && feed_keyed_answers "$adapter" "$id" "$durable"; then
     printf 'answers-fed: %s\n' "$id"
+  fi
+  if [ "$extension_owner" -eq 0 ] \
+    && publish_parent_event "$adapter" "$id" "$durable"; then
+    printf 'parent-event-published: %s\n' "$id"
   fi
 
   # A self-announcing adapter's autohandle announces through its own durable

@@ -20,6 +20,8 @@
 #   - bin/fm-pr-check.sh             a registered PR-ready line carrying the
 #                                    canonical URL
 #   - bin/fm-captain-hold.sh         a task held for the captain and its answer
+#   - bin/fm-procevent.sh            a captain's board answer, at capture time,
+#                                    through the adapter's parent-event command
 #   - bin/fm-merge-outcome-lib.sh    a merged PR
 #   - bin/fm-goal.sh                 goal progress marks (quiet status lines)
 #   - bin/fm-teardown.sh             the child's final ledger line, refusing to
