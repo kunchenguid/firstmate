@@ -66,6 +66,7 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -197,10 +198,17 @@ class Freezer:
                 os.kill(os.getpid(), signal.SIGKILL)
             if self.stop_after and self.changes == self.stop_after:
                 paused = os.environ.get("FM_FOOTPRINT_TEST_PAUSED_FILE", "")
+                resume = os.environ.get("FM_FOOTPRINT_TEST_RESUME_FILE", "")
                 if paused:
                     with open(paused, "w", encoding="utf-8") as handle:
                         handle.write(f"{os.getpid()}\n")
-                os.kill(os.getpid(), signal.SIGSTOP)
+                if resume:
+                    # Waits, still running, until <resume> exists: a stopped
+                    # process in a group its parent left would be sent SIGHUP.
+                    while not os.path.exists(resume):
+                        time.sleep(0.05)
+                else:
+                    os.kill(os.getpid(), signal.SIGSTOP)
 
     def freeze_root(self, root: str, seen: list[tuple[int, int, int]]) -> None:
         """Freezes <root>, appending every directory and file whose mode it

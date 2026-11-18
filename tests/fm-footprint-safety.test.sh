@@ -1495,11 +1495,12 @@ engine_gone() {
   return 1
 }
 
-# stopped_mid <step> <name>: runs a close whose engine is paused (SIGSTOP)
-# part way through <step> (freeze or remove), then stops the close with TERM
-# as a timed-out caller does; sets SM_PID to the paused engine's pid. Under
-# GNU timeout the engine is in its own process group, out of the signal's
-# reach, so only the close itself can stop it.
+# stopped_mid <step> <name>: runs a close whose engine is paused part way
+# through <step> (freeze or remove), waiting, still running, for
+# $FB/resume, then stops the close with TERM as a timed-out caller does;
+# sets SM_PID to the paused engine's pid. Under GNU timeout the engine is in
+# its own process group, out of the signal's reach, so only the close itself
+# can stop it.
 stopped_mid() {  # <step> <name>
   local step=$1 name=$2 s n i pids
   new_home "$name"
@@ -1509,15 +1510,16 @@ stopped_mid() {  # <step> <name>
   while [ "$i" -le 40 ]; do printf 'w\n' > "$s/a/f$i"; printf 'w\n' > "$s/d/f$i"; i=$((i + 1)); done
   SM_AREA=$s
   if [ "$step" = freeze ]; then
-    # The engine stops itself (SIGSTOP) after five mode changes.
-    export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid"
+    # The engine pauses itself after five mode changes.
+    export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid" \
+      FM_FOOTPRINT_TEST_RESUME_FILE="$FB/resume"
   else
-    # Pauses the remove engine once it reaches the second directory.
+    # Holds the remove engine once it reaches the second directory.
     cat > "$FB/remove-hook" <<HOOK
 #!/bin/bash
 [ "\$2" = d ] || exit 0
 printf '%s\n' "\$PPID" > "$FB/engine.pid"
-kill -STOP "\$PPID"
+while [ ! -e "$FB/resume" ] && kill -0 "\$PPID" 2>/dev/null; do sleep .05; done
 HOOK
     chmod +x "$FB/remove-hook"
     export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook"
@@ -1533,7 +1535,8 @@ HOOK
   # shellcheck disable=SC2086 # one pid per word
   kill -TERM $pids
   wait
-  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_REMOVE_HOOK FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_REMOVE_HOOK FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE \
+    FM_FOOTPRINT_TEST_RESUME_FILE
 }
 
 test_a_close_stopped_mid_step_stops_its_engine_first() {
@@ -1543,7 +1546,7 @@ test_a_close_stopped_mid_step_stops_its_engine_first() {
     alive=0
     engine_gone "$SM_PID" || alive=1
     # Let a still-running engine go on, as it would have, before looking.
-    kill -CONT "$SM_PID" 2>/dev/null || true
+    : > "$FB/resume"
     n=0
     until engine_gone "$SM_PID" || [ "$n" -ge 100 ]; do sleep .05; n=$((n + 1)); done
     kill -KILL "$SM_PID" 2>/dev/null || true
@@ -1574,7 +1577,8 @@ esac
 exec "$real_py" "\$@"
 SH
   chmod +x "$FB/python3"
-  export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid"
+  export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid" \
+    FM_FOOTPRINT_TEST_RESUME_FILE="$FB/resume"
   fp task-close task-m2 "$s" > "$TMP_ROOT/startstop/out" 2>&1 &
   n=0
   until [ -e "$FB/freeze-starting" ] || [ "$n" -ge 400 ]; do sleep .05; n=$((n + 1)); done
@@ -1584,11 +1588,11 @@ SH
   # shellcheck disable=SC2086 # one pid per word
   kill -TERM $pids
   wait
-  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE FM_FOOTPRINT_TEST_RESUME_FILE
   rm -f "$FB/python3"
   # An engine that went on would have paused; let it finish, as it would.
   if [ -s "$FB/engine.pid" ]; then
-    kill -CONT "$(cat "$FB/engine.pid")" 2>/dev/null || true
+    : > "$FB/resume"
     n=0
     until engine_gone "$(cat "$FB/engine.pid")" || [ "$n" -ge 200 ]; do sleep .05; n=$((n + 1)); done
   fi
@@ -1606,11 +1610,12 @@ test_a_killed_close_is_repaired_only_after_its_engine_ends() {
   mkdir -p "$s/a" "$s/d"
   i=1
   while [ "$i" -le 40 ]; do printf 'w\n' > "$s/a/f$i"; printf 'w\n' > "$s/d/f$i"; i=$((i + 1)); done
-  export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid"
+  export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid" \
+    FM_FOOTPRINT_TEST_RESUME_FILE="$FB/resume"
   fp task-close task-m3 "$s" > "$TMP_ROOT/killmid/out" 2>&1 &
   n=0
   until [ -s "$FB/engine.pid" ] || [ "$n" -ge 400 ]; do sleep .05; n=$((n + 1)); done
-  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE FM_FOOTPRINT_TEST_RESUME_FILE
   [ "$n" -lt 400 ] || fail "the freeze never paused"
   epid=$(cat "$FB/engine.pid")
   pids=$(pgrep -f "fm-footprint.sh task-close task-m3 $s" || true)
@@ -1622,7 +1627,7 @@ test_a_killed_close_is_repaired_only_after_its_engine_ends() {
   engine_gone "$epid" && fail "the engine must outlive a close killed outright"
   out=$(fp sweep)
   [ -n "$(ls "$H/state/footprint-stopped" 2>/dev/null)" ] || fail "a pass must not undo a run whose engine still runs: $out"
-  kill -CONT "$epid" 2>/dev/null || true
+  : > "$FB/resume"
   n=0
   until engine_gone "$epid" || [ "$n" -ge 200 ]; do sleep .05; n=$((n + 1)); done
   out=$(fp sweep)
