@@ -639,7 +639,6 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
   return 1
 }
 
-# The still-open keys in a folded "<key>\t<verb>\t<note>" open set, one per line.
 # Advice only, after a steer is durably recorded: a ship or scout whose session
 # already reached the home's advise line is cheaper to replace than to steer
 # into a new piece of work (bin/fm-context-ceiling-lib.sh "THE ADVICE"). It
@@ -659,6 +658,7 @@ fm_send_fresh_worker_advice() {  # <meta-file> <task-id>
   echo "advice: $id's conversation is already $reason; if this steer starts a new piece of work, a fresh worker is cheaper: let this one finish and spawn a new task for it" >&2
 }
 
+# The still-open keys in a folded "<key>\t<verb>\t<note>" open set, one per line.
 fm_send_open_set_keys() {  # <open-set>
   [ -n "$1" ] || return 0
   printf '%s\n' "$1" | cut -f1

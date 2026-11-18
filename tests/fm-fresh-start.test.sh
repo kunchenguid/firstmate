@@ -232,13 +232,13 @@ test_durable_records_do_not_hold() {
 test_chat_question_record() {
   local out
   new_case chat-record
-  assert_equals '' "$(ask list)" "no record lists nothing"
+  [ ! -e "$CASE/state/chat-questions" ] || fail "no question asked leaves no record"
   out=$(ask open pick-layout 'which layout, A or B') || fail "open must succeed"
   case "$out" in *pick-layout*) ;; *) fail "open names the key: $out" ;; esac
   ask open name-it "$(printf 'what\tshould it\nbe called')" >/dev/null || fail "a second question opens"
-  assert_equals "name-it	what should it be called" "$(ask list | awk -F '\t' '$1 == "name-it" { print $1 "\t" $3 }')" \
+  assert_equals "what should it be called" "$(sed -n 's/^summary=//p' "$CASE/state/chat-questions/name-it.question")" \
     "tabs and newlines in the summary become spaces"
-  [[ "$(ask list | head -n 1 | cut -f2)" =~ ^[0-9]+$ ]] || fail "list prints when the question was asked"
+  [[ "$(sed -n 's/^asked=//p' "$CASE/state/chat-questions/pick-layout.question")" =~ ^[0-9]+$ ]] || fail "the record holds when the question was asked"
   assert_equals 'waiting:an unanswered chat question (name-it)' "$(step "$CASE")" "the gate names the first open question"
   ask close name-it >/dev/null || fail "close succeeds"
   assert_equals 'waiting:an unanswered chat question (pick-layout)' "$(step "$CASE")" "one open question still holds"
@@ -610,6 +610,59 @@ test_the_same_park_clears_once_the_save_turn_ends() {
   pass "the save turn's own Stop, in its own session with the /stow newest, lets the same park clear; nothing else does"
 }
 
+# A turn that ends after the save's own, in the same session and with no
+# submitted prompt (a supervision hand-back wakes the primary this way), may
+# have answered the captain; its Stop skips the day, so the clear never wipes
+# that answer.
+test_a_later_turn_end_after_the_save_skips_the_day() {
+  local nonce
+  new_case later-turn
+  step "$CASE" >/dev/null
+  nonce=$(record nonce)
+  prompted "/stow daily-fresh-start $nonce"
+  stow_turn "$nonce"
+  attest "$nonce"
+  turn_ends
+  assert_equals "$nonce" "$(sed -n 's/^nonce=//p' "$CASE/state/.daily-fresh-start-ended")" "the save turn's own end marks it finished"
+  jq -cn '{type: "user", isMeta: true, message: {role: "user", content: [{type: "text", text: "supervision-host: branch-outcome: run bin/fm-wake-drain.sh"}]}}' >>"$CASE/transcript.jsonl"
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"Captain, the docs fix is done."}],"usage":{"input_tokens":1,"cache_read_input_tokens":300000,"cache_creation_input_tokens":0}}}\n' >>"$CASE/transcript.jsonl"
+  turn_ends
+  assert_equals skipped "$(record step)" "a second turn end after the save skips the day"
+  [ ! -e "$CASE/state/.daily-fresh-start-attest" ] && [ ! -e "$CASE/state/.daily-fresh-start-ended" ] \
+    || fail "a skipped save forgets its attestation and its finished mark"
+  assert_equals 'done' "$(step "$CASE")" "the skipped day never clears"
+  assert_equals 'done' "$(FAKE_HOUR=06 step "$CASE")" "not later in the window either"
+  if grep -qx /clear "$CASE/typed"; then fail "a later turn after the save was wiped by /clear"; fi
+  assert_equals saving "$(FAKE_DAY=2030-01-03 step "$CASE")" "the next day starts again with a save"
+  pass "only the first turn end after the save marks it finished; a later one skips the day, so its reply is never cleared"
+}
+
+# A window that runs past midnight is one day: a save typed before midnight
+# attests and clears after it, and is not typed a second time.
+test_a_window_past_midnight_is_one_day() {
+  local nonce d
+  new_case midnight
+  printf 'hour=22\nwindow-hours=4\n' >"$CASE/config/daily-fresh-start"
+  assert_equals saving "$(FAKE_DAY=2030-01-02 FAKE_HOUR=23 step "$CASE")" "the save is typed before midnight"
+  nonce=$(record nonce)
+  assert_equals 2030-01-02 "$(record date)" "the day is the date the window opened"
+  stow_turn "$nonce"
+  export FAKE_DAY=2030-01-03 FAKE_HOUR=00
+  attest "$nonce" || fail "a save that finishes after midnight still attests"
+  assert_equals saving "$(step "$CASE")" "after midnight the same save is still waiting, not typed again"
+  turn_ends
+  assert_equals cleared "$(step "$CASE")" "and clears once its turn ends"
+  assert_equals 'done' "$(FAKE_HOUR=01 step "$CASE")" "the rest of the window is done"
+  assert_equals 1 "$(grep -c '^/stow ' "$CASE/typed")" "the save was typed once"
+  assert_equals saving "$(FAKE_HOUR=22 step "$CASE")" "the next evening's window is a new day"
+  export FAKE_DAY=2030-01-02 FAKE_HOUR=04
+  for d in 2030-03-01:2030-02-28 2032-03-01:2032-02-29 2031-01-01:2030-12-31 2030-05-01:2030-04-30 2030-08-01:2030-07-31; do
+    assert_equals "${d#*:}" "$(PATH="$FAKEBIN:$PATH" FAKE_DAY="${d%%:*}" bash -c '. "$1/bin/fm-fresh-start-lib.sh"; FM_FRESH_START_HOUR=22; fm_fresh_start_day 01' _ "$ROOT")" \
+      "before the opening hour, ${d%%:*} belongs to the day before"
+  done
+  pass "a window that runs past midnight is one day: one save, attested and cleared after midnight"
+}
+
 # The host keeps running across turns, so a fresh start leaves it holding the
 # replaced session's transcript; every Stop records the current one, which the
 # host reads instead, so the next day's save and clear follow the new session.
@@ -682,6 +735,8 @@ test_input_during_the_probes_stops_the_clear
 test_a_prompt_during_the_final_check_never_loses_to_the_clear
 test_the_clearing_commit_is_bounded
 test_the_same_park_clears_once_the_save_turn_ends
+test_a_later_turn_end_after_the_save_skips_the_day
+test_a_window_past_midnight_is_one_day
 test_unknown_size_is_not_a_run
 test_the_current_session_follows_each_stop
 test_settled_records_do_not_hold

@@ -520,15 +520,18 @@ Blank lines and lines that start with `#` are ignored, and an unusable value kee
 
 Inside the window the host first submits `/stow daily-fresh-start <nonce>`, with a new random nonce for that attempt.
 The stow skill runs [`bin/fm-fresh-start.sh`](../bin/fm-fresh-start.sh) `attest <nonce>` as its last action only when its own completion receipt declares the session safe to reset.
+Inside a window that runs past midnight, the whole window counts as the day it opened, so a save that ends after midnight is still that day's save.
 Once the save turn ends, which the primary's own Stop hook records, the host submits `/clear` and one short resume prompt only when that attestation names this attempt, the primary is still the session the save was typed into, and that session's newest prompt is still the `/stow`, so nothing said after the save is dropped.
 Those checks and the waiting rules below are read once more right before `/clear` is typed, under a lock the primary's prompt-submit hook shares, and the clear is then recorded as committed.
 Any new message submitted after the save and before that commit cancels that day's clear at once, through the prompt-submit hook.
+Only the first turn end after the save marks it finished; any later turn end in that session before the clear, such as a supervision hand-back that woke the primary without a typed message, skips the day, so a reply to the captain is never wiped.
 A message for the same session that meets the commit would run and then be wiped by `/clear`, so it is refused instead: Claude Code shows the reason and keeps the text in the input box to send again into the fresh conversation, and a commit refuses nothing once it is 30 seconds old.
 The startup digest then re-enters through the session-start hook, and the resume turn re-arms supervision.
 A save that never attests, because it failed, was interrupted, or was not reset-safe, never clears: the day is skipped when the window closes, and a save the session moved past is skipped at once.
 
 Each step waits only for what lives in the conversation alone and clears within minutes: an away or quiet record, a queued wake, a pending supervision handoff or secondmate reply, an unread captain outcome or inbox note, and a question firstmate asked the captain in chat that is still unanswered.
 That last one is known from a record, never from reading the conversation: firstmate runs [`bin/fm-chat-question.sh`](../bin/fm-chat-question.sh) `open <key> <summary>` in the turn it asks a question that has no other durable record, and `close <key>` in the turn the captain answers.
+Firstmate keeps that record only while `config/daily-fresh-start` exists.
 Durable records that survive a restart and are printed again at session start do not hold it: backlog items held for the captain, open decisions and blockers in worker status logs, and captain outcomes already presented but not yet acknowledged.
 Each step also waits whenever one of its inputs cannot be read, including a path that is only a link, dangling or not, a path of the wrong kind, and a wake queue holding anything but whole, well-formed rows, such as a partly written append; nothing is typed unless the agent reads idle and its composer provably empty.
 If two days and one window pass without a fresh start, the host queues one note for firstmate to tell the captain, naming the most recent reason, and sends no more until a fresh start runs again; a conversation still below `min-context-tokens` counts as run, because none was due, while one whose size cannot be read does not, and turning the setting off resets the count.
@@ -544,6 +547,7 @@ With it present, an attended engine turn whose captain outcomes the records prov
 The parked host hands them to main once the oldest has waited the window, without starting a model, and also as soon as the setting is removed or the outcome store cannot be read; away, they wait for the captain's return as every captain outcome does.
 
 An outcome is held only when the engine marked it batchable as it reported it (`bin/fm-branch-report.sh --batchable true`, recorded in the outcome store), its explicit claim that the outcome is a finished result asking nothing of anyone; an outcome without that mark always goes at once, whatever its wording.
+The engine's prompt (`bin/fm-branch-prompt.sh`) carries the rule for that mark only while the file exists, so a home without it gets the prompt it had before.
 A marked outcome must also pass two extra checks: its task's status log is readable, its newest line is `working`, `paused`, `note`, or `resolved`, and no decision or blocker is open in it; and its text mentions no blocker, failure, error, sign-in, credential, review, merge, pull request, link, decision, deletion, security, production, or alert and asks nothing.
 One outcome that is not proven routine sends its whole turn at once, and so does a turn of more than 20 captain outcomes, which is already a batch.
 A turn is held only after its release record (`state/.outcome-batch`) is written and read back, so a held outcome can never miss its release; anything else at that path sends the turn at once.

@@ -8,7 +8,7 @@
 # command as its last action only when its completion receipt declares the
 # session safe to reset (.agents/skills/stow/SKILL.md "Completion receipt").
 # It records that attestation for the waiting save attempt; the clear step
-# requires it. It refuses (exit 1) unless today's record is a save waiting on
+# requires it. It refuses (exit 1) unless the record is a save waiting on
 # exactly this nonce, and exits 2 on a usage error. It types nothing and
 # clears nothing itself.
 set -u
@@ -26,7 +26,7 @@ if [ "$#" -ne 2 ] || [ "$1" != attest ]; then
   exit 2
 fi
 if ! fm_fresh_start_attest "$STATE" "$2"; then
-  echo "fm-fresh-start: no save is waiting on nonce $2 today; nothing was recorded" >&2
+  echo "fm-fresh-start: no save is waiting on nonce $2; nothing was recorded" >&2
   exit 1
 fi
 echo "fm-fresh-start: recorded that this session is safe to reset; the daily fresh start may clear it on a later idle moment"

@@ -5,7 +5,6 @@
 # Usage:
 #   fm-chat-question.sh open <key> <summary>   record a question just asked
 #   fm-chat-question.sh close <key>            remove it once it is answered
-#   fm-chat-question.sh list                   print open ones, one per line
 #
 # A question asked only in chat, with no backlog hold or other durable record
 # behind it, lives in the current conversation alone; a fresh conversation
@@ -24,9 +23,6 @@
 # with a dot. Opening an open key again replaces its record. Tabs and newlines
 # in the summary become spaces.
 #
-# list prints `<key><TAB><asked><TAB><summary>` for each open question in key
-# order, and nothing when none is open.
-#
 # Exit codes: 0 done, 1 close found no open question with that key or a write
 # failed, 2 usage.
 set -u
@@ -38,7 +34,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DIR=$STATE/chat-questions
 
 usage() {
-  echo "usage: fm-chat-question.sh open <key> <summary> | close <key> | list" >&2
+  echo "usage: fm-chat-question.sh open <key> <summary> | close <key>" >&2
   exit 2
 }
 
@@ -71,15 +67,6 @@ close)
   fi
   rm -f "$DIR/$2.question" || exit 1
   echo "fm-chat-question: closed question $2"
-  ;;
-list)
-  [ "$#" -eq 1 ] || usage
-  [ -d "$DIR" ] || exit 0
-  for f in "$DIR"/*.question; do
-    [ -f "$f" ] || continue
-    key=${f##*/}
-    printf '%s\t%s\t%s\n' "${key%.question}" "$(sed -n 's/^asked=//p' "$f" | head -n 1)" "$(sed -n 's/^summary=//p' "$f" | head -n 1)"
-  done
   ;;
 *) usage ;;
 esac

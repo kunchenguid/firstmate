@@ -22,8 +22,10 @@
 # Blank lines and lines starting with # are ignored; an unusable value keeps its
 # default, like the warm-compact setting beside it.
 #
-# THE STEPS, at most one per day (the local date), each on its own park so a
-# turn always ends between them, recorded in state/.daily-fresh-start as
+# THE STEPS, at most one per day, each on its own park so a turn always ends
+# between them. A day is the local date its quiet window opened on, so a window
+# that runs past midnight is one day (fm_fresh_start_day). They are recorded in
+# state/.daily-fresh-start as
 #   date=<YYYY-MM-DD>  step=<saving|clearing|cleared|skipped|cancelled>  at=<epoch>
 #   nonce=<random>     transcript=<the primary's session transcript>
 #   1. save   submit `/stow daily-fresh-start <nonce>`. The stow skill runs
@@ -51,8 +53,12 @@
 # save always cancels that day's clear. The Stop that ends the save turn, in
 # the session the save was submitted to with the /stow still its newest prompt,
 # writes state/.daily-fresh-start-ended naming the nonce: that marker, not a
-# later park, is what tells the clear step the save turn is over. Every Stop
-# also records the primary's current session transcript in
+# later park, is what tells the clear step the save turn is over. Only the
+# first such Stop writes it: a later turn in that session, such as a hand-back
+# that woke the primary without a submitted prompt, or a Stop hook's
+# continuation, may have answered the captain, so a Stop that finds the marker
+# already naming the nonce skips the day rather than let the clear wipe that
+# answer. Every Stop also records the primary's current session transcript in
 # state/.daily-fresh-start-session (transcript=<path>), because the host keeps
 # running across turns and a fresh start changes the session: the host reads
 # that record (fm_fresh_start_transcript) rather than the path it started with.
@@ -142,6 +148,29 @@ fm_fresh_start_config() {
     esac
   done <"$file"
   return 0
+}
+
+# fm_fresh_start_day <hour-now>: the local date the current day's quiet window
+# opened on: today from the opening hour on, the calendar day before until
+# then, so a save that starts before midnight and ends after it stays one day.
+fm_fresh_start_day() {
+  local today y m d
+  today=$(date +%Y-%m-%d)
+  if [ "$((10#$1))" -ge "$FM_FRESH_START_HOUR" ]; then printf '%s\n' "$today"; return 0; fi
+  case "$today" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) printf '%s\n' "$today"; return 0 ;; esac
+  y=$((10#${today%%-*})) m=${today#*-} d=$((10#${today##*-}))
+  m=$((10#${m%-*}))
+  d=$((d - 1))
+  if [ "$d" -eq 0 ]; then
+    m=$((m - 1))
+    [ "$m" -gt 0 ] || { m=12; y=$((y - 1)); }
+    case "$m" in
+    4 | 6 | 9 | 11) d=30 ;;
+    2) if [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; }; then d=29; else d=28; fi ;;
+    *) d=31 ;;
+    esac
+  fi
+  printf '%04d-%02d-%02d\n' "$y" "$m" "$d"
 }
 
 # fm_fresh_start_in_window <hour-now>: true inside [hour, hour+window), wrapping
@@ -260,14 +289,13 @@ fm_fresh_start_record_put() {  # <state-dir> <date> <step> [nonce] [transcript]
 }
 
 # fm_fresh_start_attest <state-dir> <nonce>: record that the stow skill declared
-# the session safe to reset for this save attempt. Refuses (1) unless today's
+# the session safe to reset for this save attempt. Refuses (1) unless the
 # record is a save waiting on exactly this nonce, so a stale or guessed nonce
-# can never license a clear.
+# can never license a clear; a new day's save always carries a new nonce.
 fm_fresh_start_attest() {
   local state=$1 nonce=$2 tmp
   case "$nonce" in '' | *[!0-9a-f]*) return 1 ;; esac
   [ "$(fm_fresh_start_record_get "$state" step)" = saving ] || return 1
-  [ "$(fm_fresh_start_record_get "$state" date)" = "$(date +%Y-%m-%d)" ] || return 1
   [ "$(fm_fresh_start_record_get "$state" nonce)" = "$nonce" ] || return 1
   tmp=$(mktemp "$state/.daily-fresh-start-attest.tmp.XXXXXX") || return 1
   printf 'nonce=%s\nat=%s\n' "$nonce" "$(date +%s)" >"$tmp" && mv -f "$tmp" "$state/.daily-fresh-start-attest"
@@ -462,7 +490,17 @@ fm_fresh_start_hook() {
     rec_nonce=$(fm_fresh_start_record_get "$state" nonce)
     rec_transcript=$(fm_fresh_start_record_get "$state" transcript)
     tp=$(printf '%s' "$payload" | jq -r '(.transcript_path // "") | tostring' 2>/dev/null) || return 0
-    [ -n "$rec_transcript" ] && [ "$tp" = "$rec_transcript" ] || return 0
+    [ -n "$rec_nonce" ] && [ -n "$rec_transcript" ] && [ "$tp" = "$rec_transcript" ] || return 0
+    if [ "$(fm_fresh_start_record_get "$state" nonce .daily-fresh-start-ended)" = "$rec_nonce" ]; then
+      locked=0
+      if _fm_fresh_start_lock "$state"; then locked=1; fi
+      if [ "$(fm_fresh_start_record_get "$state" step)" = saving ] && [ "$(fm_fresh_start_record_get "$state" nonce)" = "$rec_nonce" ]; then
+        fm_fresh_start_record_put "$state" "$(fm_fresh_start_record_get "$state" date)" skipped || true
+        _fm_fresh_start_forget_save "$state"
+      fi
+      [ "$locked" = 0 ] || _fm_fresh_start_unlock "$state"
+      return 0
+    fi
     _fm_fresh_start_prompt_is_save "$rec_transcript" "$rec_nonce" || return 0
     tmp=$(mktemp "$state/.daily-fresh-start-ended.tmp.XXXXXX") || return 0
     if ! { printf 'nonce=%s\nat=%s\n' "$rec_nonce" "$(date +%s)" >"$tmp" && mv -f "$tmp" "$state/.daily-fresh-start-ended"; }; then
@@ -504,8 +542,8 @@ _fm_fresh_start_step_once() {
   local config=$1 state=$2 backend=$3 target=$4 transcript=$5
   local today hour rec_date rec_step rec_nonce rec_transcript tokens why state_now nonce locked_at
   fm_fresh_start_config "$config" || { printf 'off\n'; return 0; }
-  today=$(date +%Y-%m-%d)
   hour=$(date +%H)
+  today=$(fm_fresh_start_day "$hour")
   rec_date=$(fm_fresh_start_record_get "$state" date)
   rec_step=$(fm_fresh_start_record_get "$state" step)
   rec_nonce=$(fm_fresh_start_record_get "$state" nonce)
