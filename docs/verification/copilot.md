@@ -426,6 +426,7 @@ Live checks, 2026-11-11, copilot 1.0.109 on tmux (private socket, scratch clone,
   `bin/fm-control.sh` reads a new one in the task's own `COPILOT_HOME` as the cancel acknowledgement; the portable pins are `tests/fm-copilot-wake.test.sh` and `tests/fm-control.test.sh`.
   Not run: the `fm-control` change on a live Copilot task, an interrupt during a subagent or a permission prompt, and Herdr.
   On 2026-11-12 `FM_COPILOT_SIGNALS_LIVE=1 bash bin/fm-test-run.sh tests/fm-copilot-signals-live-e2e.test.sh` passed on copilot 1.0.109 (tmux 3.7c, Linux) in the default `~/.copilot`.
+  The guard has since moved to a private `COPILOT_HOME`, so it now reads only its own transcripts.
   It starts a long second turn, sends a double Escape through a private pty, and asserts the transcript gained a line starting with `{"type":"abort"`.
   The matcher is `fm_copilot_abort_count` in `bin/fm-busy-lib.sh`, shared by the wake and `fm-control`, and the guard fails with `copilot <version>` in its message when a release stops writing that event.
 - **Launch prompt:** a plain launch fired no hook in 25 s; `-i '<prompt>'` fired `userPromptSubmitted` at +2.5 s and `sessionStart` (`source:new`) at +6.4 s with a 7902-character digest, and `--resume=<id> -i` fired `sessionStart` with `source:resume`.
