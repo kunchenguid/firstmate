@@ -1168,9 +1168,11 @@ set -u
 case "${1:-}" in
   status) [ "${2:-}" = --json ] && printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
   pane)
-    if [ "${2:-}" = process-info ] && [ "${FM_FAKE_PROCESS:-}" = shell ]; then
+    if [ "${2:-}" = process-info ]; then
+      [ "${FM_FAKE_PROCESS:-}" != unreadable ] || exit 1
       pane=""; args=("$@"); for ((i=0; i<${#args[@]}; i++)); do [ "${args[$i]}" = --pane ] && pane=${args[$((i+1))]:-}; done
-      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"]}]}}}\n' "$pane" "${FM_FAKE_SHELL_PID:-$PPID}" "${FM_FAKE_SHELL_PID:-$PPID}" "${FM_FAKE_SHELL_PID:-$PPID}"
+      name=codex; [ "${FM_FAKE_PROCESS:-}" != shell ] || name=zsh
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s","argv":["%s"]}]}}}\n' "$pane" "${FM_FAKE_SHELL_PID:-$PPID}" "${FM_FAKE_SHELL_PID:-$PPID}" "${FM_FAKE_SHELL_PID:-$PPID}" "$name" "$name" "$name"
     else
       printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
     fi ;;
@@ -1193,11 +1195,11 @@ SH
     env_prefix=(env PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_AGENT="$agent" FM_FAKE_SOURCE="$source" FM_FAKE_STATUS="$status" FM_FAKE_PROCESS="$process" FM_FAKE_SHELL_PID="$$" FM_FAKE_LOG="$home/herdr.log")
     out=$("${env_prefix[@]}" "$SNAPSHOT" --json)
     [ ! -s "$home/herdr.log" ] || fail "$case_name: a plain snapshot must never probe Herdr"
-    printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .display_activity == null' >/dev/null \
+    printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | (has("display_activity") | not)' >/dev/null \
       || fail "$case_name: a plain snapshot must carry no display activity: $out"
     out=$("${env_prefix[@]}" "$SNAPSHOT" --json --display-activity)
     if [ "$case_name" = park-record-wins ]; then
-      printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .current_state.state == "paused" and .display_activity == null' >/dev/null \
+      printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .current_state.state == "paused" and (has("display_activity") | not)' >/dev/null \
         || fail "$case_name: a canonical paused state must win over native working: $out"
       view=$("${env_prefix[@]}" "$VIEW")
       assert_contains "$view" "| cx | paused / review-park |" "$case_name: view row"
@@ -1206,7 +1208,7 @@ SH
     printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .current_state.state == "unknown" and .current_state.source == "pane"' >/dev/null \
       || fail "$case_name: current_state must stay the unchanged supervision verdict: $out"
     if [ -z "$want_state" ]; then
-      printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .display_activity == null' >/dev/null \
+      printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | (has("display_activity") | not)' >/dev/null \
         || fail "$case_name: no display activity expected: $out"
     else
       printf '%s' "$out" | jq -e --arg s "$want_state" --arg src "$want_source" \
@@ -1224,6 +1226,7 @@ idle-status|codex|herdr:codex|idle||
 foreign-agent|pi|herdr:pi|working||
 foreign-source|codex|other|done||
 retained-registration|codex|herdr:codex|working||||shell
+unreadable-process|codex|herdr:codex|done||||unreadable
 park-record-wins|codex|herdr:codex|working||||
 ROWS
   pass "codex on herdr adds a display-only working/idle field only over an unknown canonical state"

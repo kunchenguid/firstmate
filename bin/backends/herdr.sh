@@ -3871,7 +3871,10 @@ fm_backend_herdr_codex_native_state() {  # <target>
   IFS=$'\t' read -r agent source status <<<"$fields"
   [ "$agent" = codex ] && [ "$source" = herdr:codex ] || { printf 'unknown'; return 0; }
   case "$status" in working|done) ;; *) printf 'unknown'; return 0 ;; esac
-  [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" != shell ] || { printf 'unknown'; return 0; }
+  case "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    agent|other) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
   case "$status" in
     working) printf 'busy' ;;
     done) printf 'idle' ;;

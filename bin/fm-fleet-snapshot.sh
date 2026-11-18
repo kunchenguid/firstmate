@@ -951,7 +951,6 @@ task_json_row() {  # <captured-meta> <id>
       },
       secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
       current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
-      display_activity:$display_activity,
       endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
         status:(if $endpoint_exists == false then "absent"
                 elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
@@ -975,7 +974,7 @@ task_json_row() {  # <captured-meta> <id>
            steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
            return_channel_note:null}
         end)
-    }'
+    } + (if $display_activity == null then {} else {display_activity:$display_activity} end)'
 }
 
 task_json_lines() {
