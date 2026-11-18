@@ -16,9 +16,9 @@
 # 2ndmate-<id>-<hash> session. hc uses the host's herdr-core core that
 # Herdr.app shows for that machine (bin/fm-remote-hc-lib.sh owns which core and
 # how its socket resolves), and needs that core to answer, speak the adapter's
-# protocol generation, and report that it keeps running after logout; --fix
-# may start a core when none answers, but never installs herdr-core and never
-# stops or restarts a running core, because that ends every terminal in it.
+# protocol generation, and report that it keeps running after logout. --fix
+# never starts, stops, or restarts a core: a missing core is the account's own
+# user service to start, and stopping a running one ends every terminal in it.
 # --backend names the one to verify; the default `any` resolves herdr when its
 # CLI is present, then rex, so a host offering both is still verified for the
 # default backend. hc is never resolved by `any`: it is selected explicitly. On
@@ -106,8 +106,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 # shellcheck source=bin/fm-remote-herdr-identity-lib.sh
 . "$SCRIPT_DIR/fm-remote-herdr-identity-lib.sh"
 # The shared remote toolchain plus the selected backend's CLI; the backend slot
-# is filled once the backend is resolved below, keeping the probe's six-fact
-# shape (five tools plus the at-least-one harness) for explicit and resolved
+# is filled once the backend is resolved below, so the probe reports one fact
+# per required tool plus the at-least-one harness for explicit and resolved
 # selections alike.
 REQUIRED_TOOLS=()
 HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi omp)
@@ -170,8 +170,9 @@ if [ "$DOCTOR_BACKEND" = any ]; then
 fi
 case "$DOCTOR_BACKEND" in
   herdr | rex) REQUIRED_TOOLS=(git jq "$DOCTOR_BACKEND" tasks-axi treehouse) ;;
-  # herdr-core is the official release asset's name (bin/fm-install-hc.sh).
-  hc) REQUIRED_TOOLS=(git jq herdr-core tasks-axi treehouse) ;;
+  # herdr-core names the binary the hc adapter resolves (fm_backend_hc_bin),
+  # and node proves its core socket live (fm_backend_unix_sock_live).
+  hc) REQUIRED_TOOLS=(git jq herdr-core node tasks-axi treehouse) ;;
   *) REQUIRED_TOOLS=(git jq backend tasks-axi treehouse) ;;
 esac
 if [ "$DOCTOR_BACKEND" = herdr ] && [ "$MODE" != worker-tool-probe ]; then
@@ -575,12 +576,32 @@ check_remote_job_worker() {
   fi
 }
 
+# herdr-core resolves exactly as the hc adapter resolves it at launch: FM_HC_BIN,
+# then herdr-core, then its hc alias.
+hc_bin_path() {
+  (
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh" >/dev/null 2>&1 || exit 1
+    fm_backend_source hc >/dev/null 2>&1 || exit 1
+    fm_backend_hc_bin
+  )
+}
+
+required_tool_path() { # <tool>
+  local resolved
+  case "$1" in
+    herdr-core) resolved=$(hc_bin_path) || return 1 ;;
+    *) resolved=$(command -v "$1" 2>/dev/null) || return 1 ;;
+  esac
+  [ -n "$resolved" ] && [ -x "$resolved" ] || return 1
+  printf '%s\n' "$resolved"
+}
+
 report_required_tools() {
   local tool resolved harness
   MISSING=()
   for tool in "${REQUIRED_TOOLS[@]}"; do
-    resolved=$(command -v "$tool" 2>/dev/null || true)
-    if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    if resolved=$(required_tool_path "$tool"); then
       if [ "$tool" = tasks-axi ] && ! fm_tasks_axi_compatible; then
         printf 'required tasks-axi=MISSING (incompatible)\n'
         MISSING+=(tasks-axi)
@@ -605,7 +626,7 @@ report_required_tools() {
 
 report_required_tools_from_worker() {
   local job_id probe_stdout probe_stderr probe_exit line fact name value
-  local expected=6 count=0 valid=1 seen=' '
+  local expected=$((${#REQUIRED_TOOLS[@]} + 1)) count=0 valid=1 seen=' '
   # The probe recomputes the same backend selection in the worker's own PATH:
   # an explicit selection is passed through, while `none` stays unflagged so the
   # probe reports `backend=MISSING` rather than resolving differently.
@@ -636,7 +657,7 @@ report_required_tools_from_worker() {
     fact=${line#required }
     name=${fact%%=*}
     value=${fact#*=}
-    case "$name" in git | jq | herdr | rex | herdr-core | backend | tasks-axi | treehouse | harness) ;; *) valid=0; continue ;; esac
+    case "$name" in git | jq | herdr | rex | herdr-core | node | backend | tasks-axi | treehouse | harness) ;; *) valid=0; continue ;; esac
     case "$seen" in *" $name "*) valid=0; continue ;; esac
     seen="$seen$name "
     count=$((count + 1))
@@ -666,10 +687,11 @@ wrapper_is_firstmate_owned() { # <path>
 
 repair_tool_wrapper() { # <tool>
   local tool=$1 target wrapper tmp
-  local resolved
-  resolved=$(command -v "$tool" 2>/dev/null || true)
-  [ -n "$resolved" ] && [ -x "$resolved" ] && return 0
+  required_tool_path "$tool" >/dev/null && return 0
   target=$(fm_remote_job_manager_tool "${HOME:-}" "$tool" 2>/dev/null || true)
+  if [ -z "$target" ] && [ "$tool" = herdr-core ]; then
+    target=$(fm_remote_job_manager_tool "${HOME:-}" hc 2>/dev/null || true)
+  fi
   [ -n "$target" ] || return 1
   wrapper="${HOME:-}/.local/bin/$tool"
   if [ -e "$wrapper" ] || [ -L "$wrapper" ]; then
@@ -893,8 +915,8 @@ check_hc_server() {
     return 0
   fi
   if ! hc_adapter_run fm_backend_unix_sock_live "$sock" >/dev/null 2>&1; then
-    record hc-server "fixable: no herdr-core core answers for session $session at $sock" \
-      "rerun this command with --fix to start it, or connect this machine from Herdr.app"
+    record hc-server "human: no herdr-core core answers for session $session at $sock" \
+      "connect this machine from Herdr.app or start its user service, then rerun this command; Firstmate never starts a core, because one started from this session is not the core the app shows"
     return 0
   fi
   if ! status=$(hc_adapter_run fm_backend_hc_cli "$session" server status --json 2>/dev/null) \
@@ -922,19 +944,6 @@ check_hc_server() {
     return 0
   fi
   record hc-server "ok: herdr-core core for session $session at $sock keeps running after logout"
-}
-
-# Starting a core is the only repair: it runs only when no core answers, and an
-# answering core is never stopped or restarted here.
-start_hc_server() {
-  local session
-  if session=$(hc_adapter_run printenv HC_SESSION 2>/dev/null) \
-    && hc_adapter_run fm_backend_hc_cli "$session" server start >/dev/null 2>&1; then
-    fix_report hc-server applied "started the herdr-core core for remote second mates"
-    return 0
-  fi
-  fix_report hc-server failed "the herdr-core core did not start"
-  return 1
 }
 
 # A persistent rex server is `rex server start`, detached from every SSH
@@ -1432,7 +1441,6 @@ apply_fixes() { # <resolved-login-shell>
         fi
         ;;
       rex-server) start_rex_server || true ;;
-      hc-server) start_hc_server || true ;;
       entrypoint-link) link_entrypoint || true ;;
     esac
   done

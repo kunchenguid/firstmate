@@ -289,7 +289,8 @@ An answering exit-empty server is reported as a human gap: at a time when nothin
 Because Rex starts a missing server as exit-empty, nothing else Firstmate runs for a remote second mate starts one: while no server answers, the remote endpoint state reads `unreadable`, and recovery waits for this repair to start the persistent server.
 Under `--backend hc`, the doctor reads the core only through a socket it has proven live, because hc starts an empty core on contact with a dead one.
 A core that does not report `keeps_running_after_logout: true`, or that speaks another protocol generation, is a human gap.
-`--fix` runs `hc server start` only when no core answers, and never stops or restarts an answering core, because that ends every terminal in it.
+A core that does not answer is a human gap too: connect the machine from Herdr.app or start the account's herdr-core user service.
+`--fix` never starts, stops, or restarts a core, because a core started from the doctor's session is not necessarily the one the app shows, and stopping one ends every terminal in it.
 
 ### How the Herdr launch agent starts its server
 
@@ -345,7 +346,7 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 
 | Requirement | Tools |
 | --- | --- |
-| Always required | `git`, `jq`, the selected backend's CLI (`herdr`, `rex`, or `herdr-core`), compatible `tasks-axi`, and `treehouse` |
+| Always required | `git`, `jq`, the selected backend's CLI (`herdr`, `rex`, or herdr-core, which resolves as the hc adapter does: `FM_HC_BIN`, then `herdr-core`, then its `hc` alias), compatible `tasks-axi`, and `treehouse` |
 | Additionally required for hc | `node`, which proves the core socket live before any read |
 | At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `omp` |
 | Additionally required on macOS | `lsof`, so the doctor and guard can prove which process owns the session socket |
@@ -683,6 +684,8 @@ The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, 
 It passes them explicitly because `config/secondmate-harness` is not inherited into a second mate's home, and the file on that host belongs to a different home.
 Letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
+A remote hc second mate cannot be relaunched: the host-local control plane refuses `relaunch` for any hc task, as [`hc-backend.md`](hc-backend.md#second-mates) records, and the remote relaunch reports that refusal.
+A dead or finished remote hc mate is still recovered through liveness recovery, which launches it again.
 Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the host-local relaunch it drives can only rewrite the host's own endpoint record, so this wrapper reads the confirmed identity back from that record afterward and republishes the primary's own route metadata to match, the same way launch already records a fresh route.
 
 ### Firstmate code convergence

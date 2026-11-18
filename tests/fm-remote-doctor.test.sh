@@ -1474,25 +1474,49 @@ if command -v node >/dev/null 2>&1; then
   assert_contains "$DOCTOR_OUT" '0.1.9' "the gap did not name the reported version"
   pass "a herdr-core below the verified floor is a human gap"
 
-  # With no live core the gap is fixable, the read-only check never calls hc
-  # (which would start an empty core), and --fix runs only `server start`.
+  # herdr-core installed only under its documented `hc` alias
+  # (docs/hc-backend.md) is the binary the adapter launches through, so it
+  # satisfies the required tool rather than reporting herdr-core missing.
+  new_case Linux no-herdr
+  write_hc_fake_cli "$CASE_BIN/hc" "D='$CASE_STATE/hcfake'"
+  ln -sf "$(command -v node)" "$CASE_BIN/node"
+  doctor --backend hc
+  expect_code 0 "$DOCTOR_RC" "a host with herdr-core installed as hc was not ready"$'\n'"$DOCTOR_OUT"
+  assert_contains "$DOCTOR_OUT" "required herdr-core=$CASE_BIN/hc" "the hc alias did not satisfy the required herdr-core"
+  pass "herdr-core installed only as its hc alias satisfies readiness"
+
+  # node proves the core socket live, so a host without it names node as a
+  # missing tool.
+  if ! PATH="$BASE_PATH" command -v node >/dev/null 2>&1; then
+    new_case Linux no-herdr
+    write_hc_fake_cli "$CASE_BIN/herdr-core" "D='$CASE_STATE/hcfake'"
+    doctor --backend hc
+    expect_code 1 "$DOCTOR_RC" "an hc host without node was reported ready"
+    assert_contains "$DOCTOR_OUT" 'required node=MISSING' "a missing node was not reported as a missing tool"
+    pass "an hc host without node reports node as a missing required tool"
+  fi
+
+  # With no live core the gap is a human one: the read-only check never calls
+  # hc (which would start an empty core), and --fix never starts a core.
   hc_core_down
   new_case Linux no-herdr
   install_case_hc
   doctor --backend hc
   expect_code 1 "$DOCTOR_RC" "an hc host with no live core was reported ready"
-  assert_contains "$DOCTOR_OUT" 'check hc-server=fixable: no herdr-core core answers for session fmtest' \
-    "a missing core was not tagged fixable"
+  assert_contains "$DOCTOR_OUT" 'check hc-server=human: no herdr-core core answers for session fmtest' \
+    "a missing core was not tagged human"
+  assert_contains "$DOCTOR_OUT" 'action: hc-server: connect this machine from Herdr.app or start its user service' \
+    "a missing core did not name the human step"
   if grep -q $'\x1fserver\x1f' "$CASE_STATE/hcfake/log" 2>/dev/null; then
     fail "the read-only check called the core while no socket was live"
   fi
   doctor --backend hc --fix
-  assert_contains "$DOCTOR_OUT" 'fix hc-server=' "--fix did not attempt to start the missing core"
-  grep -q $'\x1fserver\x1fstart' "$CASE_STATE/hcfake/log" || fail "--fix never ran hc server start"
-  if grep -qE $'\x1fserver\x1f(stop|restart)' "$CASE_STATE/hcfake/log"; then
-    fail "--fix stopped or restarted a core"
+  expect_code 1 "$DOCTOR_RC" "--fix reported a host with no live core ready"
+  assert_not_contains "$DOCTOR_OUT" 'fix hc-server=' "--fix attempted to repair a missing core"
+  if grep -q $'\x1fserver\x1f' "$CASE_STATE/hcfake/log" 2>/dev/null; then
+    fail "--fix started, stopped, or restarted a core"
   fi
-  pass "a missing core is fixable, probed without calling hc, and repaired only by a start"
+  pass "a missing core is a human gap, probed without calling hc, and never started by --fix"
 else
   echo "skip: node not found (the hc socket probe needs it)"
 fi

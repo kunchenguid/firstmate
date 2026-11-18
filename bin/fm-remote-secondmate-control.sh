@@ -422,10 +422,6 @@ cmd_relaunch() {
     FM_SKIP_SECONDMATE_SYNC=1)
   case "$REMOTE_ENDPOINT_BACKEND" in
     herdr) relaunch_env=("HERDR_SESSION=$REMOTE_HERDR_SESSION" "${relaunch_env[@]}") ;;
-    hc)
-      remote_hc_launch_env || die "the remote herdr-core session override is invalid"
-      relaunch_env=("${REMOTE_HC_LAUNCH_ENV[@]}" "${relaunch_env[@]}")
-      ;;
   esac
   env "${relaunch_env[@]}" "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}"
   # A parent tracking this route needs the identity the relaunch actually

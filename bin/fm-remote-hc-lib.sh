@@ -24,7 +24,8 @@
 # convention every user service, including hc's own, runs under), this exports
 # it; otherwise the environment is left unchanged and docs/hc-backend.md's
 # socket resolution applies as written. An explicit FM_HC_SOCKET pin always
-# wins over both, through the adapter.
+# wins over both, through the adapter. FM_REMOTE_HC_RUN_USER_ROOT replaces the
+# /run/user root for tests only, which must prove the pin without a real one.
 
 fm_remote_hc_session() {
   local session=${FM_REMOTE_HC_SESSION:-default}
@@ -41,7 +42,7 @@ fm_remote_hc_runtime_env() {
   local uid dir
   [ -z "${XDG_RUNTIME_DIR:-}" ] || return 0
   uid=$(id -u 2>/dev/null) || return 0
-  dir="/run/user/$uid"
+  dir="${FM_REMOTE_HC_RUN_USER_ROOT:-/run/user}/$uid"
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || return 0
   XDG_RUNTIME_DIR=$dir
   export XDG_RUNTIME_DIR

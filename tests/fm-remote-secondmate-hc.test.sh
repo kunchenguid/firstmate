@@ -202,13 +202,33 @@ fi
 # shellcheck disable=SC2016 # expanded by the child shell.
 [ "$(XDG_RUNTIME_DIR=/keep/me bash -c '. "$0/bin/fm-remote-hc-lib.sh"; fm_remote_hc_runtime_env; printf %s "$XDG_RUNTIME_DIR"' "$ROOT")" = /keep/me ] \
   || fail "an explicit runtime directory was overridden"
-expected_pin=
-if [ -d "/run/user/$(id -u)" ] && [ ! -L "/run/user/$(id -u)" ] && [ -O "/run/user/$(id -u)" ]; then
-  expected_pin="/run/user/$(id -u)"
-fi
+# The pin follows the systemd per-user runtime-directory convention,
+# <root>/<uid>, under a root this test owns: it exports a directory this account
+# owns, and never one that is a symlink or belongs to another account.
 # shellcheck disable=SC2016 # expanded by the child shell.
-[ "$(env -u XDG_RUNTIME_DIR bash -c '. "$0/bin/fm-remote-hc-lib.sh"; fm_remote_hc_runtime_env; printf %s "${XDG_RUNTIME_DIR:-}"' "$ROOT")" = "$expected_pin" ] \
-  || fail "the runtime directory pin did not follow /run/user/<uid> on this host"
+pin_from() { # <run-user-root> [path-prefix]
+  env -u XDG_RUNTIME_DIR PATH="${2:+$2:}$PATH" FM_REMOTE_HC_RUN_USER_ROOT="$1" \
+    bash -c '. "$0/bin/fm-remote-hc-lib.sh"; fm_remote_hc_runtime_env; printf %s "${XDG_RUNTIME_DIR:-}"' "$ROOT"
+}
+PIN_ROOT="$TMP_ROOT/run-user"
+mkdir -p "$PIN_ROOT/$(id -u)"
+[ "$(pin_from "$PIN_ROOT")" = "$PIN_ROOT/$(id -u)" ] \
+  || fail "an absent runtime directory was not pinned to this account's <root>/<uid>"
+[ -z "$(pin_from "$TMP_ROOT/no-run-user")" ] \
+  || fail "a runtime directory was pinned although <root>/<uid> does not exist"
+LINK_ROOT="$TMP_ROOT/run-user-link"
+mkdir -p "$LINK_ROOT"
+ln -s "$PIN_ROOT/$(id -u)" "$LINK_ROOT/$(id -u)"
+[ -z "$(pin_from "$LINK_ROOT")" ] || fail "a symlinked <root>/<uid> was pinned"
+if [ "$(id -u)" != 0 ]; then
+  # /usr is a real directory owned by root on every supported host, so an id
+  # that names it presents a runtime directory owned by another account.
+  OTHER_ID="$TMP_ROOT/other-id"
+  mkdir -p "$OTHER_ID"
+  printf '#!/usr/bin/env bash\nprintf usr\n' > "$OTHER_ID/id"
+  chmod +x "$OTHER_ID/id"
+  [ -z "$(pin_from / "$OTHER_ID")" ] || fail "a runtime directory owned by another account was pinned"
+fi
 pass "F the session override and the runtime-directory pin behave as documented"
 
 # --- G) retirement ------------------------------------------------------------
