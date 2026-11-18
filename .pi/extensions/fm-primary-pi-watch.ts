@@ -296,21 +296,17 @@ function lockOwnership(): LockOwnership {
   }
   const holderPid = lockHolderPid(lockPid);
   if (!holderPid) return "other";
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === holderPid) return "owned";
-    pid = parentPid(pid);
-    if (!pid || pid === "1") break;
-  }
+  // The Pi engine is the session owner. Shell startup resolves the exact
+  // native Codex transport shapes to this same PID in fm-session-lock-lib.sh.
+  // A launcher or another enclosing session is not this Pi session.
+  if (holderPid === String(process.pid)) return "owned";
   return pidAlive(holderPid) ? "other" : "missing";
 }
 
 // A Pi command started from inside the live session, such as the `pi --help`
-// capability probe in bin/fm-spawn.sh, auto-loads this extension too and passes
-// lockOwnership() through the same ancestor walk. Its pid dies at once, so the
-// marker must keep naming the live session above it (#5202). Pid equality with
-// the lock is not required because a wrapper such as pi-signed may hold the lock
-// while the extension host runs as its child.
+// capability probe in bin/fm-spawn.sh, auto-loads this extension too. Its pid
+// dies at once, so the marker must keep naming the live session above it even
+// when the lock is missing. This marker-preservation check grants no ownership.
 function markerNamesLiveAncestor(): boolean {
   let markerPid = "";
   try {
