@@ -546,8 +546,10 @@ FP_GUARD_REC=
 FP_GUARD_KEEP=0
 
 # fp_proc_start <pid>: the process's start time as ps prints it, or nothing.
+# These bookkeeping calls use the system ps (command -p), not the process
+# listing of the in-use check.
 fp_proc_start() {  # <pid>
-  ps -o lstart= -p "$1" 2>/dev/null | head -n 1
+  command -p ps -o lstart= -p "$1" 2>/dev/null | head -n 1
 }
 
 # fp_stopped_record <pairs>: creates a run record listing <pairs>, its owner
@@ -574,7 +576,7 @@ fp_stopped_drop() {  # <run-record>
 # fp_engine_alive <pid>: 0 while <pid> is a live removal engine.
 fp_engine_alive() {  # <pid>
   kill -0 "$1" 2>/dev/null || return 1
-  case "$(ps -o command= -p "$1" 2>/dev/null)" in *fm-footprint-fs.py*) return 0 ;; esac
+  case "$(command -p ps -o command= -p "$1" 2>/dev/null)" in *fm-footprint-fs.py*) return 0 ;; esac
   return 1
 }
 
