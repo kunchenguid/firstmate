@@ -100,7 +100,15 @@ if [ "\${1:-}" = return ]; then
 fi
 if [ "\${1:-}" = get ]; then
   [ ! -e "$world/treehouse.full" ] || exit 1
-  printf '[{"path":"%s","status":"leased","lease_holder":"lane"}]\n' "$wt" > "$world/treehouse.status.json"
+  holder=; while [ "\$#" -gt 0 ]; do
+    if [ "\$1" = --lease-holder ]; then holder=\$2; break; fi
+    shift
+  done
+  [ -f "$world/treehouse.status.json" ] || printf '[{"path":"%s","status":"available"}]\n' "$wt" > "$world/treehouse.status.json"
+  jq --arg path "$wt" --arg holder "\$holder" \
+    'map(if .path == \$path then .status = "leased" | .lease_holder = \$holder else . end)' \
+    "$world/treehouse.status.json" > "$world/treehouse.next.json" || exit 1
+  mv "$world/treehouse.next.json" "$world/treehouse.status.json"
   printf '%s\n' "$wt"; exit 0
 fi
 [ "\${1:-}" = lease ] || exit 1
@@ -1249,6 +1257,26 @@ test_release_and_reacquire_parked_lane() {
   pass "release returns the lease and a review trigger reacquires its branch"
 }
 
+test_reacquire_does_not_adopt_another_homes_same_task_id() {
+  local w wt other head out foreign_home
+  w=$(make_world release-home-collision "$GH_URL"); gh_fixture "$w/gh.1.json"
+  wt="$w/root/.treehouse/repo-1/3/repo"; head=$(cat "$w/head")
+  other="$w/root/.treehouse/repo-1/4/repo"; foreign_home="$w/other-home"
+  mkdir -p "$(dirname "$other")" "$foreign_home"
+  git -C "$w/project" worktree add -q --detach "$other" main
+  git -C "$wt" checkout --detach -q main
+  printf 'task=lane\nhome=%s\n' "$foreign_home" > "$(dirname "$other")/.fm-slot-owner"
+  printf '[{"path":"%s","status":"available","lease_holder":null},{"path":"%s","status":"leased","lease_holder":"lane"}]\n' "$wt" "$other" > "$w/treehouse.status.json"
+  printf 'pr=%s\nhead=%s\nparked_at=1\nslot_leased=no\nbranch=fm/lane\nendpoint_closed=1\nclosed_backend=tmux\nclosed_target=fm:fm-lane\nreleased_at=1\n' "$GH_URL" "$head" > "$w/state/lane.review-park"
+  out=$(run_park "$w" resume lane --trigger 'new review comment' 2>&1) || fail "home collision: $out"
+  grep -qx "home=$foreign_home" "$(dirname "$other")/.fm-slot-owner" || fail "home collision: foreign claim changed"
+  [ "$(git -C "$other" rev-parse HEAD)" = "$(git -C "$w/project" rev-parse main)" ] || fail "home collision: foreign checkout changed"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$head" ] || fail "home collision: wrong replacement checkout"
+  jq -e --arg path "$other" 'any(.[]; .path == $path and .status == "leased" and .lease_holder == "lane")' "$w/treehouse.status.json" >/dev/null || fail "home collision: foreign lease changed"
+  grep -q '^get --lease --lease-holder review-' "$w/treehouse.log" || fail "home collision: no home-specific lease"
+  pass "review reacquisition preserves another home's lease with the same task ID"
+}
+
 test_release_refuses_unsafe_copies() {
   local w wt head rc out variant
   for variant in dirty detached foreign unclean stale; do
@@ -1465,6 +1493,7 @@ test_real_treehouse_reuses_returned_slots() {
 }
 
 fm_test_run \
+  test_reacquire_does_not_adopt_another_homes_same_task_id \
   test_release_opt_in_drives_park_and_release \
   test_crew_state_reports_a_released_lane_without_a_copy \
   test_park_claims_an_unclaimed_custom_slot \

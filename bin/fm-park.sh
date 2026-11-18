@@ -586,8 +586,15 @@ park_preflight() {  # <id>
 
 # Durable Treehouse lease for a pool slot; prints yes when taken, no when the
 # copy is not a Treehouse slot, and fails when a slot cannot be leased.
+review_lease_holder() {  # <id>
+  local home hash
+  home=$(CDPATH='' cd -- "$FM_HOME" && pwd -P) || return 1
+  hash=$(printf '%s' "$home" | git hash-object --stdin) || return 1
+  printf 'review-%s-%s\n' "$hash" "$1"
+}
+
 slot_lease() (  # <id>
-  local id=$1 meta project wt slot_dir pool slot leased holder secs project_lock
+  local id=$1 meta project wt slot_dir pool slot leased holder secs project_lock review_holder
   local -a root=()
   meta="$STATE/$id.meta"
   project=$(fm_meta_get "$meta" project)
@@ -621,7 +628,8 @@ slot_lease() (  # <id>
   holder=$( (cd "$project" && fm_run_timed "$secs" treehouse status --json "${root[@]}") 2>/dev/null \
     | jq -r --arg p "$(CDPATH='' cd -- "$wt" && pwd -P)" \
       '[.[] | select(.status == "leased" and .path == $p) | .lease_holder] | first // empty' 2>/dev/null) || holder=
-  if [ "$holder" = "$id" ]; then
+  review_holder=$(review_lease_holder "$id") || return 1
+  if [ "$holder" = "$id" ] || [ "$holder" = "$review_holder" ]; then
     fm_treehouse_slot_owner_state "$wt" "$id"
     case "$FM_TREEHOUSE_SLOT_OWNER" in
       mine) ;;
@@ -841,7 +849,7 @@ settle_endpoint_close() {  # <id>
 # Complete the journaled return after a crash without returning a slot that was
 # reassigned. The project lock serializes the status read, return, and claim.
 finish_release() {  # <id>
-  local id=$1 meta project wt pool root lock holder pr head parked branch backend target dirty slots
+  local id=$1 meta project wt pool root lock holder pr head parked branch backend target dirty slots review_holder
   local -a root_arg=()
   [ "$(record_get "$id" endpoint_closed)" = 1 ] || return 1
   meta="$STATE/$id.meta"; project=$(fm_meta_get "$meta" project); wt=$(fm_meta_get "$meta" worktree)
@@ -859,14 +867,15 @@ finish_release() {  # <id>
   holder=$(printf '%s\n' "$slots" | jq -er --arg p "$wt" \
     'select(type == "array") | [.[] | select(.path == $p)] | if length == 1 then .[0].lease_holder // "" else error("slot missing") end') || return 1
   fm_treehouse_slot_owner_state "$wt" "$id"
-  if [ "$holder" = "$id" ]; then
+  review_holder=$(review_lease_holder "$id") || return 1
+  if [ "$holder" = "$id" ] || [ "$holder" = "$review_holder" ]; then
     [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 1
     [ "$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" = "$branch" ] || return 1
     [ "$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)" = "$head" ] || return 1
     dirty=$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null) || return 1
     [ -z "$dirty" ] || return 1
     fm_control_remove_worktree_wiring "$meta" "$wt" "$STATE" "$id" || return 1
-    (cd "$project" && treehouse return --force --if-lease-holder "$id" "$wt" "${root_arg[@]}") || return 1
+    (cd "$project" && treehouse return --force --if-lease-holder "$holder" "$wt" "${root_arg[@]}") || return 1
     fm_treehouse_slot_owner_release "$wt" "$id"
   elif [ -z "$holder" ]; then
     [ "$FM_TREEHOUSE_SLOT_OWNER" != unsafe ] || return 1
@@ -884,7 +893,7 @@ finish_release() {  # <id>
 # Reacquire an existing interrupted lease before asking Treehouse for another.
 # Its get operation is not idempotent for a holder that already owns a slot.
 reacquire_slot() {  # <id>
-  local id=$1 meta project old pool root lock wt branch head tip snap forge ref tmp meta_lock slots dirty unpushed
+  local id=$1 meta project old pool root lock wt branch head tip snap forge ref tmp meta_lock slots dirty unpushed holder
   local -a root_arg=()
   meta="$STATE/$id.meta"; project=$(fm_meta_get "$meta" project); old=$(fm_meta_get "$meta" worktree)
   branch=$(record_get "$id" branch); head=$(record_get "$id" head)
@@ -894,11 +903,12 @@ reacquire_slot() {  # <id>
   fi
   lock=$(fm_treehouse_project_lock_path "$project") || return 1
   lock_try "$lock" || return 2
+  holder=$(review_lease_holder "$id") || return 1
   slots=$(cd "$project" && treehouse status --json "${root_arg[@]}") || return 1
-  wt=$(printf '%s\n' "$slots" | jq -er --arg id "$id" \
+  wt=$(printf '%s\n' "$slots" | jq -er --arg id "$holder" \
     'select(type == "array") | [.[] | select(.status == "leased" and .lease_holder == $id) | .path] | if length == 1 then .[0] elif length == 0 then "" else error("multiple leases") end') || return 1
   if [ -z "$wt" ]; then
-    wt=$(cd "$project" && treehouse get --lease --lease-holder "$id" "${root_arg[@]}") || return 2
+    wt=$(cd "$project" && treehouse get --lease --lease-holder "$holder" "${root_arg[@]}") || return 2
   fi
   fm_treehouse_pool_slot "$project" "$wt" probe-custom || return 1
   fm_treehouse_slot_owner_claim "$wt" "$id" "$FM_HOME" || return 1
@@ -942,7 +952,7 @@ reacquire_slot() {  # <id>
     unpushed=$(git -C "$wt" log --format=%H "$tip" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
     [ -z "$unpushed" ] || return 1
   fi
-  (cd "$project" && treehouse return --force --if-lease-holder "$id" "$wt" "${root_arg[@]}") || return 1
+  (cd "$project" && treehouse return --force --if-lease-holder "$holder" "$wt" "${root_arg[@]}") || return 1
   fm_treehouse_slot_owner_release "$wt" "$id"
   return 1
 }
@@ -1016,7 +1026,7 @@ land_eligible() {  # <id>
 # A relaunch may have acquired a lease before it could publish the new copy in
 # the task record. Settle that lease before records-only teardown.
 return_interrupted_lease() {  # <id>
-  local id=$1 meta project old pool root lock slots wt dirty tip forge snap unpushed
+  local id=$1 meta project old pool root lock slots wt dirty tip forge snap unpushed holder
   local -a root_arg=()
   meta="$STATE/$id.meta"; project=$(fm_meta_get "$meta" project); old=$(fm_meta_get "$meta" worktree)
   pool=$(dirname "$(dirname "$old")")
@@ -1025,8 +1035,9 @@ return_interrupted_lease() {  # <id>
   fi
   lock=$(fm_treehouse_project_lock_path "$project") || return 1
   lock_try "$lock" || return 1
+  holder=$(review_lease_holder "$id") || return 1
   slots=$(cd "$project" && treehouse status --json "${root_arg[@]}") || return 1
-  wt=$(printf '%s\n' "$slots" | jq -er --arg id "$id" \
+  wt=$(printf '%s\n' "$slots" | jq -er --arg id "$holder" \
     'select(type == "array") | [.[] | select(.status == "leased" and .lease_holder == $id) | .path] | if length == 1 then .[0] elif length == 0 then "" else error("multiple leases") end') || return 1
   if [ -n "$wt" ]; then
     fm_treehouse_pool_slot "$project" "$wt" probe-custom || return 1
@@ -1047,7 +1058,7 @@ return_interrupted_lease() {  # <id>
         [ "$tip" = "$forge" ] || return 1
       fi
     fi
-    (cd "$project" && treehouse return --force --if-lease-holder "$id" "$wt" "${root_arg[@]}") || return 1
+    (cd "$project" && treehouse return --force --if-lease-holder "$holder" "$wt" "${root_arg[@]}") || return 1
     fm_treehouse_slot_owner_release "$wt" "$id"
   fi
   fm_lock_release "$lock"
