@@ -99,7 +99,7 @@ fm_context_ceiling_kind_key() {
 fm_context_ceiling_read() {
   local file=$1/context-ceiling line k v seen=' '
   FM_CONTEXT_CEILING_ERROR=
-  [ -e "$file" ] || return 2
+  [ -e "$file" ] || [ -L "$file" ] || return 2
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
     FM_CONTEXT_CEILING_ERROR="config/context-ceiling is not a readable file"
     return 1

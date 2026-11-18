@@ -106,7 +106,17 @@ test_lib_precedence() {
   if fm_context_ceiling_resolve "$cfg" ship 0 '' ''; then fail "an unknown line must make the setting unreadable"; fi
   printf 'worker=25000O\n' >"$cfg/context-ceiling"
   if fm_context_ceiling_resolve "$cfg" ship 0 '' ''; then fail "a typo'd value must make the setting unreadable"; fi
-  pass "precedence is spawn value, then task record, then home setting; an unreadable setting is an error"
+  # Final review finding 3: a link whose target is gone is an unreadable
+  # setting, never an absent one; a link to a readable file is read through.
+  rm -f "$cfg/context-ceiling"
+  ln -s "$cfg/moved-away" "$cfg/context-ceiling"
+  if fm_context_ceiling_resolve "$cfg" ship 0 '' ''; then fail "a dangling setting link must make the setting unreadable (value '$FM_CONTEXT_CEILING_VALUE')"; fi
+  assert_contains "$FM_CONTEXT_CEILING_ERROR" 'not a readable file' "the dangling-link error must name the problem"
+  printf 'worker=190000\n' >"$cfg/moved-away"
+  fm_context_ceiling_resolve "$cfg" ship 0 '' '' || fail "a link to a readable setting must be read: $FM_CONTEXT_CEILING_ERROR"
+  assert_equals 190000 "$FM_CONTEXT_CEILING_VALUE" "a linked setting is read through its link"
+  rm -f "$cfg/context-ceiling" "$cfg/moved-away"
+  pass "precedence is spawn value, then task record, then home setting; an unreadable setting, including a dangling link, is an error"
 }
 
 test_absent_setting_keeps_launch_unchanged() {
