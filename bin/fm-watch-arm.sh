@@ -495,6 +495,8 @@ attached_holder_live() {
 # a started arm tolerates by waiting on its child, so this arm keeps following it.
 # Only at the stall bound, where the watcher's own re-arm evicts a live holder,
 # does it fail with the typed stalled-holder line so its owner's retry replaces it.
+# Returns 4 without reporting when it settles a take-over whose watcher outlived
+# the stop (TAKE_OVER_LATE_PID), so the caller owns a fresh cycle instead.
 attach_and_wait() {
   local attached_pid=$1 age
   while :; do
