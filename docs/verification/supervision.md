@@ -48,6 +48,8 @@ That cold positional-prompt check established eventual custom-message delivery, 
 The installed pi-signed 0.82.0 wrapper repeated the shared Pi primary extension and session-start path on 2026-07-27.
 [`runtime-backends.md`](runtime-backends.md#tmux) owns the shared-ancestry evidence and authoritative selection-marker boundary.
 
+GitHub Copilot CLI delivers the digest through its tracked `sessionStart` hook at the first prompt; [Copilot verification](copilot.md#sessionstart) owns the payload, source values, and compaction re-emit evidence.
+
 ### omp (Oh My Pi) native delivery, 2026-09-05
 
 The omp Run-tier adapter was verified on 2026-09-05 with omp 18.1.11 and the openai-codex `gpt-6-astra` model through `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh`, which drives a real omp in its JSON-RPC stdio mode inside an isolated lab clone.
@@ -328,6 +330,8 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+
+GitHub Copilot CLI blocks one stop through its `agentStop` hook and rings the idle pane with a typed wake instead of parking the turn; [Copilot verification](copilot.md#typed-wake) owns the dated evidence and [Parked hooks](copilot.md#parked-hooks) the reason it does not park.
 
 ### Cursor primary park, 2026-08-13
 

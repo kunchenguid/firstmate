@@ -143,6 +143,9 @@ Hermes Agent v0.21.7 was verified as a tmux worker on Linux on 2026-11-02: nativ
 [Hermes verification](hermes.md) owns the dated native hook, composer, profile-safety, and lifecycle evidence.
 Refresh it with `FM_HERMES_SIGNALS_LIVE=1 FM_HERMES_LIVE_HOME="$throwaway_root" bash bin/fm-test-run.sh tests/fm-hermes-signals-live-e2e.test.sh`.
 
+GitHub Copilot CLI 1.0.105 was verified as a worker TUI on Linux on 2026-11-04 through a real pty, and on 2026-11-05 in a real Herdr pane and, with tmux 3.7c, a real tmux pane: argv[0] `copilot` under the kernel name `MainThread` is the only process identity.
+[Copilot verification](copilot.md) owns the dated hook, composer, and lifecycle evidence, including the 2026-11-10 persistent-secondmate runs on tmux and Herdr, the 1.0.109 output reads and primary runs, and the 1.0.113 persistent-directory denial, and what each backend did and did not exercise.
+
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
 In this macOS run that reading reflected a rewritable process title rather than stable executable identity, so it is now one of two independent name sources rather than the sole basis of a verdict.
 
