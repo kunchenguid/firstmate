@@ -466,7 +466,9 @@ fp_set_aside() {  # <dir> <tag>
 #      file with a name outside the copy as well (a hard link from a package
 #      store, say) is never changed, because its mode and data are shared;
 #      its name is removed by the final step only while its identity and
-#      link count still match, so its data stays with its other names;
+#      link count still match, so its data stays with its other names, and
+#      a file that gains a name outside after the freeze gets its recorded
+#      permissions back as its name inside goes;
 #   2. flush: dirty pages are written out, so a later write through a memory
 #      mapping or a descriptor opened earlier changes the entry's times;
 #   3. snapshot: type, permissions, device, inode, size, blocks,
@@ -533,25 +535,45 @@ fp_engine_failed() {  # <work-dir> <status>
 # temporary directory: <stopped-dir>/run.<pid>.<random> lists the run's
 # set-aside copies ("aside<TAB>dir"), <that>.modes holds every permission,
 # written before it changes, <that>.owner the run's pid and start time, and
-# <that>.engine the pid of the engine working for it. While a run is under
-# way a stop signal (TERM, INT, HUP, as a timed-out caller sends) first stops
-# and reaps that engine, which a GNU timeout runs in its own process group
-# out of the signal's reach, then thaws every copy and puts it back under its
-# name (fp_guard_fire). A run killed outright leaves the record, and the next
-# close, old-folder apply or daily pass gives each copy it names its
-# permissions back once neither the run nor its engine is running
-# (fp_repair_stopped). A record whose thaw failed is never dropped, so a
+# <that>.engine the pid of the engine working for it, and <that>.stop, once
+# made, tells an engine still starting for it to do nothing. While a run is
+# under way a stop signal (TERM, INT, HUP, as a timed-out caller sends) first
+# makes that marker, then stops and reaps the engine, which a GNU timeout
+# runs in its own process group out of the signal's reach, then thaws every
+# copy and puts it back under its name (fp_guard_fire). A run killed outright
+# leaves the record, and the next close, old-folder apply or daily pass
+# gives each copy it names its permissions back once neither the run nor its
+# engine is running (fp_repair_stopped). Whether they run is read from /proc
+# on Linux and from ps elsewhere, never from a process listing that a host
+# may lack. A record whose thaw failed is never dropped, so a
 # later run tries again; nothing here removes or renames anything.
 FP_STOPPED_DIR="$STATE/footprint-stopped"
 FP_GUARD_PAIRS=
 FP_GUARD_REC=
 FP_GUARD_KEEP=0
 
-# fp_proc_start <pid>: the process's start time as ps prints it, or nothing.
-# These bookkeeping calls use the system ps (command -p), not the process
-# listing of the in-use check.
+# fp_ps <args...>: the system ps, else the first on PATH. Only macOS and
+# other systems without /proc use it here; Linux reads /proc, so a host whose
+# ps lives elsewhere (NixOS, Guix) or has none loses nothing.
+fp_ps() {
+  if command -p -v ps >/dev/null 2>&1; then command -p ps "$@"; else ps "$@"; fi
+}
+
+# fp_proc_start <pid>: the process's start time (on Linux in clock ticks
+# since boot, from /proc; otherwise as ps prints it), or nothing.
 fp_proc_start() {  # <pid>
-  command -p ps -o lstart= -p "$1" 2>/dev/null | head -n 1
+  local line
+  if [ -d /proc/self ]; then
+    { read -r line < "/proc/$1/stat"; } 2>/dev/null || return 0
+    # Field 22 of the line; the command name before it may hold spaces and
+    # ends at the last ")", after which field 3 begins.
+    line=${line##*) }
+    # shellcheck disable=SC2086 # split into its fields on purpose
+    set -- $line
+    [ "$#" -ge 20 ] && printf '%s\n' "${20}"
+    return 0
+  fi
+  fp_ps -o lstart= -p "$1" 2>/dev/null | head -n 1
 }
 
 # fp_stopped_record <pairs>: creates a run record listing <pairs>, its owner
@@ -571,14 +593,25 @@ fp_stopped_record() {  # <pairs>
 # fp_stopped_drop <run-record>: removes a run record and its companions.
 fp_stopped_drop() {  # <run-record>
   case "$1" in
-    "$FP_STOPPED_DIR"/run.?*) rm -f -- "$1" "$1.modes" "$1.owner" "$1.engine" 2>/dev/null || true ;;
+    "$FP_STOPPED_DIR"/run.?*) rm -f -- "$1" "$1.modes" "$1.owner" "$1.engine" "$1.stop" "$1".engine.* 2>/dev/null || true ;;
   esac
 }
 
-# fp_engine_alive <pid>: 0 while <pid> is a live removal engine.
+# fp_engine_alive <pid>: 0 while <pid> is a live removal engine, and also
+# when it is alive but cannot be told apart from one, so nothing is undone
+# under an engine that might still be running.
 fp_engine_alive() {  # <pid>
+  local cmd
   kill -0 "$1" 2>/dev/null || return 1
-  case "$(command -p ps -o command= -p "$1" 2>/dev/null)" in *fm-footprint-fs.py*) return 0 ;; esac
+  if [ -d /proc/self ]; then
+    [ -r "/proc/$1/cmdline" ] || return 0
+    cmd=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null) || return 0
+  elif command -p -v ps >/dev/null 2>&1 || command -v ps >/dev/null 2>&1; then
+    cmd=$(fp_ps -o command= -p "$1" 2>/dev/null) || return 0
+  else
+    return 0
+  fi
+  case "$cmd" in *fm-footprint-fs.py*) return 0 ;; esac
   return 1
 }
 
@@ -604,9 +637,9 @@ fp_engine_stop() {  # <pid-file>
 fp_guard_set() {  # <pairs> <run-record>
   FP_GUARD_PAIRS=$1 FP_GUARD_REC=$2 FP_GUARD_KEEP=0
   if [ -n "$2" ]; then
-    export FM_FOOTPRINT_ENGINE_PID_FILE="$2.engine"
+    export FM_FOOTPRINT_ENGINE_PID_FILE="$2.engine" FM_FOOTPRINT_ENGINE_STOP_FILE="$2.stop"
   else
-    unset FM_FOOTPRINT_ENGINE_PID_FILE
+    unset FM_FOOTPRINT_ENGINE_PID_FILE FM_FOOTPRINT_ENGINE_STOP_FILE
   fi
   trap 'fp_guard_fire' TERM INT HUP
 }
@@ -618,7 +651,7 @@ fp_guard_clear() {
   FP_GUARD_PAIRS=''
   FP_GUARD_REC=''
   FP_GUARD_KEEP=0
-  unset FM_FOOTPRINT_ENGINE_PID_FILE
+  unset FM_FOOTPRINT_ENGINE_PID_FILE FM_FOOTPRINT_ENGINE_STOP_FILE
   trap - TERM INT HUP
 }
 
@@ -640,9 +673,13 @@ fp_guard_finish() {  # <aside>...
 fp_guard_fire() {
   local aside area
   trap - TERM INT HUP
-  # An engine that is still running would go on changing the copies.
-  if [ -n "$FP_GUARD_REC" ] && ! fp_engine_stop "$FP_GUARD_REC.engine"; then
-    exit 143
+  # An engine that is still running would go on changing the copies. The
+  # marker first: an engine starting now either finds it and does nothing,
+  # or has already named itself in the pid file read next (write_pid_file).
+  if [ -n "$FP_GUARD_REC" ]; then
+    : > "$FP_GUARD_REC.stop" 2>/dev/null || true
+    unset FM_FOOTPRINT_ENGINE_PID_FILE FM_FOOTPRINT_ENGINE_STOP_FILE
+    fp_engine_stop "$FP_GUARD_REC.engine" || exit 143
   fi
   if [ -n "$FP_GUARD_PAIRS" ] && [ -f "$FP_GUARD_PAIRS" ]; then
     while IFS='	' read -r aside area; do
@@ -656,10 +693,10 @@ fp_guard_fire() {
   exit 143
 }
 
-# fp_stopped_running <run-record>: 0 while the run that wrote <run-record>,
-# or its engine, is still running (its pid alive with the same start time).
-fp_stopped_running() {  # <run-record>
-  local rec=$1 pid start now epid
+# fp_stopped_owner <run-record>: 0 while the run that wrote <run-record> is
+# still running (its pid alive with the same start time).
+fp_stopped_owner() {  # <run-record>
+  local rec=$1 pid start now
   if IFS='	' read -r pid start < "$rec.owner" 2>/dev/null && [ -n "$pid" ]; then
     case "$pid" in *[!0-9]*) return 0 ;; esac
     now=$(fp_proc_start "$pid")
@@ -674,7 +711,16 @@ fp_stopped_running() {  # <run-record>
     case "$pid" in ''|*[!0-9]*) return 0 ;; esac
     ! kill -0 "$pid" 2>/dev/null || return 0
   fi
-  epid=$(head -n 1 "$rec.engine" 2>/dev/null)
+  return 1
+}
+
+# fp_stopped_engine <run-record>: 0 while the engine of a run that is gone
+# may still be running. The marker first, as in fp_guard_fire, so an engine
+# that run's timer was still starting does nothing.
+fp_stopped_engine() {  # <run-record>
+  local epid
+  : > "$1.stop" 2>/dev/null || return 0
+  epid=$(head -n 1 "$1.engine" 2>/dev/null)
   case "$epid" in ''|*[!0-9]*) return 1 ;; esac
   fp_engine_alive "$epid"
 }
@@ -687,9 +733,10 @@ fp_repair_stopped() {
   local rec aside area ok
   [ -d "$FP_STOPPED_DIR" ] && [ ! -L "$FP_STOPPED_DIR" ] || return 0
   for rec in "$FP_STOPPED_DIR"/run.*; do
-    case "$rec" in *.modes|*.owner|*.engine) continue ;; esac
+    case "$rec" in *.modes|*.owner|*.engine|*.engine.*|*.stop) continue ;; esac
     [ -f "$rec" ] && [ ! -L "$rec" ] || continue
-    ! fp_stopped_running "$rec" || continue
+    ! fp_stopped_owner "$rec" || continue
+    ! fp_stopped_engine "$rec" || continue
     ok=1
     if [ -f "$rec.modes" ] && [ ! -L "$rec.modes" ]; then
       while IFS='	' read -r aside area; do

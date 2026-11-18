@@ -214,7 +214,7 @@ class Freezer:
         # (dev, ino) -> [link count, names seen inside root] for linked files.
         multi: dict[tuple[int, int], list[int]] = {}
         self.walk_freeze(fd, st, root_dev, seen, multi)
-        inside = {key for key, (links, count) in multi.items() if count >= links}
+        inside = {key: links for key, (links, count) in multi.items() if count >= links}
         if inside:
             self.freeze_inside_links(root, root_dev, inside, seen)
 
@@ -262,11 +262,12 @@ class Freezer:
         finally:
             close_all([frame[0] for frame in stack])
 
-    def freeze_inside_links(self, root: str, root_dev: int, inside: set[tuple[int, int]],
+    def freeze_inside_links(self, root: str, root_dev: int, inside: dict[tuple[int, int], int],
                             seen: list[tuple[int, int, int]]) -> None:
-        """Freezes the linked files whose every name is inside <root>, once
-        each, checking at the moment of change that the link count is still
-        the one counted."""
+        """Freezes the linked files whose every name is inside <root> (<inside>
+        maps each to the link count the first walk counted), once each,
+        checking at the moment of change that the link count is still that
+        one, so a name made elsewhere in between keeps the copy."""
         pfd, fd, _st = open_root(root)
         os.close(pfd)
         done: set[tuple[int, int]] = set()
@@ -299,7 +300,7 @@ class Freezer:
                 cfd = open_child(frame[0], name, cst)
                 try:
                     now = os.fstat(cfd)
-                    if now.st_nlink != cst.st_nlink:
+                    if now.st_nlink != inside[key] or cst.st_nlink != inside[key]:
                         raise Keep("changed")
                     self.chmod_fd(cfd, now, seen)
                     done.add(key)
@@ -336,7 +337,10 @@ def thaw_root(root: str, modes: dict[tuple[int, int], int]) -> bool:
     def restore(cfd: int, cst: os.stat_result) -> None:
         nonlocal ok
         want = modes.get((cst.st_dev, cst.st_ino))
-        if want is not None and stat.S_IMODE(cst.st_mode) != want:
+        have = stat.S_IMODE(cst.st_mode)
+        # Only write bits were ever taken away, so an object whose other bits
+        # differ is not the one recorded (a reused inode) and is left alone.
+        if want is not None and have != want and have & ~WRITE_BITS == want & ~WRITE_BITS:
             try:
                 os.fchmod(cfd, want)
             except OSError:
@@ -477,7 +481,27 @@ class Dir:
         self.meta = meta
 
 
-def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
+def unlink_linked(dfd: int, name: str, cst: os.stat_result, modes: dict[tuple[int, int], int]) -> None:
+    """Unlinks a name of a regular file with more than one link through a
+    descriptor held across the unlink: when the file still has a name, now
+    outside the copy, and the freeze recorded it, it gets its recorded mode
+    back, so a name made elsewhere after the freeze is never left frozen."""
+    cfd = open_child(dfd, name, cst)
+    try:
+        os.unlink(name, dir_fd=dfd)
+        now = os.fstat(cfd)
+        want = modes.get((now.st_dev, now.st_ino))
+        have = stat.S_IMODE(now.st_mode)
+        if now.st_nlink > 0 and want is not None and have != want and have & ~WRITE_BITS == want & ~WRITE_BITS:
+            os.fchmod(cfd, want)
+    finally:
+        os.close(cfd)
+
+
+def remove_root(root: str, entries: dict[str, list[str]], modes: dict[tuple[int, int], int],
+                gone: dict[tuple[str, str], int]) -> tuple[bool, int]:
+    """Removes the snapshotted entries of <root>. <gone> counts, across every
+    root of one run, the names of each linked object already unlinked."""
     removed_blocks = 0
     children: dict[str, dict[str, str]] = {}
     for rel in entries:
@@ -490,7 +514,6 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
     # Names of an object with more than one link: each unlink lowers the
     # link count the next name of the same object must show.
     linked = [rel for rel, want in entries.items() if want[0] != "d" and int(want[8]) > 1]
-    gone: dict[tuple[str, str], int] = {}
     parent, name = os.path.split(root.rstrip("/"))
     pfd = os.open(parent, DIR_FLAGS)
     stack: list[Dir] = []
@@ -511,7 +534,7 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
             except OSError:
                 os.close(fd)
                 return False, 0
-            if not matches(now, entries[rel]):
+            if not matches(now, entries[rel], gone.get((entries[rel][2], entries[rel][3]), 0)):
                 os.close(fd)
                 return False, 0
 
@@ -586,7 +609,10 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
                     frame.whole = False
                 continue
             try:
-                os.unlink(cname, dir_fd=frame.fd)
+                if want[0] == "f" and cst.st_nlink > 1:
+                    unlink_linked(frame.fd, cname, cst, modes)
+                else:
+                    os.unlink(cname, dir_fd=frame.fd)
                 if int(want[8]) > 1:
                     gone[key] = gone.get(key, 0) + 1
                     # The data stays reachable through its other names; only
@@ -595,7 +621,7 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
                         removed_blocks += int(want[5])
                 else:
                     removed_blocks += int(want[5])
-            except OSError:
+            except (OSError, Keep):
                 frame.whole = False
         if root_whole:
             again = os.stat(name, dir_fd=pfd, follow_symlinks=False)
@@ -671,9 +697,10 @@ def cmd_remove(args: list[str]) -> int:
     snap = read_snapshot(args[0], set(roots))
     modes = read_record(args[1])
     out: list[str] = []
+    gone: dict[tuple[str, str], int] = {}
     for root in roots:
         try:
-            done, blocks = remove_root(root, snap.get(root, {}))
+            done, blocks = remove_root(root, snap.get(root, {}), modes, gone)
         except (ValueError, IndexError, Keep):
             done, blocks = False, 0
         if done and not os.path.lexists(root):
@@ -686,20 +713,30 @@ def cmd_remove(args: list[str]) -> int:
     return 0
 
 
-def write_pid_file() -> None:
+def write_pid_file() -> bool:
     """Names this engine in FM_FOOTPRINT_ENGINE_PID_FILE, so the script can
-    stop and wait for it before undoing a run it was stopped in."""
+    stop and wait for it before undoing a run it was stopped in. Returns
+    False when the run is being undone (FM_FOOTPRINT_ENGINE_STOP_FILE
+    exists): the marker is made before the pid file is read, and checked here
+    only after this pid is in place, so either the undoing side sees this
+    engine and stops it, or this engine sees the marker and does nothing."""
     path = os.environ.get("FM_FOOTPRINT_ENGINE_PID_FILE", "")
-    if not path:
-        return
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600)
+    if path:
+        tmp = f"{path}.{os.getpid()}"
         try:
-            os.write(fd, f"{os.getpid()}\n".encode())
-        finally:
-            os.close(fd)
-    except OSError:
-        pass
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600)
+            try:
+                os.write(fd, f"{os.getpid()}\n".encode())
+            finally:
+                os.close(fd)
+            os.rename(tmp, path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    marker = os.environ.get("FM_FOOTPRINT_ENGINE_STOP_FILE", "")
+    return not (marker and os.path.lexists(marker))
 
 
 def raise_open_file_limit() -> None:
@@ -729,7 +766,9 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] not in commands:
         sys.stderr.write("usage: fm-footprint-fs.py freeze|snapshot|thaw|remove ...\n")
         return 2
-    write_pid_file()
+    if not write_pid_file():
+        sys.stderr.write("fm-footprint-fs: the run is being undone\n")
+        return 75
     raise_open_file_limit()
     try:
         rc = commands[argv[1]](argv[2:])
