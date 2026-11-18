@@ -229,8 +229,11 @@ Each key is reported as follows:
 | Names no task, names a task that is not captain-held, or names a task already closed | Reported as `skipped:` and feeds nothing. |
 | A replay whose answer and requested close mode match the newest record | An idempotent `closed:`. |
 | A replay with a mode mismatch | Skipped. |
+| With `--for <task-id>`, names a task not held with `--origin <task-id>` | Reported as `refused:` and feeds nothing. |
 
-The command exits nonzero when any key was skipped.
+The command exits nonzero when any key was skipped or refused.
+`--for` exists because the keyed-answer intake closes held tasks, while a board key is text the board's author wrote.
+A board a worker hosts may therefore answer only the calls held for that worker.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch.
 
 ### Source bindings
@@ -238,6 +241,10 @@ The command exits nonzero when any key was skipped.
 `bind`, `unbind`, and `binding` record that a captured-answer source feeds this intake, as a private record under `state/decision-bindings/`.
 An unbound source feeds nothing, so the path is opt-in per source.
 `bind` deliberately does not require the source to exist yet.
+A worker arms its own board, so firstmate often binds it after the captain has already answered.
+`bind` therefore replays each result captured for a worker-owned board that has not reached the intake yet, then prints the intake's report.
+Once the intake has walked a captured result, no later `bind` replays it.
+A firstmate-owned source is never replayed, because it is bound before it is armed and an unscoped replay of an old capture could close any call held since.
 
 ### Channels that feed the intake
 
@@ -253,6 +260,7 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 
 - After capture, the runner passes a bound built-in source's result to `bin/fm-procevent-<adapter>.sh answers <result-file>`.
 - The runner pipes whatever that prints into the intake.
+- A result captured for a board armed `--for` a task reaches the intake with `--for` that task.
 - Any built-in adapter with an `answers` command therefore works.
 - The runner names no adapter, parses no result, and carries no decision rule.
 
@@ -571,6 +579,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
+- `test_scout_board_answers_reach_only_its_own_held_calls` binds a worker-armed board after its round was captured: `bind` records that answer once, a repeat `bind` records nothing more, and a key naming a call held for another task is refused on both the replay and the capture paths.
+  An unbound capture from a firstmate-owned board is never replayed.
 - The chat channel reaches the same intake.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
