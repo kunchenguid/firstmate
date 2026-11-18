@@ -71,7 +71,9 @@
 # is capped at five seconds. A first attempt killed at that bound or deadline is
 # budget refusal; a killed retry retains the genuine failure that caused it.
 # HTTP 5xx, 429, secondary-rate-limit 403, connection, DNS and TLS failures are
-# retried once when that bound still has time. Other failures are reported
+# retried once when that bound still has time. A bare EOF is a connection failure
+# only when the error is exactly `EOF` or ends in `: EOF`; unrelated `eof`
+# substrings are not connection failures. Other failures are reported
 # immediately, including a 404, which is how a lost login reads on a private
 # repository. A pull observation has three
 # dependent waves: core, six independent reads (seven when FM_CONTRIBUTIONS_REPLY_AGE
