@@ -16,7 +16,8 @@
 # (held back, when config/wait-no-turns is present, while the mate waits on its
 # own open decision or blocker), and
 # escalate once if the recovery turn also completes without a correlated
-# report. Never loop, never repeatedly inject, never silently expire unresolved
+# report, or at the delivery hard bound. Never loop, never repeatedly inject,
+# never silently expire unresolved
 # records (a request older than FM_PENDING_REPLY_MAX_AGE_SECS is closed with a
 # recorded resolved_via=expired-unanswered instead of reposted, see
 # fm_pending_reply_expire_stale), and never treat wrong-home or structured-home heuristics as
@@ -51,6 +52,10 @@
 #                           undelivered escalation note below)
 #   turn_seen_busy=         0|1 after delivery for the original request turn
 #   request_turn_completed_epoch=
+#   request_receipt_epoch=  first observed acknowledgement or idle-to-busy transition
+#   request_observed_state= last busy/idle/unknown observation
+#   request_continuously_busy= 1 until idle after receipt; then 0
+#   inbox_closed=           1 after correlated inbox cleanup (or expiry skip)
 #   recovery_attempted_epoch=
 #   recovery_sender_pid=
 #   recovery_sender_identity=
@@ -69,10 +74,16 @@
 #   wrong_home_first_sighting= encoded path:line identity of the first sighting
 #   wrong_home_sightings=   comma-separated encoded path:line identities
 #   wrong_home_scan_signature=
-#   grace_secs=             bounded grace before recovery, and before the
-#                           missed-report escalation, are eligible - measured
-#                           from the relevant turn's completion (request or
-#                           recovery), never from delivery or send time
+#   grace_secs=             recovery grace starts at request_receipt_epoch;
+#                           continuous busy extends it, bounded by 45 minutes
+#                           from delivery even without receipt evidence.
+#                           Recovery-turn completion anchors escalation grace;
+#                           the delivery hard bound also surfaces a real miss.
+# Receipt is conservative: an observed idle-to-busy transition proxies a new
+# turn, never a first busy observation that could predate delivery. Inbox moves
+# have no durable acknowledgement timestamp, so their first observation anchors
+# receipt. No conversation is scraped. Correlated replies move matching local
+# inbox records to handled/; remote inbox cleanup needs host-local plumbing.
 #
 # Escalation lifecycle: an escalation is not just a message, it OPENS a durable
 # keyed decision in the parent status log, and bin/fm-classify-lib.sh's fold is
@@ -112,10 +123,7 @@
 # tests. No side effects on source. set -u / set -e safe.
 #
 # Tunables (env):
-#   FM_PENDING_REPLY_GRACE_SECS   default 120; counted from the request turn's
-#                                 completion for the recovery repost, and from
-#                                 the recovery turn's completion for the
-#                                 missed-report escalation - never from delivery
+#   FM_PENDING_REPLY_GRACE_SECS   default 120; see grace_secs above
 #   FM_PENDING_REPLY_MAX_AGE_SECS default 21600 (6 h); a still-unanswered request
 #                                 older than this, counted from created_epoch, is
 #                                 never reposted: it is closed as
@@ -738,6 +746,7 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
   if [ "$phase" = resolved ]; then
+    fm_pending_reply_inbox "$state" "$corr" close || true
     _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
     return 0
   fi
@@ -778,17 +787,78 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
   fi
   fm_pending_reply_set "$rec" resolved_epoch "$now" || return 1
   fm_pending_reply_set "$rec" resolved_via "$via" || return 1
+  fm_pending_reply_inbox "$state" "$corr" close || true
   # The record is resolved either way; a failed close stays retryable from the
   # watcher tick rather than turning a settled request back into a failure.
   _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
   return 0
 }
 
+# Read only the asked task's durable inbox, matching the exact correlation.
+# A move to handled/ is receipt, not a reply. Only parent-channel resolution
+# authorizes automatic cleanup; expired-unanswered must never acknowledge work.
+fm_pending_reply_inbox() {  # <state-dir> <corr_id> <observe|close>
+  local state=$1 corr=$2 action=$3 rec task dir msg body handled=0
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  task=$(fm_pending_reply_get "$rec" task_id)
+  [ -n "$task" ] || return 1
+  dir="$state/$task.inbox"
+  if [ "$action" = observe ]; then
+    [ -d "$dir" ] || return 0
+    [ -z "$(fm_pending_reply_get "$rec" request_receipt_epoch)" ] || return 0
+  fi
+  if [ "$action" = close ]; then
+    case "$(fm_pending_reply_get "$rec" resolved_via)" in
+      expired-unanswered)
+        fm_pending_reply_set "$rec" inbox_closed 1
+        return $? ;;
+      status|document|helper) ;;
+      *)
+        # A partial expiry write may have committed resolved before its reason.
+        # An ambiguous terminal phase alone must not acknowledge inbox work.
+        body=$(fm_pending_reply_find_resolve_line "$(fm_pending_reply_get "$rec" parent_status)" "$corr")
+        [ -n "$body" ] || return 1
+        ;;
+    esac
+  fi
+  # Deliberately undirected: inbox owns its body format and lock implementation.
+  if ! declare -F fm_task_inbox_body >/dev/null; then
+    . "$_FM_PENDING_REPLY_LIB_DIR/fm-task-inbox-lib.sh"
+  fi
+  for msg in "$dir"/*.msg "$dir"/handled/*.msg; do
+    [ -f "$msg" ] && [ ! -L "$msg" ] || continue
+    body=$(fm_task_inbox_body "$msg") || return 1
+    fm_pending_reply_text_has_corr "$body" "$corr" || continue
+    if [ "${msg%/*}" = "$dir/handled" ]; then
+      handled=1
+    elif [ "$action" = close ]; then
+      mkdir -p "$dir/handled" || return 1
+      # Never overwrite an acknowledged record, even in a malformed inbox.
+      [ ! -e "$dir/handled/${msg##*/}" ] || return 1
+      mv "$msg" "$dir/handled/" || { [ ! -e "$msg" ] || return 1; }
+    fi
+  done
+  if [ "$action" = close ]; then
+    fm_pending_reply_set "$rec" inbox_closed 1
+  elif [ "$handled" = 1 ] && [ -z "$(fm_pending_reply_get "$rec" request_receipt_epoch)" ]; then
+    fm_pending_reply_set "$rec" request_receipt_epoch "$(fm_pending_reply_now)"
+  fi
+}
+
+fm_pending_reply_hard_limit_reached() {  # <record-path>
+  local delivered now
+  delivered=$(fm_pending_reply_get "$1" delivered_epoch)
+  case "$delivered" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(fm_pending_reply_now)
+  [ $((now - delivered)) -ge 2700 ]
+}
+
 # Observe backend busy/idle evidence for the active turn without reading chat.
 # busy_state must be one of: busy | idle | unknown.
 fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
   local state=$1 corr=$2 busy_state=$3
-  local rec phase delivered now seen completed field_seen field_completed
+  local rec phase delivered now seen completed field_seen field_completed previous receipt continuous next_continuous
+  case "$busy_state" in busy|idle|unknown) ;; *) return 2 ;; esac
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -804,6 +874,32 @@ fm_pending_reply_observe_busy() {  # <state-dir> <corr_id> <busy_state>
   else
     field_seen=recovery_turn_seen_busy
     field_completed=recovery_turn_completed_epoch
+  fi
+  if [ "$phase" = awaiting_report ]; then
+    previous=$(fm_pending_reply_get "$rec" request_observed_state)
+    fm_pending_reply_inbox "$state" "$corr" observe || return 1
+    receipt=$(fm_pending_reply_get "$rec" request_receipt_epoch)
+    continuous=$(fm_pending_reply_get "$rec" request_continuously_busy)
+    if [ -z "$receipt" ] && [ "$previous" = idle ] && [ "$busy_state" = busy ]; then
+      receipt=$(fm_pending_reply_now)
+      fm_pending_reply_set "$rec" request_receipt_epoch "$receipt" || return 1
+      # Discard an earlier idle snapshot: it was not this new request turn.
+      fm_pending_reply_set "$rec" request_turn_completed_epoch '' || return 1
+    fi
+    if [ -n "$receipt" ]; then
+      next_continuous=$continuous
+      if [ "$busy_state" = idle ]; then
+        next_continuous=0
+      elif [ -z "$continuous" ] && [ "$busy_state" = busy ]; then
+        next_continuous=1
+      fi
+      if [ "$next_continuous" != "$continuous" ]; then
+        fm_pending_reply_set "$rec" request_continuously_busy "$next_continuous" || return 1
+      fi
+    fi
+    if [ "$previous" != "$busy_state" ]; then
+      fm_pending_reply_set "$rec" request_observed_state "$busy_state" || return 1
+    fi
   fi
   seen=$(fm_pending_reply_get "$rec" "$field_seen")
   completed=$(fm_pending_reply_get "$rec" "$field_completed")
@@ -1096,13 +1192,14 @@ fm_pending_reply_repost_allowed() {  # <state-dir> <task_id>
 }
 
 # Deliver the recovery message once. Caller must hold phase awaiting_report with
-# turn completed and grace elapsed. Uses FM_PENDING_REPLY_SEND_HOOK when set
+# receipt grace elapsed without continuous busy, or the hard limit reached.
+# Uses FM_PENDING_REPLY_SEND_HOOK when set
 # (tests), otherwise invokes fm-send with FM_PENDING_REPLY_EXISTING_CORR so a
 # second expectation is not created.
 fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
   local rec phase completed delivered attempted grace now age task_id msg parent_home send_status=0
-  local sender_pid sender_identity status_file lock
+  local sender_pid sender_identity status_file lock evidence_since
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -1117,21 +1214,27 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   if fm_pending_reply_expire_stale "$state" "$corr"; then
     return 1
   fi
-  completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
-  [ -n "$completed" ] || return 1
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   [ -n "$delivered" ] || return 1
+  fm_pending_reply_inbox "$state" "$corr" observe || return 1
+  completed=$(fm_pending_reply_get "$rec" request_receipt_epoch)
   grace=$(fm_pending_reply_get "$rec" grace_secs)
   case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
   now=$(fm_pending_reply_now)
-  # Grace runs from the request turn's completion, not from delivery: delivery
-  # only proves the request arrived, while the turn's completion is the
-  # earliest moment a correlated report could exist to race against.
-  age=$((now - completed))
-  [ "$age" -ge "$grace" ] || return 1
+  if fm_pending_reply_hard_limit_reached "$rec"; then
+    completed=$((delivered + 2700))
+  else
+    [ -n "$completed" ] || return 1
+    [ "$(fm_pending_reply_get "$rec" request_continuously_busy)" != 1 ] || return 1
+    age=$((now - completed))
+    [ "$age" -ge "$grace" ] || return 1
+  fi
   task_id=$(fm_pending_reply_get "$rec" task_id)
   # A remote mate's report may exist and simply not have been mirrored yet.
-  fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
+  evidence_since=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
+  case "$evidence_since" in ''|*[!0-9]*) evidence_since=$completed ;; esac
+  [ "$evidence_since" -ge "$completed" ] || evidence_since=$completed
+  fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$evidence_since" || return 1
   # config/wait-no-turns: a mate waiting on its own open decision or blocker
   # is never poked. The recovery stays unattempted until the answer lands.
   if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
@@ -1445,16 +1548,20 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     [ "$phase" = delivery_unknown ] || return 0
   fi
   case "$phase" in
-    recovery_sent)
-      completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
-      [ -n "$completed" ] || return 1
-      # Grace runs from the recovery turn's completion, the same anchor the
-      # recovery repost itself uses (never from delivery or send time).
-      grace=$(fm_pending_reply_get "$rec" grace_secs)
-      case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
-      now=$(fm_pending_reply_now)
-      age=$((now - completed))
-      [ "$age" -ge "$grace" ] || return 1
+    awaiting_report|recovery_sent)
+      if fm_pending_reply_hard_limit_reached "$rec"; then
+        delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
+        completed=$((delivered + 2700))
+      else
+        [ "$phase" = recovery_sent ] || return 1
+        completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch)
+        [ -n "$completed" ] || return 1
+        grace=$(fm_pending_reply_get "$rec" grace_secs)
+        case "$grace" in ''|*[!0-9]*) grace=$(fm_pending_reply_grace_secs) ;; esac
+        now=$(fm_pending_reply_now)
+        age=$((now - completed))
+        [ "$age" -ge "$grace" ] || return 1
+      fi
       # Same reply-channel evidence rule the recovery repost obeys: a missing
       # correlated report is not a missed report until the mirror caught up.
       fm_pending_reply_missing_report_is_evidence "$state" \
@@ -1680,6 +1787,11 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   fi
   phase=$(fm_pending_reply_get "$rec" phase)
   case "$phase" in
+    awaiting_report)
+      if fm_pending_reply_hard_limit_reached "$rec"; then
+        fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null || true
+      fi
+      ;;
     recovery_sent|recovery_failed|recovery_unknown)
       fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null || true
       ;;
@@ -1693,22 +1805,23 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # is still unclosed: for every other resolved record the tick's per-record path
 # (fm_pending_reply_close_escalation) is a no-op that still pays a lock and
 # several forks, and records are never pruned, so that cost grew with the store.
-# Every other record - any phase but resolved, no phase at all, or one awk
-# cannot read - is selected, so the per-record path still decides it. Values
+# Resolved records also get one upgrade pass for inbox cleanup, retried until
+# inbox_closed=1. Every other record is selected for the per-record path. Values
 # follow fm_pending_reply_get: the last line for a key wins.
 _fm_pending_reply_select_needing_work() {  # <record-path>...
   [ "$#" -gt 0 ] || return 0
   printf '%s\n' "$@" | LC_ALL=C awk '
     {
       path = $0
-      phase = ""; escalated = ""; closed = ""
+      phase = ""; escalated = ""; closed = ""; inbox_closed = ""
       while ((rc = (getline line < path)) > 0) {
         if (index(line, "phase=") == 1) phase = substr(line, 7)
         else if (index(line, "escalated_epoch=") == 1) escalated = substr(line, 17)
         else if (index(line, "escalation_closed_epoch=") == 1) closed = substr(line, 25)
+        else if (index(line, "inbox_closed=") == 1) inbox_closed = substr(line, 14)
       }
       close(path)
-      if (rc < 0 || phase != "resolved" || (escalated != "" && closed == "")) print path
+      if (rc < 0 || phase != "resolved" || inbox_closed != "1" || (escalated != "" && closed == "")) print path
     }
   '
 }
@@ -1751,7 +1864,7 @@ fm_pending_reply_tick() {  # <state-dir>
     if [ "$phase" = resolved ]; then
       # Cheap no-op unless an escalation for this record is still open; this is
       # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      fm_pending_reply_try_resolve "$state" "$corr" || true
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true
