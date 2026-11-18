@@ -21,6 +21,7 @@ Every path comes from the environment.
 | `COCKPIT_DATA_DIR` | `$FM_HOME/data/miko-all-in-one-lavish` | Directory holding `cockpit-2.html`, `card-data.json` and `.refresh.lock`. |
 | `MIKO_WORKTREE` | none, required | A git worktree of the Miko repository with an `origin` remote; the run stops with a message when it is unset. |
 | `COCKPIT_OUT` | unset | Write the refreshed page to this file and leave the installed page and `card-data.json` alone. |
+| `COCKPIT_SCOREBOARD_CONFIG` | unset | Enable the hourly secondmate scoreboard using an explicit input-path JSON config; `bin/fm-secondmate-scoreboard.py --help` owns its format and limits. |
 
 The scripts find each other through their own location, so the directory can be called from any working directory.
 `gh` must be authenticated for the Miko repository, and `tasks-axi` is optional.

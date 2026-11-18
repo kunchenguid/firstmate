@@ -480,5 +480,10 @@ def main():
         if 'id="archcheck"' in pg: pg=re.sub(r'<span id="archcheck"[^>]*>[^<]*</span>',lambda m_:an,pg,1)
         else: pg=re.sub(r'(Hoofdtekening: stand [^(]*\([^)]*\))',lambda m_:m_.group(1)+an,pg,1)
     tmp2=tgt+'.tmp2'; open(tmp2,'w').write(pg); os.replace(tmp2,tgt)
+    scoreboard_config=os.environ.get('COCKPIT_SCOREBOARD_CONFIG')
+    if scoreboard_config:
+        run([sys.executable, '-I', os.path.join(BIN, '../../bin/fm-secondmate-scoreboard.py'),
+             '--config', scoreboard_config, '--output', (tgt+'.scoreboard.json' if os.environ.get('COCKPIT_OUT') else os.path.join(D, 'secondmate-scoreboard.json')),
+             '--page', tgt])
     print('production serves %s %s'%(DEPLOYED[:8] or 'unknown (main used)',DEPLOY_NOTE)); print('cockpit refreshed %s: %d cards updated, %d moved, %d boxes synced to their card, %d open PRs, %d in queue; WBS boxes: %s'%(now,changed,len(moves),boxsync,len(OPEN),sum(1 for o in OPEN.values() if o['isInMergeQueue']),boxstat))
 if __name__=='__main__': main()

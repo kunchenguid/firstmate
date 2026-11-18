@@ -224,4 +224,28 @@ cmp -s "$TMP_ROOT/kb-1.html" "$TMP_ROOT/kb-2.html" || fail "kanban-from-wbs seco
 cmp -s "$TMP_ROOT/kb-1.out" "$TMP_ROOT/kb-2.out" || fail "kanban-from-wbs summary changed on the second run"
 pass "kanban-from-wbs: second run changes nothing"
 
+# The existing refresh timer also publishes the opt-in hourly scoreboard.
+python3 - "$TMP_ROOT" <<'PY'
+import json
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+source = root/'score-source'
+for name in ('inbox', 'pending'):
+    (source/name).mkdir(parents=True)
+transcript = source/'session.jsonl'
+transcript.write_text('')
+(root/'score-config.json').write_text(json.dumps({
+    'read_only_home': str(source), 'transcripts': [str(transcript)],
+    'inbox': str(source/'inbox'), 'pending_replies': str(source/'pending'),
+    'task_id': 'demo', 'repo': 'demo/repo', 'goal_status': []}))
+PY
+printf '#!/usr/bin/env bash\nprintf "count\\t0\\n"\n' > "$FAKEBIN/gh-axi"
+chmod +x "$FAKEBIN/gh-axi"
+run_refresh COCKPIT_SCOREBOARD_CONFIG="$TMP_ROOT/score-config.json" > "$TMP_ROOT/score-refresh.out" 2>&1 \
+  || fail "scoreboard refresh failed: $(cat "$TMP_ROOT/score-refresh.out")"
+[ -s "$DATA/secondmate-scoreboard.json" ] || fail "scoreboard snapshot missing"
+grep -q 'id="secondmate-scoreboard"' "$DATA/cockpit-2.html" || fail "scoreboard table not rendered"
+pass "refresh-cockpit: publishes configured hourly scoreboard"
+
 echo "all cockpit-tools tests passed"
