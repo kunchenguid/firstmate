@@ -51,14 +51,12 @@
 # abort it - a timeout TERM used to land before the child could run cleanup and
 # cascade stale locks into the next arm. The child's own startup lock waits are
 # bounded by FM_WATCHER_STARTUP_LOCK_BOUND and fail with the typed line above.
-# When a standalone arm forwards a stop - a signal mid-start or the deadline itself -
+# Whenever the arm forwards a stop - a signal mid-start or the deadline itself -
 # it TERM's only at the startup safe point: the child's published lock identity,
 # which the child writes immediately after installing its EXIT cleanup trap, so
 # the stop runs through the same downtime publication and lock release as an
 # ordinary exit. A child still before that point when the deadline expires is
-# waited for, never killed mid-claim. An enclosing host startup attempt retains
-# its bounded owned-child cancellation before the host retires the arm.
-# A failed identity publication exits through
+# waited for, never killed mid-claim. A failed identity publication exits through
 # the child's trap instead of leaving a live child that cannot pass this gate.
 # Once attached, a stale beacon alone does not end the followed cycle: while that
 # holder is alive and the lock still names it under the same identity, the arm
@@ -763,7 +761,7 @@ cleanup_child() {
 # steal mutex or a startup lock - so a stop is forwarded only once the
 # identity matches the child (the startup safe point) or once the state
 # directory holding those locks is gone; otherwise this waits for the child to
-# exit on its own. No standalone deadline overrides it; startup identity-publication
+# exit on its own. No deadline overrides it; startup identity-publication
 # failure exits through the child's cleanup rather than stranding this wait.
 term_child_at_safe_point() {
   # The cheap gate reads only files the child itself writes after its trap
@@ -790,28 +788,10 @@ term_child_at_safe_point() {
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
-  local signal=$1 rc=$2 cancel_deadline=$((SECONDS + 5))
+  local signal=$1 rc=$2
   trap - HUP TERM INT
   if [ -n "$child" ] && fm_pid_alive "$child"; then
-    if [ -n "${FM_STARTUP_PROGRESS_JOURNAL:-}" ]; then
-      # The watcher installs its own cleanup traps only after acquiring and
-      # publishing the home-bound lock identity. Do not TERM it in the middle of
-      # stale-lock acquisition: that can abandon the steal mutex. Let startup
-      # reach that cleanup-ready point (or exit naturally) before forwarding TERM.
-      # This cancellation clock is separate from the startup allowance and stays
-      # below the host's ten-second arm-retirement grace, even before lock publication.
-      while fm_pid_alive "$child"; do
-        if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$child" "$FM_HOME" \
-          || [ "$SECONDS" -ge "$cancel_deadline" ]; then
-          kill -TERM "$child" 2>/dev/null || true
-          break
-        fi
-        sleep 0.02
-      done
-      wait "$child" 2>/dev/null || true
-    else
-      term_child_at_safe_point
-    fi
+    term_child_at_safe_point
   fi
   cycle_log_append "$rc" "$signal" arm-interrupted none
   cleanup_child

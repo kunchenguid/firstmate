@@ -1993,13 +1993,17 @@ SH
 }
 
 test_arm_term_waits_out_a_stalled_claim() {
-  local dir state fakebin armout pidfile release armpid real_ln status
-  dir=$(make_case arm-term-stalled-startup)
+  local mode=${1:-standalone} dir state fakebin armout pidfile release armpid real_ln status journal='' i watcher
+  dir=$(make_case "arm-term-stalled-startup-$mode")
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/arm.out"
   pidfile="$dir/arm.pid"
   release="$dir/release"
+  if [ "$mode" = journal ]; then
+    journal="$state/.watch-startup.claim"
+    : > "$journal"
+  fi
   real_ln=$(command -v ln)
   cat > "$fakebin/ln" <<'SH'
 #!/usr/bin/env bash
@@ -2013,6 +2017,8 @@ case "$last" in
       i=$((i + 1))
     done
     kill -TERM "$(cat "$FM_TEST_ARM_PID_FILE")" 2>/dev/null || true
+    cat "$2/pid" > "$FM_TEST_RELEASE.watcher"
+    : > "$FM_TEST_RELEASE.signalled"
     while [ ! -e "$FM_TEST_RELEASE" ]; do sleep 0.05; done
     ;;
 esac
@@ -2020,17 +2026,28 @@ exec "$FM_TEST_REAL_LN" "$@"
 SH
   chmod +x "$fakebin/ln"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_STARTUP_PROGRESS_JOURNAL="$journal" FM_STARTUP_PROGRESS_NONCE="${journal##*/}" \
+    FM_STARTUP_PROGRESS_BEGIN="$(date +%s)" FM_STARTUP_PROGRESS_CAP=100 FM_STARTUP_PROGRESS_EXPLICIT=0 \
     FM_TEST_REAL_LN="$real_ln" \
     FM_TEST_ARM_PID_FILE="$pidfile" FM_TEST_RELEASE="$release" \
     FM_ARM_CONFIRM_TIMEOUT=2 FM_POLL=5 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2>&1 &
   armpid=$!
   printf '%s\n' "$armpid" > "$pidfile"
-  sleep 5
+  i=0
+  while [ ! -e "$release.signalled" ] && [ "$i" -lt "$ARM_FAIL_EXIT_POLLS" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$release.signalled" ] || fail "$mode arm never reached the stalled singleton claim"
+  IFS= read -r watcher < "$release.watcher"
+  sleep 6
   if ! is_live_non_zombie "$armpid"; then
     : > "$release"
     fail "arm TERM'd a startup still inside its singleton claim once the deadline passed"
   fi
+  is_live_non_zombie "$watcher" || fail "$mode arm killed its watcher inside the singleton claim"
+  [ ! -s "$state/.watch.lock/pid-identity" ] || fail "$mode claim barrier already published a safe-point identity"
   : > "$release"
   status=0
   wait_for_exit "$armpid" "$ARM_FAIL_EXIT_POLLS" || status=$?
@@ -2038,7 +2055,7 @@ SH
   grep -q 'reason=arm-interrupted.*lock_after=pid:none' "$state/.watch-cycle-exits.log" \
     || fail "stalled-claim TERM left lock evidence: $(cat "$state/.watch-cycle-exits.log")"
   assert_no_startup_lock_evidence "$state" "stalled-claim TERM"
-  pass "arm TERM waits out a stalled singleton claim past the deadline and leaves no lock evidence"
+  pass "$mode arm TERM waits out a stalled singleton claim past the deadline and leaves no lock evidence"
 }
 
 test_arm_starts_and_self_heals() {
@@ -2864,6 +2881,7 @@ test_arm_starts_and_self_heals
 test_arm_hup_cleans_child_and_temp_output
 test_arm_term_during_steal_waits_for_watcher_cleanup_trap
 test_arm_term_waits_out_a_stalled_claim
+test_arm_term_waits_out_a_stalled_claim journal
 test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable

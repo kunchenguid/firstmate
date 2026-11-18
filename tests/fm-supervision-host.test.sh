@@ -1154,7 +1154,7 @@ ENV
 }
 
 test_startup_prelock_retirement() {
-  local mode=$1 home real_bash begin watcher owner journal posture=attended
+  local mode=$1 home real_bash begin watcher owner journal i posture=attended
   [ "$mode" != failed-ack ] || posture=away
   home=$(make_home "startup-prelock-$mode" "$posture")
   case "$mode" in ack|failed-ack) : > "$home/config/supervision-handoff-ack" ;; esac
@@ -1192,11 +1192,8 @@ SH
   wait_until 300 host_exited "$home" || fail "$mode prelock: host did not return to main"
   if [ "$mode" = ack ]; then
     owner=$(cut -f1 "$home/state/.supervision-handoff-owner" 2>/dev/null || true)
-    if [ -n "$owner" ]; then
-      wait_until 100 bash -c '! kill -0 "$1" 2>/dev/null' _ "$owner" || fail "ack prelock: handoff cleanup exceeded retirement grace"
-    fi
   fi
-  ! kill -0 "$watcher" 2>/dev/null || fail "$mode prelock: retired arm left its initializing watcher alive"
+  kill -0 "$watcher" 2>/dev/null || fail "$mode prelock: retirement killed the watcher before its startup safe point"
   [ ! -e "$journal" ] || fail "$mode prelock: superseded startup journal survived"
   if [ "$mode" = failed-ack ]; then
     assert_grep 'successor watcher cycle could not be verified' "$home/host.out" "failed-ack: direct successor did not fail"
@@ -1215,8 +1212,27 @@ SH
     [ ! -e "$journal" ] || fail "$mode prelock: stale startup journal $journal"
   done
   rm -f "$home/prelock-hold"
+  case "$mode" in
+    ack|failed-ack)
+      i=0
+      while is_live_non_zombie "$watcher" && [ "$i" -lt 300 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      ! is_live_non_zombie "$watcher" || fail "$mode prelock: released watcher did not finish safely"
+      if [ "$mode" = ack ]; then
+        [ -z "$owner" ] || wait_until 100 bash -c '! kill -0 "$1" 2>/dev/null' _ "$owner" \
+          || fail "ack prelock: handoff cleanup did not finish after the safe point"
+        [ ! -e "$home/state/.watch.lock/pid" ] || fail "ack prelock: safely retired watcher left its lock"
+      else
+        watcher_live "$home" || fail "failed-ack prelock: preserved startup disturbed the replacement watcher"
+      fi ;;
+    *)
+      wait_until 300 watcher_live "$home" || fail "$mode prelock: released startup did not establish a verified watcher"
+      [ "$(cat "$home/state/.watch.lock/pid")" = "$watcher" ] || fail "$mode prelock: the preserved watcher did not establish the singleton" ;;
+  esac
   stop_home_processes "$home"
-  pass "startup: $mode retires the initializing owned watcher and its journal"
+  pass "startup: $mode retires the arm and journal while preserving unsafe watcher startup"
 }
 
 test_startup_prelock_initial() { test_startup_prelock_retirement initial; }
