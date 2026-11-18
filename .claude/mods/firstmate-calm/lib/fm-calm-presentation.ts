@@ -13,12 +13,15 @@ import {
   classifyFirstmateOperationalText,
   firstmateOperationalDoorbellPath,
   firstmateOperationalRecordKind,
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 } from "./fm-operational-input.ts";
 import {
   CALM_PRESERVE_MIN_CHARS,
   calmTextIsSubstantive,
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 } from "./fm-calm-preservation.ts";
 
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 export { CALM_PRESERVE_MIN_CHARS } from "./fm-calm-preservation.ts";
 
 /** The environment variables that select the effective Firstmate home, as the mod reads them. */

@@ -2,6 +2,7 @@
 // line per outcome the store's tail copy gains and per latch change, replayed at session
 // start, shown whether Calm is on or off, and never marking anything read.
 import { describe, expect, test } from "claude-code/testing";
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 import { HOME, world } from "./support.ts";
 
 const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive: true };
