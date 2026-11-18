@@ -4,10 +4,12 @@
 # (bin/fm-remote-secondmate-control.sh) and the parent-side route check in
 # bin/fm-spawn.sh:
 #
-#   A) launch runs the ordinary host-local hc secondmate spawn in the remote hc
-#      session, under exactly that session and no inherited hc routing marker,
-#      and records and reports the hc route; the mate's terminal carries the
-#      Herdr.app labels that place it in its own space.
+#   A) a launch whose session core does not answer is refused before any hc
+#      call, so it never starts a core the app does not show; a launch with a
+#      live core runs the ordinary host-local hc secondmate spawn in the remote
+#      hc session, under exactly that session and no inherited hc routing
+#      marker, and records and reports the hc route; the mate's terminal
+#      carries the Herdr.app labels that place it in its own space.
 #   B) state, route, a repeated launch, a steer, and a key all reach that
 #      endpoint without creating another terminal.
 #   C) a record outside the remote hc session, or on another backend, is
@@ -99,6 +101,19 @@ mate_tag() {
 }
 
 # --- A) launch ---------------------------------------------------------------
+
+NO_CORE_RUN="$HC_RUN/no-core"
+mkdir -p "$NO_CORE_RUN/herdr-core"
+if CTL_RUNTIME="$NO_CORE_RUN" ctl launch "$ID" claude - - hc > "$TMP_ROOT/no-core.out" 2>&1; then
+  fail "a launch was accepted although no core answers for the remote hc session"
+fi
+assert_grep "no herdr-core core answers for session $SESSION" "$TMP_ROOT/no-core.out" \
+  "the no-core refusal did not name the missing core"
+assert_grep 'connect this machine from Herdr.app or start its user service' "$TMP_ROOT/no-core.out" \
+  "the no-core refusal did not name the human remedy"
+[ ! -s "$HC_DIR/log" ] || fail "a launch with no live core called hc, which would start a core the app does not show"
+[ ! -e "$META" ] || fail "a launch with no live core recorded an endpoint"
+pass "A a launch with no live core for the remote hc session is refused and calls no hc"
 
 ctl launch "$ID" claude - - hc > "$TMP_ROOT/launch.out" 2> "$TMP_ROOT/launch.err"
 expect_code 0 "$?" "host-local remote secondmate launch on hc failed"$'\n'"$(cat "$TMP_ROOT/launch.err")"

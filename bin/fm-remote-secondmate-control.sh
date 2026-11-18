@@ -195,11 +195,16 @@ remote_endpoint_load() {
 
 # The environment a host-local hc spawn runs under: exactly the remote mate
 # session, the pinned runtime directory, and none of an ambient terminal's or
-# caller's hc routing markers, which would otherwise outrank the session.
+# caller's hc routing markers, which would otherwise outrank the session. The
+# session's core must already answer on its socket: the spawn's first hc call
+# would otherwise start a fresh core from this context, not the one the app shows.
 remote_hc_launch_env() {
-  local session
-  session=$(fm_remote_hc_session) || return 1
+  local session sock
+  session=$(fm_remote_hc_session) || die "the remote herdr-core session override is invalid"
   fm_remote_hc_runtime_env
+  sock=$(HC_SESSION=$session fm_backend_detect_hc_core_sock)
+  fm_backend_unix_sock_live "$sock" \
+    || die "no herdr-core core answers for session $session at $sock; connect this machine from Herdr.app or start its user service, then retry; Firstmate never starts a core, because one started from this session is not the core the app shows"
   REMOTE_HC_LAUNCH_ENV=(-u HC_SOCKET -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE "HC_SESSION=$session")
   [ -z "${XDG_RUNTIME_DIR:-}" ] || REMOTE_HC_LAUNCH_ENV+=("XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR")
 }
@@ -364,7 +369,7 @@ cmd_launch() {
     hc)
       # The mate's terminal lands in the core Herdr.app shows for this host,
       # and hc must resolve that core's live socket, never start another.
-      remote_hc_launch_env || die "the remote herdr-core session override is invalid"
+      remote_hc_launch_env
       launch_env=("${REMOTE_HC_LAUNCH_ENV[@]}" "${launch_env[@]}")
       ;;
   esac
