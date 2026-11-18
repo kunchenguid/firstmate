@@ -307,7 +307,12 @@ case "${1:-}" in
           exit 0
         fi
         [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] || exit 1
-        printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT_STATUS"
+        if [ -n "${FM_FAKE_HERDR_AGENT:-}" ]; then
+          printf '{"result":{"agent":{"agent":"%s","agent_session":{"source":"%s"},"agent_status":"%s"}}}\n' \
+            "$FM_FAKE_HERDR_AGENT" "${FM_FAKE_HERDR_SOURCE:-}" "$FM_FAKE_HERDR_AGENT_STATUS"
+        else
+          printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT_STATUS"
+        fi
         exit 0 ;;
     esac ;;
 esac
@@ -370,6 +375,8 @@ reset_fakes() {
   FM_FAKE_HERDR_READ_FAIL=0
   FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_AGENT=""
+  FM_FAKE_HERDR_SOURCE=""
   FM_FAKE_HERDR_PROCESS=agent
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
@@ -400,7 +407,7 @@ reset_fakes() {
   FM_FAKE_STATUS_APPEND_MARKER=""
   FM_FAKE_STATUS_APPEND_LINE=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_WINDOW_GONE FM_FAKE_TMUX_UNREADABLE
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_AGENT FM_FAKE_HERDR_SOURCE FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_DAEMON_OUTPUT
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
@@ -2835,6 +2842,52 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   assert_contains "$out" "source: pane" "herdr native busy -> pane source"
   assert_contains "$out" "herdr-native" "the herdr verdict names its native source"
   pass "herdr's native busy verdict reads working with no record present"
+}
+
+# Oracle: `herdr pane list`/`agent get` report agent=codex, agent_session.source=herdr:codex and
+# agent_status working|done for a Codex pane (docs/verification/supervision.md "Codex on Herdr").
+# Display-only: an explicit declaration beats native idle; a foreign registration or any other
+# status stays unknown.
+codex_herdr_case() {  # <name> <agent> <source> <status> <status-log-or-empty>
+  reset_fakes
+  CASE_D=$(new_case "$1")
+  make_repo_on_branch "$CASE_D/wt" "fm/$1"
+  make_fakebin "$CASE_D" >/dev/null
+  fm_write_meta "$CASE_D/state/$1.meta" "window=default:w1:p2" "worktree=$CASE_D/wt" "kind=scout" \
+    "backend=herdr" "harness=codex"
+  [ -z "${5:-}" ] || printf '%s\n' "$5" > "$CASE_D/state/$1.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_AGENT=$2
+  FM_FAKE_HERDR_SOURCE=$3
+  FM_FAKE_HERDR_AGENT_STATUS=$4
+  CASE_OUT=$(run_crew_state "$CASE_D" "$1")
+}
+
+test_codex_herdr_native_display() {
+  command -v jq >/dev/null 2>&1 || { pass "codex herdr display skipped without jq"; return; }
+  codex_herdr_case cxw codex herdr:codex working ""
+  assert_contains "$CASE_OUT" "state: working" "codex working -> working"
+  codex_herdr_case cxd codex herdr:codex done ""
+  assert_contains "$CASE_OUT" "state: idle" "codex done with no report -> idle"
+  codex_herdr_case cxs codex herdr:codex done "working: setup complete"
+  assert_contains "$CASE_OUT" "state: idle" "codex done over a stale working report -> idle"
+  codex_herdr_case cxp codex herdr:codex done "needs-decision [key=scope]: pick A or B"
+  assert_contains "$CASE_OUT" "state: parked" "an open decision beats native idle"
+  codex_herdr_case cxb codex herdr:codex done "blocked: waiting on review"
+  assert_contains "$CASE_OUT" "state: blocked" "a blocked report beats native idle"
+  codex_herdr_case cxf codex herdr:codex done "failed: could not build"
+  assert_contains "$CASE_OUT" "state: failed" "a failed report beats native idle"
+  codex_herdr_case cxbl codex herdr:codex blocked ""
+  assert_contains "$CASE_OUT" "state: unknown" "codex blocked stays unknown"
+  codex_herdr_case cxi codex herdr:codex idle ""
+  assert_contains "$CASE_OUT" "state: unknown" "codex idle stays unknown"
+  codex_herdr_case cxpi pi herdr:pi working ""
+  assert_not_contains "$CASE_OUT" "state: working" "a foreign registration is not Codex activity"
+  codex_herdr_case cxsrc codex other done ""
+  assert_contains "$CASE_OUT" "state: unknown" "a wrong source stays unknown"
+  pass "codex on herdr shows working/idle from exact native status, declarations first"
 }
 
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
@@ -6835,6 +6888,7 @@ test_no_run_launch_prompt_parked_is_not_working
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
+test_codex_herdr_native_display
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone

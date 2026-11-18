@@ -3858,12 +3858,19 @@ fm_backend_herdr_busy_state() {  # <target>
 }
 
 # fm_backend_herdr_codex_native_state: a Codex pane's busy state from Herdr's
-# herdr:codex integration, read without starting a stopped server. Exactly
-# `working` -> busy and `done` -> idle; every other status (idle, blocked,
-# missing, unreadable) and an unavailable session -> unknown.
+# herdr:codex integration, read without starting a stopped server. Only a
+# registration whose agent is codex and whose session source is herdr:codex
+# counts; exactly `working` -> busy and `done` -> idle. Every other status
+# (idle, blocked, missing, unreadable), a foreign or stale registration, and an
+# unavailable session -> unknown.
 fm_backend_herdr_codex_native_state() {  # <target>
+  local out fields agent source status
   fm_backend_herdr_target_observable "$1" || { printf 'unknown'; return 0; }
-  case "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || { printf 'unknown'; return 0; }
+  fields=$(printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_session.source // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null) || { printf 'unknown'; return 0; }
+  IFS=$'\t' read -r agent source status <<<"$fields"
+  [ "$agent" = codex ] && [ "$source" = herdr:codex ] || { printf 'unknown'; return 0; }
+  case "$status" in
     working) printf 'busy' ;;
     done) printf 'idle' ;;
     *) printf 'unknown' ;;

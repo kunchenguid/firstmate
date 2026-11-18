@@ -149,13 +149,6 @@
 # installed binary, so Codex classifies unknown codex-unverified rather than
 # falling back to idle, and fm-spawn installs no Codex busy wiring.
 # docs/verification/supervision.md owns the evidence for both probes.
-# The one exception is the Herdr backend: Herdr reports each Codex pane's
-# agent_status through its own herdr:codex integration (codex-cli 0.169.1
-# verdict, live: `working` during a turn, `done` after it), so a Herdr-backed
-# Codex worker classifies from that native status - working is busy herdr-native
-# and done is idle herdr-native; idle, blocked, or anything else stays unknown. The gate functions stay closed, so
-# fm-spawn still wires nothing and no record is ever trusted for Codex; a
-# missing or unmapped Herdr status keeps unknown codex-unverified.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
@@ -1159,20 +1152,6 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       ;;
     codex*)
       if ! fm_busy_codex_semantic_source; then
-        # A Herdr-backed Codex pane is the one exception: Herdr's own
-        # herdr:codex integration reports the pane's agent_status, so its
-        # native verdict is the Codex busy source there. No status (any
-        # other backend, an unreadable pane, an unmapped status) stays
-        # unknown codex-unverified, never idle. Only exact working and done count.
-        if [ "$backend" = herdr ] && command -v fm_backend_herdr_codex_native_state >/dev/null 2>&1; then
-          native=$(fm_backend_herdr_codex_native_state "$target" 2>/dev/null || true)
-          case "$native" in
-            busy|idle)
-              printf '%s herdr-native' "$native"
-              return 0
-              ;;
-          esac
-        fi
         printf 'unknown codex-unverified'
         return 0
       fi

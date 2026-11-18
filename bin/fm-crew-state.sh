@@ -1610,10 +1610,22 @@ if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
-    idle)
-      [ "${BUSY_VERDICT#* }" != herdr-native ] || emit idle pane "harness idle (herdr-native)"
+    idle) ;;
+    *)
+      CODEX_NATIVE=unknown
+      case "$HARNESS" in
+        codex*)
+          if [ "$TASK_BACKEND" = herdr ] && fm_backend_source herdr 2>/dev/null; then
+            CODEX_NATIVE=$(fm_backend_herdr_codex_native_state "$BACKEND_TARGET" 2>/dev/null || printf unknown)
+          fi
+          ;;
+      esac
+      case "$CODEX_NATIVE" in
+        busy) emit working pane "harness busy (herdr-native)" ;;
+        idle) CODEX_NATIVE_IDLE=1 ;;
+        *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+      esac
       ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi
 
@@ -1632,9 +1644,13 @@ if [ -n "$LOG_VERB" ]; then
     emit_ship_status_done
   fi
   LOG_STATE=$(map_log_state "$LOG_LINE")
+  if [ "$LOG_STATE" = working ] && [ "${CODEX_NATIVE_IDLE:-}" = 1 ]; then
+    emit idle pane "harness idle (herdr-native)"
+  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi
 
+[ "${CODEX_NATIVE_IDLE:-}" != 1 ] || emit idle pane "harness idle (herdr-native)"
 emit unknown none "no current-state source available"

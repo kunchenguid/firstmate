@@ -256,13 +256,16 @@ It was checked live with codex-cli 0.169.1 and Herdr 0.9.5 on Linux arm64, readi
 herdr pane list | jq -r '.result.panes[] | select(.agent=="codex") | [.pane_id, .agent_session.source, .agent_status, .terminal_title_stripped] | @tsv'
 ```
 
-| `agent_status` | Observed pane | Classification |
+| `agent_status` | Observed pane | Fleet view and Bearings |
 | --- | --- | --- |
-| `working` | A Codex pane whose title carried the spinner glyph while it handled its launch brief | `busy herdr-native` |
-| `done` | Codex panes that had finished a turn and sat at the prompt | `idle herdr-native` |
+| `working` | A Codex pane whose title carried the spinner glyph while it handled its launch brief | `working` |
+| `done` | Codex panes that had finished a turn and sat at the prompt | `idle` |
 
-Only exactly `working` and `done` count; `idle`, `blocked`, any other, missing, or unreadable status, a stopped Herdr session (the probe never starts a server), and every other backend keeps `unknown codex-unverified`. The crew-state reader reports a `done` pane as idle instead of falling back to the status log; the app-server and hook gates stay closed, so no Codex busy record is written or trusted.
-`tests/fm-busy-state.test.sh` pins the mapping.
+This is display only, read by `bin/fm-crew-state.sh` through `fm_backend_herdr_codex_native_state`; the busy classifier, watcher, and park policy still treat Codex as `unknown codex-unverified`, and the app-server and hook gates stay closed.
+The read never starts a stopped Herdr server, and it counts only a registration whose `agent` is `codex` and whose `agent_session.source` is `herdr:codex`, with `agent_status` exactly `working` or `done`.
+Any other status, a foreign or missing registration, a stopped session, and every other backend stay `unknown`.
+Native `done` yields `idle` only when there is no declaration or the last report is a stale `working`; an explicit `needs-decision`, `blocked`, paused, `done`, or `failed` report wins.
+`tests/fm-crew-state.test.sh` pins this through the crew-state executable.
 
 Deterministic entry points:
 
