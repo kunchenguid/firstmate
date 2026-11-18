@@ -69,6 +69,30 @@ test_report_surface_enforces_actor_turn_and_scope() {
 }
 
 
+test_report_surface_defaults_the_task_only_for_a_single_task_turn() {
+  local home state out rc
+  home="$TMP_ROOT/report-default-task"
+  state="$home/state"
+  mkdir -p "$state"
+  printf 'turn=t1\nrows=4\ntasks=alpha\nunscoped=0\nwake=signal: alpha.status\n' > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t1 "$REPORT" --verdict routine --summary ok 2>&1); rc=$?
+  expect_code 0 "$rc" "a single-task turn must accept a report without --task"
+  assert_contains "$out" "recorded seq 1 [routine] for alpha" "the defaulted report must name its task"
+  assert_grep '"task":"alpha"' "$state/branch-outcomes.jsonl" "the defaulted report did not store the claimed task"
+
+  printf 'turn=t2\nrows=5,6\ntasks=alpha beta\nunscoped=0\nwake=signal: x\n' > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t2 "$REPORT" --verdict routine --summary ok 2>&1); rc=$?
+  expect_code 2 "$rc" "a multi-task turn must still require --task"
+  assert_contains "$out" "alpha beta" "the refusal must list the claimed tasks"
+
+  printf 'turn=t3\nrows=7\ntasks=\nunscoped=1\nwake=heartbeat\n' > "$state/.supervision-host-turn"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_BRANCH_REPORT_TURN=t3 "$REPORT" --verdict routine --summary ok 2>&1); rc=$?
+  expect_code 2 "$rc" "an unscoped turn must still require --task"
+  [ "$(wc -l < "$state/branch-outcomes.jsonl")" -eq 1 ] || fail "a refused report touched the outcome store"
+  pass "report surface: --task defaults only when the turn claims exactly one task"
+}
+
+
 # The return brief is rendered after the record is archived, so a non-silent
 # report made after that may be missing from it: the report queues its relay
 # for main, while a report made during the away window only waits for the brief.
@@ -587,6 +611,7 @@ test_branch_outcomes_keep_a_drain_presented_outcome_across_an_index_repair() {
 
 fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
+  test_report_surface_defaults_the_task_only_for_a_single_task_turn \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
   test_branch_outcomes_only_on_a_host_home_off_pi \

@@ -1218,7 +1218,10 @@ export default function (pi: ExtensionAPI) {
       description:
         "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks an eligible no-change outcome.",
       parameters: Type.Object({
-        task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
+        task: Type.Optional(Type.String({
+          description:
+            "The task id the event belongs to (or 'fleet' for fleet-wide events). May be omitted only when the wake being handled claims exactly one task",
+        })),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
           description:
             "Use captain or routine exactly as the \"Verdict: routine or captain\" section of your system prompt decides; that section is the one owner of the rule.",
@@ -1233,14 +1236,19 @@ export default function (pi: ExtensionAPI) {
         })),
       }),
       execute: async (_toolCallId, params) => {
-        const task = String((params as { task: unknown }).task || "").trim();
+        let task = String((params as { task?: unknown }).task || "").trim();
+        let taskNote = "";
+        if (!task && wakeTaskScope?.tasks.size === 1) {
+          task = [...wakeTaskScope.tasks][0];
+          taskNote = ` for ${task}`;
+        }
         const verdictRaw = String((params as { verdict: unknown }).verdict || "");
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
         if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain")) {
           return {
-            content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            content: [{ type: "text", text: "invalid report: task (omittable only when the wake claims exactly one task), verdict (routine|captain), and summary are required" }],
             details: undefined,
             isError: true,
           };
@@ -1289,7 +1297,7 @@ export default function (pi: ExtensionAPI) {
             };
           }
           return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
+            content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}]${taskNote} into main` }],
             details: undefined,
           };
         });

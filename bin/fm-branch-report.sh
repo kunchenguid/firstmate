@@ -15,9 +15,12 @@
 # the host's turn record; this script only compares against it.
 #
 # Usage:
-#   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
+#   fm-branch-report.sh [--task <id|fleet>] --verdict routine|captain \
 #       --summary <text> [--silent true|false] [--wake <text>]
 #
+# --task may be omitted only when the host's turn claims exactly one task: the
+# report then goes to that task. An unscoped turn (heartbeat or check rows) or
+# a turn claiming several tasks needs --task, one report per claimed task.
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
 # or captain"); --silent true is legal only for a routine outcome.
 # --wake defaults to the wake reason the host recorded for the turn.
@@ -63,7 +66,7 @@ refuse() {
   exit 3
 }
 
-TASK='' VERDICT='' SUMMARY='' SILENT=false WAKE='' WAKE_SET=0
+TASK='' TASK_NOTE='' VERDICT='' SUMMARY='' SILENT=false WAKE='' WAKE_SET=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --task) TASK=${2:-}; shift 2 || usage ;;
@@ -80,8 +83,8 @@ TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
-if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
-  echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
+if [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
+  echo "invalid report: --verdict (routine|captain) and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
@@ -107,6 +110,18 @@ turn_field() {  # <name>
 
 if [ "$(turn_field unscoped)" != 1 ]; then
   TASKS=$(turn_field tasks)
+  if [ -z "$TASK" ]; then
+    case "$TASKS" in
+      ''|*[[:space:]]*) ;;
+      *) TASK=$TASKS TASK_NOTE=" for $TASKS" ;;
+    esac
+  fi
+fi
+if [ -z "$TASK" ]; then
+  echo "invalid report: --task is required unless the wake claims exactly one task (this one claims: ${TASKS:-none, an unscoped turn})" >&2
+  exit 2
+fi
+if [ "$(turn_field unscoped)" != 1 ]; then
   case " $TASKS " in
     *" $TASK "*) ;;
     *)
@@ -128,14 +143,14 @@ printf '%s\t%s\t%s\t%s\n' "$TURN" "$SEQ" "$VERDICT" "$TASK" >> "$RECEIPTS" || {
   exit 1
 }
 if [ "$SILENT" = true ]; then
-  printf 'recorded seq %s [routine]; silent outcome remains in the outcome store\n' "$SEQ"
+  printf 'recorded seq %s [routine]%s; silent outcome remains in the outcome store\n' "$SEQ" "$TASK_NOTE"
   exit 0
 fi
 if [ "$(turn_field posture)" = attended ]; then
   if [ "$VERDICT" = captain ] && ! fm_afk_contract_away_present "$STATE"; then
-    printf 'recorded seq %s [captain]; MAIN processes it from its next drain\n' "$SEQ"
+    printf 'recorded seq %s [captain]%s; MAIN processes it from its next drain\n' "$SEQ" "$TASK_NOTE"
   else
-    printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
+    printf 'recorded seq %s [%s]%s; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT" "$TASK_NOTE"
   fi
   exit 0
 fi
@@ -144,10 +159,10 @@ if ! fm_afk_contract_away_present "$STATE"; then
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   if ! fm_wake_append check "supervision-host-return:$SEQ" \
     "check: supervision-host outcome $SEQ for $TASK [$VERDICT] was recorded after the captain returned, so the return brief may not show it; relay it to the captain: $SUMMARY"; then
-    printf 'recorded seq %s [%s], but the captain has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" >&2
+    printf 'recorded seq %s [%s]%s, but the captain has returned and its relay to MAIN could not be queued; the host hands this turn to MAIN\n' "$SEQ" "$VERDICT" "$TASK_NOTE" >&2
     exit 0
   fi
-  printf 'recorded seq %s [%s]; the captain has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT"
+  printf 'recorded seq %s [%s]%s; the captain has returned, so it is queued for MAIN to relay\n' "$SEQ" "$VERDICT" "$TASK_NOTE"
   exit 0
 fi
-printf 'recorded seq %s [%s]; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT"
+printf 'recorded seq %s [%s]%s; it waits in the outcome store for MAIN\n' "$SEQ" "$VERDICT" "$TASK_NOTE"
