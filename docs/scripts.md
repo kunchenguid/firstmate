@@ -18,8 +18,9 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-home-summary-refresh.sh` | Atomically publish this home's structured summary ledger                         |
 | `fm-fleet-ledger.sh`     | Append the opt-in fleet activity ledger's records ([contract](fleet-ledger.md))      |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view, with the worker Step column, `--steps` checklist, and `--watch` redraw |
-| `fm-step.sh`             | Record the plan step a worker has started for the fleet view, without a wake          |
+| `fm-step.sh`             | Record a worker's full plan, the step it started, and verifier scenario results, without a wake |
 | `fm-step-lib.sh`         | Single owner of the worker step record format and the `config/step-display` switch   |
+| `fm-crew-panel.sh`       | Print the read-only fleet or worker status panel, and open it in a Herdr right split (`config/crew-panel`) |
 | `fm-bearings-snapshot.sh` | Project the bounded remote-ledger fleet snapshot to compact TOON; `--include-prs` adds live GitHub enrichment |
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/bearings lavish` fleet board                  |
 | `fm-secondmate-reconcile.sh` | Queue Bearings reconcile requests for later supervision delivery and ask each mismatched home through its durable inbox with a per-home cooldown |

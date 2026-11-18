@@ -5847,4 +5847,12 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+# On Herdr the worker panel opens in the right split of the worker tab.
+# bin/fm-crew-panel.sh owns the config/crew-panel switch and is idempotent.
+# The worker is already running here, so a failed panel only warns.
+if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    fm_run_timed 15 "$SCRIPT_DIR/fm-crew-panel.sh" open-task "$ID" >/dev/null 2>&1 \
+    || echo "warning: the worker panel did not open for $ID; the worker runs without it" >&2
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

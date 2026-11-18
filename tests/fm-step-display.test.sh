@@ -262,6 +262,97 @@ test_off_restores_brief_byte_for_byte() {
   pass "with the display off the ship and scout briefs are the briefs without the step line, byte for byte"
 }
 
+test_plan_list_shows_every_step_name_before_the_step_starts() {
+  local home snap out
+  home=$(make_home plan-first)
+  write_task "$home" plan-task 'working: setup done'
+  record_step "$home" plan-task --plan "Read the toolbar code" "Write failing tests" "Build the panel" "Run the suite"
+  snap=$(view "$home" --json) || fail "snapshot failed"
+  assert_equals "Read the toolbar code|Write failing tests|Build the panel|Run the suite" \
+    "$(printf '%s' "$snap" | jq -r '.tasks[] | select(.id == "plan-task") | [.step.plan[].name] | join("|")')" \
+    "the snapshot does not carry every plan step name before step 1"
+  out=$(view "$home" --steps plan-task) || fail "--steps failed"
+  assert_contains "$out" "[ ] 4/4 Run the suite" "the checklist does not name a step before it starts"
+  record_step "$home" plan-task 1 4 "Read the toolbar code"
+  out=$(view "$home" --steps plan-task) || fail "--steps failed"
+  assert_contains "$out" "[>] 1/4 Read the toolbar code" "the checklist does not mark step 1 current"
+  assert_contains "$out" "[ ] 3/4 Build the panel" "the checklist does not name step 3 before it starts"
+  assert_contains "$out" "[ ] 4/4 Run the suite" "the checklist does not name step 4 before it starts"
+  pass "the plan list shows every step name before the step starts"
+}
+
+test_a_later_plan_replaces_the_earlier_plan() {
+  local home names
+  home=$(make_home replan)
+  write_task "$home" replan-task 'working: setup done'
+  record_step "$home" replan-task --plan "Old one" "Old two" "Old three"
+  record_step "$home" replan-task 1 3 "Old one"
+  record_step "$home" replan-task --plan "New one" "New two"
+  names=$(view "$home" --json | jq -r '.tasks[] | select(.id == "replan-task") | [.step.plan[].name] | join("|")')
+  assert_equals "New one|New two" "$names" "a later plan did not replace the earlier plan"
+  pass "a later plan record replaces the earlier plan"
+}
+
+test_a_step_record_without_a_plan_still_reads_the_same() {
+  local home rec cur
+  home=$(make_home old-record)
+  write_task "$home" old-task 'working: setup done'
+  rec="$home/state/old-task.step"
+  printf '100\t1\t3\tFirst\n200\t2\t3\tSecond\n' > "$rec"
+  cur=$(bash -c '. "$1"; fm_step_record_json "$2" 300' _ "$ROOT/bin/fm-step-lib.sh" "$rec" | jq -c '{current, history}')
+  assert_equals '{"current":{"n":2,"m":3,"name":"Second","started_at":200,"age_seconds":100},"history":[{"n":1,"m":3,"name":"First","started_at":100},{"n":2,"m":3,"name":"Second","started_at":200}]}' \
+    "$cur" "a step record from before plan lines existed reads differently"
+  record_step "$home" old-task --scenario pass "Log in as admin"
+  record_step "$home" old-task --plan "A" "B" "C"
+  cur=$(bash -c '. "$1"; fm_step_record_json "$2" 300' _ "$ROOT/bin/fm-step-lib.sh" "$rec" | jq -c '.current | {n, name}')
+  assert_equals '{"n":2,"name":"Second"}' "$cur" "a plan or scenario line changed the current step"
+  pass "a step record without a plan still reads the same, and new line shapes never change the current step"
+}
+
+test_scenario_results_keep_the_last_result_per_name() {
+  local home out
+  home=$(make_home scenarios)
+  write_task "$home" scen-verify 'working: setup done'
+  record_step "$home" scen-verify --scenario run "Log in as admin"
+  record_step "$home" scen-verify --scenario run "Viewer cannot edit"
+  record_step "$home" scen-verify --scenario pass "Log in as admin"
+  out=$(view "$home" --json | jq -c '[.tasks[] | select(.id == "scen-verify") | .step.scenarios[] | [.name, .result]]')
+  assert_equals '[["Log in as admin","pass"],["Viewer cannot edit","run"]]' "$out" \
+    "the scenario list does not keep the last result for each name in first-recorded order"
+  pass "scenario results keep the last result for each name"
+}
+
+test_brief_step_line_records_the_full_plan_first() {
+  local home line plan_at step_at verify
+  home=$(make_home brief-plan)
+  FM_HOME="$home" "$BRIEF" plan-ship firstmate --mode no-mistakes >/dev/null 2>&1 || fail "ship brief failed"
+  line=$(grep 'fm-step.sh' "$home/data/plan-ship/brief.md")
+  assert_contains "$line" "--plan" "the step line does not record the full plan"
+  plan_at=${line%%--plan*}
+  step_at=${line%%<n> <m>*}
+  [ "${#plan_at}" -lt "${#step_at}" ] || fail "the step line does not record the plan before each step start: $line"
+  assert_no_grep '--scenario' "$home/data/plan-ship/brief.md" "a ship brief asks for scenario records"
+  FM_HOME="$home" "$BRIEF" plan-ship-verify firstmate --scout >/dev/null 2>&1 || fail "verifier brief failed"
+  verify="$home/data/plan-ship-verify/brief.md"
+  assert_grep '--scenario run' "$verify" "a verifier brief does not ask for scenario records"
+  pass "the brief step line records the full plan first, and only a verifier records scenarios"
+}
+
+test_helper_rejects_bad_plan_and_scenario_without_writing() {
+  local home
+  home=$(make_home bad-plan)
+  FM_TASK_INBOX="$home/state/t.inbox" "$STEP" --plan >/dev/null 2>&1
+  expect_code 2 "$?" "fm-step.sh accepted an empty plan"
+  FM_TASK_INBOX="$home/state/t.inbox" "$STEP" --plan "A" "  " >/dev/null 2>&1
+  expect_code 2 "$?" "fm-step.sh accepted a plan step with no name"
+  FM_TASK_INBOX="$home/state/t.inbox" "$STEP" --scenario maybe "Log in" >/dev/null 2>&1
+  expect_code 2 "$?" "fm-step.sh accepted an unknown scenario result"
+  FM_TASK_INBOX="$home/state/t.inbox" "$STEP" --scenario pass >/dev/null 2>&1
+  expect_code 2 "$?" "fm-step.sh accepted a scenario with no name"
+  assert_absent "$home/state/t.step" "a refused plan or scenario still wrote a record"
+  pass "fm-step.sh refuses a bad plan or scenario and writes nothing"
+}
+
 test_step_write_produces_no_wake
 test_helper_rejects_bad_input_without_writing
 test_view_says_step_not_reported_when_absent
@@ -270,3 +361,9 @@ test_review_step_comes_from_current_state
 test_watch_redraws
 test_off_restores_table_byte_for_byte
 test_off_restores_brief_byte_for_byte
+test_plan_list_shows_every_step_name_before_the_step_starts
+test_a_later_plan_replaces_the_earlier_plan
+test_a_step_record_without_a_plan_still_reads_the_same
+test_scenario_results_keep_the_last_result_per_name
+test_brief_step_line_records_the_full_plan_first
+test_helper_rejects_bad_plan_and_scenario_without_writing

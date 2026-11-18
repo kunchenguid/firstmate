@@ -69,7 +69,8 @@
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
 #     step is the worker's own plan-step record, state/<id>.step, as
-#     bin/fm-step-lib.sh's fm_step_record_json reads it: null when no step is
+#     bin/fm-step-lib.sh's fm_step_record_json reads it, with the current step,
+#     the full recorded plan, and scenario results: null when nothing is
 #     recorded, when the display is off, or when the task generation changed
 #     during the snapshot. It is presentation data only and never current state.
 #   step_display: "on" or "off" from config/step-display (bin/fm-step-lib.sh).

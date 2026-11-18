@@ -12,7 +12,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Ship quality setup and the independent verifier | [Quality profile](#quality-profile-configquality-profile-configverifier-harness) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Calm preference](#calm-preference-configcalm), and [worker step display](#worker-step-display-configstep-display) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Calm preference](#calm-preference-configcalm), [worker step display](#worker-step-display-configstep-display), and [crew status panels](#crew-status-panels-configcrew-panel) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -589,8 +589,10 @@ It holds `on` or `off`.
 An absent or empty file means `on`.
 Any other value counts as `off` and prints a warning that names the file, so a mistyped fallback still falls back.
 
-With the display on, each ship and scout brief tells the worker to write a numbered plan first and to run `bin/fm-step.sh` as it starts each step.
-That command appends to the task's `state/<id>.step` record and never writes a status line, so a step change never wakes firstmate.
+With the display on, each ship and scout brief tells the worker to write a numbered plan, to record all of it with `bin/fm-step.sh --plan` before step 1, and then to run `bin/fm-step.sh` as it starts each step.
+A later plan record replaces the earlier plan.
+A pstack verifier scout's brief also tells it to record each scenario result with `bin/fm-step.sh --scenario`.
+These commands append to the task's `state/<id>.step` record and never write a status line, so a step change never wakes firstmate.
 `bin/fm-fleet-view.sh` then shows a Step column, a per-task checklist with `--steps <task-id>`, and a redrawing view with `--watch`.
 During a no-mistakes run the Step column shows the review step from the task's current state instead of the worker's record.
 A task with no record shows "step not reported", and the view never guesses a step from pane text.
@@ -599,6 +601,24 @@ Teardown removes the record with the other per-task state.
 With `off`, generated briefs and the fleet table are byte for byte the same as before the step display existed, and `--steps` and `--watch` only report that the display is off.
 The setting is a home-local preference and is not inherited by secondmate homes.
 `bin/fm-step-lib.sh` owns the switch and the record format, and `bin/fm-fleet-view.sh --help` owns the view options.
+
+## Crew status panels (config/crew-panel)
+
+The optional local, gitignored `config/crew-panel` file selects whether Herdr opens the read-only crew status panels automatically.
+It holds `on` or `off`, with the same parse rules as `config/step-display`.
+An absent or empty file means `on`.
+Any other value counts as `off` and prints a warning that names the file.
+
+With the panels on, session start opens the fleet panel in a right split of the firstmate pane, with one status card for each worker of this home.
+Each ship or scout spawn opens that worker's own panel in a right split of the worker's tab.
+The worker panel shows the question for the captain, every plan step name, the messages from firstmate, the events, the automatic review steps, the verifier steps and scenario results, and the PR.
+Both opens are idempotent, and a failed open only prints a warning, so it never stops a session start or a spawn.
+A panel closes with its tab, and a worker panel also stops when its task record is removed.
+Other backends and secondmate homes open no panel.
+
+With `off`, no panel opens automatically, and `bin/fm-crew-panel.sh` still prints a panel on request.
+The setting is a home-local preference and is not inherited by secondmate homes.
+`bin/fm-crew-panel.sh --help` owns the commands and options, and the plan list depends on the plan record that [worker step display](#worker-step-display-configstep-display) owns.
 
 ## No-mistakes pipeline spend (config/pipeline-spend)
 

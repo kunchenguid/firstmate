@@ -713,6 +713,13 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # session-start result. A context re-emit is not another session start.
   if [ "$REEMIT" -eq 0 ]; then
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
+    # The crew panel opens beside this firstmate pane on Herdr. It is
+    # idempotent (a tab that has a panel gets no second one), bounded, and a
+    # failure only warns, so it can never change the session-start result.
+    # bin/fm-crew-panel.sh owns the config/crew-panel switch and the
+    # secondmate-home and backend checks.
+    fm_run_timed "$ENDPOINT_TIMEOUT" "$SCRIPT_DIR/fm-crew-panel.sh" open-fleet >/dev/null 2>&1 \
+      || echo "warning: the crew panel did not open beside this session" >&2
   fi
   # Every network call and the potentially slow inactive-outcome startup scan
   # are launched HERE, detached and bounded, so they run concurrently with the

@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# fm-step.sh - record which plan step a worker has started.
+# fm-step.sh - record a worker's plan, the step it started, and scenario results.
 #
-# Usage: fm-step.sh [--record <file>] <n> <m> <step name...>
+# Usage: fm-step.sh [--record <file>] --plan <step 1 name> <step 2 name> ...
+#        fm-step.sh [--record <file>] <n> <m> <step name...>
+#        fm-step.sh [--record <file>] --scenario pass|fail|run <scenario name...>
 #
-# A worker writes a numbered plan of <m> steps first, then runs this command
-# when it starts step <n>. The command appends one line to the task's step
-# record and prints nothing on success.
+# A worker writes a numbered plan of <m> steps first and records it with
+# --plan, one argument per step name, before it starts step 1. A later --plan
+# replaces the earlier plan. Then the worker runs `fm-step.sh <n> <m> <name>`
+# when it starts step <n>.
+# A verifier records each scenario it checks with --scenario: `run` when the
+# scenario starts, then `pass` or `fail`. The last result for a name wins.
+# Each call appends to the task's step record and prints nothing on success.
 # bin/fm-fleet-view.sh shows the current step in its STEP column and in its
-# `--steps <task-id>` checklist.
+# `--steps <task-id>` checklist, and bin/fm-crew-panel.sh shows the full plan
+# and the scenario results.
 #
 # The record is state/<task-id>.step under the task's home. Without --record,
 # the command finds it from FM_TASK_INBOX, the absolute state/<task-id>.inbox
@@ -29,8 +36,17 @@ usage() {
 
 die_usage() {
   printf 'fm-step: %s\n' "$1" >&2
-  printf 'usage: fm-step.sh [--record <file>] <n> <m> <step name...>\n' >&2
+  printf 'usage: fm-step.sh [--record <file>] --plan <step name>...\n' >&2
+  printf '       fm-step.sh [--record <file>] <n> <m> <step name...>\n' >&2
+  printf '       fm-step.sh [--record <file>] --scenario pass|fail|run <name...>\n' >&2
   exit 2
+}
+
+# One record line per name: control characters, tabs, and newlines become
+# spaces, and the name is trimmed and capped so a reader never has to guard
+# against an oversized line.
+clean_name() {
+  printf '%s' "$1" | tr '\000-\037\177' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-200
 }
 
 RECORD=
@@ -43,25 +59,48 @@ case "${1:-}" in
     ;;
 esac
 
-[ $# -ge 3 ] || die_usage "expected <n> <m> <step name>"
-N=$1
-M=$2
-shift 2
-NAME="$*"
-
-case "$N" in ''|*[!0-9]*) die_usage "<n> must be a positive whole number, not '$N'" ;; esac
-case "$M" in ''|*[!0-9]*) die_usage "<m> must be a positive whole number, not '$M'" ;; esac
-N=$((10#$N))
-M=$((10#$M))
-[ "$N" -ge 1 ] || die_usage "<n> must be at least 1"
-[ "$M" -ge 1 ] || die_usage "<m> must be at least 1"
-[ "$N" -le "$M" ] || die_usage "<n> ($N) must not be greater than <m> ($M)"
-
-# One record line per step: control characters, tabs, and newlines become
-# spaces, and the name is trimmed and capped so a reader never has to guard
-# against an oversized line.
-NAME=$(printf '%s' "$NAME" | tr '\000-\037\177' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-200)
-[ -n "$NAME" ] || die_usage "<step name> must not be empty"
+NOW=$(date +%s)
+LINES=
+case "${1:-}" in
+  --plan)
+    shift
+    [ $# -ge 1 ] || die_usage "--plan needs at least one step name"
+    M=$#
+    K=0
+    for raw in "$@"; do
+      K=$((K + 1))
+      NAME=$(clean_name "$raw")
+      [ -n "$NAME" ] || die_usage "plan step $K must have a name"
+      LINES="$LINES$(printf '%s\tplan\t%s\t%s\t%s' "$NOW" "$K" "$M" "$NAME")"$'\n'
+    done
+    ;;
+  --scenario)
+    shift
+    [ $# -ge 2 ] || die_usage "--scenario needs a result and a scenario name"
+    RESULT=$1
+    shift
+    case "$RESULT" in pass|fail|run) ;; *) die_usage "the scenario result must be pass, fail, or run, not '$RESULT'" ;; esac
+    NAME=$(clean_name "$*")
+    [ -n "$NAME" ] || die_usage "<scenario name> must not be empty"
+    LINES=$(printf '%s\tscenario\t%s\t%s' "$NOW" "$RESULT" "$NAME")$'\n'
+    ;;
+  *)
+    [ $# -ge 3 ] || die_usage "expected <n> <m> <step name>"
+    N=$1
+    M=$2
+    shift 2
+    case "$N" in ''|*[!0-9]*) die_usage "<n> must be a positive whole number, not '$N'" ;; esac
+    case "$M" in ''|*[!0-9]*) die_usage "<m> must be a positive whole number, not '$M'" ;; esac
+    N=$((10#$N))
+    M=$((10#$M))
+    [ "$N" -ge 1 ] || die_usage "<n> must be at least 1"
+    [ "$M" -ge 1 ] || die_usage "<m> must be at least 1"
+    [ "$N" -le "$M" ] || die_usage "<n> ($N) must not be greater than <m> ($M)"
+    NAME=$(clean_name "$*")
+    [ -n "$NAME" ] || die_usage "<step name> must not be empty"
+    LINES=$(printf '%s\t%s\t%s\t%s' "$NOW" "$N" "$M" "$NAME")$'\n'
+    ;;
+esac
 
 if [ -z "$RECORD" ]; then
   [ -n "${FM_TASK_INBOX:-}" ] || die_usage "FM_TASK_INBOX is not set; pass --record state/<task-id>.step"
@@ -77,7 +116,8 @@ case "$RECORD" in
 esac
 [ -d "$(dirname -- "$RECORD")" ] || die_usage "the record directory does not exist: $(dirname -- "$RECORD")"
 
-printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$N" "$M" "$NAME" >> "$RECORD" || {
+# One write call per invocation, so a plan lands as one append.
+printf '%s' "$LINES" >> "$RECORD" || {
   printf 'fm-step: could not write %s\n' "$RECORD" >&2
   exit 1
 }

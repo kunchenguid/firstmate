@@ -1184,6 +1184,12 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
   ' >/dev/null 2>&1 || return 5
 }
 
+# FM_BACKEND_HERDR_CREW_PANEL_LABEL: the pane label bin/fm-crew-panel.sh gives
+# the read-only status panel it splits into a firstmate or worker tab. A pane
+# with this label is never a task endpoint, and it runs only a display, so
+# closing it loses nothing.
+FM_BACKEND_HERDR_CREW_PANEL_LABEL=fm-crew-panel
+
 # fm_backend_herdr_emptying_close_plan: choose the focus-safe removal for one
 # exact pane. The LAST echoed line is the plan: "plain" (use the ordinary
 # explicit close; below the presentation version floor the exact-tab restore
@@ -1195,6 +1201,8 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
 # record line is echoed first so the caller can hand it to
 # fm_backend_herdr_emptying_move_rollback when removal is not confirmed.
 # Never fails; every ambiguity plans "plain".
+# A crew panel in the target tab is closed first, so the close can still empty
+# the workspace; a panel that does not close plans "plain".
 # The death plan requires the close to empty the workspace (exactly one tab
 # and one pane, both the target), the target workspace to sit behind the
 # focused one (repositioned to the end first when it does not, with the move
@@ -1202,7 +1210,7 @@ fm_backend_herdr_workspace_move_capable() {  # <session>
 # to hold one provably lone idle recognized shell.
 fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <tab-id> <focused-workspace-id> [guard-tab-id]
   local session=$1 pane_id=$2 ws_id=$3 tab_id=$4 focused_ws=$5 guard_tab=${6:-}
-  local tabs panes list indices r rest a len capable socket mover response move_status shell_pid before_order
+  local tabs panes panels panel list indices r rest a len capable socket mover response move_status shell_pid before_order
   [ -n "$ws_id" ] && [ -n "$tab_id" ] && [ -n "$focused_ws" ] || { printf 'plain\n'; return 0; }
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$ws_id" 2>/dev/null) || { printf 'plain\n'; return 0; }
   printf '%s' "$tabs" | jq -e --arg tab "$tab_id" '
@@ -1210,9 +1218,16 @@ fm_backend_herdr_emptying_close_plan() {  # <session> <pane-id> <workspace-id> <
     and .result.tabs[0].tab_id == $tab
   ' >/dev/null 2>&1 || { printf 'plain\n'; return 0; }
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$ws_id" 2>/dev/null) || { printf 'plain\n'; return 0; }
-  printf '%s' "$panes" | jq -e --arg pane "$pane_id" '
-    (.result.panes | type) == "array" and (.result.panes | length) == 1
-    and .result.panes[0].pane_id == $pane
+  panels=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" --arg panel "$FM_BACKEND_HERDR_CREW_PANEL_LABEL" '
+    .result.panes[]? | select(.tab_id == $tab and (.label // "") == $panel) | .pane_id
+  ' 2>/dev/null) || panels=
+  for panel in $panels; do
+    fm_backend_herdr_cli "$session" pane close "$panel" >/dev/null 2>&1 || { printf 'plain\n'; return 0; }
+  done
+  printf '%s' "$panes" | jq -e --arg pane "$pane_id" --arg panel "$FM_BACKEND_HERDR_CREW_PANEL_LABEL" '
+    select((.result.panes | type) == "array")
+    | [.result.panes[] | select((.label // "") != $panel)]
+    | length == 1 and .[0].pane_id == $pane
   ' >/dev/null 2>&1 || { printf 'plain\n'; return 0; }
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || { printf 'plain\n'; return 0; }
   indices=$(printf '%s' "$list" | jq -r --arg ws "$ws_id" --arg focused "$focused_ws" '
@@ -2763,11 +2778,14 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     and .result.tabs[0].label == $task_label
   ' >/dev/null 2>&1 || return 1
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -e --arg tab "$tab" --arg pane "$pane" '
-    (.result.panes | type) == "array"
-    and (.result.panes | length) == 1
-    and .result.panes[0].pane_id == $pane
-    and .result.panes[0].tab_id == $tab
+  # A crew panel (FM_BACKEND_HERDR_CREW_PANEL_LABEL) beside the task pane is
+  # not part of the binding.
+  printf '%s' "$panes" | jq -e --arg tab "$tab" --arg pane "$pane" --arg panel "$FM_BACKEND_HERDR_CREW_PANEL_LABEL" '
+    select((.result.panes | type) == "array")
+    | [.result.panes[] | select((.label // "") != $panel)]
+    | length == 1
+    and .[0].pane_id == $pane
+    and .[0].tab_id == $tab
   ' >/dev/null 2>&1
 }
 
@@ -3785,9 +3803,10 @@ fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <p
 fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
   local session=$1 wsid=$2 tab_id=$3 panes
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-    '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
+  printf '%s' "$panes" | jq -r --arg tab "$tab_id" --arg panel "$FM_BACKEND_HERDR_CREW_PANEL_LABEL" \
+    '.result.panes[]? | select(.tab_id == $tab and ((.label // "") != $panel)) | .pane_id' 2>/dev/null | head -1
 }
+
 
 # fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an
 # ad hoc selector with no meta (mirrors tmux's list-windows grep). Searches

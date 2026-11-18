@@ -68,6 +68,12 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Forget the Herdr pane an operator shell inherits. A suite run from inside a
+# Herdr pane would otherwise let a fixture session start (bin/fm-session-start.sh
+# opens the crew panel through bin/fm-crew-panel.sh) split the operator's live
+# pane. A case that needs a Herdr pane sets these values itself, against a lab.
+unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH HERDR_SESSION
+
 # Write the tracked default backlog configuration into a fixture home. Never copy
 # "$ROOT/.tasks.toml": an operator's primary checkout keeps a gitignored override
 # there (for example a beads backend at its live backlog), so a copy points the

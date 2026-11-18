@@ -308,10 +308,14 @@ Projected cleanup therefore:
 
 A focus-safe removal takes these steps:
 
-1. Verify the close would empty the workspace.
+1. Close a crew status panel pane (label `fm-crew-panel`) in the target tab, then verify the close would empty the workspace.
 2. When needed, reposition the doomed workspace behind the focused one through the verified `workspace.move` transport.
 3. Prove the pane holds one lone idle shell.
 4. End that shell, so Herdr removes the emptied workspace through its focus-preserving pane-death path.
+
+A crew status panel that does not close keeps the workspace from emptying, so cleanup then uses the plain explicit close.
+The panel pane is never the task pane: the binding check and the tab-to-pane lookup leave it out.
+[`configuration.md`](configuration.md#crew-status-panels-configcrew-panel) owns when the panels open.
 
 The persisted `.focused` pointer is not a live viewer.
 When `herdr terminal title clear` reports `no_foreground_client`, cleanup proceeds on that tab because no human is attached, and skips restoration of the tab it destroys.

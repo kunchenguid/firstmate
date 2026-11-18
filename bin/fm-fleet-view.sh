@@ -116,6 +116,9 @@ STEP_JQ_DEFS='
   def step_text($t):
     if in_review($t) then review_text($t)
     elif $t.step == null then "step not reported"
+    elif $t.step.current == null then
+      (if $t.step.plan == null then "step not reported"
+       else "\(bar(0; ($t.step.plan | length))) 0/\($t.step.plan | length) plan recorded, not started" end)
     else $t.step.current as $c
       | "\(bar($c.n; $c.m)) \($c.n)/\($c.m) \($c.name) (\(human_age($c.age_seconds)))"
     end;
@@ -200,11 +203,17 @@ render_steps() {
   jq -r --arg id "$STEPS_ID" --arg human_decision "$FM_GATE_HUMAN_DECISION" "$STEP_JQ_DEFS"'
   ([.tasks[]? | select(.id == $id)] | first) as $t
   # A step name counts only from the current plan size, so a re-plan never
-  # labels a step with a name from an older plan.
+  # labels a step with a name from an older plan. A recorded full plan of that
+  # size names the steps that have not started yet.
+  | ($t.step.plan // null) as $plan
   | def name_of($i):
-      ([$t.step.history[]? | select(.n == $i and .m == $t.step.current.m) | .name] | last);
+      ([$t.step.history[]? | select(.n == $i and .m == $t.step.current.m) | .name] | last)
+      // (if $plan != null and ($plan | length) == $t.step.current.m then $plan[$i - 1].name else null end);
     def build_lines:
       if $t.step == null then "  step not reported"
+      elif $t.step.current == null then
+        (if $plan == null then "  step not reported"
+         else $plan[] as $p | "  [ ] \($p.n)/\($plan | length) \($p.name)" end)
       else $t.step.current as $c
         | range(1; $c.m + 1) as $i
         | name_of($i) as $name

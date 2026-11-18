@@ -31,8 +31,10 @@
 #   worktrees of the same repo). It is mutually exclusive with a project list, and
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   While config/step-display is on (bin/fm-step-lib.sh), ship and scout briefs
-#   carry one status-rule line: write a numbered plan, then record each step
-#   start with bin/fm-step.sh. With the switch off that line is absent.
+#   carry one status-rule line: record the full numbered plan with
+#   bin/fm-step.sh --plan first, then record each step start. A scout whose id
+#   ends in -verify (a pstack verifier) also gets one line that records each
+#   scenario result with bin/fm-step.sh --scenario. With the switch off that line is absent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
@@ -451,7 +453,14 @@ fi
 # When off it is empty, so the brief is byte for byte the brief without it.
 STEP_LINE=
 if [ "$(fm_step_display_mode "$CONFIG")" = on ]; then
-  STEP_LINE=$'\n'"   Write a numbered plan first, then run \`$(shell_quote "$FM_ROOT/bin/fm-step.sh") --record $(shell_quote "$(fm_step_record_path "$STATE" "$ID")") <n> <m> '<step name>'\` as you start each step; it feeds the fleet view and never wakes firstmate."
+  STEP_LINE=$'\n'"   Write a numbered plan first and record all of it before step 1: \`$(shell_quote "$FM_ROOT/bin/fm-step.sh") --record $(shell_quote "$(fm_step_record_path "$STATE" "$ID")") --plan '<step 1 name>' '<step 2 name>' ...\`. Then run \`$(shell_quote "$FM_ROOT/bin/fm-step.sh") --record $(shell_quote "$(fm_step_record_path "$STATE" "$ID")") <n> <m> '<step name>'\` as you start each step. Record a new full plan when the plan changes. These records feed the fleet view and the crew panel and never wake firstmate."
+fi
+# A pstack verifier scout (<ship-id>-verify) also records each scenario result,
+# so the ship's crew panel can show which scenario passed or failed.
+if [ -n "$STEP_LINE" ] && [ "$KIND" = scout ]; then
+  case "$ID" in
+    *-verify) STEP_LINE="$STEP_LINE"$'\n'"   For each scenario you check, run \`$(shell_quote "$FM_ROOT/bin/fm-step.sh") --record $(shell_quote "$(fm_step_record_path "$STATE" "$ID")") --scenario run '<scenario name>'\` when it starts, then the same command with \`pass\` or \`fail\` in place of \`run\` when it ends." ;;
+  esac
 fi
 
 if [ "$KIND" = secondmate ]; then
