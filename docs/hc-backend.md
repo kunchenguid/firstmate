@@ -122,6 +122,9 @@ The respawn is `bin/fm-spawn.sh <id> --secondmate` on the mate's recorded backen
 [`bin/fm-secondmate-move.sh`](../bin/fm-secondmate-move.sh) `<id> --backend hc` moves an existing local mate from another local backend onto hc while keeping its home, records, and backlog, and recovery then keeps it on hc because the record names hc; its header owns the sequence and its refusals.
 Lifecycle control of an hc second mate (`bin/fm-control.sh <id> exit` and `relaunch`) is governed by the control plane's per-backend capability ([capability matrix](agent-control.md#capability-matrix)), which does not list hc, so both verbs refuse an hc task of any kind; this page adds no second-mate-specific exception.
 
+A remote second mate can run on hc too, in the remote host's core that Herdr.app shows for that machine; [`remote-secondmates.md`](remote-secondmates.md#where-the-remote-agent-runs) owns that placement, its readiness checks, and its refusals.
+On the remote host the launching home is that host's code root, so the terminal's identity labels are the code root's and its presentation labels are the mate home's, exactly as above.
+
 ## Limits
 
 - `hc send` always presses Enter, so hc cannot type without submitting.
@@ -144,7 +147,8 @@ Lifecycle control of an hc second mate (`bin/fm-control.sh <id> exit` and `relau
 `tests/fm-backend-hc-smoke.test.sh` drives the real binary in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and metadata-tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
 `tests/fm-backend-hc-appdetect-smoke.test.sh` runs a real `bin/fm-spawn.sh` spawn in the same kind of lab for the app-terminal and explicit cases, and checks that a live app window never selects hc for a marker-less process and starts nothing for a session with no running core.
 `tests/fm-backend-hc-secondmate-smoke.test.sh` runs a real `--secondmate --backend hc` launch in the same kind of lab with a token-free stand-in agent, then drives the shared recovery library through a dead agent, a finished terminal, and an alive mate.
-The fake-core cases for second mates live in `tests/fm-backend-hc.test.sh` (the launch and its labels) and `tests/fm-secondmate-liveness.test.sh` (the sweep's hc recovery and `bin/fm-secondmate-move.sh`).
+`tests/fm-remote-secondmate-hc-smoke.test.sh` drives a remote mate's host-local control plane, `bin/fm-remote-secondmate-control.sh`, against the real binary in the same kind of lab: launch, steer, replacement of a finished terminal, and retirement.
+The fake-core cases for second mates live in `tests/fm-backend-hc.test.sh` (the launch and its labels), `tests/fm-secondmate-liveness.test.sh` (the sweep's hc recovery and `bin/fm-secondmate-move.sh`), `tests/fm-remote-secondmate-hc.test.sh` (a remote mate's host-local control plane), and `tests/fm-remote-doctor.test.sh` (remote hc readiness).
 The smokes skip when no resolved Core binary or `jq` is available; provisioning and teardown failures fail the test.
 For CI coverage, see [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend); the workflow requires `jq` and rejects the `hc not found` skip.
 [`bin/fm-hc-ci-cleanup.sh`](../bin/fm-hc-ci-cleanup.sh) owns job-end cleanup mechanics.

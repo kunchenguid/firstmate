@@ -2,7 +2,7 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix [--automatic]] [--backend herdr|rex|any]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix [--automatic]] [--backend herdr|rex|hc|any]
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
@@ -13,9 +13,15 @@
 # default) uses the shared fm-remote session and launch-agent label for the
 # primary code root; each additional code root uses its own isolated session
 # and launch-agent label. Rex uses the host's own persistent rex server in a
-# 2ndmate-<id>-<hash> session. --backend names the one to verify; the default
-# `any` resolves herdr when its CLI is present, then
-# rex, so a host offering both is still verified for the default backend. On
+# 2ndmate-<id>-<hash> session. hc uses the host's herdr-core core that
+# Herdr.app shows for that machine (bin/fm-remote-hc-lib.sh owns which core and
+# how its socket resolves), and needs that core to answer, speak the adapter's
+# protocol generation, and report that it keeps running after logout; --fix
+# may start a core when none answers, but never installs herdr-core and never
+# stops or restarts a running core, because that ends every terminal in it.
+# --backend names the one to verify; the default `any` resolves herdr when its
+# CLI is present, then rex, so a host offering both is still verified for the
+# default backend. hc is never resolved by `any`: it is selected explicitly. On
 # the Herdr backend the account needs the Firstmate-owned Aqua Herdr agent plus
 # the sibling dev.firstmate.remote-job worker that runs normal fm-on commands
 # through the Aqua or Linux job-worker path. On darwin, that Herdr agent runs
@@ -133,10 +139,10 @@ while [ "$#" -gt 0 ]; do
     --automatic) AUTOMATIC=1 ;;
     --backend)
       shift
-      case "${1:-}" in herdr | rex | any) DOCTOR_BACKEND=$1 ;; *) usage ;; esac
+      case "${1:-}" in herdr | rex | hc | any) DOCTOR_BACKEND=$1 ;; *) usage ;; esac
       ;;
     --backend=*)
-      case "${1#--backend=}" in herdr | rex | any) DOCTOR_BACKEND=${1#--backend=} ;; *) usage ;; esac
+      case "${1#--backend=}" in herdr | rex | hc | any) DOCTOR_BACKEND=${1#--backend=} ;; *) usage ;; esac
       ;;
     --worker-tool-probe)
       [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
@@ -164,6 +170,8 @@ if [ "$DOCTOR_BACKEND" = any ]; then
 fi
 case "$DOCTOR_BACKEND" in
   herdr | rex) REQUIRED_TOOLS=(git jq "$DOCTOR_BACKEND" tasks-axi treehouse) ;;
+  # herdr-core is the official release asset's name (bin/fm-install-hc.sh).
+  hc) REQUIRED_TOOLS=(git jq herdr-core tasks-axi treehouse) ;;
   *) REQUIRED_TOOLS=(git jq backend tasks-axi treehouse) ;;
 esac
 if [ "$DOCTOR_BACKEND" = herdr ] && [ "$MODE" != worker-tool-probe ]; then
@@ -603,7 +611,7 @@ report_required_tools_from_worker() {
   # probe reports `backend=MISSING` rather than resolving differently.
   local -a probe_args=(--worker-tool-probe)
   case "$DOCTOR_BACKEND" in
-    herdr | rex) probe_args+=(--backend "$DOCTOR_BACKEND") ;;
+    herdr | rex | hc) probe_args+=(--backend "$DOCTOR_BACKEND") ;;
   esac
   if ! job_id=$(fm_remote_job_stage "${HOME:-}" "$FM_ROOT" "${FM_HOME:-}" \
     fm-remote-doctor.sh "${probe_args[@]}" </dev/null); then
@@ -628,7 +636,7 @@ report_required_tools_from_worker() {
     fact=${line#required }
     name=${fact%%=*}
     value=${fact#*=}
-    case "$name" in git | jq | herdr | rex | backend | tasks-axi | treehouse | harness) ;; *) valid=0; continue ;; esac
+    case "$name" in git | jq | herdr | rex | herdr-core | backend | tasks-axi | treehouse | harness) ;; *) valid=0; continue ;; esac
     case "$seen" in *" $name "*) valid=0; continue ;; esac
     seen="$seen$name "
     count=$((count + 1))
@@ -841,6 +849,92 @@ check_rex_server() {
     return 0
   fi
   record rex-server "ok: persistent rex server on $endpoint (API revision $server_api)"
+}
+
+# herdr-core checks run in a subshell that sources the hc adapter, so the
+# version floor, protocol generation, and socket resolution each keep their one
+# owner (bin/backends/hc.sh and bin/fm-backend.sh) and a failure there can never
+# end this report. The runtime pin and the session come from
+# bin/fm-remote-hc-lib.sh, the same owner the control plane launches through.
+hc_adapter_run() { # <command> [args...]
+  (
+    # shellcheck source=bin/fm-remote-hc-lib.sh
+    . "$SCRIPT_DIR/fm-remote-hc-lib.sh" || exit 1
+    fm_remote_hc_runtime_env
+    HC_SESSION=$(fm_remote_hc_session) || exit 1
+    export HC_SESSION
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh" >/dev/null 2>&1 || exit 1
+    fm_backend_source hc >/dev/null 2>&1 || exit 1
+    "$@"
+  )
+}
+
+check_hc() {
+  local err bin
+  if err=$(hc_adapter_run fm_backend_hc_version_check 2>&1); then
+    bin=$(hc_adapter_run fm_backend_hc_bin)
+    record hc "ok: $bin ($("$bin" --version 2>/dev/null))"
+    return 0
+  fi
+  record hc "human: ${err#error: }" \
+    "install or update Herdr Core on that account (bin/fm-install-hc.sh, or connect the machine from Herdr.app), then rerun this command"
+}
+
+# The core is read only through a socket proven live first: hc starts a fresh,
+# empty core on contact with a dead socket, which would satisfy this check with
+# a core the app never shows.
+check_hc_server() {
+  local session sock status keeps
+  if ! session=$(hc_adapter_run printenv HC_SESSION 2>/dev/null) \
+    || ! sock=$(hc_adapter_run fm_backend_detect_hc_core_sock 2>/dev/null); then
+    record hc-server "human: the herdr-core session or socket for remote second mates could not be resolved" \
+      "check FM_REMOTE_HC_SESSION and that herdr-core, jq, and node resolve on that account, then rerun this command"
+    return 0
+  fi
+  if ! hc_adapter_run fm_backend_unix_sock_live "$sock" >/dev/null 2>&1; then
+    record hc-server "fixable: no herdr-core core answers for session $session at $sock" \
+      "rerun this command with --fix to start it, or connect this machine from Herdr.app"
+    return 0
+  fi
+  if ! status=$(hc_adapter_run fm_backend_hc_cli "$session" server status --json 2>/dev/null) \
+    || ! keeps=$(printf '%s' "$status" | jq -r 'if (.keeps_running_after_logout | type) == "boolean" then .keeps_running_after_logout else "unknown" end' 2>/dev/null); then
+    record hc-server "human: the herdr-core core for session $session did not report its status" \
+      "run 'hc server status --json' on that account and report the failure"
+    return 0
+  fi
+  case "$keeps" in
+    true) ;;
+    false)
+      record hc-server "human: the herdr-core core for session $session stops at logout, so a second mate's terminal would not survive the SSH session that started it" \
+        "enable lingering for that account (loginctl enable-linger on Linux) or keep a login session open, then rerun this command; Firstmate never restarts a running core, because that ends every terminal in it"
+      return 0
+      ;;
+    *)
+      record hc-server "human: the herdr-core core for session $session reports no explicit boolean keeps_running_after_logout; persistence is unproven" \
+        "update Herdr Core on that account, then rerun this command"
+      return 0
+      ;;
+  esac
+  if ! hc_adapter_run fm_backend_hc_container_ensure >/dev/null 2>&1; then
+    record hc-server "human: the herdr-core core for session $session does not speak the protocol generation this adapter requires" \
+      "update Herdr Core on that account, then rerun this command"
+    return 0
+  fi
+  record hc-server "ok: herdr-core core for session $session at $sock keeps running after logout"
+}
+
+# Starting a core is the only repair: it runs only when no core answers, and an
+# answering core is never stopped or restarted here.
+start_hc_server() {
+  local session
+  if session=$(hc_adapter_run printenv HC_SESSION 2>/dev/null) \
+    && hc_adapter_run fm_backend_hc_cli "$session" server start >/dev/null 2>&1; then
+    fix_report hc-server applied "started the herdr-core core for remote second mates"
+    return 0
+  fi
+  fix_report hc-server failed "the herdr-core core did not start"
+  return 1
 }
 
 # A persistent rex server is `rex server start`, detached from every SSH
@@ -1063,6 +1157,7 @@ run_checks() { # <resolved-login-shell>
   case "$DOCTOR_BACKEND" in
     herdr) check_herdr ;;
     rex) check_rex ;;
+    hc) check_hc ;;
     *) check_backend ;;
   esac
   check_gui_session
@@ -1076,6 +1171,7 @@ run_checks() { # <resolved-login-shell>
       check_herdr_server
       ;;
     rex) check_rex_server ;;
+    hc) check_hc_server ;;
   esac
   check_entrypoint_link
 }
@@ -1336,6 +1432,7 @@ apply_fixes() { # <resolved-login-shell>
         fi
         ;;
       rex-server) start_rex_server || true ;;
+      hc-server) start_hc_server || true ;;
       entrypoint-link) link_entrypoint || true ;;
     esac
   done

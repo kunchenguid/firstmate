@@ -15,6 +15,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/rex-fake-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/rex-fake-fixture.sh"
+# shellcheck source=tests/hc-fake-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/hc-fake-fixture.sh"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (plistlib parses the owned launch-agent contract)"; exit 0; }
 
@@ -1399,3 +1401,112 @@ assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' \
 assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "the herdr server was checked for rex on linux"
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux rex path invoked launchctl"
 pass "a Linux host verifies rex without any Aqua-specific requirement"
+
+# --- the hc backend: herdr-core, its core socket, and the persistence contract -
+
+# A private runtime directory names where the fake core's socket lives, so the
+# doctor's own runtime pin (bin/fm-remote-hc-lib.sh) leaves it alone and no
+# real core is ever reached; FM_REMOTE_HC_SESSION names a lab session.
+HC_RUN=$(TMPDIR=/tmp fm_test_tmproot fm-doc-hc-run)
+HC_SOCKET_PID=
+trap 'if [ -n "$DOCTOR_WORKER_PID" ]; then kill "$DOCTOR_WORKER_PID" 2>/dev/null || true; fi; if [ "${#HOLDER_PIDS[@]}" -gt 0 ]; then kill "${HOLDER_PIDS[@]}" 2>/dev/null || true; fi; [ -z "$HC_SOCKET_PID" ] || kill "$HC_SOCKET_PID" 2>/dev/null || true; fm_test_cleanup || true' EXIT
+export XDG_RUNTIME_DIR="$HC_RUN" FM_REMOTE_HC_SESSION=fmtest
+
+# install_case_hc: the shared stateful herdr-core fake as the case's
+# herdr-core, plus node for the socket probe.
+install_case_hc() {
+  write_hc_fake_cli "$CASE_BIN/herdr-core" "D='$CASE_STATE/hcfake'"
+  ln -sf "$(command -v node)" "$CASE_BIN/node"
+}
+hc_core_up() {
+  fm_test_live_unix_sock "$HC_RUN/herdr-core/fmtest.sock" || fail "could not park the fake core socket"
+  HC_SOCKET_PID=$!
+}
+hc_core_down() {
+  [ -z "$HC_SOCKET_PID" ] || kill "$HC_SOCKET_PID" 2>/dev/null || true
+  wait "$HC_SOCKET_PID" 2>/dev/null || true
+  HC_SOCKET_PID=
+  rm -f "$HC_RUN/herdr-core/fmtest.sock"
+}
+
+if command -v node >/dev/null 2>&1; then
+  hc_core_up
+
+  new_case Linux no-herdr
+  install_case_hc
+  doctor --backend hc
+  expect_code 0 "$DOCTOR_RC" "a Linux hc host with a persistent core was not ready"$'\n'"$DOCTOR_OUT"
+  assert_contains "$DOCTOR_OUT" 'required herdr-core=' "herdr-core was not reported as a required tool"
+  assert_not_contains "$DOCTOR_OUT" 'required herdr=' "an hc verification still required the herdr CLI"
+  assert_contains "$DOCTOR_OUT" 'check hc=ok:' "the herdr-core CLI was not accepted"
+  assert_contains "$DOCTOR_OUT" "check hc-server=ok: herdr-core core for session fmtest" "a persistent core was not accepted"
+  assert_not_contains "$DOCTOR_OUT" 'check herdr-server=' "an hc verification still ran the herdr server check"
+  assert_not_contains "$DOCTOR_OUT" 'check rex' "an hc verification still ran the rex checks"
+  grep -q $'^HC_SESSION=fmtest\x1f.*\x1fserver\x1fstatus' "$CASE_STATE/hcfake/log" \
+    || fail "the core status was not read for the remote hc session"
+  pass "a Linux host verifies herdr-core, its live core, and its persistence"
+
+  # A core that stops at logout, or reports no persistence at all, is a human
+  # gap that --fix never touches.
+  for keeps in false absent; do
+    new_case Linux no-herdr
+    install_case_hc
+    mkdir -p "$CASE_STATE/hcfake"
+    printf '%s\n' "$keeps" > "$CASE_STATE/hcfake/keeps-running"
+    doctor --backend hc --fix
+    expect_code 1 "$DOCTOR_RC" "a core reporting keeps_running_after_logout=$keeps was reported ready"
+    assert_contains "$DOCTOR_OUT" 'check hc-server=human:' "a $keeps persistence report was not a human gap"
+    assert_not_contains "$DOCTOR_OUT" 'fix hc-server=' "--fix attempted a repair on an answering core"
+    if grep -qE $'\x1fserver\x1f(stop|start|restart)' "$CASE_STATE/hcfake/log"; then
+      fail "--fix stopped, started, or restarted an answering core"
+    fi
+  done
+  pass "a core that does not keep running after logout is a human gap --fix never touches"
+
+  # A CLI below the verified floor is a human gap.
+  new_case Linux no-herdr
+  install_case_hc
+  mkdir -p "$CASE_STATE/hcfake"
+  printf '0.1.9\n' > "$CASE_STATE/hcfake/version"
+  doctor --backend hc
+  expect_code 1 "$DOCTOR_RC" "an older herdr-core was reported ready"
+  assert_contains "$DOCTOR_OUT" 'check hc=human:' "a herdr-core below the floor was not tagged human"
+  assert_contains "$DOCTOR_OUT" '0.1.9' "the gap did not name the reported version"
+  pass "a herdr-core below the verified floor is a human gap"
+
+  # With no live core the gap is fixable, the read-only check never calls hc
+  # (which would start an empty core), and --fix runs only `server start`.
+  hc_core_down
+  new_case Linux no-herdr
+  install_case_hc
+  doctor --backend hc
+  expect_code 1 "$DOCTOR_RC" "an hc host with no live core was reported ready"
+  assert_contains "$DOCTOR_OUT" 'check hc-server=fixable: no herdr-core core answers for session fmtest' \
+    "a missing core was not tagged fixable"
+  if grep -q $'\x1fserver\x1f' "$CASE_STATE/hcfake/log" 2>/dev/null; then
+    fail "the read-only check called the core while no socket was live"
+  fi
+  doctor --backend hc --fix
+  assert_contains "$DOCTOR_OUT" 'fix hc-server=' "--fix did not attempt to start the missing core"
+  grep -q $'\x1fserver\x1fstart' "$CASE_STATE/hcfake/log" || fail "--fix never ran hc server start"
+  if grep -qE $'\x1fserver\x1f(stop|restart)' "$CASE_STATE/hcfake/log"; then
+    fail "--fix stopped or restarted a core"
+  fi
+  pass "a missing core is fixable, probed without calling hc, and repaired only by a start"
+else
+  echo "skip: node not found (the hc socket probe needs it)"
+fi
+
+# An explicit hc request on a host without herdr-core names the missing CLI,
+# and `any` never resolves hc.
+new_case Linux no-herdr
+doctor --backend hc
+expect_code 1 "$DOCTOR_RC" "a herdr-core-less host was reported ready for hc"
+assert_contains "$DOCTOR_OUT" 'check hc=human:' "a missing herdr-core was not tagged human"
+assert_contains "$DOCTOR_OUT" 'required herdr-core=MISSING' "the missing herdr-core was not reported"
+new_case Linux no-herdr
+write_hc_fake_cli "$CASE_BIN/herdr-core" "D='$CASE_STATE/hcfake'"
+doctor
+assert_contains "$DOCTOR_OUT" 'check backend=human:' "an hc-only host resolved a backend under any"
+assert_not_contains "$DOCTOR_OUT" 'check hc=' "any resolved hc"
+pass "an explicit hc request needs herdr-core, and any never resolves hc"

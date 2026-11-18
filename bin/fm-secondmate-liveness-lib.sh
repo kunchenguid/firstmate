@@ -204,7 +204,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
           fi
           remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
           case "$remote_backend" in
-            herdr | rex) ;;
+            herdr | rex | hc) ;;
             *)
               FM_SM_LIVE_REASON="alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
               return 0

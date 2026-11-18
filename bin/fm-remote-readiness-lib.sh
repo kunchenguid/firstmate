@@ -14,12 +14,12 @@
 # remains the single owner of every check, every repair, and every message;
 # nothing here restates them.
 #
-# <backend> is herdr, rex, or any (the default). A concrete backend is passed
-# to the doctor's --backend flag; `any` invokes it bare, which resolves
+# <backend> is herdr, rex, hc, or any (the default). A concrete backend is
+# passed to the doctor's --backend flag; `any` invokes it bare, which resolves
 # whichever supported backend that host provides. A remote still on the
 # herdr-only doctor exits 2 on the unknown flag; an explicit herdr request then
 # retries its read-only checks bare, whose only selectable backend there is
-# herdr. rex has no such fallback: a remote that old cannot run it. The repair
+# herdr. rex and hc have no such fallback: a remote that old cannot run them. The repair
 # never retries without --automatic, so a remote too old to repair safely is
 # reported not ready instead of repaired the unsafe way.
 #

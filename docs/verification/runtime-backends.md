@@ -3839,6 +3839,29 @@ The mate's terminal carried `herdr.space=fm-2ndmate-<id>-<hash of the mate home>
 On this host the lab teardown's fleet-state tripwire refused, because the live `default` core rewrote its own `terminals.json` during the run; the same file changed between two passive reads taken with no lab activity at all, no lab process survived the sweep, and the retained lab directory was removed by hand.
 A host whose real core is idle, such as the `tests-hc` CI lane, keeps the tripwire intact.
 
+#### Remote second mates
+
+Measured on 2026-11-17 with `hc 0.1.21` on macOS 26.2 arm64, inside a `bin/fm-hc-lab.sh` session only, while the operator's own `default` core stayed live and untouched.
+The guard drives `bin/fm-remote-secondmate-control.sh`, the command a parent reaches over SSH, with `FM_REMOTE_HC_SESSION` naming the lab session in place of the remote host's `default` core.
+
+```sh
+bin/fm-test-run.sh tests/fm-remote-secondmate-hc-smoke.test.sh
+```
+
+Observed guard output:
+
+```text
+ok - remote hc smoke: the control plane launches the mate in the remote hc session with an alive agent
+ok - remote hc smoke: a steer is recorded and its doorbell reaches the mate
+ok - remote hc smoke: a finished terminal is removed as a husk and the mate relaunched
+ok - remote hc smoke: retirement closes the mate's terminal and removes its home
+FM_TEST_COMPLETE
+```
+
+The mate's terminal carried `herdr.space=fm-2ndmate-<id>-<hash of the mate home>` and the code root's `firstmate.home` label, and the steer's doorbell reached it without reading the terminal as foreign.
+The lab teardown's fleet-state tripwire held on this run.
+Not covered: a real remote host's `default` core under its systemd user service, how Herdr.app displays that remote mate, and whether the mate's own workers land beside it in the app.
+
 ### Not verified
 
 - A spawn with a real harness rather than the stand-in.

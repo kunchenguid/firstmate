@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> {herdr|rex} [traceparent]
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> {herdr|rex|hc} [traceparent]
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
@@ -18,7 +18,9 @@
 # Remote placement ends here, but the second-mate agent runs only on a session
 # backend whose server survives every SSH disconnection that supervises it:
 # herdr in this code root's remote session (bin/fm-remote-herdr-identity-lib.sh),
-# or rex in this home's 2ndmate-<id>-<hash> session on the personal rex server.
+# rex in this home's 2ndmate-<id>-<hash> session on the personal rex server, or
+# hc in the host's herdr-core core that Herdr.app shows for that machine
+# (bin/fm-remote-hc-lib.sh owns which core and how its socket is resolved).
 # Launch refuses any other selection rather than reading this home's
 # config/backend. The user's interactive sessions remain for the user's work.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
@@ -93,6 +95,8 @@ fi
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-remote-herdr-identity-lib.sh
 . "$SCRIPT_DIR/fm-remote-herdr-identity-lib.sh"
+# shellcheck source=bin/fm-remote-hc-lib.sh
+. "$SCRIPT_DIR/fm-remote-hc-lib.sh"
 
 # The Herdr session this code root's remote mates live in, resolved by the same
 # owner the readiness doctor prepares the service under.
@@ -115,7 +119,7 @@ validate_home() { # <id>
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 
 remote_endpoint_load() {
-  local id=$1 herdr_session rex_server
+  local id=$1 herdr_session rex_server hc_session remote_hc_session
   REMOTE_ENDPOINT_ERROR=
   REMOTE_ENDPOINT_META=$(meta_path "$id")
   if ! fm_backend_validate_task_endpoint "$REMOTE_ENDPOINT_META" "$id" 2>/dev/null; then
@@ -158,11 +162,46 @@ remote_endpoint_load() {
           ;;
       esac
       ;;
+    hc)
+      # The validator above already binds hc_session/hc_terminal to the
+      # <session>:<address> target. The remote contract adds placement: the
+      # endpoint must live in the core this host's remote mates use, and every
+      # read here must resolve that core's live socket rather than start an
+      # empty one.
+      if ! remote_hc_session=$(fm_remote_hc_session); then
+        REMOTE_ENDPOINT_ERROR="the remote herdr-core session override is invalid"
+        return 1
+      fi
+      hc_session=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" hc_session 2>/dev/null || true)
+      if [ "$hc_session" != "$remote_hc_session" ] || [ "${REMOTE_ENDPOINT_TARGET%%:*}" != "$remote_hc_session" ]; then
+        REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded in herdr-core session '${hc_session:-missing}', expected '$remote_hc_session'; refusing access until it is explicitly migrated"
+        return 1
+      fi
+      fm_remote_hc_runtime_env
+      # The launch labeled the terminal with the identity of the host-local
+      # spawn, which runs as this code root's home (cmd_launch's FM_HOME), and
+      # every hc read, input, and close checks that firstmate.home label
+      # against the caller's own home tag. This process otherwise derives the
+      # mate home's tag and would read its own endpoint as foreign.
+      FM_HOME=$FM_ROOT
+      export FM_HOME
+      ;;
     *)
-      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND'; a remote secondmate runs only on herdr or rex; refusing access until it is explicitly migrated"
+      REMOTE_ENDPOINT_ERROR="remote secondmate $id endpoint is recorded on backend '$REMOTE_ENDPOINT_BACKEND'; a remote secondmate runs only on herdr, rex, or hc; refusing access until it is explicitly migrated"
       return 1
       ;;
   esac
+}
+
+# The environment a host-local hc spawn runs under: exactly the remote mate
+# session, the pinned runtime directory, and none of an ambient terminal's or
+# caller's hc routing markers, which would otherwise outrank the session.
+remote_hc_launch_env() {
+  local session
+  session=$(fm_remote_hc_session) || return 1
+  fm_remote_hc_runtime_env
+  REMOTE_HC_LAUNCH_ENV=(-u HC_SOCKET -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE "HC_SESSION=$session")
+  [ -z "${XDG_RUNTIME_DIR:-}" ] || REMOTE_HC_LAUNCH_ENV+=("XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR")
 }
 
 remote_endpoint_require() {
@@ -224,6 +263,9 @@ print_route() { # <id>
       printf 'rex_session_id=%s\n' "$rex_session_id"
       printf 'rex_server=%s\n' "$rex_server"
       ;;
+    hc)
+      printf 'hc_session=%s\n' "${REMOTE_ENDPOINT_TARGET%%:*}"
+      ;;
   esac
   printf 'harness=%s\n' "$harness"
   printf 'model=%s\n' "$model"
@@ -259,10 +301,11 @@ cmd_launch() {
   fi
   # The selected backend's session-provider server must survive every SSH
   # disconnection a remote route depends on: the herdr server belongs to the
-  # GUI login session, and a persistent `rex server start` server is a
-  # detached daemon no SSH session owns. bin/fm-remote-doctor.sh is the
+  # GUI login session, a persistent `rex server start` server is a detached
+  # daemon no SSH session owns, and the herdr-core core keeps running after
+  # logout as the account's own service. bin/fm-remote-doctor.sh is the
   # readiness owner for whichever backend the parent selected.
-  case "$selected_backend" in herdr|rex) ;; *) die "a remote secondmate runs only on the herdr or rex backend, not '$selected_backend'" ;; esac
+  case "$selected_backend" in herdr|rex|hc) ;; *) die "a remote secondmate runs only on the herdr, rex, or hc backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
@@ -288,7 +331,16 @@ cmd_launch() {
         fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
           || die "could not remove the confirmed agent-less endpoint"
         ;;
-      missing) ;;
+      missing)
+        # An hc terminal reads missing once its program has finished, while
+        # the finished record still carries the mate's labels and Herdr.app
+        # tab; the adapter's idempotent close removes that husk, and is a
+        # silent success on a terminal already gone.
+        if [ "$REMOTE_ENDPOINT_BACKEND" = hc ]; then
+          fm_backend_kill hc "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
+            || die "could not remove the finished herdr-core terminal"
+        fi
+        ;;
       *) die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
   fi
@@ -304,10 +356,18 @@ cmd_launch() {
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA"
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1
     FM_SKIP_SECONDMATE_SYNC=1)
-  if [ "$selected_backend" = herdr ]; then
-    remote_herdr_session_resolve || die "no SHA-256 tool resolves to name the Herdr session for code root $FM_ROOT"
-    launch_env=("HERDR_SESSION=$REMOTE_HERDR_SESSION" "${launch_env[@]}")
-  fi
+  case "$selected_backend" in
+    herdr)
+      remote_herdr_session_resolve || die "no SHA-256 tool resolves to name the Herdr session for code root $FM_ROOT"
+      launch_env=("HERDR_SESSION=$REMOTE_HERDR_SESSION" "${launch_env[@]}")
+      ;;
+    hc)
+      # The mate's terminal lands in the core Herdr.app shows for this host,
+      # and hc must resolve that core's live socket, never start another.
+      remote_hc_launch_env || die "the remote herdr-core session override is invalid"
+      launch_env=("${REMOTE_HC_LAUNCH_ENV[@]}" "${launch_env[@]}")
+      ;;
+  esac
   if ! out=$(env "${launch_env[@]}" "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     die "remote host-local secondmate launch failed"
@@ -360,7 +420,13 @@ cmd_relaunch() {
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA"
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1
     FM_SKIP_SECONDMATE_SYNC=1)
-  [ "$REMOTE_ENDPOINT_BACKEND" != herdr ] || relaunch_env=("HERDR_SESSION=$REMOTE_HERDR_SESSION" "${relaunch_env[@]}")
+  case "$REMOTE_ENDPOINT_BACKEND" in
+    herdr) relaunch_env=("HERDR_SESSION=$REMOTE_HERDR_SESSION" "${relaunch_env[@]}") ;;
+    hc)
+      remote_hc_launch_env || die "the remote herdr-core session override is invalid"
+      relaunch_env=("${REMOTE_HC_LAUNCH_ENV[@]}" "${relaunch_env[@]}")
+      ;;
+  esac
   env "${relaunch_env[@]}" "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}"
   # A parent tracking this route needs the identity the relaunch actually
   # produced, not the one it asked for, so it can republish its own record the
