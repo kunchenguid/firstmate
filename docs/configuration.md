@@ -1117,8 +1117,10 @@ The floor is goal-aware.
 A lane that is only a page host never counts as working: a live Lavish listener or a parked host (`state/<task>.page-host-parked`) is quiet by design and is neither working nor startable, and a dead host is startable (it needs re-hosting) but never working, whatever its pane reads.
 A host whose round is open keeps its ordinary verdict, because its owner is acting on feedback.
 An active goal item that `bin/fm-goal.sh startable` lists, with no working lane on its `task=`, is work waiting: it keeps the floor alarm armed with no startable lane at all and appears in the wake's idle list as `goal:<goal>/<item>=startable`.
+What startable means includes an orphaned-running item: one marked `running` whose `task=` is empty, whose task has no `state/<task>.meta` record, or whose task's `bin/fm-crew-state.sh` verdict is `done` or `failed`.
+Such an item is listed as startable with the marker `orphaned running, no live task` - a running mark over no live work is waiting, not working - while a `working` or `parked` verdict keeps the item running and out of the startable list.
 
-The same tick also raises `check: goal stalled: <goal>: <item> (owner=<owner>) <age>s[, ...] (threshold <n>s)[; ...]` once such an item has sat unstarted for the hold, whether or not the floor is met, so an idle startable item never stays silent.
+The same tick also raises `check: goal stalled: <goal>: <item> (owner=<owner>) <age>s[, ...] (threshold <n>s)[; ...]` once such an item has sat unstarted for the hold, whether or not the floor is met, so an idle startable item never stays silent; an orphaned-running item counts as unstarted, so a `running` mark alone does not silence the alarm.
 The age runs from the watcher's first sight of the item as waiting, repeats once per `FM_PAUSE_RESURFACE_SECS`, and restarts when the item is marked, finishes, or leaves the record; closing the goal or removing the config drops the ledger.
 `bin/fm-goal.sh` owns what startable means, and the supervising firstmate answers the wake by steering the item's owner or starting the item itself.
 

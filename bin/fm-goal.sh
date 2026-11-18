@@ -78,15 +78,24 @@
 # shown by `show` and excluded from the projection.
 #
 # PROJECTION. Derived state per item: the item's fields, the folded mark
-# state, since (the winning mark's epoch), startable (state open, class drive,
-# every after id done or dropped), waiting_on (the unmet after ids), and a
-# landing hint (the item's task merged with no newer goal update: for a task
-# with a state/<task>.meta record, the merge-notified marker bin/fm-pr-lib.sh
+# state, since (the winning mark's epoch), startable (state open, or the
+# orphaned-running state below, in both cases class drive and every after id
+# done or dropped), waiting_on (the unmet after ids), and a landing hint (the
+# item's task merged with no newer goal update: for a task with a
+# state/<task>.meta record, the merge-notified marker bin/fm-pr-lib.sh
 # owns, read the way bin/fm-afk-return.sh's landed-work scan reads it;
-# otherwise a done [key=merged-<task>] line in an owner's stream). `show`
-# renders the projection unbounded; `brief` renders it bounded (~1.5 KB per
-# goal, 3 KB total, later goals collapsed to one line); `window` renders the
-# since-epoch view a return brief needs. The brief also reads drive_goals
+# otherwise a done [key=merged-<task>] line in an owner's stream). ORPHANED
+# RUNNING. An item marked running whose task is empty, has no readable
+# state/<task>.meta, or whose task bin/fm-crew-state.sh reads as done or
+# failed (the one owner of a task's current state, never re-derived here) is
+# orphaned-running: no live task is behind it, so it counts as startable -
+# carrying an `orphaned running, no live task` marker - exactly like an open
+# item, and the watcher's goal-stall tick therefore sees it too. A task that
+# reads working, parked, blocked, paused or unknown may still be alive, so
+# that item stays running and is not startable. `show` renders the projection
+# unbounded; `brief` renders it bounded (~1.5 KB per goal, 3 KB total, later
+# goals collapsed to one line); `window` renders the since-epoch view a
+# return brief needs. The brief also reads drive_goals
 # from state/.afk-contract when that field is present (bin/fm-afk-contract.sh
 # owns it): named goals come first, and every active goal is labeled as driven
 # while away, named or not (the captain's goal-drive-always decision).
@@ -152,7 +161,10 @@
 # goal - goal, item, owner, task (- when none), since (the folded mark epoch, or
 # the goal's started epoch for an item no mark touched) - and nothing when no
 # item is startable; it is the machine read the watcher's goal-stall tick uses
-# (bin/fm-watch.sh), so that tick never invents what startable means.
+# (bin/fm-watch.sh), so that tick never invents what startable means. An
+# orphaned-running item (marked running with no live task behind it, see
+# PROJECTION above) is startable like an open one, so the tick ages it to the
+# same `check: goal stalled` wake instead of letting it sit unread for hours.
 #
 # `export` is the JSON read of the same projection, for a renderer that is not
 # bash (bin/fm-drive-board.sh, the Miko cockpit panel). It prints one compact
@@ -199,6 +211,14 @@ FM_GOAL_BRIEF_TOTAL_BYTES=3072
 FM_GOAL_BRIEF_ITEM_LIST=5
 FM_GOAL_FIELD_MAX=300
 FM_GOAL_ITEM_TITLE_MAX=300
+
+# The one owner of a task's current state, asked read-only by the
+# orphaned-running predicate below; the projection never re-derives liveness.
+# FM_CREW_STATE_BIN is the same stub seam bin/fm-watch.sh and
+# bin/fm-classify-lib.sh use. Verdicts are memoized per state dir and task for
+# the life of the process, so one render asks at most once per task.
+declare -A _FM_GOAL_CREW_STATE_VERDICTS=()
+FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$FM_GOAL_DIR/fm-crew-state.sh}"
 
 
 # Accumulator line separator for the brief's category lists (never a byte a
@@ -1129,9 +1149,48 @@ _fm_goal_item_target_reached() {  # <idx>
   [ "$cur" -ge "$want" ]
 }
 
-_fm_goal_item_startable() {  # <idx>
+# 0 iff item <idx> is orphaned-running: its folded state is running but no
+# live task is behind it. The task is empty, has no readable
+# state/<task>.meta, or bin/fm-crew-state.sh - the one owner of a task's
+# current state, asked read-only with the forge fallback skipped, exactly as
+# the watcher's drive-floor scan asks it - reports it done or failed. Every
+# other verdict (working, parked, blocked, paused, unknown) may still be a
+# live task, so the item keeps its running state and is not startable.
+_fm_goal_item_orphaned_running() {  # <idx> [state-dir]
+  local idx=$1 state=${2:-$FM_GOAL_STATE}
+  local task line verdict key
+  [ "${FM_GOAL_M_STATES[$idx]}" = running ] || return 1
+  task=${FM_GOAL_ITEMS_TASKS[$idx]}
+  [ -n "$task" ] || return 0
+  [ "$( _fm_goal_regular_file_kind "$state/$task.meta" )" = 0 ] || return 0
+  key="$state|$task"
+  if [ -n "${_FM_GOAL_CREW_STATE_VERDICTS[$key]+x}" ]; then
+    case "${_FM_GOAL_CREW_STATE_VERDICTS[$key]}" in done|failed) return 0 ;; esac
+    return 1
+  fi
+  line=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_NO_FORGE=1 \
+    "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+  verdict=unknown
+  case "$line" in
+    'state: '*) verdict=${line#state: }; verdict=${verdict%% *} ;;
+  esac
+  _FM_GOAL_CREW_STATE_VERDICTS[$key]=$verdict
+  case "$verdict" in done|failed) return 0 ;; esac
+  return 1
+}
+
+# Startable: a drive item whose folded state is open, or an orphaned-running
+# item (marked running with no live task behind it, so nobody is on it). Both
+# stay behind the class, until and after gates: a captain item is never
+# startable, an item past its until never is, and an item with unmet after ids
+# waits.
+_fm_goal_item_startable() {  # <idx> [state-dir]
   [ "${FM_GOAL_ITEMS_CLASSES[$1]}" = drive ] || return 1
-  [ "${FM_GOAL_M_STATES[$1]}" = open ] || return 1
+  case "${FM_GOAL_M_STATES[$1]}" in
+    open) ;;
+    running) _fm_goal_item_orphaned_running "$1" "${2-}" || return 1 ;;
+    *) return 1 ;;
+  esac
   ! _fm_goal_item_expired "$1" || return 1
   _fm_goal_item_waiting "$1"
   [ -z "$FM_GOAL_WAITING" ] || return 1
@@ -1200,7 +1259,10 @@ fm_goal_project() {  # <id> [state-dir] [data-dir] [now]
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i"; then startable=yes; else startable=no; fi
+    if _fm_goal_item_startable "$i" "$state"; then startable=yes; else startable=no; fi
+    if _fm_goal_item_orphaned_running "$i" "$state"; then
+      startable="$startable (orphaned running, no live task)"
+    fi
     if _fm_goal_item_landing "$i" "$state"; then landing=yes; else landing=no; fi
     printf 'item %s owner=%s class=%s state=%s since=%s task=%s startable=%s waiting_on=%s landing_hint=%s\n' \
       "${FM_GOAL_ITEMS_IDS[$i]}" "${FM_GOAL_ITEMS_OWNERS[$i]}" "${FM_GOAL_ITEMS_CLASSES[$i]}" \
@@ -1361,7 +1423,10 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i"; then startable=yes; else startable=no; fi
+    if _fm_goal_item_startable "$i" "$state"; then startable=yes; else startable=no; fi
+    if _fm_goal_item_orphaned_running "$i" "$state"; then
+      startable="$startable (orphaned running, no live task)"
+    fi
     if _fm_goal_item_landing "$i" "$state"; then landing=yes; else landing=no; fi
     line="  item ${FM_GOAL_ITEMS_IDS[$i]} [owner=${FM_GOAL_ITEMS_OWNERS[$i]} class=${FM_GOAL_ITEMS_CLASSES[$i]}"
     [ -z "${FM_GOAL_ITEMS_TASKS[$i]}" ] || line="$line task=${FM_GOAL_ITEMS_TASKS[$i]}"
@@ -1434,10 +1499,13 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i"; then
+    if _fm_goal_item_startable "$i" "$state"; then
       if [ "$startable_n" -lt "$FM_GOAL_BRIEF_ITEM_LIST" ]; then
         if [ -n "$startable_list" ]; then startable_list="$startable_list, "; fi
         startable_list="$startable_list${FM_GOAL_ITEMS_IDS[$i]} [${FM_GOAL_ITEMS_OWNERS[$i]}]"
+        if _fm_goal_item_orphaned_running "$i" "$state"; then
+          startable_list="$startable_list (orphaned running, no live task)"
+        fi
       else
         more=$((more + 1))
       fi
@@ -1515,8 +1583,11 @@ _fm_goal_brief_block_mate() {  # <id> <state> <data> <mate> <away>
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$mate" ] || { i=$((i + 1)); continue; }
     _fm_goal_item_doneish "$i" && closed=$((closed + 1))
-    if _fm_goal_item_startable "$i"; then
-      fm_cap_line_var "  startable, nobody on it: ${FM_GOAL_ITEMS_IDS[$i]} [$mate]"
+    if _fm_goal_item_startable "$i" "$state"; then
+      line="  startable, nobody on it: ${FM_GOAL_ITEMS_IDS[$i]} [$mate]"
+      _fm_goal_item_orphaned_running "$i" "$state" \
+        && line="$line (orphaned running, no live task)"
+      fm_cap_line_var "$line"
       printf '%s\n' "$FM_LINE_CAP_LINE"
     fi
     case "${FM_GOAL_M_STATES[$i]}" in
@@ -2214,7 +2285,7 @@ cmd_startable() {
     fm_goal_fold "$id" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$(date +%s)"
     i=0
     while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
-      if _fm_goal_item_startable "$i"; then
+      if _fm_goal_item_startable "$i" "$FM_GOAL_STATE"; then
         printf '%s\t%s\t%s\t%s\t%s\n' "$FM_GOAL_REC_ID" "${FM_GOAL_ITEMS_IDS[$i]}" \
           "${FM_GOAL_ITEMS_OWNERS[$i]}" "${FM_GOAL_ITEMS_TASKS[$i]:--}" \
           "${FM_GOAL_M_ATS[$i]:-$FM_GOAL_REC_STARTED_EPOCH}"
@@ -2236,7 +2307,7 @@ _fm_goal_export_one() {  # <id>
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i"; then startable=true; else startable=false; fi
+    if _fm_goal_item_startable "$i" "$FM_GOAL_STATE"; then startable=true; else startable=false; fi
     if _fm_goal_item_target_reached "$i"; then reached=true; else reached=false; fi
     if _fm_goal_item_landing "$i" "$FM_GOAL_STATE"; then landing=true; else landing=false; fi
     stopon=${FM_GOAL_ITEMS_STOPONS[$i]}
@@ -2539,6 +2610,9 @@ cmd_window() {
         if [ "$n" -lt "$FM_GOAL_BRIEF_ITEM_LIST" ]; then
           if [ -n "$list" ]; then list="$list, "; fi
           list="$list${FM_GOAL_ITEMS_IDS[$i]} [${FM_GOAL_ITEMS_OWNERS[$i]}]"
+          if _fm_goal_item_orphaned_running "$i"; then
+            list="$list (orphaned running, no live task)"
+          fi
         else
           more=$((more + 1))
         fi

@@ -3,6 +3,16 @@
 Captain-level routing and operating decisions whose reasoning the current-behavior docs do not carry.
 Each entry links the page that owns its resulting contract.
 
+## 2026-11-18 - a running goal item with no live task is startable again
+
+**Decision.** A goal item marked `running` whose `task=` is empty, whose task has no `state/<task>.meta` record, or whose `bin/fm-crew-state.sh` verdict is `done` or `failed` is orphaned-running: `bin/fm-goal.sh startable` lists it like an open item, with the marker `orphaned running, no live task` in the projection, `show`, the drain's GOAL section and the mate brief.
+The goal-stall tick and the drive floor read the same list, so such an item is stalled and startable again with no watcher change.
+A `working` or `parked` verdict keeps the item running and out of the startable list.
+[`configuration.md`](configuration.md#drive-floor-configdrive-floor) owns the resulting contract.
+
+**Why.** The Miko CI/CD item `cf-queue-at-green` sat marked `running` with no task behind the mark for hours: the projection's startable predicate accepted only `state=open`, so GOAL DUTY never re-dispatched it and the goal-stall tick never named it, because a mark alone was read as someone being on the work.
+A running mark over no live work is waiting, not working, and the crew-state verdict already says which tasks are live - re-deriving it in the projection would fork the meaning of a live task.
+
 ## 2026-11-17 - an idle startable goal item wakes the supervisor
 
 **Decision.** In a home with `config/drive-floor`, a startable item of an active goal that no working lane is on raises `check: goal stalled` once it has waited the drive-floor hold, even when the fleet meets the floor.

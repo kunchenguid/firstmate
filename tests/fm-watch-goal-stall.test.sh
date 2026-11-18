@@ -82,11 +82,14 @@ test_startable_command_lists_only_startable_items() {
   [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "expected one startable item, got: $out"
   case "$out" in "G1"$'\t'"build"$'\t'"main"$'\t'"t-build"$'\t'[0-9]*) ;; *) fail "unexpected startable row: $out" ;; esac
   "$GOAL" mark G1 build running -- 'on it' >/dev/null
-  [ -z "$("$GOAL" startable)" ] || fail "a running item stayed startable"
+  case "$("$GOAL" startable)" in "G1"$'\t'"build"$'\t'"main"$'\t'"t-build"$'\t'[0-9]*) ;; *)
+    fail "a running item with no task record behind it was not listed as orphaned startable" ;; esac
+  lane t-build "$WORKING"
+  [ -z "$("$GOAL" startable)" ] || fail "a running item with a live task stayed startable"
   "$GOAL" mark G1 build "done" -- 'landed' >/dev/null
   out=$("$GOAL" startable)
   case "$out" in "G1"$'\t'"verify"$'\t'*) ;; *) fail "finishing build did not unlock verify: $out" ;; esac
-  pass "fm-goal.sh startable prints one row per startable item and follows marks"
+  pass "fm-goal.sh startable prints one row per startable item, an orphaned-running row included, and follows marks"
 }
 
 test_idle_startable_item_wakes_after_the_hold() {
@@ -118,16 +121,39 @@ test_an_item_with_a_working_task_or_a_mark_is_not_stalled() {
   floor 1
   lane w1 "$WORKING"
   lane t-build "$WORKING"
+  lane t-docs "$WORKING"
   start_goal G1 'item [id=build] [owner=main] [task=t-build]: build' \
     'item [id=docs] [owner=main]: docs'
   drive_floor_tick 1000
   drive_floor_tick 2000
   case "$GOAL_STALL" in *'docs'*) ;; *) fail "the unowned item did not stall: $GOAL_STALL" ;; esac
   case "$GOAL_STALL" in *build*) fail "an item whose task lane is working was named: $GOAL_STALL" ;; esac
-  "$GOAL" mark G1 docs running -- 'started' >/dev/null
+  "$GOAL" mark G1 docs running --task t-docs -- 'started' >/dev/null
   drive_floor_tick 3000
   [ ! -e "$STATE/.goal-stall" ] || fail "a running item kept its stall episode"
   pass "an item with a working task lane or a running mark is never named, and its episode drops"
+}
+
+test_an_orphaned_running_item_is_stalled_like_an_open_one() {
+  reset_case
+  floor 1
+  lane w1 "$WORKING"
+  # the exact shape of the running-with-no-live-task case: a running mark, a
+  # task name that has no record at all in this home
+  start_goal G1 'item [id=queue] [owner=main] [task=ghost-child]: keep the queue green'
+  "$GOAL" mark G1 queue running -- 'on it' >/dev/null
+  drive_floor_tick 1000
+  drive_floor_tick 2000
+  case "$GOAL_STALL" in *'queue'*) ;; *) fail "an orphaned-running item was not stalled: $GOAL_STALL" ;; esac
+  grep -q 'goal-stall' "$FM_WAKE_QUEUE" || fail "the orphaned-running stall was not queued"
+  # a dead verdict behind the mark stalls the same way
+  rm -f -- "$STATE/.goal-stall"
+  rm -f -- "$FM_WAKE_QUEUE"
+  lane ghost-child 'state: failed · source: status-log · the task died'
+  drive_floor_tick 3000
+  drive_floor_tick 4000
+  case "$GOAL_STALL" in *'queue'*) ;; *) fail "an item running over a dead task was not stalled: $GOAL_STALL" ;; esac
+  pass "a running item with no task record or a dead one is stalled like an open item"
 }
 
 test_goal_items_count_as_work_for_the_drive_floor() {
@@ -240,6 +266,7 @@ test_watcher_loop() {
 fm_test_run test_startable_command_lists_only_startable_items \
   test_idle_startable_item_wakes_after_the_hold \
   test_an_item_with_a_working_task_or_a_mark_is_not_stalled \
+  test_an_orphaned_running_item_is_stalled_like_an_open_one \
   test_goal_items_count_as_work_for_the_drive_floor \
   test_page_hosts_never_count_as_working test_only_idle_page_hosts_stay_silent \
   test_closing_or_removing_config_drops_the_ledger test_a_home_without_goals_stays_unchanged \

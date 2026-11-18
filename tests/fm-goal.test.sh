@@ -497,6 +497,64 @@ test_limits() {
   pass 'until stops an item from being startable once it passes'
 }
 
+crew_state_stub() {  # <task>=<state> ... - stub fm-crew-state.sh verdicts for the orphaned tests
+  local spec
+  STUB="$TMP_ROOT/crew-state.sh"
+  {
+    # shellcheck disable=SC2016 # the stub source expands $1 in the child shell.
+    printf '%s\n' '#!/usr/bin/env bash' 'case "$1" in'
+    for spec in "$@"; do
+      printf '  %s) echo "state: %s - source: status-log - stub" ;;\n' "${spec%%=*}" "${spec#*=}"
+    done
+    printf '%s\n' '  *) echo "state: unknown - source: none - no stub for this task" ;;' 'esac' 'exit 0'
+  } > "$STUB"
+  chmod +x "$STUB"
+}
+
+test_orphaned_running() {
+  fixture
+  printf '%s\n' \
+    'item [id=notask] [owner=terp]: running with no task' \
+    'item [id=dead] [owner=terp] [task=deadchild]: running with a dead task' \
+    'item [id=live] [owner=terp] [task=livechild]: running with a live task' \
+    'item [id=landed] [owner=terp] [task=donechild]: running with a done task' \
+    'item [id=closed] [owner=terp] [task=donechild]: item itself done' > "$ITEMS"
+  crew_state_stub deadchild=failed livechild=working donechild=done
+  export FM_CREW_STATE_BIN="$STUB"
+  start >/dev/null
+  local now out; now=$(date +%s)
+  {
+    mark_line notask running "$((now - 300))"
+    mark_line dead running "$((now - 300))"
+    mark_line live running "$((now - 300))"
+    mark_line landed running "$((now - 300))"
+    mark_line closed 'done' "$((now - 300))"
+  } > "$H/state/goals/I1.marks"
+  # a task the verdict is read through needs its meta record to exist
+  printf 'kind=ship\n' > "$H/state/deadchild.meta"
+  printf 'kind=ship\n' > "$H/state/livechild.meta"
+  printf 'kind=ship\n' > "$H/state/donechild.meta"
+  out=$(project)
+  assert_contains "$out" 'item notask owner=terp class=drive state=running' 'running with no task keeps its folded state'
+  assert_contains "$out" 'task=- startable=yes (orphaned running, no live task) waiting_on=-' 'no task marks the item orphaned-running startable'
+  assert_contains "$out" 'task=deadchild startable=yes (orphaned running, no live task)' 'a dead task marks the item orphaned-running startable'
+  assert_contains "$out" 'task=livechild startable=no waiting_on=- landing_hint=no' 'a live task keeps the item running, not startable'
+  assert_contains "$out" 'item live owner=terp class=drive state=running' 'a live task keeps the running state'
+  assert_contains "$out" 'task=donechild startable=yes (orphaned running, no live task)' 'a done task marks the item orphaned-running startable'
+  assert_contains "$out" 'item closed owner=terp class=drive state=done' 'a done item stays done'
+  assert_not_contains "$(goal startable)" $'I1\tlive\t' 'a live task is not a startable row'
+  assert_not_contains "$(goal startable)" $'I1\tclosed\t' 'a done item is not a startable row'
+  assert_contains "$(goal startable)" $'I1\tnotask\tterp\t-' 'no task is a startable row with task -'
+  assert_contains "$(goal startable)" $'I1\tdead\tterp\tdeadchild' 'a dead task is a startable row'
+  assert_contains "$(goal startable)" $'I1\tlanded\tterp\tdonechild' 'a done task is a startable row'
+  out=$(goal brief)
+  assert_contains "$out" 'startable, nobody on it: notask [terp] (orphaned running, no live task)' 'the brief GOAL section shows the marker line'
+  assert_contains "$out" 'running: live [terp, task livechild' 'the brief still lists the live task as running'
+  assert_contains "$(goal show I1)" 'startable: yes (orphaned running, no live task)' 'show marks the orphaned item startable'
+  unset FM_CREW_STATE_BIN
+  pass 'a running item with no live task is orphaned-running: startable, marked, alarmed like an open item; a live or done-item task is not'
+}
+
 test_target_close_and_brief() {
   probe_fixture
   goal mark I1 a 'done' -- 'merged and done' >/dev/null
@@ -575,4 +633,4 @@ test_driven() {
 fm_test_run test_start test_validation test_marks test_local_mate test_remote_mate \
   test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
-  test_probe_pr_merged test_limits test_target_close_and_brief test_export test_driven
+  test_probe_pr_merged test_limits test_orphaned_running test_target_close_and_brief test_export test_driven
