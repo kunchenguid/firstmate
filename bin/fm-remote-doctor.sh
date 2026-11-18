@@ -580,7 +580,10 @@ check_remote_job_worker() {
 # then herdr-core, then its hc alias.
 hc_bin_path() {
   (
-    # shellcheck source=bin/fm-backend.sh
+    # The subshell deliberately isolates fm-backend.sh's FM_ROOT/FM_HOME
+    # assignments from this report; ShellCheck lints that module as its own
+    # root, so it is not followed here.
+    # shellcheck source=/dev/null
     . "$SCRIPT_DIR/fm-backend.sh" >/dev/null 2>&1 || exit 1
     fm_backend_source hc >/dev/null 2>&1 || exit 1
     fm_backend_hc_bin
@@ -885,7 +888,8 @@ hc_adapter_run() { # <command> [args...]
     fm_remote_hc_runtime_env
     HC_SESSION=$(fm_remote_hc_session) || exit 1
     export HC_SESSION
-    # shellcheck source=bin/fm-backend.sh
+    # Isolated like hc_bin_path: the report's own FM_ROOT/FM_HOME stay unchanged.
+    # shellcheck source=/dev/null
     . "$SCRIPT_DIR/fm-backend.sh" >/dev/null 2>&1 || exit 1
     fm_backend_source hc >/dev/null 2>&1 || exit 1
     "$@"
