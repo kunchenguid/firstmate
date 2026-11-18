@@ -260,6 +260,7 @@ An announced handling episode becomes pending downtime on the same generation be
 That handling republication gives a successor exactly one recovery presentation without orphaning the acknowledgement already printed for that generation.
 A watcher stopped so an arm can take its cycle over (`bin/fm-watch-arm.sh --take-over`) publishes downtime like any close, but the taking arm restores an acknowledged episode that stop reopened only when the taken-over arm's cycle-ledger row for that exact arm and watcher records the watcher ending by the take-over's TERM and no wake was appended in between.
 The taking arm waits within a short bound for that row; a missing row or any other signal leaves downtime for the fresh cycle's ordinary recovery wake, while take-over still proceeds.
+A watcher can hold the stop for a whole blocking command substitution, so one that outlives the stop bound is attached to, and when it later ends by that TERM without delivering a reason the taking arm applies the same rule and owns the fresh cycle rather than closing empty.
 Any other episode is left for the next cycle's arm check.
 
 ### What an acknowledgement retires
@@ -513,6 +514,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The already-acknowledged confirmation no-op for a matching generation, with its mismatched-generation, dead-pid, and lock-mismatch rejections preserved.
 - The manual-restart generation churn that makes a confirmation for the churned generation report a mismatch, which an arm check without a reopen leaves in place.
 - A take-over that stays quiet after a confirmed TERM, including one that lands inside a herdr event wait, still surfaces queued work and self-exit downtime, and attaches without stopping a cycle the named arm does not own.
+- A take-over whose watcher holds the stop past the bound and then ends by that TERM without a reason restores the acknowledged episode and owns a fresh cycle instead of resurfacing an empty recovery.
 - The disposable-checkout arm refusal.
 - The home-gone and state-gone watcher exits.
 - The test reaper that stops a watcher armed for a temporary home.
