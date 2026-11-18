@@ -810,6 +810,21 @@ outcome: failed
 EOF
 }
 
+# A run `no-mistakes axi handoff` ended: terminal for the worker (CI monitoring
+# over, PR open and free to merge), matching the daemon's own record shape.
+run_handed_off() {  # <branch> <pr>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: handed_off
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "$2"
+  findings: none
+outcome: handed-off
+EOF
+}
+
 run_ci_monitoring() {  # <branch>
   cat <<EOF
 run:
@@ -4931,6 +4946,39 @@ test_capped_overview_without_branch_rows_reports_both_ids() {
   pass 'same-branch identity survives both runs falling outside the overview'
 }
 
+# A handed_off run is terminal for the worker: its CI monitoring ended with the
+# PR open, so the guard in bin/fm-nm-start.sh lets a new head start a new run.
+# The same terminal reading must hold here: a handed_off row in the branch's
+# history must not make the whole inventory unreadable, or the new run the
+# guard allowed could never be attributed (2026-11-17 guard bug, Miko PRs
+# 1061 and 1070).
+test_handed_off_history_row_does_not_poison_a_new_run() {
+  make_competing_runs_case handed-off-history running handed_off
+  local d=$TMP_ROOT/handed-off-history out
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: working' 'the new run on the handed-off branch reads working'
+  assert_contains "$out" 'source: run-step' 'the new run is attributed as a run-step'
+  assert_not_contains "$out" 'unrecognized run status' 'a handed_off history row must not poison the branch inventory'
+  pass 'a handed_off history row does not poison the newer run on the branch'
+}
+
+# The handed_off run itself, as the branch's newest row: recognized and read as
+# terminal, never as an unrecognized status and never as a working crew.
+test_handed_off_newest_row_reads_terminal_not_busy() {
+  make_competing_runs_case handed-off-newest handed_off completed
+  local d=$TMP_ROOT/handed-off-newest out
+  FM_FAKE_AXI_STATUS="$(run_handed_off fm/competing https://github.com/o/r/pull/7 | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'source: run-step' 'the handed_off run is selected and attributed'
+  assert_contains "$out" 'outcome: handed-off' 'the reading names the handed-off outcome'
+  assert_not_contains "$out" 'unrecognized run status' 'a handed_off newest row is a recognized status'
+  assert_not_contains "$out" 'state: working' 'a handed_off run is terminal, never busy'
+  pass 'a handed_off newest row reads terminal, not busy or unrecognized'
+}
+
 # A branch with zero rows anywhere in a capped overview must read as
 # truthfully absent, not as an unreadable table: the rebuilt zero-row
 # inventory re-parses as `runs[0]`.
@@ -5518,9 +5566,10 @@ branch_sync:
 
 # The same live run reads working for every EXECUTING status word the CLI can
 # actually deliver here. `fm_nm_select_run` validates the overview status column
-# against pending|running|completed|failed|cancelled, so those are the only live
-# words that reach the predicate; the overview and the id-addressed detail read
-# the same runs.status column, so the fixture carries one word in BOTH surfaces.
+# against pending|running|completed|failed|cancelled|handed_off, so those are the
+# only live words that reach the predicate; the overview and the id-addressed
+# detail read the same runs.status column, so the fixture carries one word in
+# BOTH surfaces.
 test_live_rebased_run_reads_working_for_every_executing_status() {
   local status d rebased out
   for status in pending running; do
@@ -6998,6 +7047,8 @@ test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
 test_capped_competing_live_runs_report_both_ids
 test_capped_overview_without_branch_rows_reports_both_ids
+test_handed_off_history_row_does_not_poison_a_new_run
+test_handed_off_newest_row_reads_terminal_not_busy
 test_capped_overview_with_no_branch_runs_reports_absent
 test_no_branch_run_beside_a_live_run_elsewhere_reads_absent
 test_capped_inventory_reader_is_time_bounded

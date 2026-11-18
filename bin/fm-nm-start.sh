@@ -2,8 +2,10 @@
 # Start-only guard for no-mistakes. Reattach with `no-mistakes axi run` instead.
 # Usage: fm-nm-start.sh [axi run flags...]
 # Checks ALL runs on this repository/branch, regardless of head or age, using
-# the read-only daemon database. Any nonterminal run or unreadable inventory
-# refuses a new launch. The daemon remains the atomic branch-custody authority.
+# the read-only daemon database. Any run still active, or an unreadable
+# inventory, refuses a new launch; a handed_off run is terminal for the worker
+# (its CI monitoring ended with the PR open), so a new head may start a new
+# run. The daemon remains the atomic branch-custody authority.
 # NM_HOME and config/nm-home-resolver follow fm-nm-run-lib.sh for reads; launch
 # keeps the ambient home, exactly like that library's other driving commands.
 # No daemon administration, branch mutation, abort, or automatic gate answers.
@@ -46,7 +48,7 @@ try:
             raise ValueError("repository inventory ambiguous or unavailable")
         busy = db.execute(
             "SELECT id FROM runs WHERE repo_id = ? AND branch = ? "
-            "AND (status IS NULL OR status NOT IN ('completed', 'failed', 'cancelled'))",
+            "AND (status IS NULL OR status NOT IN ('completed', 'failed', 'cancelled', 'handed_off'))",
             (repos[0][0], branch),
         ).fetchall()
     if busy:

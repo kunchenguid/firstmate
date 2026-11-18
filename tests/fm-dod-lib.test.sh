@@ -623,7 +623,7 @@ with sqlite3.connect(sys.argv[1]) as db:
                      'CREATE TABLE runs(id TEXT, repo_id TEXT, branch TEXT, status TEXT, head_sha TEXT);')
     db.executemany('INSERT INTO repos VALUES (?, ?)', [('mine', sys.argv[2]), ('other', '/other')])
 PY
-  for status in pending running fixing ci awaiting_approval fix_review unfamiliar null completed failed cancelled; do
+  for status in pending running fixing ci awaiting_approval fix_review unfamiliar null completed failed cancelled handed_off; do
     python3 - "$d/home/state.sqlite" "$status" <<'PY'
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as db:
@@ -638,7 +638,7 @@ PY
     out=$( (cd "$d/repo" && PATH="$d/bin:$PATH" NM_HOME="$d/home" GUARD_REPO="$d/repo" GUARD_CALLED="$d/called" \
       bash "$ROOT/bin/fm-nm-start.sh" --intent 'test goal') 2>&1); rc=$?
     case "$status" in
-      completed|failed|cancelled)
+      completed|failed|cancelled|handed_off)
         [ "$rc" -eq 0 ] && [ -f "$d/called" ] || fail "terminal $status refused: $out"
         assert_contains "$(<"$d/called")" 'axi run --intent test goal' 'launch preserves arguments'
         ;;
