@@ -666,6 +666,20 @@ SH
   done
 }
 
+# fm_test_live_unix_sock <path>: park a listener that accepts and drops every
+# connection at <path>, standing in for a live core socket beside a fake CLI.
+# AF_UNIX caps <path> near 104 bytes, so root it in `TMPDIR=/tmp
+# fm_test_tmproot <prefix>`; fm_test_cleanup reaps the listener with that root.
+fm_test_live_unix_sock() {  # <path>
+  local i=0
+  mkdir -p "$(dirname "$1")" || return 1
+  python3 -c 'import socket,sys
+s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(16)
+while True: s.accept()[0].close()' "$1" >/dev/null 2>&1 &
+  while [ ! -S "$1" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -S "$1" ]
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

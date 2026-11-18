@@ -50,6 +50,7 @@ The T3 Code backend suites carry the slowest successful Ubuntu samples from CI r
 `tests/fm-backend-t3code.test.sh` and `tests/fm-t3-mcp.test.sh` run in the portable parallel lanes, so those two values sit in `portable_parallel_weight_hints`: every case id the backend suite spawns carries a per-run suffix and its cleanup removes only the `/tmp/fm-<id>` directories that run created, and both suites passed running concurrently with each other and beside another parallel suite (see [`fm-test-isolation-proof.md`](fm-test-isolation-proof.md)).
 
 The new `tests/fm-remote-herdr-identity.test.sh` serial hint is provisionally 6158 ms, from a successful local macOS arm64 `bin/fm-test-run.sh` sample on 2026-11-08. Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
+The 2026-11-17 remote hc second-mate serial hints are provisional local measurements: 15000 ms for `tests/fm-remote-secondmate-hc.test.sh` and 20000 ms for `tests/fm-remote-secondmate-hc-smoke.test.sh`, above the slowest of three `bin/fm-test-run.sh` samples (11229-13111 ms and 16108-17253 ms) on a macOS arm64 host, until the next CI refresh replaces them with Ubuntu timing-artifact maxima.
 
 ## Parallel lanes
 

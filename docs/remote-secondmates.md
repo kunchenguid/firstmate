@@ -21,7 +21,7 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent runs on one of two session-provider backends, selected per launch.
+The remote second-mate agent runs on one of three session-provider backends, selected per launch.
 [Launch selection and placement](#launch-or-recover) define the backend contract.
 Provisioning checks any available supported backend; launch checks the selected one.
 
@@ -32,6 +32,10 @@ Provisioning checks any available supported backend; launch checks the selected 
 - A remote Rex endpoint requires a persistent rex server started with `rex server start`, which is a detached daemon no SSH session owns.
   An ephemeral `rex server run --exit-empty` server exits when its last session or control connection disappears, so it can never satisfy remote readiness.
 - [Rex's server-stop limits](rex-backend.md#active-limits) explain session restoration and agent recovery.
+- A remote hc endpoint runs in the host's herdr-core core that Herdr.app shows for that machine, so the second mate appears in the captain's window as a native agent, and its own workers, which select hc automatically inside its labeled terminal, appear beside it.
+  That core must report that it keeps running after logout, which herdr-core does when it runs as the account's own user service.
+  Remote hc second mates are supported today only on Linux hosts, because herdr-core on macOS reports `keeps_running_after_logout: null`; on a macOS host the doctor reports that as a human gap and names Linux as the fix.
+  [`bin/fm-remote-hc-lib.sh`](../bin/fm-remote-hc-lib.sh) owns which core that is and how its socket is resolved under the remote job worker's scrubbed environment.
 - Local second mates are unaffected and keep their ordinary backend and session selection.
   So do the workers a remote second mate supervises inside its own home.
 
@@ -232,8 +236,8 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --backend rex
 ```
 
-`--backend` names the session backend to verify: `herdr`, `rex`, or `any`.
-The default `any` resolves herdr when its CLI is present and rex otherwise, so a host offering both is verified for the default backend.
+`--backend` names the session backend to verify: `herdr`, `rex`, `hc`, or `any`.
+The default `any` resolves herdr when its CLI is present and rex otherwise, so a host offering both is verified for the default backend; it never resolves hc, which is always selected explicitly.
 The launch path passes the launch's own selection, so the gate a launch passes is the gate for the backend it will use.
 
 That run is read-only.
@@ -284,6 +288,12 @@ Under `--backend rex --fix`, the doctor starts the account's persistent Rex serv
 It never stops or restarts an answering Rex server, because a stop ends every process in that server's sessions, including unrelated work and sibling agents, and a restore brings back only shells.
 An answering exit-empty server is reported as a human gap: at a time when nothing runs there, an operator runs `rex server stop` and then `rex server start` on that account, and rex stays not ready until then.
 Because Rex starts a missing server as exit-empty, nothing else Firstmate runs for a remote second mate starts one: while no server answers, the remote endpoint state reads `unreadable`, and recovery waits for this repair to start the persistent server.
+Under `--backend hc`, the doctor reads the core only through a socket it has proven live, because hc starts an empty core on contact with a dead one.
+A core that does not report `keeps_running_after_logout: true`, or that speaks another protocol generation, is a human gap.
+On macOS that gap says remote hc second mates need a Linux host, because herdr-core there reports `keeps_running_after_logout: null` and no update changes it.
+A core that does not answer is a human gap too: connect the machine from Herdr.app or start the account's herdr-core user service.
+`--fix` never starts, stops, or restarts a core, because a core started from the doctor's session is not necessarily the one the app shows, and stopping one ends every terminal in it.
+Neither does a launch or recovery: the host-local hc launch proves the core answers right before it spawns and otherwise refuses with that same gap, so a core that stopped after the readiness gate is never replaced from the launch's session.
 
 ### How the Herdr launch agent starts its server
 
@@ -339,7 +349,8 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 
 | Requirement | Tools |
 | --- | --- |
-| Always required | `git`, `jq`, the selected backend's CLI (`herdr` or `rex`), compatible `tasks-axi`, and `treehouse` |
+| Always required | `git`, `jq`, the selected backend's CLI (`herdr`, `rex`, or herdr-core, which resolves as the hc adapter does: `FM_HC_BIN`, then `herdr-core`, then its `hc` alias), compatible `tasks-axi`, and `treehouse` |
+| Additionally required for hc | `node`, which proves the core socket live before any read |
 | At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `omp` |
 | Additionally required on macOS | `lsof`, so the doctor and guard can prove which process owns the session socket |
 
@@ -443,18 +454,19 @@ The primary then takes these steps:
 3. It transfers the inherited-material allowlist.
 4. It asks the remote host to launch on that backend.
 
-A new route defaults to Herdr; pass `--backend rex` to select Rex.
+A new route defaults to Herdr; pass `--backend rex` to select Rex or `--backend hc` to select herdr-core.
 Without an explicit backend, a later launch or liveness recovery preserves the parent's recorded `remote_backend`; legacy records without that field use Herdr.
 An existing endpoint on a different backend is refused rather than migrated.
 Placement is per backend:
 
 - Herdr: all remote secondmates of one code root on a host share that root's remote session, `fm-remote` for the account's primary root, and retain separate `2ndmate-<id>` workspaces inside it.
 - Rex: each remote secondmate home gets its own `2ndmate-<id>-<hash>` session on the host's persistent personal rex server, the same placement rule a local secondmate home uses.
+- hc: each remote secondmate gets one terminal in the host's `default` herdr-core core, the core Herdr.app shows for that machine, labeled into its own home's Herdr.app space as a local hc second mate is ([`hc-backend.md`](hc-backend.md#second-mates)).
 
 ### Refused and unsupported launches
 
-- An explicit request for any backend other than herdr or rex is refused rather than honored, and the remote host refuses one too.
-- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than its code root's remote session, or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
+- An explicit request for any backend other than herdr, rex, or hc is refused rather than honored, and the remote host refuses one too.
+- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than its code root's remote session, a Rex route whose recorded server is not a local `unix://` endpoint, or an hc terminal outside the host's remote hc session - is classified as unverified and left untouched.
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
@@ -675,6 +687,8 @@ The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, 
 It passes them explicitly because `config/secondmate-harness` is not inherited into a second mate's home, and the file on that host belongs to a different home.
 Letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
+A remote hc second mate cannot be relaunched: the host-local control plane refuses `relaunch` for any hc task, as [`hc-backend.md`](hc-backend.md#second-mates) records, and the remote relaunch reports that refusal.
+A dead or finished remote hc mate is still recovered through liveness recovery, which launches it again.
 Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the host-local relaunch it drives can only rewrite the host's own endpoint record, so this wrapper reads the confirmed identity back from that record afterward and republishes the primary's own route metadata to match, the same way launch already records a fresh route.
 
 ### Firstmate code convergence
@@ -704,6 +718,7 @@ It refuses while any of these holds:
 
 Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its code root's remote session, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
+hc retirement closes only the retiring secondmate's own labeled terminal in the host's remote hc session, never the core or another terminal in it.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
@@ -721,7 +736,7 @@ The portable tests use these pieces:
 - The real entrypoint protocol.
 - Real git repositories.
 - A deterministic SSH boundary.
-- Stateful host-local Herdr and Rex CLI fixtures.
+- Stateful host-local Herdr, Rex, and hc CLI fixtures.
 - A controlled account fixture for the readiness gate.
 
 [`fm-remote-job-launchagent.test.sh`](../tests/fm-remote-job-launchagent.test.sh) exercises the real worker with stubbed asynchronous `launchctl`, covering slow claim sweeps, missing readiness recovery during a sweep, stale readiness without reload, concurrent repair, untracked owners, interrupted repairs, and asynchronous service removal before bootstrap.
@@ -749,6 +764,7 @@ bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+bin/fm-test-run.sh tests/fm-remote-secondmate-hc.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-omp.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```

@@ -3806,8 +3806,65 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 
 `bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
 
+### Second mates
+
+Measured on 2026-11-02 with `hc 0.1.16` on macOS, inside a `bin/fm-hc-lab.sh` session only, while the operator's own `default` core stayed live and untouched.
+
+| Probe | Result |
+| --- | --- |
+| `hc ls` and `hc ls --label <k=v>` after `hc kill` of a labeled terminal | Listed live terminals only; the finished terminal appeared under `hc ls --all` and kept every label on `hc get` (`state: finished`, `reason: killed`) until `hc rm`, after which `hc get` exited 3. |
+| `hc run --name <name>` (0.1.16) | Accepted; `hc get` reported the name. The adapter does not pass one on this version floor. |
+| `fm_backend_agent_state hc <session>:<address>` from an environment whose `XDG_RUNTIME_DIR` and `XDG_STATE_HOME` resolve no running core for that session (0.1.19, 2026-11-10) | Before the live-socket check, `hc get` started an empty core at the resolved socket and the mate's dead terminal read `missing`; with the check it reads `unreadable` and no core starts, while the recording environment still reads `dead`. `tests/fm-backend-hc.test.sh` pins the check against the fake core. |
+
+Refresh the second-mate proof with:
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-hc-secondmate-smoke.test.sh
+```
+
+The guard runs a real `bin/fm-spawn.sh <id> <home> --secondmate --backend hc` with a token-free stand-in named for a verified adapter, reads the terminal's labels through the lab core, then drives `bin/fm-secondmate-liveness-lib.sh` through a dead agent, a finished terminal, and an alive mate, whose recovery respawns keep the mate on its recorded backend `hc` (PR #8082).
+Observed guard output:
+
+```text
+ok - hc secondmate smoke: a real --secondmate launch lands in the mate's own space with this home's identity and an alive agent
+ok - hc secondmate smoke: a dead mate is closed, removed, and respawned in the same space at a new address
+ok - hc secondmate smoke: a finished terminal is removed as a husk before the mate is respawned
+ok - hc secondmate smoke: an alive mate is left exactly as it is
+FM_TEST_COMPLETE
+```
+
+The same four lines were observed again on 2026-11-10 with `hc 0.1.19`.
+
+The mate's terminal carried `herdr.space=fm-2ndmate-<id>-<hash of the mate home>`, `herdr.tab=<launching hometag>-fm-<id>`, and the launching home's `firstmate.*` labels; each respawn bound a fresh address with the same labels, and the dead and finished terminals answered not found afterwards.
+On this host the lab teardown's fleet-state tripwire refused, because the live `default` core rewrote its own `terminals.json` during the run; the same file changed between two passive reads taken with no lab activity at all, no lab process survived the sweep, and the retained lab directory was removed by hand.
+A host whose real core is idle, such as the `tests-hc` CI lane, keeps the tripwire intact.
+
+#### Remote second mates
+
+Measured on 2026-11-17 with `hc 0.1.21` on macOS 26.2 arm64, inside a `bin/fm-hc-lab.sh` session only, while the operator's own `default` core stayed live and untouched.
+The guard drives `bin/fm-remote-secondmate-control.sh`, the command a parent reaches over SSH, with `FM_REMOTE_HC_SESSION` naming the lab session in place of the remote host's `default` core.
+
+```sh
+bin/fm-test-run.sh tests/fm-remote-secondmate-hc-smoke.test.sh
+```
+
+Observed guard output:
+
+```text
+ok - remote hc smoke: the control plane launches the mate in the remote hc session with an alive agent
+ok - remote hc smoke: a steer is recorded and its doorbell reaches the mate
+ok - remote hc smoke: a finished terminal is removed as a husk and the mate relaunched
+ok - remote hc smoke: retirement closes the mate's terminal and removes its home
+FM_TEST_COMPLETE
+```
+
+The mate's terminal carried `herdr.space=fm-2ndmate-<id>-<hash of the mate home>` and the code root's `firstmate.home` label, and the steer's doorbell reached it without reading the terminal as foreign.
+The lab teardown's fleet-state tripwire held on this run.
+Not covered: a real remote host's `default` core under its systemd user service, how Herdr.app displays that remote mate, and whether the mate's own workers land beside it in the app.
+
 ### Not verified
 
 - A spawn with a real harness rather than the stand-in.
+- How the mate's space and tab display in a live Herdr.app window.
 - `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
