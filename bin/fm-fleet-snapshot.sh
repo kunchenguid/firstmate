@@ -294,8 +294,9 @@ EOF
 }
 
 OUTPUT_MODE=json
+DISPLAY_ACTIVITY=0
 case "${1:---json}" in
-  --json) ;;
+  --json) [ "${2:-}" != --display-activity ] || DISPLAY_ACTIVITY=1 ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
   -h|--help) usage; exit 0 ;;
@@ -641,15 +642,18 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
 # {state,source,detail}. It never enters current_state, so every supervision
 # consumer reads the same verdict as before, and any other canonical state
 # (declaration, pause, decision, done, failed, run step) is displayed unchanged.
-codex_display_activity_json() {  # <meta> <backend> <target>
-  local meta=$1 backend=$2 target=$3 harness native
+codex_display_activity_json() {  # <meta> <backend> <target> <id>
+  local meta=$1 backend=$2 target=$3 id=$4 harness native
   harness=$(meta_value "$meta" harness)
   case "$harness" in codex*) ;; *) return 0 ;; esac
   [ "$backend" = herdr ] && [ -n "$target" ] || return 0
   native=$(fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" bash -c '
     . "$1/fm-backend.sh" && fm_backend_source herdr 2>/dev/null || exit 1
-    fm_backend_herdr_codex_native_state "$2"
-  ' _ "$SCRIPT_DIR" "$target" 2>/dev/null) || return 0
+    native=$(fm_backend_herdr_codex_native_state "$2")
+    case "$native" in busy|idle) ;; *) exit 1 ;; esac
+    fm_backend_target_exists herdr "$2" "fm-$3" >/dev/null 2>&1 || exit 1
+    printf "%s" "$native"
+  ' _ "$SCRIPT_DIR" "$target" "$id" 2>/dev/null) || return 0
   case "$native" in
     busy) jq -n '{state:"working",source:"herdr-native",detail:"Herdr reports the Codex pane working"}' ;;
     idle) jq -n '{state:"idle",source:"herdr-native",detail:"Herdr reports the Codex pane done"}' ;;
@@ -707,24 +711,20 @@ prefetch_task_observations() {  # <meta> <id>
   # still outstanding rather than after every read has finished.
   status_open_decisions "$status_capture" "$kind" > "$open_file" || current_rc=1
   [ -z "$current_pid" ] || wait "$current_pid" || current_rc=1
+  rm -f -- "$SNAPSHOT_TASK_DIR/$id.display"
+  if [ "$DISPLAY_ACTIVITY" = 1 ] && [ "$kind" != secondmate ] && [ "$endpoint_exists" = true ] && [ "$current_rc" -eq 0 ] \
+    && [ "$(jq -r '.state // ""' "$current_file" 2>/dev/null)" = unknown ]; then
+    codex_display_activity_json "$meta" "$backend" "$target" "$id" > "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null || true
+  fi
   # All mutable observations must belong to the metadata generation captured in
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
-    rm -f -- "$status_capture" "$report_capture"
+    rm -f -- "$status_capture" "$report_capture" "$SNAPSHOT_TASK_DIR/$id.display"
     : > "$open_file" || current_rc=1
     jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
-  fi
-  rm -f -- "$SNAPSHOT_TASK_DIR/$id.display"
-  if [ "$OUTPUT_MODE" = json ] && [ "$endpoint_exists" = true ] && [ "$current_rc" -eq 0 ] \
-    && [ "$(jq -r '.state // ""' "$current_file" 2>/dev/null)" = unknown ]; then
-    codex_display_activity_json "$meta" "$backend" "$target" > "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null || true
-    if ! snapshot_task_generation_is_current "$meta" "$id" \
-      || ! fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
-      rm -f -- "$SNAPSHOT_TASK_DIR/$id.display"
-    fi
   fi
   printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
   [ "$current_rc" -eq 0 ] || return "$current_rc"
