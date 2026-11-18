@@ -777,7 +777,7 @@ ROWS
 }
 
 test_evidence_identity_and_metadata_refuse_before_publication() {
-  local home fakebin out rc marker work_a work_b meta response
+  local home fakebin out rc marker work_a work_b meta response scratch preflight
   home=$(make_role_home evidence-identity)
   fakebin="$home/bin"
   marker="$home/published"
@@ -793,6 +793,20 @@ test_evidence_identity_and_metadata_refuse_before_publication() {
   [ "$rc" -ne 0 ] || fail "cross-task worktree mismatch was accepted"
   assert_contains "$out" 'not current worktree' "cross-task refusal did not name the worktree mismatch"
   assert_absent "$marker" "cross-task mismatch invoked the publishing side effect"
+
+  scratch="$home/scratch-state"
+  mkdir -p "$scratch"
+  printf 'kind=ship\nmode=no-mistakes\nproject=%s\nworktree=%s\nevidence_text=unrestricted\nevidence_media=unrestricted\nevidence_audience=unrestricted\n' \
+    "$home/project" "$work_b" > "$scratch/evidence-b.meta"
+  printf 'kind=ship\nmode=no-mistakes\nproject=%s\nworktree=%s\nevidence_text=restricted\nevidence_media=unrestricted\nevidence_audience=unrestricted\n' \
+    "$home/project" "$work_b" > "$home/state/evidence-b.meta"
+  printf -v preflight 'FM_HOME=%q FM_STATE_OVERRIDE=%q FM_TASK_ID=%q %q evidence && printf %q > %q' \
+    "$home" "$home/state" evidence-b "$ROLE" 'scratch publication' "$marker"
+  rc=0
+  out=$(cd "$work_b" && FM_STATE_OVERRIDE="$scratch" PATH="$fakebin:$PATH" bash -c "$preflight" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "scratch FM_STATE_OVERRIDE replaced the supervisor policy"
+  assert_contains "$out" 'text/raw-log limit restricted' "pinned preflight did not read the supervisor limit"
+  assert_absent "$marker" "scratch override invoked the publishing side effect"
 
   meta="$home/state/evidence-a.meta"
   grep -v '^evidence_audience=' "$meta" > "$meta.tmp" && mv "$meta.tmp" "$meta"
@@ -823,8 +837,9 @@ test_evidence_identity_and_metadata_refuse_before_publication() {
   [ "$rc" -ne 0 ] || fail "caller-supplied evidence limits were accepted"
   assert_contains "$out" 'usage:' "caller-supplied limits had no usage refusal"
   out=$(run_role "$home" --help)
-  assert_contains "$out" 'predicate with && before the publishing command' "help omitted the pre-publication calling contract"
-  pass "fm-role.sh evidence: cross-task, missing metadata and unverified tools refuse before publication"
+  assert_contains "$out" 'supervised preflight, not a sandbox' "help overstated the preflight boundary"
+  assert_contains "$out" 'arbitrary direct publisher calls' "help did not disclose direct-call bypass"
+  pass "fm-role.sh evidence: pinned supervisor state and identity refuse prohibited publication"
 }
 
 # --- run --------------------------------------------------------------------

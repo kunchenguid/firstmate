@@ -475,10 +475,13 @@ EOF
 # Written once; only the two sentences about a green PR depend on the forge,
 # because on gerrit, and under pr=manual (the `no-ci` argument), the ci step is
 # skipped and the drive call never reports a green PR.
-fm_nm_driving_block() {  # <forge|no-ci> <text-limit> <media-limit> <audience-limit>
+fm_nm_driving_block() {  # <forge|no-ci> <text-limit> <media-limit> <audience-limit> <task-id>
   local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg role_check
-  local text=$2 media=$3 audience=$4
-  printf -v role_check '%q' "${FM_ROOT:-$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)}/bin/fm-role.sh"
+  local text=$2 media=$3 audience=$4 task_id=$5 supervisor_home supervisor_state role_path
+  supervisor_home=${FM_HOME:-${FM_ROOT:-$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)}}
+  supervisor_state=${STATE:-${FM_STATE_OVERRIDE:-$supervisor_home/state}}
+  role_path="${FM_ROOT:-$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)}/bin/fm-role.sh"
+  printf -v role_check 'FM_HOME=%q FM_STATE_OVERRIDE=%q FM_TASK_ID=%q %q evidence' "$supervisor_home" "$supervisor_state" "$task_id" "$role_path"
   if [ "$1" != gerrit ] && [ "$1" != no-ci ]; then
     pr_return_line="Only a drive call's return reports the green PR: \`no-mistakes axi status\` shows progress but never reports \`checks-passed\` while the ci step is still monitoring the PR for merge, so never wait on a status poll for the next gate or outcome.
 "
@@ -504,7 +507,8 @@ ${pr_return_line}Whenever a drive call returns without a gate or an outcome - it
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Publication capability: this task's supervisor-owned delivery record declares text/raw-log limit \`$text\`, media limit \`$media\`, and audience limit \`$audience\`. Before starting a run that can publish, establish its actual fresh-run evidence selection against installed help/schema/source, including deterministic PR-body text, evidence branches and attachments.
-Use \`$role_check evidence && no-mistakes axi run ...\`; the predicate reads those limits and the current task/project/worktree only from task metadata, and never accepts caller-supplied replacements. Never run the publishing command after a refusal.
+Use \`$role_check && no-mistakes axi run ...\`; this supervised preflight pins the dispatching home, state directory and task before reading the current project/worktree and limits from metadata. Never run the publishing command after a refusal.
+This check governs the generated Firstmate path; it is not a sandbox around arbitrary commands, and a direct publisher call or deliberately altered execution context bypasses it rather than gaining authorization from it.
 The predicate currently accepts only recorded unrestricted tool limits, not a claim that selected evidence is safe: separately establish the permitted concrete payload and destination; a narrower, unknown, absent, malformed, mismatched, or unsupported limit stops before publication until supported enforcement is qualified.
 Supported media controls must cover both \`attach_media\` and \`store_in_repo\`; neither is a raw-text suppression switch, and a private repository alone does not establish attachment audience.
 Do not substitute drafting instructions for controls, skip required validation, change global/tool settings, intercept uploads, publish then remove links, or reuse an evidence exception from another task; any exception needs firstmate's exact prospective task-scoped authorization.
@@ -560,9 +564,9 @@ EOF
 # check holds unchanged. The worker then opens or updates the PR and watches its
 # checks itself. Shaped like the gerrit block: skip flags, the shared driving
 # block, then what to do once the run passes. Callers are fm_dod_block only.
-fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffix> <nm-base> <pr-base> <text-limit> <media-limit> <audience-limit>
+fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffix> <nm-base> <pr-base> <text-limit> <media-limit> <audience-limit> <task-id>
   local branch=$1 forge_cli=$2 draft_check=$3 suffix=$4 nm_base=$5 pr_base=$6
-  local text=$7 media=$8 audience=$9
+  local text=$7 media=$8 audience=$9 task_id=${10}
   cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$suffix pr=manual
@@ -575,7 +579,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and push.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 ${nm_base}
 EOF
-  fm_nm_driving_block no-ci "$text" "$media" "$audience"
+  fm_nm_driving_block no-ci "$text" "$media" "$audience" "$task_id"
   cat <<EOF
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override, write the PR title and body yourself and publish them with \`$forge_cli\`:
@@ -657,7 +661,7 @@ Firstmate will then instruct you to run /no-mistakes to validate.
 That first \`done:\` is the handoff that starts the pipeline; it is not a request to publish.
 
 EOF
-      fm_nm_driving_block "$forge" "$text" "$media" "$audience"
+      fm_nm_driving_block "$forge" "$text" "$media" "$audience" "$id"
       cat <<EOF
 
 Because \`push\` is skipped, the pipeline's fixes DO NOT arrive in your checkout: each fix round commits onto a branch inside no-mistakes' own local gate repository, and with no push nothing carries those commits back to you.
@@ -738,7 +742,7 @@ EOF
       if [ "$pr" = manual ]; then
         [ -z "$nm_base" ] || nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto that branch, and open the PR against it with \`--base $base_q\`.
 "
-        fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent$contract_evidence" "$nm_base" "$pr_base" "$text" "$media" "$audience"
+        fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent$contract_evidence" "$nm_base" "$pr_base" "$text" "$media" "$audience" "$id"
         return
       fi
       cat <<EOF
@@ -751,7 +755,7 @@ Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
 ${nm_base}
 EOF
-      fm_nm_driving_block "$forge" "$text" "$media" "$audience"
+      fm_nm_driving_block "$forge" "$text" "$media" "$audience" "$id"
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft $draft_check

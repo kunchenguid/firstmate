@@ -1123,6 +1123,9 @@ EOF
   for brief in "$home/data/$id/brief.md" "$home/data/$id/ship-instructions.md"; do
     assert_grep "$home/data/$id/brief.md" "$brief" "promotion did not point at the single proof record"
     assert_grep 'none accepted' "$brief" "promotion inferred baseline acceptance from an investigation"
+    assert_grep "FM_HOME=$home" "$brief" "promotion did not pin the supervisor home"
+    assert_grep "FM_STATE_OVERRIDE=$home/state" "$brief" "promotion did not pin supervisor state"
+    assert_grep "FM_TASK_ID=$id" "$brief" "promotion did not pin the promoted task"
     assert_grep 'evidence && no-mistakes axi run' "$brief" \
       "promotion omitted the pre-publication predicate"
     assert_grep 'evidence-text=unrestricted evidence-media=unrestricted evidence-audience=unrestricted' "$brief" \

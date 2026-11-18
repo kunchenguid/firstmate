@@ -85,9 +85,8 @@ fm_role_meta_exact_value() {  # <meta> <key>
   grep "^${key}=" "$meta" | cut -d= -f2-
 }
 
-# The caller supplies only supervisor state, the launch-owned task marker, and
-# its current directory. Limits and identities come exclusively from the exact
-# task record; no worker-authored value can widen them.
+# The generated Firstmate command pins supervisor state and task id before this
+# predicate reads limits and identities from the exact task record.
 fm_role_gate_nm_evidence() {
   local state=$1 id=$2 cwd=$3 meta kind mode project worktree text media audience
   local current recorded top lineage=0 version value

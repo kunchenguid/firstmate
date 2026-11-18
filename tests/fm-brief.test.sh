@@ -1759,13 +1759,18 @@ test_no_mistakes_publication_check_precedes_run() {
     || fail "publication fixture did not scaffold"
   brief="$home/data/publication-check/brief.md"
   body=$(< "$brief")
+  assert_contains "$body" 'FM_TASK_ID=publication-check' "generated preflight did not pin the task"
+  assert_contains "$body" "FM_HOME=$home" "generated preflight did not pin the supervisor home"
+  assert_contains "$body" "FM_STATE_OVERRIDE=$home/state" "generated preflight did not pin the supervisor state"
   assert_contains "$body" 'evidence && no-mistakes axi run' \
     "generated publishing call omitted its executable prerequisite"
   assert_contains "$body" 'Never run the publishing command after a refusal' "worker could bypass a capability refusal"
   assert_contains "$body" 'actual fresh-run evidence selection' "capability check ignored actual selected payloads"
   assert_contains "$body" 'evidence-text=unrestricted evidence-media=unrestricted evidence-audience=unrestricted' \
     "generated delivery contract omitted its recorded limits"
-  assert_contains "$body" 'never accepts caller-supplied replacements' "worker could substitute free limit claims"
+  assert_contains "$body" 'supervised preflight pins the dispatching home' "generated contract did not describe its pinned scope"
+  assert_contains "$body" 'direct publisher call or deliberately altered execution context bypasses it' \
+    "generated contract overstated the supervised preflight as a sandbox"
   assert_contains "$body" 'neither is a raw-text suppression switch' "generated contract confused media and raw text"
   assert_contains "$body" 'exact prospective task-scoped authorization' "evidence exceptions became transferable"
   pass "fm-brief.sh: no-mistakes publishing starts behind the evidence predicate without weakening validation"

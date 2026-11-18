@@ -21,10 +21,12 @@
 #            apply). The optional `upstream-consent <scope>` argument is the
 #            recorded per-task consent a dispatcher captured.
 #
-#   evidence checks the current worker's supervisor-owned task metadata and the
-#            installed no-mistakes before starting a publishing run. FM_TASK_ID
-#            selects the record; the current physical git root must equal its
-#            recorded worktree and share the recorded project's history. The
+#   evidence is the read-only preflight used by Firstmate's generated publishing
+#            command. That command pins FM_HOME, FM_STATE_OVERRIDE and FM_TASK_ID
+#            to the dispatching supervisor's values before this script reads the
+#            record; ambient scratch overrides therefore do not select policy.
+#            The current physical git root must equal the recorded worktree and
+#            share the recorded project's history. The
 #            record must contain exactly one explicit text, media and audience
 #            limit: unrestricted|none|restricted|unknown. Only unrestricted
 #            limits currently pass: no tool-side suppression or audience
@@ -32,9 +34,11 @@
 #            includes deterministic raw-log/body embedding and evidence branches;
 #            media includes attachments AND repository storage. Chain this
 #            predicate with && before the publishing command; it neither
-#            publishes nor authorizes a destination or payload itself. Nonzero
-#            means stop, not permission to skip required validation, change
-#            tools/settings, or replace controls with drafting prose.
+#            publishes nor authorizes a destination or payload itself. This is a
+#            supervised preflight, not a sandbox or mandatory boundary around
+#            arbitrary direct publisher calls or deliberately replaced execution
+#            contexts. Nonzero means stop, not permission to skip required
+#            validation, change tools/settings, or replace controls with prose.
 #
 # bin/fm-role-lib.sh owns the schema summary and mechanics;
 # docs/configuration.md "Firstmate role" owns the operator-facing schema.
