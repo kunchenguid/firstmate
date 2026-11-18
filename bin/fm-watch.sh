@@ -2894,8 +2894,28 @@ EOF
 IMPOSED_HOLD_SCAN_SECS=${FM_IMPOSED_HOLD_SCAN_SECS:-}
 case "$IMPOSED_HOLD_SCAN_SECS" in ''|0*|*[!0-9]*) IMPOSED_HOLD_SCAN_SECS=60 ;; esac
 [ "${#IMPOSED_HOLD_SCAN_SECS}" -le 9 ] || IMPOSED_HOLD_SCAN_SECS=60
+# The lines of <status-file> that status_open_imposed_hold (fm-classify-lib.sh)
+# can act on, written to <out-file>: an imposition carries the imposer tag in
+# its head and the only line that closes one carries the imposed-hold key, so
+# every other line is a no-op in that fold and dropping it leaves the verdict
+# unchanged. The fold reads a log line by line in bash, which on a status log
+# of megabytes took most of a minute per scan and held up the whole poll cycle;
+# one grep narrows it to the handful of lines that matter. Returns 1 when no
+# line qualifies, which is "no hold open". A grep that cannot read the log
+# hands the fold the whole file, as before.
+imposed_hold_candidate_lines() {  # <status-file> <out-file>
+  local tag=${FM_CLASSIFY_HOLD_IMPOSER_TAG:-$FM_CLASSIFY_HOLD_IMPOSER_TAG_DEFAULT}
+  local prefix=${FM_CLASSIFY_HOLD_KEY_PREFIX:-$FM_CLASSIFY_HOLD_KEY_PREFIX_DEFAULT} rc=0
+  LC_ALL=C grep -a -F -e "[$tag]" -e "$prefix" -- "$1" > "$2" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) cat -- "$1" > "$2" 2>/dev/null ;;
+  esac
+}
+
 imposed_hold_expiry_tick() {  # [now-epoch], for deterministic clock callers
-  local now=${1:-} scan="$STATE/.imposed-holds-scan" exclude f task row last
+  local now=${1:-} scan="$STATE/.imposed-holds-scan" exclude f task row last filtered
   local id at until numeric_at numeric_until
   local due_task='' due_id='' due_until='' due_num='' due_at='' woke status=0 reason until_iso
   IMPOSED_HOLD_EXPIRY=
@@ -2908,12 +2928,14 @@ imposed_hold_expiry_tick() {  # [now-epoch], for deterministic clock callers
   fi
   printf '%s\n' "$now" > "$scan" || return 1
   exclude=$(status_scan_parent_channel_exclude "$STATE")
+  rm -f -- "$STATE"/.imposed-holds-lines.* 2>/dev/null || true
+  filtered=$(umask 077; mktemp "$STATE/.imposed-holds-lines.XXXXXX") || return 1
   for f in "$STATE"/*.status; do
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
     [ "$f" != "$exclude" ] || continue
     task=${f##*/}; task=${task%.status}
     case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    if ! row=$(status_open_imposed_hold "$f"); then
+    if ! imposed_hold_candidate_lines "$f" "$filtered" || ! row=$(status_open_imposed_hold "$filtered"); then
       [ ! -e "$STATE/.imposed-hold-woke-$task" ] || rm -f -- "$STATE/.imposed-hold-woke-$task" 2>/dev/null || true
       continue
     fi
@@ -2933,6 +2955,7 @@ EOF
       due_task=$task; due_id=$id; due_num=$numeric_until; due_at=$numeric_at; due_until=$until
     fi
   done
+  rm -f -- "$filtered"
   [ -n "$due_task" ] || return 0
   woke="$STATE/.imposed-hold-woke-$due_task"
   [ ! -L "$woke" ] || return 1
@@ -4477,6 +4500,192 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# The signal section of one poll cycle, callable more than once per cycle.
+#
+# A new status line used to wait for every maintenance step below to finish
+# first: the reminder ticks and the slow-check sweep ran ahead of the only
+# signal scan, and in a busy home they take minutes, so the status line that
+# wakes firstmate was noticed minutes late. The scan-and-surface step is
+# therefore a function, called unconditionally at its original place after
+# maintenance and, earlier, from signal_preempt_check between maintenance steps.
+#
+# signal_preempt_check is the cheap pre-emption test. signal_fingerprint is one
+# stat call over the signal files; a fingerprint equal to the one recorded by
+# the last scan that found nothing pending means nothing has arrived, and the
+# checkpoint costs that single fork. Any difference runs the authoritative
+# scan here, which alone decides what is pending, so a fingerprint that misses
+# a change only falls back to the scan after maintenance and can never
+# suppress a wake.
+#
+# Pre-emption is bounded so a chatty fleet cannot starve maintenance, the
+# reason the slow checks sit before the signal scan in the first place:
+# checkpoints are live only while the last complete maintenance pass
+# (state/.last-maintenance-pass, an mtime so it survives the restart that
+# follows every wake) is younger than FM_MAINTENANCE_DEFER_MAX seconds. Past
+# that, one whole pass runs before any signal can end the cycle. 0 disables
+# pre-emption. No checkpoint sits inside the slow-check sweep: a sweep cut
+# short would run again from its first check on the next cycle and repeat its
+# forge calls.
+MAINTENANCE_DEFER_MAX=${FM_MAINTENANCE_DEFER_MAX:-120}
+case "$MAINTENANCE_DEFER_MAX" in ''|*[!0-9]*) MAINTENANCE_DEFER_MAX=120 ;; esac
+[ "${#MAINTENANCE_DEFER_MAX}" -le 9 ] || MAINTENANCE_DEFER_MAX=120
+MAINTENANCE_DEFER_MAX=$((10#$MAINTENANCE_DEFER_MAX))
+MAINTENANCE_PREEMPTIBLE=0
+SIGNAL_QUIET_FINGERPRINT=unscanned
+
+signal_fingerprint() {
+  if [ "$(uname)" = Darwin ]; then
+    /usr/bin/stat -f '%N %z %Fm %i' "$STATE"/*.status "$STATE"/*.turn-ended 2>/dev/null
+  else
+    stat -c '%n %s %y %i' "$STATE"/*.status "$STATE"/*.turn-ended 2>/dev/null
+  fi
+  return 0
+}
+
+signal_scan_and_surface() {
+  local fingerprint
+  fingerprint=$(signal_fingerprint)
+  SIGNAL_QUIET_FINGERPRINT=unscanned
+  # On the first changed signal, linger one grace period and re-scan before
+  # classifying: a crewmate's final status write and the same turn's turn-end
+  # hook land seconds apart, and reporting them as separate actionable wakes
+  # costs a full firstmate turn each. The re-scan also picks up a newer
+  # signature for an already-pending file (last write wins below).
+  pending=$(scan_signals)
+  if [ -n "$pending" ]; then
+    sleep "$SIGNAL_GRACE"
+    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # The final coalesced signal set is the watcher-carried status-change
+    # trigger for this home's published summary. Start it before either
+    # surfacing or absorbing the signal, but never wait on it: see
+    # home_summary_refresh_detached for why publication stays off the beacon's
+    # path. Publication failure stays side-band.
+    home_summary_refresh_detached
+    files=""
+    while IFS=$(printf '\t') read -r sf sig f; do
+      [ -n "$sf" ] || continue
+      case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
+    done <<EOF
+$pending
+EOF
+    reason="signal:$files"
+    # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
+    #   - the away-mode daemon owns triage (afk) and wants every wake;
+    #   - any status file gained a captain-relevant event since it was last
+    #     classified (its whole new span, not merely its last line);
+    #   - or it is a no-verb wake (a bare turn-end, a working: note) with no
+    #     positive evidence the crew is still executing - the crew stopped its turn
+    #     with no actively-running pipeline and no busy pane, so it may be done
+    #     (even via an interactive menu that wrote no done: status), waiting on a
+    #     decision, or wedged. Absorbing such a turn-end is exactly the
+    #     swallowed-finish this change guards against.
+    # Positive evidence is either an authoritative provably-working verdict or, in a
+    # home that opts in with config/turnend-churn-absorb and for a BARE turn-end
+    # alone, a pane that rendered something since the previous poll
+    # (signal_turnend_panes_churned) - the only proof available to a harness whose
+    # busy state has no verified semantic source, bounded so it cannot defer that
+    # task's turn-ends forever. Absorb stays evidence-driven: with neither proof the
+    # wake surfaces exactly as before.
+    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
+    # whose crew is still executing) in always-on mode -> advance the markers so it
+    # will not re-fire, log, and keep blocking without enqueuing. Both evidence
+    # checks are costly (a bounded no-mistakes call, then a pane capture), so the ||
+    # ordering evaluates them ONLY for a non-afk signal with no captain-relevant
+    # status span, and the capture only once the authoritative verdict comes up short.
+    FM_SIGNAL_SURFACE_ENDPOINTS=''
+    FM_SIGNAL_NEEDS_DECISION_FILES=''
+    FM_SIGNAL_QUIET_FILES=''
+    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
+    signal_files_actionable $files
+    signal_actionable=$?
+    # The files left for the working proof: every one but a quiet-relay-only span.
+    proof_files=''
+    for f in $files; do
+      case " $FM_SIGNAL_QUIET_FILES " in *" $f "*) ;; *) proof_files="$proof_files $f" ;; esac
+    done
+    # A decision-owned file's queued row payload is marked "needs-decision:"
+    # instead of the ordinary "signal:" below (other files in the same batch
+    # keep the ordinary payload). The wake reason line itself, and every
+    # harness-arm consumer that pattern-matches it, stays byte-identical -
+    # only the per-row payload changes. Two readers branch on that payload:
+    # docs/pi-supervision-branch.md's Pi-only branch dispatcher, to keep a
+    # decision-owned row off the supervision branch (fm-branch-dispatch.ts,
+    # fm-primary-pi-watch.ts), and the away daemon, whose handle_durable_wakes
+    # passes it to handle_wake (see the comment above handle_wake in
+    # bin/fm-supervise-daemon.sh).
+    # shellcheck disable=SC2086  # same space-separated status-path list
+    if afk_present || [ "$signal_actionable" -eq 0 ] \
+      || { [ -n "$proof_files" ] && ! signal_crew_provably_working $proof_files \
+           && ! signal_turnend_panes_churned $proof_files; }; then
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        file_reason="$reason"
+        case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
+        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
+      done <<EOF
+$pending
+EOF
+      # The wake signature advances for every file in this batch, including one
+      # whose span could not be classified: it has now been reported, and this is
+      # what bounds an unreadable log to one report per distinct file state. Only
+      # a SUCCESSFULLY classified log commits a classification position below, so
+      # an unreadable log's content is still classified once it becomes readable.
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        case "$f" in
+          *.status)
+            fm_wake_status_reported_commit "$STATE" "$f" "$sig" || true
+            mark_surface_reported "$f" "$sig" || true
+            ;;
+          *) printf '%s' "$sig" > "$sf" ;;
+        esac
+      done <<EOF
+$pending
+EOF
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
+        mark_surfaced "$f" "$surface_end" "$surface_ident"
+      done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+      wake "$reason"
+    else
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
+      done <<EOF
+$pending
+EOF
+      signal_commit_error=0
+      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+        [ -n "$f" ] || continue
+        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" \
+          || signal_commit_error=1
+      done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+      if [ "$signal_commit_error" -ne 0 ]; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
+        done <<EOF
+$pending
+EOF
+        wake "$reason"
+      fi
+      triage_log "absorbed benign $reason"
+    fi
+  fi
+  [ -n "$pending" ] || SIGNAL_QUIET_FINGERPRINT=$fingerprint
+}
+
+signal_preempt_check() {
+  [ "$MAINTENANCE_PREEMPTIBLE" -eq 1 ] || return 0
+  [ "$(signal_fingerprint)" != "$SIGNAL_QUIET_FINGERPRINT" ] || return 0
+  signal_scan_and_surface
+}
+
 while :; do
   # Native Codex may tear down the async hook and its watchdog together.
   # fm-codex-stop-park.sh owns this optional identity binding. Self-expiry
@@ -4530,6 +4739,14 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Whether a pending signal may pre-empt this cycle's maintenance steps
+  # (signal_scan_and_surface owns the rule and its starvation bound).
+  MAINTENANCE_PREEMPTIBLE=0
+  if [ "$MAINTENANCE_DEFER_MAX" -gt 0 ] \
+    && [ "$(age_of "$STATE/.last-maintenance-pass")" -lt "$MAINTENANCE_DEFER_MAX" ]; then
+    MAINTENANCE_PREEMPTIBLE=1
+  fi
+
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
@@ -4577,8 +4794,10 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
-  fm_pending_reply_tick "$STATE" || true
+  signal_preempt_check
+  FM_PENDING_REPLY_TICK_YIELD=signal_preempt_check fm_pending_reply_tick "$STATE" || true
 
+  signal_preempt_check
   open_decision_reminder_tick || {
     echo 'watcher: open-decision reminder check failed' >&2
     exit 1
@@ -4597,12 +4816,14 @@ while :; do
   }
   [ -z "$AWAY_LONG_WAIT" ] || wake "$AWAY_LONG_WAIT"
 
+  signal_preempt_check
   ci_fixing_green_tick || {
     echo 'watcher: ci-fixing-green check failed' >&2
     exit 1
   }
   [ -z "$CI_FIXING_GREEN" ] || wake "$CI_FIXING_GREEN"
 
+  signal_preempt_check
   drive_floor_tick || {
     echo 'watcher: drive-floor check failed' >&2
     exit 1
@@ -4615,6 +4836,7 @@ while :; do
   # is also what unsticks that mate's foreign wake queue. The tick's single
   # wake exits the cycle like every other wake, so its marker is stamped before
   # any relaunch and the restarted watcher will not re-probe early.
+  signal_preempt_check
   secondmate_liveness_tick || {
     echo "watcher: secondmate liveness check failed" >&2
     exit 1
@@ -4632,6 +4854,7 @@ while :; do
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
+  signal_preempt_check
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
@@ -4663,6 +4886,8 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  # signal_scan_and_surface bounds how long a signal may pre-empt this sweep.
+  signal_preempt_check
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
     rejected_checks=
     contribution_check_output=
@@ -4882,137 +5107,10 @@ EOF
     fi
   fi
 
-  # On the first changed signal, linger one grace period and re-scan before
-  # classifying: a crewmate's final status write and the same turn's turn-end
-  # hook land seconds apart, and reporting them as separate actionable wakes
-  # costs a full firstmate turn each. The re-scan also picks up a newer
-  # signature for an already-pending file (last write wins below).
-  pending=$(scan_signals)
-  if [ -n "$pending" ]; then
-    sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
-    # The final coalesced signal set is the watcher-carried status-change
-    # trigger for this home's published summary. Start it before either
-    # surfacing or absorbing the signal, but never wait on it: see
-    # home_summary_refresh_detached for why publication stays off the beacon's
-    # path. Publication failure stays side-band.
-    home_summary_refresh_detached
-    files=""
-    while IFS=$(printf '\t') read -r sf sig f; do
-      [ -n "$sf" ] || continue
-      case " $files " in *" $f "*) ;; *) files="$files $f" ;; esac
-    done <<EOF
-$pending
-EOF
-    reason="signal:$files"
-    # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
-    #   - the away-mode daemon owns triage (afk) and wants every wake;
-    #   - any status file gained a captain-relevant event since it was last
-    #     classified (its whole new span, not merely its last line);
-    #   - or it is a no-verb wake (a bare turn-end, a working: note) with no
-    #     positive evidence the crew is still executing - the crew stopped its turn
-    #     with no actively-running pipeline and no busy pane, so it may be done
-    #     (even via an interactive menu that wrote no done: status), waiting on a
-    #     decision, or wedged. Absorbing such a turn-end is exactly the
-    #     swallowed-finish this change guards against.
-    # Positive evidence is either an authoritative provably-working verdict or, in a
-    # home that opts in with config/turnend-churn-absorb and for a BARE turn-end
-    # alone, a pane that rendered something since the previous poll
-    # (signal_turnend_panes_churned) - the only proof available to a harness whose
-    # busy state has no verified semantic source, bounded so it cannot defer that
-    # task's turn-ends forever. Absorb stays evidence-driven: with neither proof the
-    # wake surfaces exactly as before.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew is still executing) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. Both evidence
-    # checks are costly (a bounded no-mistakes call, then a pane capture), so the ||
-    # ordering evaluates them ONLY for a non-afk signal with no captain-relevant
-    # status span, and the capture only once the authoritative verdict comes up short.
-    FM_SIGNAL_SURFACE_ENDPOINTS=''
-    FM_SIGNAL_NEEDS_DECISION_FILES=''
-    FM_SIGNAL_QUIET_FILES=''
-    # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
-    signal_files_actionable $files
-    signal_actionable=$?
-    # The files left for the working proof: every one but a quiet-relay-only span.
-    proof_files=''
-    for f in $files; do
-      case " $FM_SIGNAL_QUIET_FILES " in *" $f "*) ;; *) proof_files="$proof_files $f" ;; esac
-    done
-    # A decision-owned file's queued row payload is marked "needs-decision:"
-    # instead of the ordinary "signal:" below (other files in the same batch
-    # keep the ordinary payload). The wake reason line itself, and every
-    # harness-arm consumer that pattern-matches it, stays byte-identical -
-    # only the per-row payload changes. Two readers branch on that payload:
-    # docs/pi-supervision-branch.md's Pi-only branch dispatcher, to keep a
-    # decision-owned row off the supervision branch (fm-branch-dispatch.ts,
-    # fm-primary-pi-watch.ts), and the away daemon, whose handle_durable_wakes
-    # passes it to handle_wake (see the comment above handle_wake in
-    # bin/fm-supervise-daemon.sh).
-    # shellcheck disable=SC2086  # same space-separated status-path list
-    if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { [ -n "$proof_files" ] && ! signal_crew_provably_working $proof_files \
-           && ! signal_turnend_panes_churned $proof_files; }; then
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        file_reason="$reason"
-        case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
-        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
-      done <<EOF
-$pending
-EOF
-      # The wake signature advances for every file in this batch, including one
-      # whose span could not be classified: it has now been reported, and this is
-      # what bounds an unreadable log to one report per distinct file state. Only
-      # a SUCCESSFULLY classified log commits a classification position below, so
-      # an unreadable log's content is still classified once it becomes readable.
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        case "$f" in
-          *.status)
-            fm_wake_status_reported_commit "$STATE" "$f" "$sig" || true
-            mark_surface_reported "$f" "$sig" || true
-            ;;
-          *) printf '%s' "$sig" > "$sf" ;;
-        esac
-      done <<EOF
-$pending
-EOF
-      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
-        [ -n "$f" ] || continue
-        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
-        mark_surfaced "$f" "$surface_end" "$surface_ident"
-      done <<EOF
-$FM_SIGNAL_SURFACE_ENDPOINTS
-EOF
-      wake "$reason"
-    else
-      while IFS=$(printf '\t') read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        case "$f" in *.status) ;; *) printf '%s' "$sig" > "$sf" ;; esac
-      done <<EOF
-$pending
-EOF
-      signal_commit_error=0
-      while IFS=$(printf '\t') read -r f surface_end surface_ident; do
-        [ -n "$f" ] || continue
-        fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" \
-          || signal_commit_error=1
-      done <<EOF
-$FM_SIGNAL_SURFACE_ENDPOINTS
-EOF
-      if [ "$signal_commit_error" -ne 0 ]; then
-        while IFS=$(printf '\t') read -r sf sig f; do
-          [ -n "$sf" ] || continue
-          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-        done <<EOF
-$pending
-EOF
-        wake "$reason"
-      fi
-      triage_log "absorbed benign $reason"
-    fi
-  fi
+  # A whole maintenance pass has now run; stamp it so the next cycles may let a
+  # signal pre-empt maintenance again (signal_scan_and_surface owns the rule).
+  touch "$STATE/.last-maintenance-pass"
+  signal_scan_and_surface
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct

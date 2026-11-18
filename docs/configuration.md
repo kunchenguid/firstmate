@@ -4143,6 +4143,7 @@ FM_WATCH_EXTENSION_LOG_KEEP_LINES=0   # opt-in Pi extension diagnostic log (stat
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence"); seconds before a fresh arm refuses a live holder's stale beacon (attached arms: FM_WATCHER_STALL_BOUND)
 FM_WATCHER_STALL_BOUND=       # live-holder stall bound; default and arm/re-arm behavior: docs/turnend-guard.md "Guard grace and the poll cadence"
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
+FM_MAINTENANCE_DEFER_MAX=120   # seconds since the last complete maintenance pass (reminder ticks and the slow-check sweep) during which a newly arrived signal may surface ahead of that maintenance; past it one whole pass runs first, and 0 keeps maintenance always first
 FM_WATCHER_CLEANUP_LOCK_BOUND=   # optional watcher EXIT marker-lock wait; default and validation: docs/watcher-continuity.md
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches

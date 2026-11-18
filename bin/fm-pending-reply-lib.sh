@@ -129,6 +129,12 @@
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
 #   FM_PENDING_REPLY_NOW          optional fixed epoch for deterministic tests
+#   FM_PENDING_REPLY_TICK_YIELD   optional command fm_pending_reply_tick runs
+#                                 before each record it has work for, so a
+#                                 caller can act between records (the watcher
+#                                 surfaces a newly arrived signal there rather
+#                                 than behind a run of recovery sends); its
+#                                 status is ignored
 
 # This directive does double duty: it also binds _FM_PENDING_REPLY_LIB_DIR as
 # the bin/ source prefix so the deliberately undirected lazy sources below
@@ -1735,6 +1741,9 @@ fm_pending_reply_tick() {  # <state-dir>
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
   for rec in ${selected[@]+"${selected[@]}"}; do
+    # Every record is settled independently, so the gap between two of them is
+    # a safe place for the caller to act or leave (FM_PENDING_REPLY_TICK_YIELD).
+    [ -z "${FM_PENDING_REPLY_TICK_YIELD:-}" ] || "$FM_PENDING_REPLY_TICK_YIELD" || true
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)

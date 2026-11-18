@@ -1574,6 +1574,36 @@ test_tick_skips_terminal_and_reuses_target_observation() {
 # tick selects the records it has work for in one pass and leaves every settled
 # record alone: it must not block on a settled record's per-record lock that a
 # live foreign process holds, and it still does the work the selected records need.
+# The tick runs FM_PENDING_REPLY_TICK_YIELD once before each record it has work
+# for and never for a settled one, and a failing yield changes nothing.
+test_tick_yields_between_records_with_work() {
+  local home state settled first second yields
+  home=$(setup_parent tick-yield)
+  state="$home/state"
+  # Reset the fixture clock after isolated subshell tests.
+  # shellcheck disable=SC2031
+  export FM_PENDING_REPLY_NOW=5300
+  settled=$(fm_pending_reply_create "$home" "$state" hibit "settled request")
+  fm_pending_reply_mark_delivered "$state" "$settled"
+  printf 'done [corr=%s]: settled reply\n' "$settled" >> "$state/hibit.status"
+  fm_pending_reply_try_resolve "$state" "$settled" || fail "settled fixture should resolve"
+  first=$(fm_pending_reply_create "$home" "$state" hibit "first open request")
+  second=$(fm_pending_reply_create "$home" "$state" hibit "second open request")
+  yields="$home/yields"
+  : > "$yields"
+  count_yield() { printf 'y\n' >> "$yields"; return 1; }
+  FM_PENDING_REPLY_TICK_YIELD=count_yield fm_pending_reply_tick "$state" \
+    || fail "a failing yield must not fail the tick"
+  [ "$(wc -l < "$yields" | tr -d ' ')" = 2 ] \
+    || fail "yield ran $(wc -l < "$yields" | tr -d ' ') times for two records with work"
+  [ "$(phase_of "$state" "$first")" != resolved ] && [ "$(phase_of "$state" "$second")" != resolved ] \
+    || fail "the yield changed an open record"
+  : > "$yields"
+  fm_pending_reply_tick "$state" || fail "the tick without a yield should succeed"
+  [ ! -s "$yields" ] || fail "the yield ran without being configured"
+  pass "the tick yields once before each record with work"
+}
+
 test_tick_leaves_settled_records_alone() {
   local home state settled closed open_esc awaiting rec i copy holder tick_pid ticked=0 open lib
   local sums_before sums_after holder_lock_pid
@@ -2443,6 +2473,7 @@ test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
 test_tick_leaves_settled_records_alone
+test_tick_yields_between_records_with_work
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation

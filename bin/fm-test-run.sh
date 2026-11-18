@@ -331,6 +331,7 @@ family_for_basename() {
     fm-codex-stop-park.test.sh|\
     fm-watch-inbox-meta.test.sh|fm-watch-open-decisions.test.sh|fm-watch-away-long-waits.test.sh|fm-watch-ci-fixing-green.test.sh|\
     fm-watch-drive-floor.test.sh|fm-watch-goal-stall.test.sh|\
+    fm-watch-signal-preempt.test.sh|\
     fm-watch-triage.test.sh|fm-watch-triage-pause.test.sh|\
     fm-watch-triage-wedge-defer.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-watch-wedge-cap.test.sh|\
@@ -1041,6 +1042,7 @@ tests/fm-watch-inbox-meta.test.sh 283
 tests/fm-watch-imposed-holds.test.sh 3352
 tests/fm-watch-open-decisions.test.sh 11821
 tests/fm-watch-recovery-loop.test.sh 59092
+tests/fm-watch-signal-preempt.test.sh 12000
 tests/fm-watch-triage-pause.test.sh 466750
 tests/fm-watch-triage-wedge-defer.test.sh 526980
 tests/fm-watch-triage.test.sh 592950

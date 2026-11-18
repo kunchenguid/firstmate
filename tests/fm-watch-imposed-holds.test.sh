@@ -204,6 +204,39 @@ test_two_lapsed_holds_wake_one_at_a_time() {
   pass "one wake per cycle, earliest lapse first"
 }
 
+# The tick hands the fold only the lines that can open or close a hold. A hold
+# and its release must read the same wherever they sit in a long log, through
+# a binary line, and the narrowed copy must not outlive the pass.
+test_hold_buried_in_a_long_log_reads_the_same() {
+  local i
+  reset_case
+  {
+    for i in $(seq 1 400); do printf 'working [at=%s]: step %s of imposed-holding the door\n' "$i" "$i"; done
+    printf 'working [at=401]: binary \0 payload\n'
+    printf 'paused [hold=firstmate] [at=1000] [key=imposed-hold-%s]: imposed-hold-%s: hold until 2030-01-02T03:04Z\n' \
+      "$ID" "$ID"
+    for i in $(seq 1 400); do printf 'working [at=%s]: later step %s\n' "$((1000 + i))" "$i"; done
+  } > "$STATE/worker.status"
+  for i in $(seq 1 400); do printf 'working [at=%s]: no hold was ever imposed here\n' "$i"; done \
+    > "$STATE/bystander.status"
+  imposed_hold_expiry_tick $((U - 1))
+  [ "$(count_wakes)" = 0 ] || fail "a buried hold inside its window queued a wake"
+  imposed_hold_expiry_tick $((U + 60))
+  [ "$(count_wakes)" = 1 ] || fail "a lapsed hold buried in a long log did not wake"
+  printf '%s' "$IMPOSED_HOLD_EXPIRY" | grep -F "worker hold imposed-hold-$ID" >/dev/null \
+    || fail "buried hold wake named the wrong hold: $IMPOSED_HOLD_EXPIRY"
+  printf 'resolved [at=%s] [key=imposed-hold-%s]: imposed-hold-%s: released by firstmate: resume\n' \
+    "$((U + 61))" "$ID" "$ID" >> "$STATE/worker.status"
+  for i in $(seq 1 50); do printf 'working [at=%s]: after release %s\n' "$((U + 61 + i))" "$i"; done \
+    >> "$STATE/worker.status"
+  imposed_hold_expiry_tick $((U + 200))
+  [ "$(count_wakes)" = 1 ] || fail "a buried release still woke"
+  [ ! -e "$STATE/.imposed-hold-woke-worker" ] || fail "a buried release left the wake marker behind"
+  set -- "$STATE"/.imposed-holds-lines.*
+  [ ! -e "$1" ] || fail "the pass left its narrowed copy behind: $1"
+  pass "a hold and its release read the same when buried in a long log"
+}
+
 fm_test_run \
   test_not_due_is_silent \
   test_lapse_queues_exactly_one_wake \
@@ -216,4 +249,5 @@ fm_test_run \
   test_invalid_scan_settings_fall_back \
   test_early_renewal_and_release_never_wake \
   test_queued_wake_covers_missing_marker \
-  test_two_lapsed_holds_wake_one_at_a_time
+  test_two_lapsed_holds_wake_one_at_a_time \
+  test_hold_buried_in_a_long_log_reads_the_same
