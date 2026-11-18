@@ -2636,7 +2636,7 @@ test_worker_launch_delivers_role_scope() {
     rec=$(make_spawn_case "$id" codex)
     read_case_record "$rec"
     if [ "$brief_kind" != scaffold ]; then
-      fm_test_spawn_brief "$HOME_DIR" "$id"
+      fm_test_spawn_brief "$HOME_DIR" "$id" "brief for $id" "$kind"
       if [ "$brief_kind" = heading ]; then
         printf '\n# Worker role\nFollow the project instructions.\n' >> "$HOME_DIR/data/$id/brief.md"
       fi
@@ -2710,6 +2710,36 @@ SH
   done
   done
   pass "fm-spawn: actual ship/scout launch commands deliver the worker role contract"
+}
+
+test_legacy_no_mistakes_without_evidence_contract_refuses() {
+  local rec id out status marker
+  id=legacy-no-evidence-contract
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  cat > "$HOME_DIR/data/$id/brief.md" <<'EOF'
+# Task
+[captain] Fix the legacy publication boundary.
+Run `no-mistakes axi run --intent legacy` directly.
+EOF
+  marker="$CASE_DIR/worker-launched"
+  cat > "$FAKEBIN_DIR/codex" <<SH
+#!/bin/sh
+printf launched > "$marker"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy no-mistakes brief without evidence declarations launched"
+  assert_contains "$out" 'evidence-limit mismatch' "legacy refusal did not name the missing evidence contract"
+  assert_contains "$out" 'records text=missing media=missing audience=missing' \
+    "legacy refusal did not distinguish absent declarations from recorded unknown limits"
+  [ ! -s "$LAUNCH_LOG" ] || fail "legacy refusal still sent a worker launch command"
+  assert_absent "$HOME_DIR/state/$id.meta" "legacy refusal published task metadata"
+  assert_absent "$marker" "legacy refusal reached the worker-side publication path"
+  pass "fm-spawn: legacy no-mistakes briefs cannot bypass evidence preflight"
 }
 
 # config/claude-permission-mode: bypass remains the unconfigured default;
@@ -3025,6 +3055,7 @@ test_codex_permission_invalid_refuses_before_mutation
 test_codex_permission_does_not_change_other_harnesses
 test_launch_preserves_inherited_git_config
 test_worker_launch_delivers_role_scope
+test_legacy_no_mistakes_without_evidence_contract_refuses
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
 test_claude_secondmate_launch_brief_publishes_into_its_own_home

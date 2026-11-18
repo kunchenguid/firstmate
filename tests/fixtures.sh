@@ -382,9 +382,9 @@ fm_test_spawn_home() {
   fi
 }
 
-# fm_test_spawn_brief <home> <id> [captain-intent]
+# fm_test_spawn_brief <home> <id> [captain-intent] [mode]
 fm_test_spawn_brief() {
-  local home=$1 id=$2 intent=${3:-brief for $2}
+  local home=$1 id=$2 intent=${3:-brief for $2} mode=${4:-no-mistakes}
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<EOF
 # Task
@@ -394,6 +394,15 @@ $intent
 ## Firstmate spec
 Exercise the spawn behavior under test.
 EOF
+  case "$mode" in
+    no-mistakes)
+      printf '\n# Definition of done\nDelivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown\n' >> "$home/data/$id/brief.md"
+      ;;
+    direct-PR|local-only)
+      printf '\n# Definition of done\nDelivery contract: mode=%s\n' "$mode" >> "$home/data/$id/brief.md"
+      ;;
+    scout) ;;
+  esac
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]

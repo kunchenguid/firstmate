@@ -397,8 +397,10 @@ test_direct_pr_and_scout_refresh_before_launch() {
     rec=$(make_case "$contract" "$id")
     read_case_record "$rec"
     if [ "$contract" = scout ]; then
+      fm_test_spawn_brief "$HOME_DIR" "$id" "brief for $id" scout
       out=$(run_spawn "$id" --scout)
     else
+      fm_test_spawn_brief "$HOME_DIR" "$id" "brief for $id" direct-PR
       out=$(run_spawn "$id" --mode direct-PR --yolo off)
     fi
     status=$?
@@ -1057,8 +1059,9 @@ publish_feature_branch() { # <branch>
   git -C "$CASE_DIR/publisher" push --quiet origin "$1"
 }
 
-brief_with_base() { # <id> <base> [<intent>]
-  fm_test_spawn_brief "$HOME_DIR" "$1" ${3:+"$3"}
+brief_with_base() { # <id> <base> [<intent>] [<mode>]
+  local intent=${3:-brief for $1} mode=${4:-no-mistakes}
+  fm_test_spawn_brief "$HOME_DIR" "$1" "$intent" "$mode"
   printf '\n# Setup\nYou are in a disposable git worktree of project, at a detached HEAD on a clean copy of its base branch.\nBase branch: %s\n' "$2" >> "$HOME_DIR/data/$1/brief.md"
 }
 
@@ -1069,10 +1072,11 @@ test_named_base_branch_starts_from_that_branch() {
     rec=$(make_case "named-base-$kind" "$id")
     read_case_record "$rec"
     publish_feature_branch feature/hub
-    brief_with_base "$id" feature/hub
     if [ "$kind" = ship ]; then
+      brief_with_base "$id" feature/hub "brief for $id" direct-PR
       out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch feature/hub)
     else
+      brief_with_base "$id" feature/hub "brief for $id" scout
       out=$(run_spawn "$id" --scout --base-branch feature/hub)
     fi
     status=$?
@@ -1232,6 +1236,7 @@ push_forge_only_commit() {
 }
 
 spawn_delivery() { # <id> <no-mistakes|direct-PR|local-only|scout>
+  fm_test_spawn_brief "$HOME_DIR" "$1" "brief for $1" "$2"
   if [ "$2" = scout ]; then
     run_spawn "$1" --scout
   else
@@ -1363,6 +1368,7 @@ test_opt_in_still_refuses_an_unclean_slot_first() {
   push_forge_only_commit
   printf 'work the captain has not committed\n' > "$POOL_DIR/uncommitted.txt"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  fm_test_spawn_brief "$HOME_DIR" "$id" "brief for $id" local-only
 
   out=$(run_spawn "$id" --mode local-only --yolo off)
   status=$?

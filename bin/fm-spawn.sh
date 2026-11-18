@@ -4545,13 +4545,6 @@ if [ "$KIND" = ship ]; then
   BRIEF_EVIDENCE_TEXT=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]evidence-text=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_EVIDENCE_MEDIA=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]evidence-media=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_EVIDENCE_AUDIENCE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]evidence-audience=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
-  if [ "$MODE" = no-mistakes ] && [ -z "$BRIEF_EVIDENCE_TEXT$BRIEF_EVIDENCE_MEDIA$BRIEF_EVIDENCE_AUDIENCE" ] \
-    && [ "$EVIDENCE_TEXT/$EVIDENCE_MEDIA/$EVIDENCE_AUDIENCE" = unknown/unknown/unknown ]; then
-    BRIEF_EVIDENCE_TEXT=unknown
-    BRIEF_EVIDENCE_MEDIA=unknown
-    BRIEF_EVIDENCE_AUDIENCE=unknown
-    echo "warning: $SOURCE_BRIEF predates evidence-limit declarations; recording all three as unknown, which refuses publication until the brief and spawn carry explicit supported values" >&2
-  fi
   if [ "$BRIEF_EVIDENCE_TEXT" != "$EVIDENCE_TEXT" ] || [ "$BRIEF_EVIDENCE_MEDIA" != "$EVIDENCE_MEDIA" ] || [ "$BRIEF_EVIDENCE_AUDIENCE" != "$EVIDENCE_AUDIENCE" ]; then
     echo "error: evidence-limit mismatch for $ID: $SOURCE_BRIEF records text=${BRIEF_EVIDENCE_TEXT:-missing} media=${BRIEF_EVIDENCE_MEDIA:-missing} audience=${BRIEF_EVIDENCE_AUDIENCE:-missing}, but this spawn passed text=${EVIDENCE_TEXT:-missing} media=${EVIDENCE_MEDIA:-missing} audience=${EVIDENCE_AUDIENCE:-missing}; correct the flags or re-scaffold the brief" >&2
     exit 1
