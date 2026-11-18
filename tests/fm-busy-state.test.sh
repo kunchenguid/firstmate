@@ -628,6 +628,34 @@ test_dead_endpoint_overrides() {
   pass "endpoint death is the only process-level override and yields dead, never busy"
 }
 
+test_codex_herdr_native() {
+  local state out
+  state=$(new_state_dir codex-herdr-native)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify herdr s:p codex t1 "$state")
+  [ "$out" = "busy herdr-native" ] || fail "herdr codex working must classify busy, got '$out'"
+  FAKE_NATIVE=idle
+  out=$(fm_busy_classify herdr s:p codex t1 "$state")
+  [ "$out" = "idle herdr-native" ] || fail "herdr codex done must classify idle, got '$out'"
+  FAKE_NATIVE=unknown
+  out=$(fm_busy_classify herdr s:p codex t1 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "herdr codex with no status must stay unverified, got '$out'"
+  FAKE_NATIVE=
+  out=$(fm_busy_classify herdr s:p codex t1 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "herdr codex with empty status must stay unverified, got '$out'"
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify tmux w1 codex t1 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "a non-herdr codex must not borrow the native verdict, got '$out'"
+  out=$(fm_busy_classify herdr s:p kimi t1 "$state")
+  [ "$out" = "unknown kimi-unverified" ] || fail "kimi must not borrow herdr's native verdict, got '$out'"
+  unset -f fm_backend_busy_state
+  out=$(fm_busy_classify herdr s:p codex t1 "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "herdr codex without the backend helper must stay unverified, got '$out'"
+  pass "a herdr-backed codex classifies from herdr's native status and nothing else"
+}
+
 test_herdr_native_busy_only() {
   local state out
   state=$(new_state_dir herdr-native)
@@ -849,6 +877,7 @@ test_launch_prompt_never_reclassifies_an_advanced_record
 test_launch_prompt_requires_a_captured_tail
 test_grok_regex_isolated
 test_codex_unverified_gate
+test_codex_herdr_native
 test_kimi_unverified_gate
 test_pi_stream_version_floor_accepts_verified_rejects_unverified
 test_cursor_ignores_rendered_and_native_signals

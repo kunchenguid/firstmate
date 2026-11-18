@@ -231,7 +231,7 @@ Each pass polled `state/<id>.busy-state` while a real turn ran.
 | omp | 18.1.11 | Extension `agent_start` / `agent_end` without `willContinue` | Live Herdr scout on `openai-codex/gpt-6-astra` (2026-09-05): the spawn seed `busy source=fm-spawn`, then `busy source=omp-ext event=agent-start`, then `idle source=omp-ext event=agent-end` at the natural end of the brief; a steer through `fm-send` reopened `busy … agent-start`, and a control-plane interrupt closed it with `idle … agent-end` (omp fires `agent_end` on an interrupted turn). `ctx.isIdle()` is deliberately not consulted because it reads false at a natural TUI `agent_end`. |
 | OpenCode | 2.0.21 | Plugin `session.execution.*` (OpenCode 1 `session.status`/`session.idle` retained as legacy inputs) | Verified on 2026-10-01 via `opencode run --standalone`: the live event stream delivered `session.execution.started` then `session.execution.succeeded` for a tool-using turn, and the plugin maps them to `busy`/`idle`; `tests/fm-busy-adapter-wiring.test.sh` pins both the legacy and the `session.execution.*` mappings and the latched-session scoping. |
 | Claude | 2.1.220 (Claude Code) | Hooks `UserPromptSubmit`, `Stop`, `StopFailure`, `SessionEnd` | `UserPromptSubmit` fired for the argv launch prompt and each steer, and `Stop` closed every completed turn. A mid-stream Escape interrupt fired no closing hook, which is why the firstmate-controlled clear exists. `StopFailure` was reproduced live on 2.1.317 (see [StopFailure auto-arm](#stopfailure-auto-arm)); `SessionEnd` remains wired from the hook names present in the installed binary without a live abnormal-path reproduction. |
-| Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`. |
+| Codex | codex-cli 0.145.0 | None usable | See below; classifies `unknown codex-unverified`, except on the Herdr backend (see [Codex on Herdr](#codex-on-herdr)). |
 | Kimi (standalone) | not installed | None usable | No binary on `PATH`, so the gate stays closed and it classifies `unknown kimi-unverified`. |
 | Grok | 0.2.112 | Isolated rendered-tail fallback | Retained unconverted; the approved audit could not credit a live structured-lifecycle run. |
 
@@ -246,6 +246,23 @@ The daemon refused with `managed standalone Codex install not found`, and an int
 In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycle project hooks under `<worktree>/.codex/hooks.json` fired for neither an interactive pane whose directory trust was granted nor `codex exec`, in both cases with `--dangerously-bypass-hook-trust`, while an untracked global probe fired in the same runs; Firstmate does not ship, install, recommend, or depend on that global path.
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
+
+### Codex on Herdr
+
+On the Herdr backend, Codex has a usable native source: Herdr's own `herdr:codex` integration reports each Codex pane's `agent_status`.
+It was checked live with codex-cli 0.169.1 and Herdr 0.9.5 on Linux arm64, reading `herdr pane list` (a pane's `agent` is `codex` and its `agent_session.source` is `herdr:codex`) while several firstmate-launched Codex workers ran in isolated worktrees:
+
+```sh
+herdr pane list | jq -r '.result.panes[] | select(.agent=="codex") | [.pane_id, .agent_session.source, .agent_status, .terminal_title_stripped] | @tsv'
+```
+
+| `agent_status` | Observed pane | Classification |
+| --- | --- | --- |
+| `working` | A Codex pane whose title carried the spinner glyph while it handled its launch brief | `busy herdr-native` |
+| `done` | Codex panes that had finished a turn and sat at the prompt | `idle herdr-native` |
+
+Any other, missing, or unreadable status, and every other backend, keeps `unknown codex-unverified`; the app-server and hook gates stay closed, so no Codex busy record is written or trusted.
+`tests/fm-busy-state.test.sh` pins the mapping.
 
 Deterministic entry points:
 
