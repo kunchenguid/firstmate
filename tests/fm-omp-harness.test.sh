@@ -1053,6 +1053,147 @@ EOF
   pass ".omp watch extension: a host close split across stream chunks reaches main as one whole follow-up"
 }
 
+# Drive the public extension with real children and a controlled owner clock.
+# --host-startup-only <case> runs one focused regression without the adapter suite.
+test_watch_extension_startup_window() {  # <host-ready|host-expiry|host-explicit|arm>
+  local kind=$1 repo home out status host_timeout=''
+  repo="$TMP_ROOT/startup-$kind/repo"; home="$TMP_ROOT/startup-$kind/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  [ "$kind" = arm ] || : > "$home/config/supervision-host"
+  [ "$kind" != host-explicit ] || host_timeout=120
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ -z "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  : > "$FM_HOME/initial-started"
+  while [ ! -e "$FM_HOME/close" ]; do sleep 0.02; done
+  printf 'signal: startup-window done\n'
+  exit 0
+fi
+trap 'printf "%s\n" "$$" >> "$FM_HOME/terminated"; exit 0' TERM INT
+printf '%s\n' "$$" > "$FM_HOME/successor-pid"
+while [ ! -e "$FM_HOME/ready" ]; do sleep 0.02; done
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while :; do sleep 0.02; done
+SH
+  cp "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=12000 \
+    FM_SUPERVISION_HOST_READY_TIMEOUT="$host_timeout" \
+    FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 \
+    TEST_KIND="$kind" EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const nativeTimeout = globalThis.setTimeout;
+const nativeClear = globalThis.clearTimeout;
+const sleep = (ms) => new Promise((resolve) => nativeTimeout(resolve, ms));
+const timers = new Set();
+let now = 0;
+globalThis.setTimeout = (callback, delay, ...args) => {
+  if (delay < 1000) return nativeTimeout(callback, delay, ...args);
+  const timer = { at: now + delay, callback: () => callback(...args), unref() { return this; } };
+  timers.add(timer);
+  return timer;
+};
+globalThis.clearTimeout = (timer) => { if (!timers.delete(timer)) nativeClear(timer); };
+const advance = async (time) => {
+  now = time;
+  for (const timer of [...timers]) if (timer.at <= now) { timers.delete(timer); timer.callback(); }
+  await new Promise(setImmediate);
+};
+const waitUntil = async (predicate, message) => {
+  for (let i = 0; i < 500 && !predicate(); i += 1) await sleep(10);
+  if (!predicate()) throw new Error(message);
+};
+const home = process.env.FM_HOME;
+const successorPid = () => readFileSync(`${home}/successor-pid`, "utf8").trim();
+const terminated = (pid) => existsSync(`${home}/terminated`)
+  && readFileSync(`${home}/terminated`, "utf8").trim().split("\n").includes(pid);
+const handlers = new Map();
+const sent = [];
+let tool;
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default({
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand() {},
+  registerTool(value) { tool = value; },
+  sendUserMessage(message) { sent.push(message); },
+});
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+try {
+  const result = await tool.execute();
+  if (!result.details.ok) throw new Error(`initial arming failed: ${result.content[0].text}`);
+  await waitUntil(() => existsSync(`${home}/initial-started`), "initial child did not start");
+  writeFileSync(`${home}/close`, "close\n");
+  await waitUntil(() => timers.size && existsSync(`${home}/successor-pid`), "successor did not enter its readiness wait");
+  const pid = successorPid();
+  const deadline = [...timers][0].at;
+  const assertWaiting = () => {
+    if (sent.length || terminated(pid)) throw new Error(`owner ended a progressing startup at ${now} ms: ${JSON.stringify(sent)}`);
+    process.kill(Number(pid), 0);
+  };
+  console.log(`${process.env.TEST_KIND}: owner deadline=${deadline} ms`);
+  if (process.env.TEST_KIND === "arm") {
+    if (deadline !== 12000) throw new Error(`plain arm lost its configured 12 s bound: ${deadline}`);
+    await advance(11999);
+    assertWaiting();
+    await advance(12000);
+  } else {
+    const total = process.env.TEST_KIND === "host-explicit" ? 120000 : 100000;
+    await advance(35000);
+    if (deadline <= now) await waitUntil(() => terminated(pid), "expired owner did not retire its child");
+    assertWaiting();
+    await advance(total);
+    assertWaiting();
+    if (deadline !== total + 5000) throw new Error(`host must enclose ${total} ms with the OpenCode 5 s margin, got ${deadline}`);
+    if (process.env.TEST_KIND === "host-expiry") {
+      await advance(deadline - 1);
+      assertWaiting();
+      await advance(deadline);
+    } else {
+      writeFileSync(`${home}/ready`, "ready\n");
+    }
+  }
+  const expired = process.env.TEST_KIND === "arm" || process.env.TEST_KIND === "host-expiry";
+  if (expired) {
+    await waitUntil(() => terminated(pid), "unready successor was not retired");
+    await waitUntil(() => successorPid() !== pid && timers.size, "bounded retry did not start");
+    const retryPid = successorPid();
+    if (sent.length) throw new Error("wake was delivered before the bounded retry completed");
+    const retryDeadline = [...timers][0].at;
+    if (retryDeadline - now !== deadline) throw new Error(`retry changed its readiness allowance: ${retryDeadline - now}`);
+    await advance(retryDeadline);
+    await waitUntil(() => sent.length > 0, "expiry did not deliver its actionable wake");
+    if (!terminated(retryPid) || !sent[0].includes("could not verify a ready successor watcher")) throw new Error(`unready retry was not retired with failure: ${sent[0]}`);
+  } else {
+    await waitUntil(() => sent.length > 0, "genuine readiness did not release its actionable wake");
+    if (terminated(pid) || sent[0].includes("watcher: FAILED")) throw new Error(`ready successor was rejected: ${sent[0]}`);
+    process.kill(Number(pid), 0);
+    if (timers.size) throw new Error("genuine readiness left its owner timer active");
+  }
+  if (sent.length !== 1 || !sent[0].includes("signal: startup-window done")) throw new Error(`actionable wake was lost or duplicated: ${JSON.stringify(sent)}`);
+  await handlers.get("before_agent_start")({ prompt: sent[0] }, {});
+} finally {
+  await handlers.get("session_shutdown")({}, {});
+}
+JS
+  )
+  status=$?
+  expect_code 0 "$status" "omp $kind startup window: $out"
+  printf '%s\n' "$out"
+  pass "omp $kind keeps its startup deadline and delivers the actionable wake"
+}
+
+if [ "${1:-}" = --host-startup-only ]; then
+  case "${2:-host-ready}" in
+    host-ready|host-expiry|host-explicit|arm) test_watch_extension_startup_window "${2:-host-ready}" ;;
+    *) fail "unknown host startup case: $2" ;;
+  esac
+  exit 0
+fi
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_bun_package_omp_identity_unit_shapes
@@ -1074,3 +1215,7 @@ test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole
+test_watch_extension_startup_window host-ready
+test_watch_extension_startup_window host-expiry
+test_watch_extension_startup_window host-explicit
+test_watch_extension_startup_window arm

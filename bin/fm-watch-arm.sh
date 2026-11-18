@@ -49,7 +49,9 @@
 # while its child is alive and unconfirmed up to CONFIRM_TIMEOUT (default the
 # guard grace, FM_GUARD_GRACE), because a slow host must stretch the wait, not
 # abort it - a timeout TERM used to land before the child could run cleanup and
-# cascade stale locks into the next arm. The child's own startup lock waits are
+# cascade stale locks into the next arm. In a host startup context, the shared
+# attempt deadline replaces the arm's confirmation deadlines; see
+# fm-startup-progress-lib.sh. The child's own startup lock waits are
 # bounded by FM_WATCHER_STARTUP_LOCK_BOUND and fail with the typed line above.
 # Whenever the arm forwards a stop - a signal mid-start or the deadline itself -
 # it TERM's only at the startup safe point: the child's published lock identity,
@@ -150,6 +152,8 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
 fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-startup-progress-lib.sh
+. "$SCRIPT_DIR/fm-startup-progress-lib.sh"
 
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
@@ -386,8 +390,10 @@ healthy_watcher() {
 
 report_attached() {
   local age
+  fm_startup_progress_append 2
   age=$(fm_path_age "$BEAT")
   echo "watcher: attached pid=$HEALTHY_PID (beacon ${age}s)"
+  fm_startup_progress_forget
 }
 
 # Header, "arm ground removed". Sets ARM_GROUND_MISSING to the first missing
@@ -417,14 +423,16 @@ fail_arm_ground_gone() {
   return 1
 }
 
-# Give a successor its own short bounded confirmation window. Adapter-owned
-# continuations normally win immediately, but the bound avoids a false failure
+# Without a host startup context, give a successor its own short bounded
+# confirmation window. Adapter-owned continuations normally win immediately,
+# but the bound avoids a false failure
 # when process-close delivery and lock publication cross briefly.
 wait_for_healthy_successor() {
   local deadline
   # date(1) exposes whole seconds. Add one rounding second so a timeout of one
   # second cannot collapse to a few milliseconds when called near a boundary.
   deadline=$(( $(date +%s) + SUCCESSOR_CONFIRM_TIMEOUT + 1 ))
+  fm_startup_progress_deadline deadline
   while :; do
     healthy_watcher && return 0
     arm_ground_gone && return 1
@@ -577,6 +585,7 @@ print_watch_output() {
 handling_successor_generation() {
   [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ] || return 0
   fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 1
+  fm_startup_progress_append 3
   case "$FM_RECOVERY_MARKER_TOKEN" in
     pending:downtime:*|pending:handling:*|announced:downtime:*|announced:handling:*) printf '%s' "${FM_RECOVERY_MARKER_TOKEN##*:}" ;;
     acked:*|'') ;;
@@ -610,6 +619,10 @@ case "${1:-}" in
   *) echo "usage: $(basename "$0") [--restart | --stop | --take-over ARM_PID | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
 
+case "$mode" in
+  arm|restart|take-over) fm_startup_progress_append 1 ;;
+  *) fm_startup_progress_forget ;;
+esac
 if [ "$mode" = handling-delivered ]; then
   fm_pid_alive "$handling_watcher_pid" \
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
@@ -799,6 +812,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 # date(1) exposes whole seconds. Keep the configured confirmation budget from
 # collapsing when startup begins just before the next second boundary.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+fm_startup_progress_deadline deadline
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
@@ -894,6 +908,7 @@ while :; do
       else
         echo "watcher: started pid=$child (beacon fresh)"
       fi
+      fm_startup_progress_forget
       wait "$child"
       rc=$?
       owned_child_finished "$rc"

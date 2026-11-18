@@ -156,7 +156,14 @@ const armReadyTimeoutMs = positiveInteger(
   "FM_OMP_ARM_READY_TIMEOUT_MS",
   process.platform === "win32" ? 35000 : 12000,
 );
-const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
+// Host startup follows fm-startup-progress-lib.sh's 100s default total ceiling.
+// Leave 5s to publish readiness, and honor a larger explicit host window.
+// The ordinary arm budget above remains independent of host mode.
+const hostStartupDefaultTotalSeconds = 100;
+const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, Math.max(
+  hostStartupDefaultTotalSeconds,
+  positiveInteger("FM_SUPERVISION_HOST_READY_TIMEOUT", hostStartupDefaultTotalSeconds),
+) * 1000 + 5000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";

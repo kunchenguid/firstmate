@@ -21,7 +21,14 @@ const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
 const ARM_READY_TIMEOUT_DEFAULT_MS = process.platform === "win32" ? 35000 : 12000;
 const ARM_READY_TIMEOUT_MS = positiveInteger("FM_OPENCODE_ARM_READY_TIMEOUT_MS", ARM_READY_TIMEOUT_DEFAULT_MS);
-const HOST_READY_TIMEOUT_MS = Math.max(ARM_READY_TIMEOUT_MS, 30000);
+// Host startup follows fm-startup-progress-lib.sh's 100s default total ceiling.
+// Leave 5s to publish readiness, and honor a larger explicit host window.
+// The ordinary arm budget above remains independent of host mode.
+const HOST_STARTUP_DEFAULT_TOTAL_SECONDS = 100;
+const HOST_READY_TIMEOUT_MS = Math.max(ARM_READY_TIMEOUT_MS, Math.max(
+  HOST_STARTUP_DEFAULT_TOTAL_SECONDS,
+  positiveInteger("FM_SUPERVISION_HOST_READY_TIMEOUT", HOST_STARTUP_DEFAULT_TOTAL_SECONDS),
+) * 1000 + 5000);
 const WAKE_LINE = /^(signal:|stale:|check:|heartbeat($|:))/;
 const HOST_LINE = /^supervision-host:/;
 const ARM_RETIRE_TIMEOUT_MS = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
