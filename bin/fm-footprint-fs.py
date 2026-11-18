@@ -489,11 +489,12 @@ class Dir:
         self.meta = meta
 
 
-def unlink_linked(dfd: int, name: str, cst: os.stat_result, modes: dict[tuple[int, int], int]) -> None:
-    """Unlinks a name of a regular file with more than one link through a
-    descriptor held across the unlink: when the file still has a name, now
-    outside the copy, and the freeze recorded it, it gets its recorded mode
-    back, so a name made elsewhere after the freeze is never left frozen."""
+def unlink_held(dfd: int, name: str, cst: os.stat_result, modes: dict[tuple[int, int], int]) -> None:
+    """Unlinks a name of a regular file through a descriptor held across the
+    unlink: when the file still has a name afterwards, now outside the copy,
+    and the freeze recorded it, it gets its recorded mode back, so a name made
+    elsewhere after the freeze, even in the instant before this unlink, is
+    never left frozen. Once the file has no name, none can be made for it."""
     cfd = open_child(dfd, name, cst)
     try:
         os.unlink(name, dir_fd=dfd)
@@ -617,8 +618,8 @@ def remove_root(root: str, entries: dict[str, list[str]], modes: dict[tuple[int,
                     frame.whole = False
                 continue
             try:
-                if want[0] == "f" and cst.st_nlink > 1:
-                    unlink_linked(frame.fd, cname, cst, modes)
+                if want[0] == "f" and (cst.st_nlink > 1 or (cst.st_dev, cst.st_ino) in modes):
+                    unlink_held(frame.fd, cname, cst, modes)
                 else:
                     os.unlink(cname, dir_fd=frame.fd)
                 if int(want[8]) > 1:
