@@ -293,6 +293,7 @@ A core that does not report `keeps_running_after_logout: true`, or that speaks a
 On macOS that gap says remote hc second mates need a Linux host, because herdr-core there reports `keeps_running_after_logout: null` and no update changes it.
 A core that does not answer is a human gap too: connect the machine from Herdr.app or start the account's herdr-core user service.
 `--fix` never starts, stops, or restarts a core, because a core started from the doctor's session is not necessarily the one the app shows, and stopping one ends every terminal in it.
+Neither does a launch or recovery: the host-local hc launch proves the core answers right before it spawns and otherwise refuses with that same gap, so a core that stopped after the readiness gate is never replaced from the launch's session.
 
 ### How the Herdr launch agent starts its server
 
