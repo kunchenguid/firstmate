@@ -4868,6 +4868,35 @@ if (captainHeldMixed.needsDecisionKeys.join(",") !== "fm-window") {
   throw new Error(`the captain-held stale key was not marked main-owned: ${JSON.stringify(captainHeldMixed)}`);
 }
 
+// A paused recheck that names a merge conflict stays with the primary.
+// The same recheck without that phrase stays with the branch.
+writeFileSync(`${state}/task-a.status`, "paused: waiting on the maintainer\n");
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tstale\tfm-window\tstale: fm-window (paused 10s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds, merge conflict with its base)",
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+const conflictOwned = scopeForUnreadWake(state, false);
+if (!conflictOwned.eligible || conflictOwned.eligibleSeqs.join(",") !== "2") {
+  throw new Error(`a conflicting paused recheck was offered to the branch: ${JSON.stringify(conflictOwned)}`);
+}
+if (conflictOwned.needsDecisionKeys.join(",") !== "fm-window") {
+  throw new Error(`the conflicting stale key was not marked main-owned: ${JSON.stringify(conflictOwned)}`);
+}
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    "1\t1\tstale\tfm-window\tstale: fm-window (paused 10s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)",
+    "1\t2\tsignal\ttask-a.status\tsignal: routine follow-up",
+  ].join("\n"),
+);
+const cleanPaused = scopeForUnreadWake(state, false);
+if (!cleanPaused.eligible || cleanPaused.eligibleSeqs.join(",") !== "1,2" || cleanPaused.needsDecisionKeys.length !== 0) {
+  throw new Error(`a clean paused recheck left the branch: ${JSON.stringify(cleanPaused)}`);
+}
+
 writeFileSync(`${state}/task-a.status`, "captain-held [key=route]: awaiting a second captain reminder\n \n");
 writeFileSync(
   `${state}/.wake-queue`,

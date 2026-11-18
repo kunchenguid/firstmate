@@ -184,8 +184,10 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
 // starves by being left behind.
 //
 // A signal row marked "needs-decision:" by the watcher, a second-mate signal
-// whose presented span owns a decision (spanIsDecisionOwned), or a stale row
-// for a task with an open needs-decision or a current captain-held declaration
+// whose presented span owns a decision (spanIsDecisionOwned), a stale row
+// for a task with an open needs-decision or a current captain-held declaration,
+// or a stale row whose payload names a merge conflict with its base
+// (pause_recheck_conflict_clause in bin/fm-classify-lib.sh)
 // gets the identical treatment: excluded from eligibleSeqs, never a scan veto,
 // and forced to main on its own triggering close (fm-primary-pi-watch.ts's
 // offerWakeToBranch). Heartbeat handling remains independent.
@@ -478,6 +480,13 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     }
     // Projectless records may establish ambiguity, never routing authority.
     if (!project || !task) return UNSAFE_SCOPE;
+    // A paused recheck that already names a merge conflict is main-owned while
+    // attended. The clause is produced by pause_recheck_conflict_clause; matching
+    // it here keeps the conflict off a silent routine branch outcome.
+    if (kind === "stale" && (fields[4] ?? "").includes("merge conflict with its base")) {
+      needsDecisionKeys.push(key);
+      if (!afk) continue;
+    }
     // A second mate's signal is judged by its new span on both paths. For a
     // single-task log, an attended host can have accepted a routine signal
     // before its task gained a main-owned decision, so it checks the whole
@@ -599,8 +608,9 @@ export interface BranchOfferVerdict {
 // still reach the branch on this cycle; it must never also let a check-kind
 // trigger itself slip past main's delivery.
 //
-// A signal close containing a needs-decision status file, or a stale close for
-// a captain-held task, gets the identical main-only treatment as a check-kind
+// A signal close containing a needs-decision status file, a stale close for
+// a captain-held task, or a stale close that names a merge conflict with its
+// base, gets the identical main-only treatment as a check-kind
 // trigger. The cross-reference deliberately includes every unread decision
 // row: until that row is read, a later signal or stale trigger for the same
 // task stays on main. Other tasks and heartbeat handling remain independent.
