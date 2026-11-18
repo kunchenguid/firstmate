@@ -2351,7 +2351,8 @@ github_state_is_open_value() {
 # review whose approved head is exactly the head being armed
 # (fm_nm_review_coverage). A task with no run record, a run without a review,
 # or a review of an older head prints unverified or stale and is not armed -
-# its merge waits for a merge turn exactly as before. The verdict is left in
+# a URL-bound queue-pending intent lets the watcher retry the same guarded
+# arm once coverage catches up. The verdict is left in
 # FM_PR_ARM_COVERAGE for the refusal line.
 FM_PR_ARM_COVERAGE=
 github_arm_review_coverage() {  # <head>
@@ -2430,6 +2431,7 @@ github_arm_queue_at_green() {
   github_read_queue_method
   case "$FM_PR_GITHUB_QUEUE_STATUS" in
     none)
+      rm -f "$STATE/$ID.queue-pending"
       printf 'queue arm: %s was not armed: base branch %s has no merge queue rule, so the pull request follows the ordinary merge path\n' \
         "$URL" "${FM_PR_GITHUB_BASE:-<unreadable>}" >&2
       exit 0
@@ -2463,7 +2465,11 @@ github_arm_queue_at_green() {
       ;;
   esac
   if ! github_arm_review_coverage "$FM_PR_MERGE_HEAD"; then
-    printf 'error: review coverage for head %s is %s, not covered, so %s was not armed; its merge waits for a merge turn\n' \
+    if [ ! -e "$STATE/$ID.queue-arm" ]; then
+      fm_queue_pending_write "$STATE" "$ID" "$URL" \
+        || printf 'error: could not persist coverage retry intent for %s\n' "$URL" >&2
+    fi
+    printf 'error: review coverage for head %s is %s, not covered, so %s was not armed; the watcher retries with the same guards after coverage catches up\n' \
       "$FM_PR_MERGE_HEAD" "$FM_PR_ARM_COVERAGE" "$URL" >&2
     exit 1
   fi
@@ -2476,6 +2482,7 @@ github_arm_queue_at_green() {
   github_require_queue_entry_ready
   arm_baseline=${FM_PR_QUEUE_REMOVED_AT:--}
   if [ "$FM_PR_QUEUE_QUEUED" = true ]; then
+    rm -f "$STATE/$ID.queue-pending"
     printf 'queue arm: %s is already in the merge queue at head %s, so nothing was armed; the merge poll owns its landing\n' \
       "$URL" "$FM_PR_MERGE_HEAD" >&2
     fm_afk_contract_lock_release || true
@@ -2517,6 +2524,7 @@ github_arm_queue_at_green() {
     exit 1
   fi
   if [ "$FM_PR_QUEUE_MERGED" = true ]; then
+    rm -f "$STATE/$ID.queue-pending"
     fm_afk_contract_lock_release || true
     printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s); its checks were already green, so the merge-when-ready request merged it at once and the merge poll reports the landing\n' \
       "$URL" "${FM_PR_QUEUE_STATE:-<unreadable>}" "${FM_PR_QUEUE_MERGED:-<unreadable>}" "${FM_PR_QUEUE_QUEUED:-<unreadable>}" >&2
@@ -2528,6 +2536,7 @@ github_arm_queue_at_green() {
       "$URL" >&2
     exit 1
   fi
+  rm -f "$STATE/$ID.queue-pending"
   fm_afk_contract_lock_release || true
   printf 'queue arm: %s is armed at head %s (merge-when-ready, method %s); GitHub enqueues it in the merge queue when the required checks are green, one failed-checks ejection at this head re-enqueues itself, and a new push disarms it\n' \
     "$URL" "$FM_PR_MERGE_HEAD" "$queue_method" >&2

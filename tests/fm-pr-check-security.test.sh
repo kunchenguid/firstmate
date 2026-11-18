@@ -163,7 +163,9 @@ case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
       *statusCheckRollup*)
-        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        checks='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'
+        checks=${FM_TEST_GH_CHECKS-$checks}
+        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":$checks}"
         exit 0
         ;;
       *" --json isDraft "*)
@@ -199,7 +201,7 @@ case " $* " in
     fi
     ;;
   *" api --paginate repos/"*"/rules/branches/"*)
-    printf '%s\n' '[]'
+    printf '%s\n' "${FM_TEST_GH_REQUIRED_RULES:-[]}"
     ;;
   *" api repos/"*"/branches/"*)
     printf '%s\n' '{"name":"main","protected":false}'
@@ -934,6 +936,84 @@ test_registration_arms_the_merge_queue_at_green() {
   assert_no_grep 'queue arm' "$dir/stdout" \
     "queue-arm-registration: the arm wrote to stdout, which registration owns"
   pass "registration arms a merge queue at green bound to the verified head"
+}
+
+test_coverage_refusal_retries_after_review_covers_current_head() {
+  local dir state url head old rc
+  dir=$(make_case queue-coverage-retry)
+  state="$dir/home/state"
+  url=https://github.com/o/r/pull/99
+  head=$(printf '%040d' 91)
+  old=$(printf '%040d' 90)
+  write_task_meta "$dir"
+  printf 'yolo=on\n' >> "$state/task-a.meta"
+  printf 'merge_method=SQUASH\n' > "$dir/github-queue-rules"
+  write_arm_nm_coverage "$dir" "$old"
+  FM_TEST_GH_QUEUE_RULES="$dir/github-queue-rules" FM_TEST_GH_HEAD="$head" NM_HOME="$dir/nm" \
+    run_check_entry "$dir" task-a "$url" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "coverage refusal failed the registration"
+  assert_grep 'is stale, not covered' "$dir/stderr" "registration did not refuse stale coverage"
+  assert_no_grep 'pr merge' "$dir/gh.log" "stale coverage submitted a merge"
+  [ ! -e "$state/task-a.queue-arm" ] || fail "stale coverage left a live arm"
+  [ -f "$state/task-a.queue-pending" ] \
+    || fail "coverage refusal lost retry intent: $(cat "$dir/stderr")"
+
+  coverage_retry_cycle() {
+    # Contribution wakes are deliberately delivered after the sweeps.
+    printf '#!/usr/bin/env bash\nprintf "contribution-wake: check: contributions stop-cycle\\n"\n' \
+      > "$state/contributions.check.sh"
+    chmod 0700 "$state/contributions.check.sh"
+    FM_HOME="$dir/home" "$REGISTER" contributions >/dev/null || fail "could not register cycle stop"
+    rm -f "$state/.wake-queue" "$state/.watcher-down"
+    rc=0
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" \
+      FM_TEST_GH_QUEUE_RULES="$dir/github-queue-rules" FM_TEST_GH_HEAD="$head" NM_HOME="$dir/nm" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+    [ "$rc" -eq 0 ] || fail "coverage retry sweep failed: rc=$rc"
+  }
+  coverage_retry_cycle
+  assert_no_grep 'pr merge' "$dir/gh.log" "sweep armed on stale coverage before delta review"
+  [ -e "$state/task-a.queue-pending" ] || fail "stale sweep lost retry intent"
+
+  # A later review/delta-read covers the exact live head. Red or unreadable
+  # checks must still refuse, and retry intent must survive those refusals.
+  write_arm_nm_coverage "$dir" "$head"
+  FM_TEST_GH_CHECKS='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' \
+    coverage_retry_cycle
+  assert_no_grep 'pr merge' "$dir/gh.log" "coverage retry bypassed red checks"
+  FM_TEST_GH_CHECKS=null coverage_retry_cycle
+  assert_no_grep 'pr merge' "$dir/gh.log" "coverage retry bypassed unreadable checks"
+  FM_TEST_GH_REQUIRED_RULES='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"never-reported"}]}}]' \
+    coverage_retry_cycle
+  assert_no_grep 'pr merge' "$dir/gh.log" "coverage retry bypassed an unreported required check"
+  # A new push invalidates coverage again until that delta is reviewed.
+  head=$(printf '%040d' 92)
+  coverage_retry_cycle
+  assert_no_grep 'pr merge' "$dir/gh.log" "coverage retry armed a pushed head on stale review"
+  write_arm_nm_coverage "$dir" "$head"
+  printf 'yolo=off\n' >> "$state/task-a.meta"
+  coverage_retry_cycle
+  assert_no_grep 'pr merge' "$dir/gh.log" "coverage retry bypassed revoked yolo authority"
+  printf 'yolo=on\n' >> "$state/task-a.meta"
+  [ -e "$state/task-a.queue-pending" ] || fail "check refusal lost coverage retry intent"
+
+  # No registration or supervisor merge turn follows: only the sweep runs.
+  mkdir -p "$dir/graphql-seq"
+  printf 'id=PR_99\nstate=OPEN\nmerged=false\nqueued=false\nentry=\nhead=%s\nbranch=fm/task\nremoved_at=\nremoved_reason=\n' \
+    "$head" > "$dir/graphql-seq/1"
+  printf 'id=PR_99\nstate=OPEN\nmerged=false\nqueued=true\nentry=AWAITING_CHECKS\nhead=%s\nbranch=fm/task\nremoved_at=\nremoved_reason=\n' \
+    "$head" > "$dir/graphql-seq/2"
+  cp "$dir/graphql-seq/2" "$dir/graphql-seq/3"
+  FM_TEST_GH_GRAPHQL_SEQ_DIR="$dir/graphql-seq" coverage_retry_cycle
+  assert_grep "pr merge 99 --repo o/r --match-head-commit $head --auto --squash" \
+    "$dir/gh.log" "coverage becoming covered never retried the refused arm"
+  [ -f "$state/task-a.queue-arm" ] || fail "coverage retry did not persist the live arm"
+  [ ! -e "$state/task-a.queue-pending" ] || fail "successful coverage retry remained pending"
+  cp "$dir/graphql-seq/2" "$dir/graphql-seq/4"
+  FM_TEST_GH_GRAPHQL_SEQ_DIR="$dir/graphql-seq" coverage_retry_cycle
+  [ "$(grep -c -- '--auto --squash' "$dir/gh.log")" = 1 ] \
+    || fail "a later sweep repeated the accepted arm"
+  pass "coverage refusal automatically retries through the guarded arm when the current head is covered"
 }
 
 test_registration_leaves_no_queue_arm_without_yolo_a_merge_rerecord_or_a_queue() {
@@ -2178,6 +2258,8 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  fm_queue_pending_write "$dir/home/state" task-a https://github.com/o/r/pull/99 \
+    || fail "could not seed pending coverage retry"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -2192,6 +2274,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/state/task-a.queue-pending" ] || fail "teardown left pending merge intent"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -2221,7 +2304,7 @@ SH
   assert_poll_absent "$dir/home/state" task-a
   [ ! -e "$dir/home/state/task-a.meta" ] || fail "receipt-aware teardown left task metadata"
 
-  for artifact in check.sh pr-poll; do
+  for artifact in check.sh pr-poll queue-pending; do
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \
@@ -4413,6 +4496,7 @@ test_merged_outcome_row_carries_poll_detail
 test_deploy_poll_verdicts
 test_github_merge_arms_a_deploy_watch_that_wakes_once
 test_registration_arms_the_merge_queue_at_green
+test_coverage_refusal_retries_after_review_covers_current_head
 test_registration_leaves_no_queue_arm_without_yolo_a_merge_rerecord_or_a_queue
 test_queue_arm_sweep_wakes_once_on_the_second_failed_checks_ejection
 test_github_enterprise_config_resolution

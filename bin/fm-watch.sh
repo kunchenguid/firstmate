@@ -5094,6 +5094,21 @@ EOF
       touch "$STATE/.last-check"
       wake "$reason"
     done
+    # Coverage refusals persist only retry intent, never authority. Retry the
+    # same arm mode (including live-head coverage and all forge/authority
+    # guards), not a second merge path. An accepted arm consumes the intent;
+    # its bounded requeue/disarm state machine owns all later outcomes.
+    for queue_pending in "$STATE"/*.queue-pending; do
+      [ -e "$queue_pending" ] || [ -L "$queue_pending" ] || continue
+      id=$(basename "$queue_pending" .queue-pending)
+      url=$(fm_meta_get "$STATE/$id.meta" pr)
+      if ! fm_pr_task_id_valid "$id" || ! fm_queue_pending_matches "$queue_pending" "$url" \
+        || [ -e "$STATE/$id.queue-arm" ]; then
+        rm -f "$queue_pending"
+        continue
+      fi
+      run_check_capture "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" --queue-at-green || exit 1
+    done
     # Queue-at-green arms written by fm-pr-merge.sh's --queue-at-green mode
     # outlive the registration turn, so like deploy watches they are swept
     # here rather than as task checks. bin/fm-pr-merge.sh --queue-requeue owns

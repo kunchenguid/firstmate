@@ -525,6 +525,37 @@ fm_ado_az_bin() {
   return 1
 }
 
+# A coverage refusal leaves a private, URL-bound retry intent, not merge
+# authority. The watcher retries --queue-at-green with every guard afresh;
+# only fm_nm_review_coverage=covered for the live head can permit an arm.
+# Success consumes the intent, so later ejections/head changes remain owned
+# exclusively by the queue-arm state machine, not an unlimited retry loop.
+fm_queue_pending_write() {  # <state> <task-id> <url>
+  local state=$1 id=$2 url=$3 dest tmp
+  fm_pr_task_id_valid "$id" && fm_pr_url_parse "$url" || return 2
+  [ "$FM_PR_PROVIDER" = github ] || return 2
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  dest="$state/$id.queue-pending"
+  fm_pr_regular_destination_or_absent "$dest" || return 1
+  tmp=$(mktemp "$state/.$id.queue-pending.XXXXXX") || return 1
+  if chmod 0600 "$tmp" && printf '%s\n' "$url" > "$tmp" && mv -f "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+fm_queue_pending_matches() {  # <path> <url>
+  local path=$1 url extra
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  [ "$(fm_pr_file_link_count "$path")" = 1 ] || return 1
+  {
+    IFS= read -r url || return 1
+    if IFS= read -r extra || [ -n "$extra" ]; then return 1; fi
+  } < "$path"
+  [ "$url" = "$2" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ]
+}
+
 # A queue-at-green arm (bin/fm-pr-merge.sh --queue-at-green) writes
 # $STATE/<id>.queue-arm, the private record bin/fm-watch.sh sweeps with
 # fm-pr-merge.sh --queue-requeue: the exact head the arm is bound to, the

@@ -299,7 +299,10 @@ fi
 # merge-when-ready bound to that head, so the pull request enters the merge
 # queue when its required checks turn green without waiting for a firstmate
 # turn; one failed-checks ejection at that head re-enqueues itself and a new
-# push disarms it (bin/fm-watch.sh sweeps the arm record). The arm is
+# push disarms it (bin/fm-watch.sh sweeps the arm record). A coverage
+# refusal persists a URL-bound retry intent: the watcher retries this same
+# guarded mode after coverage catches up, never treating a milestone alone
+# as proof of review or allowing stale coverage. The arm is
 # strictly additive: every refusal leaves the ordinary merge-turn path
 # exactly as it was, registration itself never fails because of it, and the
 # merge-time re-record (FM_PR_CHECK_MERGE=1) never arms, so recording a
