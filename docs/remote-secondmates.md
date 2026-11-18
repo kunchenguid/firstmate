@@ -717,6 +717,7 @@ It refuses while any of these holds:
 
 Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its code root's remote session, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
+hc retirement closes only the retiring secondmate's own labeled terminal in the host's remote hc session, never the core or another terminal in it.
 SSH exit 255 preserves both the route and local records because completion is unknown.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
@@ -734,7 +735,7 @@ The portable tests use these pieces:
 - The real entrypoint protocol.
 - Real git repositories.
 - A deterministic SSH boundary.
-- Stateful host-local Herdr and Rex CLI fixtures.
+- Stateful host-local Herdr, Rex, and hc CLI fixtures.
 - A controlled account fixture for the readiness gate.
 
 [`fm-remote-job-launchagent.test.sh`](../tests/fm-remote-job-launchagent.test.sh) exercises the real worker with stubbed asynchronous `launchctl`, covering slow claim sweeps, missing readiness recovery during a sweep, stale readiness without reload, concurrent repair, untracked owners, interrupted repairs, and asynchronous service removal before bootstrap.
@@ -762,6 +763,7 @@ bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
+bin/fm-test-run.sh tests/fm-remote-secondmate-hc.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-omp.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
