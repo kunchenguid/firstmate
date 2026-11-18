@@ -2089,7 +2089,12 @@ launch_aged_pause_recheck() { # <name> <mergeable> [silent]
   printf '1\n' > "$state/.count-$key"
   install_pr_state_gh "$fakebin"
   mkdir -p "$dir/config"
-  [ "$silent" = silent ] && : > "$dir/config/paused-recheck-silent"
+  if [ "$silent" = silent ]; then
+    : > "$dir/config/paused-recheck-silent"
+    printf 'window=%s\nkind=secondmate\npr=https://github.com/o/r/pull/7\n' "$window" > "$state/conflict.meta"
+    printf 'declared:%s' "$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '. "$1"; fm_wake_signal_sig "$2"' _ "$WATCH" "$state/conflict.status")" > "$state/.paused-resurfaced-$key"
+    set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-resurfaced-$key"
+  fi
   export FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting on the maintainer'
   export FM_TEST_VIEW_MERGEABLE=$mergeable
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
