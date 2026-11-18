@@ -109,13 +109,14 @@
 #            is that board's conclude step, so it also drops the registration
 #            that kept the board with its owner, and reports `retired:` too.
 # feed-answers
-#            Pass each result a now-bound source captured for its owning task
-#            that has not yet reached the keyed-answer intake to the reconcile
-#            intake and then to that intake, oldest first, and print what each
-#            reported. `fm-captain-hold.sh bind`
-#            runs this so an answer captured before the binding is not lost.
-#            Exits nonzero when the intake could not finish a result, which
-#            stays pending for the next run.
+#            Replay each result a now-bound source captured for its owning
+#            task that the keyed-answer intake has not walked yet, oldest
+#            first: its reconcile selections go to the reconcile intake, then
+#            its keyed answers to the keyed-answer intake, and each intake's
+#            report is printed. `fm-captain-hold.sh bind` runs this so an
+#            answer captured before the binding is not lost. Exits nonzero
+#            when either intake could not finish a result, which stays pending
+#            for the next run.
 # retire     Drop a registration, stop a runner this home owns, release the claim.
 #            Idempotent, and still the supported explicit path after a source has
 #            already retired itself on its adapter's terminal verdict. Existing
@@ -473,12 +474,6 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
   "$script" autohandle "$id" "$seq" "$result" >/dev/null 2>&1
 }
 
-# Pass a bound source's captured result to the one keyed-answer intake and print
-# its report. The adapter turns its own format into keyed lines; the intake owns
-# everything those lines mean. Best-effort exactly like the seams above: an
-# unbound source, an adapter with no `answers` command, and a failure on either
-# side all leave the capture untouched and still announced, because this never
-# acknowledges anything (see the keyed-answer note in the header).
 # Prints the task a capture's feeds are scoped to, and nothing for a
 # firstmate-owned capture. Fails when the capture is task-owned but its owner
 # cannot be read, so no caller falls back to an unscoped feed.
@@ -489,6 +484,12 @@ result_feed_owner() {  # <result-file>
   fi
 }
 
+# Pass a bound source's captured result to the one keyed-answer intake and print
+# its report. The adapter turns its own format into keyed lines; the intake owns
+# everything those lines mean. Best-effort exactly like the seams above: an
+# unbound source, an adapter with no `answers` command, and a failure on either
+# side all leave the capture untouched and still announced, because this never
+# acknowledges anything (see the keyed-answer note in the header).
 feed_keyed_answers() {  # <adapter> <source-id> <result-file>
   local adapter=$1 id=$2 result=$3 script origin seq owner report rc=0
   script=$(adapter_script "$adapter")

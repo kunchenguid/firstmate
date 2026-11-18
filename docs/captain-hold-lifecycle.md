@@ -245,6 +245,7 @@ A worker arms its own board, so firstmate often binds it after the captain has a
 `bind` therefore replays each result captured for a worker-owned board that has not reached the intake yet, then prints the intake's report.
 The replay files the result's [reconcile](#reconcile-re-check-reality-never-a-blind-close) selections first, under the same `--for` scope, and prints that intake's report too.
 Once the intake has walked a captured result, no later `bind` replays it.
+When either intake could not finish a result, `bind` exits nonzero with the binding recorded, and the next `bind` replays that result again.
 A firstmate-owned source is never replayed, because it is bound before it is armed and an unscoped replay of an old capture could close any call held since.
 
 ### Channels that feed the intake
@@ -584,7 +585,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - `test_scout_board_answers_reach_only_its_own_held_calls` binds a worker-armed board after its round was captured: `bind` records that answer once, a repeat `bind` records nothing more, and a key naming a call held for another task is refused on both the replay and the capture paths.
-  An unbound capture from a firstmate-owned board is never replayed.
+  The same test covers the reconcile seam: `bind` files a reconcile selection captured before it exactly once, a reconcile pass the backlog cut short fails `bind` and leaves the whole result pending, and a reconcile selection naming a call held for another task files no request.
+  A capture with no pending marker, a marked capture whose owner record is damaged, and an unbound capture from a firstmate-owned board are never replayed.
 - The chat channel reaches the same intake.
 - `test_release_is_attended_only` exercises the attended-only release: the away posture record and the away daemon flag each refuse `answer --release` and a `release` intake line without writing, while no record and a quiet record release, and a closing answer is not gated.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
