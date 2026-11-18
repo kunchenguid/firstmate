@@ -2626,6 +2626,10 @@ if (!fleet.isError || !fleet.content[0].text.includes("never fleet")) {
 }
 const named = await report.execute("named", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
 if (named.isError) throw new Error(`the wake's own task was refused: ${JSON.stringify(named)}`);
+const omitted = await report.execute("omitted", { verdict: "routine", summary: "worker still healthy" }, undefined, undefined, {});
+if (omitted.isError || !omitted.content[0].text.includes("for branch-driver")) {
+  throw new Error(`a single-task wake did not default and name its task: ${JSON.stringify(omitted)}`);
+}
 finish();
 await settle(() => !existsSync(`${home}/state/.branch-eligible-rows`), "task-local grant release");
 
@@ -2642,10 +2646,12 @@ const goneInReview = await heartbeatReport.execute("gone-in-review", { task: "re
 if (goneInReview.isError) throw new Error(`a heartbeat report for a task with no record was refused: ${JSON.stringify(goneInReview)}`);
 const fleetInReview = await heartbeatReport.execute("fleet-in-review", { task: "fleet", verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
 if (fleetInReview.isError) throw new Error(`a fleet-wide report was refused during a heartbeat review: ${JSON.stringify(fleetInReview)}`);
+const taskless = await heartbeatReport.execute("taskless", { verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
+if (!taskless.isError) throw new Error(`an unscoped heartbeat report without a task was accepted: ${JSON.stringify(taskless)}`);
 finish();
 
 const stored = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line).task);
-if (JSON.stringify(stored) !== JSON.stringify(["branch-driver", "other-task", "retired-task", "fleet"])) {
+if (JSON.stringify(stored) !== JSON.stringify(["branch-driver", "branch-driver", "other-task", "retired-task", "fleet"])) {
   throw new Error(`refused reports reached the durable store: ${JSON.stringify(stored)}`);
 }
 
