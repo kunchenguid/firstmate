@@ -49,7 +49,9 @@
 # while its child is alive and unconfirmed up to CONFIRM_TIMEOUT (default the
 # guard grace, FM_GUARD_GRACE), because a slow host must stretch the wait, not
 # abort it - a timeout TERM used to land before the child could run cleanup and
-# cascade stale locks into the next arm. The child's own startup lock waits are
+# cascade stale locks into the next arm. In a host startup context, the shared
+# attempt deadline replaces the arm's confirmation deadlines; see
+# fm-startup-progress-lib.sh. The child's own startup lock waits are
 # bounded by FM_WATCHER_STARTUP_LOCK_BOUND and fail with the typed line above.
 # Whenever the arm forwards a stop - a signal mid-start or the deadline itself -
 # it TERM's only at the startup safe point: the child's published lock identity,
@@ -421,8 +423,9 @@ fail_arm_ground_gone() {
   return 1
 }
 
-# Give a successor its own short bounded confirmation window. Adapter-owned
-# continuations normally win immediately, but the bound avoids a false failure
+# Without a host startup context, give a successor its own short bounded
+# confirmation window. Adapter-owned continuations normally win immediately,
+# but the bound avoids a false failure
 # when process-close delivery and lock publication cross briefly.
 wait_for_healthy_successor() {
   local deadline

@@ -457,8 +457,7 @@ The foreign marker-lock contention exception described above still retains singl
 `FM_WATCHER_STARTUP_LOCK_BOUND` bounds the downtime publish inside a `.watch.lock` steal and, after identity publication, the startup recovery reopen and arm-check transitions.
 A live foreign holder that outlasts the bound during singleton-steal publication or a recovery transition ends the child with `watcher: FAILED - startup lock <path> held by live pid <n>`; the arm relays the child's final output even when startup exits during the safe-point wait.
 A handling successor's resurface decision reads the queue inside the same arm-check lock hold that announces the marker, so no separate queue wait can skip a wake the transition already announced.
-`FM_ARM_CONFIRM_TIMEOUT` is a liveness backstop rather than a fork budget, while successor hand-off confirmation uses the separate `FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT`.
-Defaults and overrides, including Claude Stop's outer successor-status wait, are owned by [configuration](configuration.md#environment-variables).
+See [configuration](configuration.md#environment-variables) for standalone arm confirmation defaults and overrides, including Claude Stop's outer successor-status wait, and [Watcher startup allowance](configuration.md#watcher-startup-allowance) for host startup configuration.
 
 ## Regression coverage
 
