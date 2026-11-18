@@ -809,7 +809,7 @@ tests/fm-fleet-ledger.test.sh 19980
 tests/fm-fleet-snapshot-view.test.sh 23334
 tests/fm-fleet-sync.test.sh 40541
 tests/fm-footprint-safety.test.sh 18355
-tests/fm-footprint-scale.test.sh 92800
+tests/fm-footprint-scale.test.sh 100000
 tests/fm-footprint-spawn.test.sh 17936
 tests/fm-footprint-tmpdir-live.test.sh 149
 tests/fm-footprint.test.sh 16025
