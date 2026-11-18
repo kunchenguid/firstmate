@@ -647,6 +647,7 @@ codex_display_activity_json() {  # <meta> <backend> <target> <id>
   harness=$(meta_value "$meta" harness)
   case "$harness" in codex*) ;; *) return 0 ;; esac
   [ "$backend" = herdr ] && [ -n "$target" ] || return 0
+  # shellcheck disable=SC2016 # single quotes intentional: expanded by the inner bash
   native=$(fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" bash -c '
     . "$1/fm-backend.sh" && fm_backend_source herdr 2>/dev/null || exit 1
     native=$(fm_backend_herdr_codex_native_state "$2")
