@@ -1154,8 +1154,9 @@ EOF
 
 # Oracle: Herdr's herdr:codex integration reports agent=codex, agent_session.source=herdr:codex and
 # agent_status working|done (docs/verification/supervision.md "Codex on Herdr"). The status is a
-# display-only field: current_state stays the unchanged crew-state verdict, explicit declarations
-# are shown instead of pane activity, and any other status or a foreign registration shows nothing.
+# display-only observation shown only where the canonical state is unknown: current_state stays the
+# unchanged crew-state verdict, any other status or a foreign registration shows nothing, and the
+# secondmate home summary never probes Herdr.
 test_codex_herdr_display_activity() {
   local home fakebin out view case_name agent source status log want_state want_source
   home=$(make_home codex-herdr)
@@ -1185,7 +1186,7 @@ SH
         || fail "$case_name: no display activity expected: $out"
     else
       printf '%s' "$out" | jq -e --arg s "$want_state" --arg src "$want_source" \
-        '.tasks[] | select(.id == "cx") | .display_activity == {state:$s,source:$src}' >/dev/null \
+        '.tasks[] | select(.id == "cx") | (.display_activity | .state == $s and .source == $src)' >/dev/null \
         || fail "$case_name: wrong display activity: $out"
     fi
     view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_AGENT="$agent" FM_FAKE_SOURCE="$source" FM_FAKE_STATUS="$status" "$VIEW")
@@ -1193,17 +1194,13 @@ SH
   done <<'ROWS'
 working|codex|herdr:codex|working||working|herdr-native
 done|codex|herdr:codex|done||idle|herdr-native
-stale-working-report|codex|herdr:codex|done|working: setup complete|idle|herdr-native
-decision-while-working|codex|herdr:codex|working|needs-decision [key=scope]: pick A or B|parked|status-log
-decision-while-done|codex|herdr:codex|done|needs-decision [key=scope]: pick A or B|parked|status-log
-blocked-report|codex|herdr:codex|done|blocked: waiting on review|blocked|status-log
-failed-report|codex|herdr:codex|working|failed: could not build|failed|status-log
+decision-open-while-done|codex|herdr:codex|done|needs-decision [key=scope]: pick A or B|idle|herdr-native
 blocked-status|codex|herdr:codex|blocked||
 idle-status|codex|herdr:codex|idle||
 foreign-agent|pi|herdr:pi|working||
 foreign-source|codex|other|done||
 ROWS
-  pass "codex on herdr adds a display-only working/idle field, declarations first"
+  pass "codex on herdr adds a display-only working/idle field only over an unknown canonical state"
 }
 
 fm_test_run \

@@ -636,40 +636,24 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
   fi
 }
 
-# Display-only: a Herdr-backed Codex worker's exact native working/done status,
-# as {state,source}, so the fleet view and Bearings can tell working from idle.
-# It never enters current_state, so every supervision consumer reads the same
-# verdict as before. An explicit declaration in the captured status log
-# (needs-decision, blocked, paused, done, failed) is shown instead of the pane
-# activity; a stale working report or none leaves the native activity.
-codex_display_activity_json() {  # <meta> <backend> <target> <status-capture>
-  local meta=$1 backend=$2 target=$3 capture=$4 harness native line verb state=
+# Display-only observation, shown only where the canonical crew state is exactly
+# unknown: a Herdr-backed Codex worker's exact native working/done status as
+# {state,source,detail}. It never enters current_state, so every supervision
+# consumer reads the same verdict as before, and any other canonical state
+# (declaration, pause, decision, done, failed, run step) is displayed unchanged.
+codex_display_activity_json() {  # <meta> <backend> <target>
+  local meta=$1 backend=$2 target=$3 harness native
   harness=$(meta_value "$meta" harness)
   case "$harness" in codex*) ;; *) return 0 ;; esac
   [ "$backend" = herdr ] && [ -n "$target" ] || return 0
-  fm_backend_source herdr 2>/dev/null || return 0
-  native=$(fm_backend_herdr_codex_native_state "$target" 2>/dev/null || printf unknown)
+  native=$(fm_run_timed "$FM_SNAPSHOT_CREW_STATE_TIMEOUT" bash -c '
+    . "$1/fm-backend.sh" && fm_backend_source herdr 2>/dev/null || exit 1
+    fm_backend_herdr_codex_native_state "$2"
+  ' _ "$SCRIPT_DIR" "$target" 2>/dev/null) || return 0
   case "$native" in
-    busy) native=working ;;
-    idle) ;;
-    *) return 0 ;;
+    busy) jq -n '{state:"working",source:"herdr-native",detail:"Herdr reports the Codex pane working"}' ;;
+    idle) jq -n '{state:"idle",source:"herdr-native",detail:"Herdr reports the Codex pane done"}' ;;
   esac
-  line=$(last_nonempty_line "$capture" 2>/dev/null || true)
-  if [ -n "$line" ]; then
-    verb=$(status_line_verb "$line")
-    if status_is_paused "$line"; then state=paused
-    else
-      case "$verb" in
-        needs-decision) state=parked ;;
-        blocked|done|failed) state=$verb ;;
-      esac
-    fi
-  fi
-  if [ -n "$state" ]; then
-    jq -n --arg state "$state" '{state:$state,source:"status-log"}'
-  else
-    jq -n --arg state "$native" '{state:$state,source:"herdr-native"}'
-  fi
 }
 
 prefetch_task_observations() {  # <meta> <id>
@@ -703,7 +687,6 @@ prefetch_task_observations() {  # <meta> <id>
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     if [ -n "$target" ]; then
-      codex_display_activity_json "$meta" "$backend" "$target" "$status_capture" > "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null || true
       if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
         endpoint_exists=true
       else
@@ -733,6 +716,15 @@ prefetch_task_observations() {  # <meta> <id>
       > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
+  fi
+  rm -f -- "$SNAPSHOT_TASK_DIR/$id.display"
+  if [ "$OUTPUT_MODE" = json ] && [ "$endpoint_exists" = true ] && [ "$current_rc" -eq 0 ] \
+    && [ "$(jq -r '.state // ""' "$current_file" 2>/dev/null)" = unknown ]; then
+    codex_display_activity_json "$meta" "$backend" "$target" > "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null || true
+    if ! snapshot_task_generation_is_current "$meta" "$id" \
+      || ! fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+      rm -f -- "$SNAPSHOT_TASK_DIR/$id.display"
+    fi
   fi
   printf 'endpoint_exists=%s\nagent_alive=%s\n' "$endpoint_exists" "$agent_alive" > "$endpoint_file" || current_rc=1
   [ "$current_rc" -eq 0 ] || return "$current_rc"
