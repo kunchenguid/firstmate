@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|copilot|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate [id]  print the harness the PRIMARY uses to launch
@@ -153,6 +153,11 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # FM_COPILOT_HARNESS=copilot is Firstmate-owned and set only by
+  # bin/fm-sessionstart-copilot.sh for the digest it runs, whose process chain is
+  # deeper than the eight levels harness_ancestry climbs. Copilot itself publishes
+  # no identity marker to a tool process (verified, copilot 1.0.105).
+  [ "${FM_COPILOT_HARNESS:-}" = copilot ] && { echo copilot; return; }
   # codex, opencode, kimi, muse, agy, devin, commandcode, polytoken, cortex, and kiro publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
@@ -213,6 +218,14 @@ harness_process_verdict() {  # <pid>
   # glob would otherwise claim it if that subtree were ever walked.
   if fm_omp_process_matches "$comm" "$args"; then
     echo "comm omp"
+    return
+  fi
+  # copilot (GitHub Copilot CLI) is a native binary whose kernel process name
+  # is the thread name `MainThread`, never `copilot` (verified, copilot 1.0.105:
+  # comm=MainThread, argv[0]=copilot). Only argv[0] identifies it, so it is
+  # matched by the exact basename of the first word, never by a later argument.
+  if fm_copilot_args_are_copilot "$args" "$pid"; then
+    echo "comm copilot"
     return
   fi
   case "$(basename -- "$comm")" in
@@ -451,7 +464,7 @@ supervision_primary_pin() {
   local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
   [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
   case "$pin" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|hermes)
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|hermes|copilot)
       printf '%s\n' "$pin"
       ;;
     *)

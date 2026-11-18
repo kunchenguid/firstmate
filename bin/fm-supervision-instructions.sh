@@ -107,7 +107,7 @@ case "$HARNESS" in
   hermes)
     echo 'error: hermes is a crewmate/scout adapter only; primary supervision is unsupported' >&2
     exit 1 ;;
-  claude|codex|opencode|pi|grok|cursor|omp|agy) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
+  claude|codex|opencode|pi|grok|cursor|omp|agy|copilot) SNIPPET="$DOC_DIR/$HARNESS.md" ;;
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
@@ -249,6 +249,9 @@ repair_line() {
     cursor)
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
+    copilot)
+      printf '%s%s\n' "$prefix" 'start the wake process with bin/fm-copilot-wake.sh start as one foreground command, never shell &, and check that it printed a running line before ending the turn.'
+      ;;
     agy)
       if [ -n "$HOST_SNIPPET" ]; then
         printf '%s%s\n' "$prefix" 'supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh running the supervision host); inspect the hook registration and supervision host startup path before ending the turn.'
@@ -285,6 +288,9 @@ ordinary_wake_line() {
       ;;
     grok)
       printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$grok_arm" ' Grok tracked background task as directed below.'
+      ;;
+    copilot)
+      printf '%s\n' '- Ordinary wake: bin/fm-copilot-wake.sh already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     cursor)
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'

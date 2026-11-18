@@ -482,6 +482,21 @@ test_launch_prompt_gemini_dialogs() {
   pass "a Gemini launch parked on its trust, auth-picker, or API-key dialog classifies unknown launch-prompt"
 }
 
+test_launch_prompt_copilot_signin_failure() {
+  local state out text
+  for text in 'Please use /login to sign in to use Copilot' 'Authentication token found but could not be validated.'; do
+    state=$(new_state_dir launch-prompt-copilot)
+    "$EV" arm "$state" t1 >/dev/null
+    out=$(fm_busy_classify tmux w1 copilot t1 "$state" "$text")
+    [ "$out" = "unknown launch-prompt" ] || fail "a Copilot launch parked on '$text' must classify unknown launch-prompt, got '$out'"
+  done
+  state=$(new_state_dir launch-prompt-copilot-normal)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 copilot t1 "$state" 'Reading the brief and starting work')
+  [ "$out" != "unknown launch-prompt" ] || fail "an ordinary Copilot output line must not classify launch-prompt"
+  pass "a Copilot launch parked on a sign-in failure classifies unknown launch-prompt"
+}
+
 test_launch_prompt_never_shortens_a_working_launch() {
   local state out
   state=$(new_state_dir launch-prompt-working)
@@ -843,6 +858,7 @@ test_launch_prompt_claude_trust_dialog
 test_launch_prompt_pi_trust_dialog
 test_launch_prompt_pi_requires_both_markers
 test_launch_prompt_gemini_dialogs
+test_launch_prompt_copilot_signin_failure
 test_launch_prompt_never_shortens_a_working_launch
 test_launch_prompt_scoped_to_armed_harnesses
 test_launch_prompt_never_reclassifies_an_advanced_record

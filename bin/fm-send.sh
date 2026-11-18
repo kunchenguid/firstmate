@@ -357,15 +357,16 @@ fm_send_count_colons() { # <string>
   printf '%s' $((${#s} - ${#no_colons}))
 }
 
-# When an explicit outside-home target has no recorded harness, detect kiro
-# from the live pane's foreground process group so the kiro-only composer
-# rules apply (fm_composer_kiro_scope). The live e2e guard owns why this
+# When an explicit outside-home target has no recorded harness, detect kiro or
+# copilot from the live pane's foreground process group so their composer rules
+# apply (fm_composer_kiro_scope; FM_COMPOSER_HARNESS=copilot). The live e2e guard owns why this
 # reads the foreground group through fm-harness.sh ancestry rather than
 # #{pane_current_command}: a toolbox wrapper can rename the tmux field
-# while comm still reads kiro-cli. Any other (or unreadable) process leaves
+# while comm still reads kiro-cli. Copilot's comm is the thread name MainThread, so
+# fm-harness.sh ancestry names it from argv[0]. Any other (or unreadable) process leaves
 # TARGET_HARNESS empty, which is the pre-kiro default and keeps the
 # non-kiro typed path - including the unknown-harness `$` settle - unchanged.
-fm_send_detect_kiro_from_live_target() {
+fm_send_detect_harness_from_live_target() {
   local pid verdict
   [ -n "$TARGET_HARNESS" ] && return 0
   [ "$TARGET_BACKEND" = tmux ] || return 0
@@ -375,8 +376,11 @@ fm_send_detect_kiro_from_live_target() {
     [ -n "$pid" ] || continue
     case "$pid" in *[!0-9]*) continue ;; esac
     verdict=$("$SCRIPT_DIR/fm-harness.sh" ancestry "$pid" 2>/dev/null || true)
-    [ "$verdict" = "comm kiro" ] || continue
-    TARGET_HARNESS=kiro
+    case "$verdict" in
+      "comm kiro") TARGET_HARNESS=kiro ;;
+      "comm copilot") TARGET_HARNESS=copilot ;;
+      *) continue ;;
+    esac
     return 0
   done <<EOF
 $(fm_backend_tmux_foreground_pids "$RESOLVED_TARGET" 2>/dev/null || true)
@@ -490,10 +494,10 @@ fm_send_resolve_target() { # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
-fm_send_detect_kiro_from_live_target
-# The recorded harness, or kiro detected from a meta-less explicit target's
-# live pane, scopes the kiro-only composer rules for every composer read this
-# send makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
+fm_send_detect_harness_from_live_target
+# The recorded harness, or kiro or copilot detected from a meta-less explicit
+# target's live pane, scopes those harnesses' composer rules for every composer
+# read this send makes (fm_composer_kiro_scope in bin/fm-composer-lib.sh).
 # shellcheck disable=SC2034
 FM_COMPOSER_HARNESS=$TARGET_HARNESS
 shift
@@ -882,7 +886,7 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # above. A task selector carries meta. An explicit backend-target escape hatch
 # has none, so its harness stays unknown and is treated as non-codex (the safe
 # default that keeps the `$` fast path) unless the live pane's foreground
-# process group is kiro (fm_send_detect_kiro_from_live_target).
+# process group is kiro or copilot (fm_send_detect_harness_from_live_target).
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own

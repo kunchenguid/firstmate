@@ -26,7 +26,7 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, verified native Codex TUI, Pi / pi-signed, omp, Cursor, Antigravity (agy) |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, verified native Codex TUI, Pi / pi-signed, omp, Cursor, Antigravity (agy), GitHub Copilot CLI |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has verified session-open delivery only on the native version selected by `bin/fm-codex-stop-park.sh`; its compaction and re-emit surfaces remain unverified.
@@ -44,7 +44,9 @@ Codex's interactive TUI has verified session-open delivery only on the native ve
 | Cursor | Run | [Cursor](#cursor) |
 | omp | Run | [omp](#omp) |
 | Antigravity (agy) | Run | [Antigravity (agy)](#antigravity-agy) |
+| GitHub Copilot CLI | Run | [GitHub Copilot CLI](#github-copilot-cli) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
+| Copilot compaction | Covered | [Copilot compaction](#copilot-compaction) |
 
 ### Why the run tier exists
 
@@ -383,6 +385,46 @@ In linked crewmate worktrees or foreign checkouts, `bin/fm-sessionstart-run.sh` 
 In primary or secondmate homes, the wrapper emits the captured digest as `{injectSteps:[{systemMessage:{systemMessage:$digest}}]}` on stdout with exit 0.
 Native stdout context injection gates the ordered digest into model context before the first agent turn.
 
+### GitHub Copilot CLI
+
+GitHub Copilot CLI is a run-tier harness for a hand-opened primary session.
+`.github/hooks/firstmate-primary.json` registers `sessionStart`, anchored through `$COPILOT_PROJECT_DIR` with a 180s timeout, invoking `bin/fm-sessionstart-copilot.sh`.
+Copilot loads project hooks only for a trusted folder.
+The adapter reads `source` from the native payload and delegates to `bin/fm-sessionstart-run.sh`, which owns primary scope, source routing, and the digest.
+It returns the digest as `{"additionalContext":...}`, which reaches the model before its first reply, and prints nothing when the run wrapper stands down.
+The hook fires when the first prompt is submitted, not when the pane opens, and Copilot fires no hook at a plain open.
+Launch the primary with `-i '<one line>'` (`bin/fm-copilot-primary.sh` adds it), or `--resume=<id> -i '<one line>'` to resume, so Copilot submits that prompt itself and the digest arrives without a human typing first.
+The one line only has to start a turn, because the hook delivers the digest whatever it says.
+The `/exit` banner's resume command carries no `-i`, so add it by hand or resume through the launcher.
+With a folder that is not yet trusted, Copilot holds the `-i` prompt behind the trust dialog and sends it once the dialog is answered `Yes`, so the digest still follows; answering `No` ends the session.
+Open a hand-started primary with `bin/fm-copilot-primary.sh --no-auto-update --allow-all` from the Firstmate home.
+The launcher runs `copilot` in place inside tmux or Herdr and otherwise opens it in a tmux session, so a plain or editor terminal still gets the typed wake.
+Native Windows is not supported; use WSL2.
+Copilot downloads new releases in the background and applies them at the next plain launch, `autoUpdate: false` alone does not stop an already-downloaded one, and `COPILOT_AUTO_UPDATE=false` does the same as `--no-auto-update`.
+`--allow-all` alone still shows the folder-trust dialog once; answer `Yes, and remember this folder` so the home stays trusted and its hooks load.
+
+| Copilot event | Payload `source` | Action |
+| --- | --- | --- |
+| First prompt of a new session | `new` | Full digest |
+| First prompt after `--continue` or `--resume <id>` | `resume` | Full digest (the adapter routes it as `startup`) |
+| First prompt after `/clear` | `new` | Full digest |
+
+`/clear` ends the old session (`sessionEnd`) and starts a new one, so it is indistinguishable from a fresh launch and takes the redundant full digest rather than a re-emit.
+The payload type also lists `startup`, which a real session was not seen to send; it routes as `startup`.
+The same registration carries the primary's `preToolUse` seatbelts through `bin/fm-pretool-copilot.sh`; [the cd guard](cd-guard.md), [the arm guard](arm-pretool-check.md), and [the subagent guard](subagent-guard.md) own their decisions.
+A worker's per-task plugin (`bin/fm-copilot-plugin.sh`) carries neither hook, and a Firstmate worktree that carries this registration stands both adapters down by primary scope.
+The same registration carries the turn-end guard ([owner](turnend-guard.md)) and the turn boundaries that `bin/fm-copilot-wake.sh` reads.
+The adapter names the harness for the digest with `FM_COPILOT_HARNESS`, because that process chain is deeper than the eight levels `bin/fm-harness.sh` climbs.
+
+### Copilot compaction
+
+Copilot compaction is covered by `bin/fm-copilot-compact.sh`, a two-step transport, because Copilot discards `preCompact` output and fires no `sessionStart` after a compaction.
+`preCompact` records the compacted session's id in `state/.copilot-compacted`.
+The next `userPromptSubmitted` or `postToolUse` from that same session claims the record with one rename and returns the `--source compact` re-emit digest as `additionalContext`, once.
+`postToolUse` covers an automatic compaction that lands mid-turn, after the prompt hook already fired.
+It stands down by primary scope like the other Copilot adapters, and skips payloads that carry `parentAgentId`, so workers and subagents never receive it.
+Unprompted, no model reran session start after a compaction, and one lost track of which home it serves, so the hook, not the model, restores the digest ([evidence](verification/copilot.md#compaction-re-emit)).
+
 ### Cursor compaction
 
 Cursor compaction is uncovered and has no tracked transport.
@@ -461,6 +503,16 @@ It uses a TERM-resistant digest that exceeds its budget and proves that the dige
 - It keeps `preCompact` unregistered, so the deferred surface cannot be reintroduced unnoticed.
 
 `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` proves the injected digest actually reaches model context in a real cursor-agent session.
+
+### Copilot tests
+
+`tests/fm-copilot-primary.test.sh` proves the Copilot adapters over sanitized recorded payloads and the tracked registration's own command strings:
+
+- `sessionStart` emits the whole digest as `additionalContext` for `new` and `resume`, and takes the helm for an unrecognized source or an unreadable payload.
+- `preToolUse` renders the cd, watcher-arm, and subagent denies as `permissionDecisionReason` with exit 0 and an empty stderr.
+- Subagent-raised payloads, malformed payloads, and the observing tools `read_agent` and `list_agents` are allowed.
+- A linked worker worktree carrying the same registration gets no digest and no deny.
+- A worker plugin written by `bin/fm-copilot-plugin.sh` registers neither hook.
 
 ### Live run-tier guards
 

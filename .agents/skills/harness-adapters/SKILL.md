@@ -34,6 +34,7 @@ Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> int
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
 Muse, Gemini, Devin, Command Code, Polytoken, Cortex, Kiro, and Hermes are verified only for crewmate and scout work, never a secondmate or primary.
+Copilot is verified for crewmate, scout, persistent secondmate, and hand-opened primary work on tmux and Herdr; as a primary it runs the typed wake, and away and quiet mode run the away daemon, never the supervision host.
 
 ## Detection
 
@@ -99,7 +100,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "polytoken": "references/harness/polytoken.md",
     "cortex": "references/harness/cortex.md",
     "kiro": "references/harness/kiro.md",
-    "hermes": "references/harness/hermes.md"
+    "hermes": "references/harness/hermes.md",
+    "copilot": "references/harness/copilot.md"
   }
 }
 ```

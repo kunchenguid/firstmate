@@ -566,6 +566,7 @@ FM_DELIVERY_POLYTOKEN_BUSY_REGEX_DEFAULT='^[[:space:]]*Running for [0-9]+([.][0-
 # the footer row (`›` glyph first), so prose that merely names the phrase, such
 # as a grep of these docs in another harness's pane, is never read as busy.
 FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT='^[[:space:]]*›[[:space:]]+Kiro is working'
+FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT='esc esc interrupt|esc again to interrupt|Working[[:space:]]+·'
 FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT='^[[:space:]]*(🌑|🌒|🌓|🌔|🌕|🌖|🌗|🌘)[[:space:]]+·[[:space:]]+'
 
 fm_busy_lines_match() {  # [harness]
@@ -590,6 +591,7 @@ fm_busy_lines_match() {  # [harness]
       kiro) regex=$FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
       cursor) regex=$FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT ;;
+      copilot) regex=$FM_DELIVERY_COPILOT_BUSY_REGEX_DEFAULT ;;
       '') regex=$FM_DELIVERY_BUSY_REGEX_DEFAULT ;;
       *)
         # A supplied harness must never borrow another harness's signature.
@@ -2313,6 +2315,46 @@ _fm_composer_hermes_state() {  # <screen> <styled>
     }'
 }
 
+# GitHub Copilot CLI draws its composer one of two ways, both read only when the
+# caller names the recorded harness copilot (FM_COMPOSER_HARNESS), because
+# neither shape is proof of this agent anywhere else (verified, copilot 1.0.105):
+#   rule box   a `❯` row between two full-width `─` rules (a plain pty)
+#   block box  `╻▄▄▄…` above, `┃`-led input rows, `╹▀▀▀…` below (a real Herdr
+#              pane): an empty composer is a bare `┃`, a draft is `┃ text`
+# Both keep their shape while a turn runs and have one footer row below. More
+# than one input row is a multi-line draft; anything that does not end in the
+# box plus at most one footer row (a picker, a dialog) is unknown. Repeated
+# multibyte glyphs are written as repeated groups so a byte-based awk matches.
+_fm_composer_copilot_state() {  # <plain-screen>
+  printf '%s\n' "$1" | awk '
+    { rows[NR]=$0 }
+    END {
+      last=NR; while (last>0 && rows[last] ~ /^[[:space:]]*$/) last--
+      bottom=0; block=0
+      for (i=last; i>0 && i>last-2; i--) {
+        if (rows[i] ~ /^[[:space:]]*╹(▀)(▀)(▀)(▀)(▀)(▀)(▀)(▀)(▀)(▀)+[[:space:]]*$/) { bottom=i; block=1; break }
+        if (rows[i] ~ /^[[:space:]]*(─)(─)(─)(─)(─)(─)(─)(─)(─)(─)+[[:space:]]*$/) { bottom=i; break }
+      }
+      if (!bottom) { print "unknown"; exit }
+      top=0
+      for (i=bottom-1; i>0 && i>bottom-12; i--) {
+        if (block && rows[i] ~ /^[[:space:]]*╻(▄)(▄)(▄)(▄)(▄)(▄)(▄)(▄)(▄)(▄)+[[:space:]]*$/) { top=i; break }
+        if (!block && rows[i] ~ /^[[:space:]]*(─)(─)(─)(─)(─)(─)(─)(─)(─)(─)+[[:space:]]*$/) { top=i; break }
+      }
+      if (!top) { print "unknown"; exit }
+      if (block) {
+        for (i=top+1; i<bottom; i++) if (rows[i] !~ /^┃/) { print "unknown"; exit }
+        if (bottom-top > 2) { print "pending"; exit }
+        text=rows[top+1]; sub(/^┃/, "", text); sub(/┃[[:space:]]*$/, "", text)
+      } else {
+        if (rows[top+1] !~ /^[[:space:]]*❯/) { print "unknown"; exit }
+        if (bottom-top > 2) { print "pending"; exit }
+        text=rows[top+1]; sub(/^[[:space:]]*❯[[:space:]]*/, "", text)
+      }
+      if (text ~ /^[[:space:]]*$/) print "empty"; else print "pending"
+    }'
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
@@ -2349,6 +2391,10 @@ EOF
     return
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  if [ "${FM_COMPOSER_HARNESS:-}" = copilot ]; then
+    _fm_composer_copilot_state "$plain"
+    return
+  fi
   _fm_composer_scan_screen "$plain" "$cy" '' "$cortex_proven"
   # The lazy Cortex identity pass: only a caller that asked for it
   # (cortex=ask), has not yet supplied an identity, and sees a titled rounded

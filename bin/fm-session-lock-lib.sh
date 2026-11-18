@@ -32,14 +32,16 @@ unset _FM_SESSION_LOCK_LIB_DIR
 # Known harness command names; extend when a new adapter is verified. omp and
 # agy are anchored exactly like pi: their process names are the bare words `omp`
 # (verified, omp 18.1.11) and `agy`, and a substring match would claim ompd or
-# comp.
+# comp. copilot is anchored too: on Linux its process name is the thread name
+# `MainThread`, so its argv[0] reaches the exact-component match below (verified,
+# copilot 1.0.105), and a substring would claim copilot-language-server.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^agy$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
 # bin/fm-claude-stop-autoarm.sh.
-FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy)
+FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp agy copilot)
 
 # Print the exact harness name carried by executable path $1 - its own basename
 # or any directory component - or return 1.

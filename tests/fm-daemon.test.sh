@@ -4147,7 +4147,23 @@ test_dialog_name_joins_unseen_status_escalation() {
   pass "a dialog name joins the escalation of an unseen status"
 }
 
+# A Copilot pane on Herdr draws a block-glyph composer the generic scan reads
+# as unknown, so only a Copilot primary may name itself to the composer read.
+test_primary_composer_read_names_only_a_copilot_primary() {
+  local dir out
+  dir=$(make_supercase composer-harness)
+  out=$(
+    fm_backend_composer_state() { printf '%s,' "${FM_COMPOSER_HARNESS:-none}" >> "$dir/seen"; printf empty; }
+    FM_DAEMON_PRIMARY_HARNESS=copilot pane_input_pending "default:w1:p2" herdr || true
+    FM_DAEMON_PRIMARY_HARNESS=claude pane_input_pending "default:w1:p2" herdr || true
+    cat "$dir/seen"
+  )
+  [ "$out" = "copilot,none," ] || fail "composer read harness was '$out', expected 'copilot,none,'"
+  pass "the primary composer read names only a Copilot primary"
+}
+
 test_dialog_name_survives_away_self_handle
 test_seen_terminal_dialog_stale_clears_like_a_plain_stale
 test_dialog_name_joins_unseen_status_escalation
 test_dialog_name_after_demand_deep_inspection_still_escalates
+test_primary_composer_read_names_only_a_copilot_primary

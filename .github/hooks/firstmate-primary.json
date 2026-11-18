@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-sessionstart-copilot.sh",
+        "timeoutSec": 180
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-pretool-copilot.sh",
+        "timeoutSec": 10
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-turnend-guard-copilot.sh",
+        "timeoutSec": 30
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-copilot-wake.sh turn busy user-prompt-submit",
+        "timeoutSec": 10
+      },
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-copilot-compact.sh deliver",
+        "timeoutSec": 180
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-copilot-wake.sh turn idle session-end",
+        "timeoutSec": 10
+      }
+    ],
+    "preCompact": [
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-copilot-compact.sh mark",
+        "timeoutSec": 10
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "\"$COPILOT_PROJECT_DIR\"/bin/fm-copilot-compact.sh deliver",
+        "timeoutSec": 180
+      }
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+Plain-text visible-screen tails (last five rows, trailing blanks trimmed) read with `tmux capture-pane -p` from a live Copilot 1.0.109 on tmux 3.7c, Linux, on 2026-11-11, in a private-socket lab with a relocated `COPILOT_HOME`; the pane was 150 columns wide.
+`busy-empty.pane` is a running `sleep 90` shell tool; `interrupt-armed.pane` is the same pane after one Escape; `after-interrupt.pane` is the pane after the second Escape; `idle.pane` is the settled composer; `idle-draft.pane` has `draft text` typed and not submitted; `rewind-picker.pane` is the picker an idle double Escape opens.
+The top row had its worktree path and usage text replaced with a placeholder.

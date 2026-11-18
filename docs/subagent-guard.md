@@ -45,13 +45,16 @@ A tool is delegation-shaped when its normalized lowercase name contains one of t
 ```text
 agent  subagent  task  workflow  cron  schedul  worktree
 delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
+createsession  sendsessionmessage
 ```
 
 Three exclusions keep the shape test from producing false positives.
 
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
-- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, `killshell`, `manage_subagents` (`managesubagents`), and `manage_task` (`managetask`) are allowed.
+  Copilot names an MCP tool `<server>-<tool>` instead, and that form has no exemption: a GitHub MCP tool is classified by its name like any other tool, so one whose name carries a stem, such as a workflow-dispatching tool, is denied.
+  A GitHub MCP tool whose name carries no stem passes the shape test whatever it does; the guard cannot know a third-party server's tool list, so that gap is accepted.
+- `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, `killshell`, `manage_subagents` (`managesubagents`), `manage_task` (`managetask`), and Copilot's `read_agent` (`readagent`), `list_agents` (`listagents`), and the GitHub MCP server's read-only `github-mcp-server-get_copilot_task_status` are allowed.
   These observe or stop work that already exists rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
   A Claude primary's optional local deny list may still remove them from the schema.
   The shipped guard stays narrower on purpose so it can never be the reason a runaway task cannot be stopped.
@@ -183,6 +186,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | --- | --- | --- |
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Antigravity | present (`invoke_subagent`, `define_subagent`) | Scoped guard wired and live-verified via `.agents/hooks.json` PreToolUse hook (`bin/fm-subagent-pretool-check.sh --agy`). |
+| GitHub Copilot CLI | present (`task`, `read_agent`, `list_agents`, `write_agent`) | Scoped guard wired and live-verified via `.github/hooks/firstmate-primary.json` `preToolUse` (`bin/fm-pretool-copilot.sh`, which feeds every tool name to this check). Starting a subagent is a `preToolUse` with `toolName` `task` that precedes `subagentStart`. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | omp | present, per bundled material | Not wired and unverified. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the captain-level `task.maxConcurrency` setting governs it. No Firstmate delegation seatbelt is wired for it yet, and its status stays unverified until a live tool enumeration is recorded the way the Codex row was. |

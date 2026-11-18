@@ -33,6 +33,9 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
   local path=$1 argv0=${2:-} base
   base=${path##*/}
   base=${base#-}
+  # The tmux foreground reading passes an empty path with only argv[0]; Copilot's
+  # kernel name is MainThread, so its exact argv[0] basename is the identity.
+  [ "${argv0##*/}" != copilot ] || base=copilot
   case "$base" in
     # muse is anchored rather than globbed like its neighbours: its installed
     # binary is muse-bin-<version> (the launcher execs it, so the version is the
@@ -65,6 +68,11 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # #{pane_current_command} both read kiro-cli), and a glob would claim
     # unrelated commands containing that fragment.
     kiro-cli) printf 'agent' ;;
+    # copilot (GitHub Copilot CLI) is anchored on argv[0]: its kernel process
+    # name is the thread name `MainThread` (verified, copilot 1.0.105), so only
+    # the argv[0] surface can name it, and a glob would claim unrelated commands
+    # such as copilot-language-server.
+    copilot) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then
