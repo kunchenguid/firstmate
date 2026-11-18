@@ -247,12 +247,13 @@ fm_afk_contract_lock_helpers() {
 # fm_afk_contract_lock_hold [state-dir]: take the cross-subsystem lock described
 # in the header. The acquire is bounded so a wedged holder is refused instead of
 # blocking a merge or a captain return forever, and returns 1 WITHOUT the lock so
-# every caller refuses rather than proceeding unlocked.
-fm_afk_contract_lock_hold() {  # [state-dir]
+# every caller refuses rather than proceeding unlocked. A caller that defers on
+# contention instead of waiting for a merge passes its own shorter bound.
+fm_afk_contract_lock_hold() {  # [state-dir] [timeout-seconds]
   local lock rc=0 STATE timeout
   STATE=${1:-$FM_AFK_CONTRACT_STATE}
   lock=$(fm_afk_contract_lock_path "$STATE")
-  timeout=${FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT:-$_FM_AFK_CONTRACT_LOCK_TIMEOUT}
+  timeout=${2:-${FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT:-$_FM_AFK_CONTRACT_LOCK_TIMEOUT}}
   fm_afk_contract_lock_helpers || {
     fm_afk_contract_log "could not load the lock primitive for $lock"
     return 1

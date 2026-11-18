@@ -155,6 +155,9 @@ exclusion_reason() {
     fm-backend-tern.test.sh|fm-backend-tern-smoke.test.sh)
       printf '%s\n' 'tern optional backend; keep out of pure parallel pool'
       ;;
+    fm-backend-hc.test.sh|fm-backend-hc-smoke.test.sh)
+      printf '%s\n' 'hc optional backend; keep out of pure parallel pool'
+      ;;
     *)
       return 1
       ;;
@@ -178,6 +181,7 @@ tests/fm-ensure-agents-md.test.sh
 tests/fm-grok-harness.test.sh
 tests/fm-herdr-lab.test.sh
 tests/fm-lint.test.sh
+tests/fm-park.test.sh
 tests/fm-pi-primary-types.test.sh
 tests/fm-pr-merge.test.sh
 tests/fm-review-diff.test.sh
