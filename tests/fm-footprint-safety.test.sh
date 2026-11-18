@@ -1209,6 +1209,36 @@ SH
   chmod +x "$FB/sync"
 }
 
+# unlink_link_shim <outside>: a python3 on PATH that runs the removal engine
+# with its unlink wrapped, so that a hard link to data.txt is made from
+# <outside>/linked.txt in the instant before that name's unlink, as a
+# process racing the removal could.
+unlink_link_shim() {  # <outside>
+  local real_py
+  real_py=$(command -v python3)
+  cat > "$FB/unlink-race.py" <<'PY2'
+import os, runpy, sys
+real_unlink = os.unlink
+outside = os.environ["FP_TEST_OUTSIDE_LINK"]
+def unlink(path, *args, dir_fd=None, **kwargs):
+    if path == "data.txt" and not os.path.lexists(outside):
+        os.link(path, outside, src_dir_fd=dir_fd)
+    return real_unlink(path, *args, dir_fd=dir_fd, **kwargs)
+os.unlink = unlink
+argv = sys.argv[1:]
+script = next(a for a in argv if a.endswith(".py"))
+sys.argv = argv[argv.index(script):]
+runpy.run_path(script, run_name="__main__")
+PY2
+  cat > "$FB/python3" <<SH
+#!/usr/bin/env bash
+case " \$* " in *" remove "*) exec "$real_py" -I -B "$FB/unlink-race.py" "\$@" ;; esac
+exec "$real_py" "\$@"
+SH
+  chmod +x "$FB/python3"
+  export FP_TEST_OUTSIDE_LINK="$1/linked.txt"
+}
+
 test_a_name_made_outside_during_the_close_keeps_its_permissions() {
   local mode t out outside n
   for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
@@ -1251,7 +1281,26 @@ test_a_name_made_outside_during_the_close_keeps_its_permissions() {
   wait
   assert_equals pair "$(cat "$outside/linked")" "the outside name must keep its data: $(cat "$TMP_ROOT/linkout-walks/out")"
   assert_equals 644 "$(file_mode "$outside/linked")" "a name made outside between the freeze's walks must keep its permissions: $(cat "$TMP_ROOT/linkout-walks/out")"
-  pass "a file that gains a name outside the copy during the close keeps its permissions there, in close, the daily pass and apply"
+  # The same name made in the instant between the removal's last check of
+  # the file and its unlink.
+  for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+    new_home "linkout-unlink-$mode"
+    outside="$TMP_ROOT/linkout-unlink-$mode/outside"
+    mkdir -p "$outside"
+    t=$(target "$mode" task-h7)
+    mkdir -p "$t/lib"
+    printf 'precious\n' > "$t/lib/data.txt"
+    printf 'x\n' > "$t/lib/other.txt"
+    chmod 644 "$t/lib/data.txt"
+    unlink_link_shim "$outside"
+    out=$(run_target "$mode" task-h7 "$t")
+    rm -f "$FB/python3"
+    unset FP_TEST_OUTSIDE_LINK
+    assert_present "$outside/linked.txt" "$mode: the probe must have linked the file at its unlink: $out"
+    assert_equals precious "$(cat "$outside/linked.txt")" "$mode: the name made at the unlink must keep its data"
+    assert_equals 644 "$(file_mode "$outside/linked.txt")" "$mode: a name made outside at the moment of the unlink must keep its permissions: $out"
+  done
+  pass "a file that gains a name outside the copy during the close, even at its unlink, keeps its permissions there, in close, the daily pass and apply"
 }
 
 test_orphans_sharing_a_store_file_all_go_in_one_pass() {
