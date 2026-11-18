@@ -51,6 +51,8 @@ Until they land, their current behavior stays as described in their own owners.
 | The engine | `bin/fm-supervision-engine-lib.sh` | Owns the home gate, including the default on Claude and the opt-out, the verified-engine list, and one bounded engine turn, including the reap of engine tool processes that outlive it. |
 | Row eligibility and the offer rule | `bin/fm-branch-dispatch.mjs` | The command entry to `.pi/extensions/lib/fm-branch-dispatch.ts`, so the host and the Pi extension compute branch-claimable rows, their task scope, and whether the branch may take a close (`branchOfferForWake`) from one owner; it also renders the wake message with the same away-posture tail, or the dialog mirror at its head. |
 | Warm-cache compaction | `bin/fm-warm-compact-lib.sh` | While parked, the host compacts the idle primary and its idle engine conversation once per idle episode when the home opted in; [configuration.md](configuration.md#warm-cache-compaction-configwarm-compact) owns the gate and guards. |
+| Daily fresh start | `bin/fm-fresh-start-lib.sh` | While parked beside a Claude primary that opted in, the host saves and clears the primary's conversation once a day in a quiet window; [configuration.md](configuration.md#daily-fresh-start-configdaily-fresh-start) owns the setting and steps. |
+| Outcome batching | `bin/fm-outcome-batch-lib.sh` | When the home opted in, the host holds attended captain outcomes the records prove routine and hands them to main together; [configuration.md](configuration.md#outcome-batching-configoutcome-batch) owns the rule. |
 | The grant and the drain | `bin/fm-wake-grant.sh` | Publishes the branch's rows bound to the host's own process; [watcher-continuity.md](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor drain and acknowledgement the engine runs. |
 | The prompt | `bin/fm-branch-prompt.sh` | Emits the same byte-stable prompt the Pi branch runs; each wake names its host's report surface. |
 | The report surface | `bin/fm-branch-report.sh` | The command twin of the Pi branch's `fm_branch_report` tool, with the same task scoping; see [The report surface](#the-report-surface). |
@@ -207,6 +209,7 @@ One example is a Cursor park superseded by the return turn's own end, which stop
 ## Captain outcomes
 
 A captain outcome the attended engine records while the captain remains attended wakes main once, through the owner's ordinary wake path, with one `supervision-host: branch-outcome:` line naming its store rows.
+With [outcome batching](configuration.md#outcome-batching-configoutcome-batch) on, a turn whose captain outcomes are all proven routine is held instead and reaches main with later ones, within a bounded window.
 Main drains, and `bin/fm-wake-drain.sh` presents it in its `BRANCH OUTCOMES` section with the exact `bin/fm-branch-outcome.sh mark-processed --through <seq>` acknowledgement.
 That presentation is what the Pi branch's visible entry is, so it advances the store's read cursor through the rows it presents.
 Every later drain, including the session-start digest, presents unprocessed captain outcomes again until main acknowledges them, so an ignored outcome costs no extra turn and is never lost.
