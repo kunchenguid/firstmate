@@ -933,6 +933,13 @@ check_hc_server() {
       return 0
       ;;
     *)
+      # herdr-core on macOS reports keeps_running_after_logout as null, so no
+      # update closes this gap there.
+      if [ "$PLATFORM" = darwin ]; then
+        record hc-server "human: remote hc second mates need a Linux host, because herdr-core on macOS does not report a core that survives logout (session $session reports no boolean keeps_running_after_logout)" \
+          "run this remote second mate on a Linux host, or on the herdr or rex backend on this macOS host"
+        return 0
+      fi
       record hc-server "human: the herdr-core core for session $session reports no explicit boolean keeps_running_after_logout; persistence is unproven" \
         "update Herdr Core on that account, then rerun this command"
       return 0

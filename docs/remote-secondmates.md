@@ -34,6 +34,7 @@ Provisioning checks any available supported backend; launch checks the selected 
 - [Rex's server-stop limits](rex-backend.md#active-limits) explain session restoration and agent recovery.
 - A remote hc endpoint runs in the host's herdr-core core that Herdr.app shows for that machine, so the second mate appears in the captain's window as a native agent, and its own workers, which select hc automatically inside its labeled terminal, appear beside it.
   That core must report that it keeps running after logout, which herdr-core does when it runs as the account's own user service.
+  Remote hc second mates are supported today only on Linux hosts, because herdr-core on macOS reports `keeps_running_after_logout: null`; on a macOS host the doctor reports that as a human gap and names Linux as the fix.
   [`bin/fm-remote-hc-lib.sh`](../bin/fm-remote-hc-lib.sh) owns which core that is and how its socket is resolved under the remote job worker's scrubbed environment.
 - Local second mates are unaffected and keep their ordinary backend and session selection.
   So do the workers a remote second mate supervises inside its own home.
@@ -289,6 +290,7 @@ An answering exit-empty server is reported as a human gap: at a time when nothin
 Because Rex starts a missing server as exit-empty, nothing else Firstmate runs for a remote second mate starts one: while no server answers, the remote endpoint state reads `unreadable`, and recovery waits for this repair to start the persistent server.
 Under `--backend hc`, the doctor reads the core only through a socket it has proven live, because hc starts an empty core on contact with a dead one.
 A core that does not report `keeps_running_after_logout: true`, or that speaks another protocol generation, is a human gap.
+On macOS that gap says remote hc second mates need a Linux host, because herdr-core there reports `keeps_running_after_logout: null` and no update changes it.
 A core that does not answer is a human gap too: connect the machine from Herdr.app or start the account's herdr-core user service.
 `--fix` never starts, stops, or restarts a core, because a core started from the doctor's session is not necessarily the one the app shows, and stopping one ends every terminal in it.
 

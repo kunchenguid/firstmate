@@ -123,6 +123,7 @@ The respawn is `bin/fm-spawn.sh <id> --secondmate` on the mate's recorded backen
 Lifecycle control of an hc second mate (`bin/fm-control.sh <id> exit` and `relaunch`) is governed by the control plane's per-backend capability ([capability matrix](agent-control.md#capability-matrix)), which does not list hc, so both verbs refuse an hc task of any kind; this page adds no second-mate-specific exception.
 
 A remote second mate can run on hc too, in the remote host's core that Herdr.app shows for that machine; [`remote-secondmates.md`](remote-secondmates.md#where-the-remote-agent-runs) owns that placement, its readiness checks, and its refusals.
+That remote host must run Linux today: herdr-core on macOS reports `keeps_running_after_logout: null`, so remote readiness never accepts a macOS core.
 On the remote host the launching home is that host's code root, so the terminal's identity labels are the code root's and its presentation labels are the mate home's, exactly as above.
 
 ## Limits

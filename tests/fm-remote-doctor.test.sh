@@ -1463,6 +1463,22 @@ if command -v node >/dev/null 2>&1; then
   done
   pass "a core that does not keep running after logout is a human gap --fix never touches"
 
+  # herdr-core 0.1.21 on macOS reports `"keeps_running_after_logout": null`
+  # from `server status --json` (captured from the real binary), and no update
+  # changes that, so a macOS host is told remote hc mates need a Linux host
+  # rather than sent to update Herdr Core.
+  new_case Darwin no-herdr gui
+  install_case_hc
+  mkdir -p "$CASE_STATE/hcfake"
+  printf 'null\n' > "$CASE_STATE/hcfake/keeps-running"
+  doctor --backend hc
+  expect_code 1 "$DOCTOR_RC" "a macOS hc core with unproven persistence was reported ready"
+  assert_contains "$DOCTOR_OUT" 'check hc-server=human: remote hc second mates need a Linux host' \
+    "a macOS hc core was not told it needs a Linux host"$'\n'"$DOCTOR_OUT"
+  assert_not_contains "$DOCTOR_OUT" 'action: hc-server: update Herdr Core' \
+    "a macOS hc core was sent to update Herdr Core, which cannot close the gap"
+  pass "a macOS hc host is told remote hc second mates need a Linux host"
+
   # A CLI below the verified floor is a human gap.
   new_case Linux no-herdr
   install_case_hc
