@@ -1231,6 +1231,16 @@ The file is created lazily on first learning and follows the internal [`stow` sk
 
 There is no shared learnings file by captain decision.
 
+### Reviewing Claude's auto-memory notes
+
+Firstmate's files stay the master copy; Claude's saved notes come back only through `bin/fm-memory-review.sh`, which the captain runs by hand with the primary `FM_HOME` set.
+It lists the notes in Claude's auto-memory directory for that home, asks the captain to approve or skip each one, and files approved notes into `data/learnings.md` with an aging marker and a provenance line.
+It never writes `data/captain.md` or `data/captain-shared.md`, never edits Claude's files, and keeps its reviewed-note record in `data/claude-memory-reviewed.tsv`.
+Stores belonging to project clones and task worktrees are never read, because a worker's "user" is Firstmate rather than the captain.
+The script refuses an `FM_HOME` that is not a genuine primary home.
+Unverified limitation: whether Claude Code shares one store between linked worktrees of the same repository is not confirmed, so a worker in a worktree of the firstmate repo itself might write into the primary home's store, and nothing detects that.
+The script header owns the directory derivation, record format, and flags.
+
 ## External memory tiers (Memory layering section)
 
 A home may declare memory stores outside firstmate, such as MCP-served knowledge stores, as authoritative for named classes of knowledge.
