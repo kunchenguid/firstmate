@@ -42,6 +42,10 @@ one, and a tree deeper than that allows is kept. Exit status 0 means every reque
 2 is a usage error and 3 a failed write of <record> or the output, which the
 caller treats as keep; any other status means the engine stopped early.
 
+FM_FOOTPRINT_ENGINE_PID_FILE, set by the script while a removal run is under
+way, names a file this engine writes its pid to, so a stop signal can stop
+and wait for it before the run is undone.
+
 Test seams, honoured only while FM_FOOTPRINT_TEST_SEAMS=1:
 FM_FOOTPRINT_TEST_REMOVE_HOOK names a program run with the root and the
 relative directory each time remove has just made a directory writable, to
@@ -232,9 +236,13 @@ class Freezer:
 
 
 def read_record(path: str) -> dict[tuple[int, int], int]:
+    """Reads a freeze record. A last line without its newline is the trace of
+    a write that failed part way, before its mode changed, so it is ignored."""
     modes: dict[tuple[int, int], int] = {}
     with open(path, encoding="utf-8") as handle:
         for line in handle:
+            if not line.endswith("\n"):
+                break
             parts = line.split()
             if len(parts) != 3:
                 raise ValueError("malformed record")
@@ -559,7 +567,10 @@ def cmd_remove(args: list[str]) -> int:
     modes = read_record(args[1])
     out: list[str] = []
     for root in roots:
-        done, blocks = remove_root(root, snap.get(root, {}))
+        try:
+            done, blocks = remove_root(root, snap.get(root, {}))
+        except (ValueError, IndexError, Keep):
+            done, blocks = False, 0
         if done and not os.path.lexists(root):
             out.append(f"{root}\tremoved\t{blocks // 2}\n")
         else:
@@ -568,6 +579,22 @@ def cmd_remove(args: list[str]) -> int:
             out.append(f"{root}\tpartial\t{blocks // 2}\n")
     emit("".join(out))
     return 0
+
+
+def write_pid_file() -> None:
+    """Names this engine in FM_FOOTPRINT_ENGINE_PID_FILE, so the script can
+    stop and wait for it before undoing a run it was stopped in."""
+    path = os.environ.get("FM_FOOTPRINT_ENGINE_PID_FILE", "")
+    if not path:
+        return
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600)
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def raise_open_file_limit() -> None:
@@ -597,6 +624,7 @@ def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] not in commands:
         sys.stderr.write("usage: fm-footprint-fs.py freeze|snapshot|thaw|remove ...\n")
         return 2
+    write_pid_file()
     raise_open_file_limit()
     try:
         rc = commands[argv[1]](argv[2:])

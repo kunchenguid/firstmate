@@ -1267,6 +1267,119 @@ PY2
   pass "a freeze stopped part way leaves a writable copy under its name, and a deep tree meets no recursion limit"
 }
 
+# engine_gone <pid>: 0 once <pid> no longer runs (gone, or a reaped zombie).
+engine_gone() {
+  local st
+  st=$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')
+  case "$st" in ''|Z*) return 0 ;; esac
+  return 1
+}
+
+# stopped_mid <step> <name>: runs a close whose engine is paused (SIGSTOP)
+# part way through <step> (freeze or remove), then stops the close with TERM
+# as a timed-out caller does; sets SM_PID to the paused engine's pid.
+stopped_mid() {  # <step> <name>
+  local step=$1 name=$2 s n real_python i pids
+  new_home "$name"
+  s=$(scratch_for task-m1)
+  mkdir -p "$s/a" "$s/d"
+  i=1
+  while [ "$i" -le 40 ]; do printf 'w\n' > "$s/a/f$i"; printf 'w\n' > "$s/d/f$i"; i=$((i + 1)); done
+  SM_AREA=$s
+  real_python=$(command -v python3)
+  if [ "$step" = freeze ]; then
+    # Pauses the freeze engine once its record holds five lines.
+    cat > "$FB/python3" <<HOOK
+#!/bin/bash
+rec=''; take=0
+for a in "\$@"; do [ "\$take" = 1 ] && { rec=\$a; break; }; [ "\$a" = freeze ] && take=1; done
+[ -n "\$rec" ] || exec "$real_python" "\$@"
+"$real_python" "\$@" & p=\$!
+until [ "\$(wc -l < "\$rec" 2>/dev/null | tr -d ' ')" -ge 5 ] 2>/dev/null || ! kill -0 "\$p" 2>/dev/null; do sleep 0.01; done
+kill -STOP "\$p" 2>/dev/null
+printf '%s\n' "\$p" > "$FB/engine.pid"
+wait "\$p"
+HOOK
+    chmod +x "$FB/python3"
+  else
+    # Pauses the remove engine once it reaches the second directory.
+    cat > "$FB/remove-hook" <<HOOK
+#!/bin/bash
+[ "\$2" = d ] || exit 0
+printf '%s\n' "\$PPID" > "$FB/engine.pid"
+kill -STOP "\$PPID"
+HOOK
+    chmod +x "$FB/remove-hook"
+    export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook"
+  fi
+  fp task-close task-m1 "$s" > "$TMP_ROOT/$name/out" 2>&1 &
+  n=0
+  until [ -s "$FB/engine.pid" ] || [ "$n" -ge 400 ]; do sleep .05; n=$((n + 1)); done
+  [ "$n" -lt 400 ] || fail "$step: the engine never paused"
+  SM_PID=$(cat "$FB/engine.pid")
+  sleep .2
+  pids=$(pgrep -f "fm-footprint.sh task-close task-m1 $s" || true)
+  [ -n "$pids" ] || fail "$step: the close must still be running"
+  # shellcheck disable=SC2086 # one pid per word
+  kill -TERM $pids
+  wait
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_REMOVE_HOOK
+  rm -f "$FB/python3"
+}
+
+test_a_close_stopped_mid_step_stops_its_engine_first() {
+  local step alive n
+  for step in freeze remove; do
+    stopped_mid "$step" "mid-$step"
+    alive=0
+    engine_gone "$SM_PID" || alive=1
+    # Let a still-running engine go on, as it would have, before looking.
+    kill -CONT "$SM_PID" 2>/dev/null || true
+    n=0
+    until engine_gone "$SM_PID" || [ "$n" -ge 100 ]; do sleep .05; n=$((n + 1)); done
+    kill -KILL "$SM_PID" 2>/dev/null || true
+    [ "$alive" = 0 ] || fail "$step: a stopped close must stop its engine before it undoes the run"
+    assert_present "$SM_AREA" "$step: the stopped close must put the copy back under its name"
+    all_writable "$SM_AREA" || fail "$step: the copy put back must be writable: $(find "$SM_AREA" ! -perm -u+w | head -n 3)"
+    [ -z "$(ls "$H/state/footprint-stopped" 2>/dev/null)" ] || fail "$step: a finished stop must drop its record"
+  done
+  pass "a close stopped mid-freeze or mid-removal stops its engine, then puts the copy back writable"
+}
+
+test_an_engine_that_dies_during_removal_leaves_a_writable_copy() {
+  local s out left rec
+  new_home engine-dies
+  s=$(scratch_for task-k1)
+  mkdir -p "$s/a" "$s/d"
+  printf 'w\n' > "$s/a/f1"
+  printf 'w\n' > "$s/d/f1"
+  cat > "$FB/remove-hook" <<'HOOK'
+#!/bin/bash
+[ "$2" = d ] || exit 0
+kill -KILL "$PPID"
+HOOK
+  chmod +x "$FB/remove-hook"
+  out=$(FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_REMOVE_HOOK="$FB/remove-hook" fp task-close task-k1 "$s")
+  ! claims_removed close "$out" || fail "a removal whose engine died must not report removal: $out"
+  left=$(find "${s%/*}" -maxdepth 1 -name '.fm-closing-task-k1.*' | head -n 1)
+  [ -n "$left" ] || fail "what is left must stay set aside: $out"
+  all_writable "$left" || fail "what is left must be writable: $(find "$left" ! -perm -u+w | head -n 3)"
+  # A record whose last line was cut short by a full disk still thaws.
+  mkdir -p "$TMP_ROOT/engine-dies/rec/x"
+  chmod 500 "$TMP_ROOT/engine-dies/rec/x"
+  rec="$TMP_ROOT/engine-dies/rec.modes"
+  python3 - "$TMP_ROOT/engine-dies/rec/x" "$rec" <<'PY2'
+import os, sys
+st = os.stat(sys.argv[1])
+with open(sys.argv[2], "w") as f:
+    f.write(f"{st.st_dev} {st.st_ino} 755\n{st.st_dev} 12")
+PY2
+  python3 -I -B "$ROOT/bin/fm-footprint-fs.py" thaw "$rec" "$TMP_ROOT/engine-dies/rec" ||
+    fail "a record with a cut-short last line must still thaw"
+  [ "$(file_mode "$TMP_ROOT/engine-dies/rec/x")" = 755 ] || fail "the thaw must restore the recorded mode"
+  pass "an engine that dies part way through removal leaves a writable copy, and a cut-short record still thaws"
+}
+
 test_an_interrupted_close_leaves_its_copy_writable() {
   local s pids n left out
   new_home halt-term
@@ -1584,6 +1697,8 @@ fm_test_run \
   test_an_uninspectable_process_is_named_on_linux \
   test_an_interrupted_freeze_leaves_a_writable_copy \
   test_an_interrupted_close_leaves_its_copy_writable \
+  test_a_close_stopped_mid_step_stops_its_engine_first \
+  test_an_engine_that_dies_during_removal_leaves_a_writable_copy \
   test_control_character_names_hide_the_whole_folder \
   test_only_rebuildable_directories_free_of_work_are_offered \
   test_preview_binds_contents_and_identity \

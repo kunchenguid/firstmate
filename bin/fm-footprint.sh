@@ -478,10 +478,12 @@ fp_set_aside() {  # <dir> <tag>
 #   7. a second snapshot that must equal the first, entry for entry.
 # A copy is removable only when a positive record says every step verified
 # it; a step that fails or cannot write its result keeps it, and a kept copy
-# gets its permissions and its old name back, as does every copy when a stop
-# signal arrives mid-way (fp_guard_set). The freeze writes each permission
-# to state/footprint-stopped/ before changing it, so a removal killed
-# outright is undone by the next run (fp_repair_stopped). fp_fs remove then deletes, at
+# gets its permissions and its old name back. A stop signal mid-way first
+# stops and reaps the running engine, then does the same for every copy
+# (fp_guard_fire). The freeze writes each permission to
+# state/footprint-stopped/ before changing it, so a removal killed outright,
+# or whose engine died, is undone by the next run once neither is running
+# (fp_repair_stopped). fp_fs remove then deletes, at
 # once, exactly the entries the verified snapshot lists, each checked against
 # its snapshotted identity in a parent opened by descriptor, giving each
 # directory its write bit back only when its own entries go; anything that
@@ -527,83 +529,175 @@ fp_engine_failed() {  # <work-dir> <status>
 
 # A removal run's freeze record lives in the home's state, not in a
 # temporary directory: <stopped-dir>/run.<pid>.<random> lists the run's
-# set-aside copies ("aside<TAB>dir") and <that>.modes holds every
-# permission, written before it changes. While a run is under way a stop
-# signal (TERM, INT, HUP, as a timed-out caller sends) thaws every copy from
-# that record and puts it back under its name (fp_guard_fire); a run killed
-# outright leaves the record, and the next close, old-folder apply or daily
-# pass gives any copy it names that still exists its permissions back once
-# that run's process is gone (fp_repair_stopped). A repaired copy that is
-# still set aside stays where it is and is reported, as before.
+# set-aside copies ("aside<TAB>dir"), <that>.modes holds every permission,
+# written before it changes, <that>.owner the run's pid and start time, and
+# <that>.engine the pid of the engine working for it. While a run is under
+# way a stop signal (TERM, INT, HUP, as a timed-out caller sends) first stops
+# and reaps that engine, which a GNU timeout runs in its own process group
+# out of the signal's reach, then thaws every copy and puts it back under its
+# name (fp_guard_fire). A run killed outright leaves the record, and the next
+# close, old-folder apply or daily pass gives each copy it names its
+# permissions back once neither the run nor its engine is running
+# (fp_repair_stopped). A record whose thaw failed is never dropped, so a
+# later run tries again; nothing here removes or renames anything.
 FP_STOPPED_DIR="$STATE/footprint-stopped"
 FP_GUARD_PAIRS=
 FP_GUARD_REC=
+FP_GUARD_KEEP=0
 
-# fp_stopped_record <pairs>: creates a run record listing <pairs> and an
-# empty permission record beside it; prints the run record's path.
+# fp_proc_start <pid>: the process's start time as ps prints it, or nothing.
+fp_proc_start() {  # <pid>
+  ps -o lstart= -p "$1" 2>/dev/null | head -n 1
+}
+
+# fp_stopped_record <pairs>: creates a run record listing <pairs>, its owner
+# line and an empty permission record beside it; prints its path.
 fp_stopped_record() {  # <pairs>
   local rec
   (umask 077 && mkdir -p "$FP_STOPPED_DIR") 2>/dev/null || return 1
   [ -d "$FP_STOPPED_DIR" ] && [ ! -L "$FP_STOPPED_DIR" ] || return 1
   rec=$(mktemp "$FP_STOPPED_DIR/run.$$.XXXXXX" 2>/dev/null) || return 1
-  { cat "$1" > "$rec" && (umask 077 && : > "$rec.modes"); } 2>/dev/null || { fp_stopped_drop "$rec"; return 1; }
+  {
+    cat "$1" > "$rec" && (umask 077 && : > "$rec.modes") &&
+      printf '%s\t%s\n' "$$" "$(fp_proc_start "$$")" > "$rec.owner"
+  } 2>/dev/null || { fp_stopped_drop "$rec"; return 1; }
   printf '%s\n' "$rec"
 }
 
-# fp_stopped_drop <run-record>: removes a run record and its permissions.
+# fp_stopped_drop <run-record>: removes a run record and its companions.
 fp_stopped_drop() {  # <run-record>
   case "$1" in
-    "$FP_STOPPED_DIR"/run.?*) rm -f -- "$1" "$1.modes" 2>/dev/null || true ;;
+    "$FP_STOPPED_DIR"/run.?*) rm -f -- "$1" "$1.modes" "$1.owner" "$1.engine" 2>/dev/null || true ;;
   esac
 }
 
+# fp_engine_alive <pid>: 0 while <pid> is a live removal engine.
+fp_engine_alive() {  # <pid>
+  kill -0 "$1" 2>/dev/null || return 1
+  case "$(ps -o command= -p "$1" 2>/dev/null)" in *fm-footprint-fs.py*) return 0 ;; esac
+  return 1
+}
+
+# fp_engine_stop <pid-file>: stops and waits for the engine named in
+# <pid-file>; returns 1 only when it is still running after TERM and KILL.
+fp_engine_stop() {  # <pid-file>
+  local pid n=0
+  [ -f "$1" ] || return 0
+  pid=$(head -n 1 "$1" 2>/dev/null)
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  fp_engine_alive "$pid" || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  kill -CONT "$pid" 2>/dev/null || true
+  while fp_engine_alive "$pid"; do
+    n=$((n + 1))
+    [ "$n" != 30 ] || kill -KILL "$pid" 2>/dev/null || true
+    [ "$n" -lt 60 ] || return 1
+    sleep 0.1
+  done
+  return 0
+}
+
 fp_guard_set() {  # <pairs> <run-record>
-  FP_GUARD_PAIRS=$1 FP_GUARD_REC=$2
+  FP_GUARD_PAIRS=$1 FP_GUARD_REC=$2 FP_GUARD_KEEP=0
+  if [ -n "$2" ]; then
+    export FM_FOOTPRINT_ENGINE_PID_FILE="$2.engine"
+  else
+    unset FM_FOOTPRINT_ENGINE_PID_FILE
+  fi
   trap 'fp_guard_fire' TERM INT HUP
 }
 
+# fp_guard_clear: ends the guard and drops the run record, unless a thaw
+# failed (FP_GUARD_KEEP=1), when the record stays for the next run's repair.
 fp_guard_clear() {
-  [ -z "$FP_GUARD_REC" ] || fp_stopped_drop "$FP_GUARD_REC"
+  [ -z "$FP_GUARD_REC" ] || [ "$FP_GUARD_KEEP" = 1 ] || fp_stopped_drop "$FP_GUARD_REC"
   FP_GUARD_PAIRS=''
   FP_GUARD_REC=''
+  FP_GUARD_KEEP=0
+  unset FM_FOOTPRINT_ENGINE_PID_FILE
   trap - TERM INT HUP
+}
+
+# fp_guard_finish <aside>...: after a removal, gives every copy that is still
+# set aside (an engine stopped or failed part way) its permissions back from
+# the run record, then ends the guard.
+fp_guard_finish() {  # <aside>...
+  local aside
+  if [ -n "$FP_GUARD_REC" ]; then
+    fp_engine_stop "$FP_GUARD_REC.engine" || FP_GUARD_KEEP=1
+    for aside in "$@"; do
+      [ -d "$aside" ] && [ ! -L "$aside" ] || continue
+      fp_thaw "$FP_GUARD_REC.modes" "$aside" || FP_GUARD_KEEP=1
+    done
+  fi
+  fp_guard_clear
 }
 
 fp_guard_fire() {
   local aside area
   trap - TERM INT HUP
+  # An engine that is still running would go on changing the copies.
+  if [ -n "$FP_GUARD_REC" ] && ! fp_engine_stop "$FP_GUARD_REC.engine"; then
+    exit 143
+  fi
   if [ -n "$FP_GUARD_PAIRS" ] && [ -f "$FP_GUARD_PAIRS" ]; then
     while IFS='	' read -r aside area; do
       [ -n "$aside" ] || continue
       [ -e "$aside" ] || [ -L "$aside" ] || continue
-      [ -z "$FP_GUARD_REC" ] || fp_thaw "$FP_GUARD_REC.modes" "$aside" || true
+      [ -z "$FP_GUARD_REC" ] || fp_thaw "$FP_GUARD_REC.modes" "$aside" || FP_GUARD_KEEP=1
       fp_restore "$aside" "$area" || true
     done < "$FP_GUARD_PAIRS"
   fi
-  [ -z "$FP_GUARD_REC" ] || fp_stopped_drop "$FP_GUARD_REC"
+  [ -z "$FP_GUARD_REC" ] || [ "$FP_GUARD_KEEP" = 1 ] || fp_stopped_drop "$FP_GUARD_REC"
   exit 143
 }
 
-# fp_repair_stopped: for every run record whose process is gone, gives each
-# set-aside copy it names that still exists its recorded permissions back,
-# by identity, then drops the record. Never removes or renames anything.
-fp_repair_stopped() {
-  local rec pid aside area
-  [ -d "$FP_STOPPED_DIR" ] && [ ! -L "$FP_STOPPED_DIR" ] || return 0
-  for rec in "$FP_STOPPED_DIR"/run.*; do
-    case "$rec" in *.modes) continue ;; esac
-    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+# fp_stopped_running <run-record>: 0 while the run that wrote <run-record>,
+# or its engine, is still running (its pid alive with the same start time).
+fp_stopped_running() {  # <run-record>
+  local rec=$1 pid start now epid
+  if IFS='	' read -r pid start < "$rec.owner" 2>/dev/null && [ -n "$pid" ]; then
+    case "$pid" in *[!0-9]*) return 0 ;; esac
+    now=$(fp_proc_start "$pid")
+    if [ -n "$start" ] && [ -n "$now" ]; then
+      [ "$now" != "$start" ] || return 0
+    elif kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  else
     pid=${rec##*/run.}
     pid=${pid%%.*}
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    ! kill -0 "$pid" 2>/dev/null || continue
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    ! kill -0 "$pid" 2>/dev/null || return 0
+  fi
+  epid=$(head -n 1 "$rec.engine" 2>/dev/null)
+  case "$epid" in ''|*[!0-9]*) return 1 ;; esac
+  fp_engine_alive "$epid"
+}
+
+# fp_repair_stopped: for every run record whose run and engine are gone,
+# gives each copy it names its recorded permissions back, by identity, at
+# its set-aside name or, once put back, at its own name; drops the record
+# only when every thaw succeeded. Never removes or renames anything.
+fp_repair_stopped() {
+  local rec aside area ok
+  [ -d "$FP_STOPPED_DIR" ] && [ ! -L "$FP_STOPPED_DIR" ] || return 0
+  for rec in "$FP_STOPPED_DIR"/run.*; do
+    case "$rec" in *.modes|*.owner|*.engine) continue ;; esac
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    ! fp_stopped_running "$rec" || continue
+    ok=1
     if [ -f "$rec.modes" ] && [ ! -L "$rec.modes" ]; then
       while IFS='	' read -r aside area; do
-        [ -n "$aside" ] && [ -d "$aside" ] && [ ! -L "$aside" ] || continue
-        fp_thaw "$rec.modes" "$aside" || true
+        [ -n "$aside" ] || continue
+        if [ -d "$aside" ] && [ ! -L "$aside" ]; then
+          fp_thaw "$rec.modes" "$aside" || ok=0
+        elif [ -n "$area" ] && [ -d "$area" ] && [ ! -L "$area" ]; then
+          fp_thaw "$rec.modes" "$area" || ok=0
+        fi
       done < "$rec"
     fi
-    fp_stopped_drop "$rec"
+    [ "$ok" = 0 ] || fp_stopped_drop "$rec"
   done
 }
 
@@ -707,7 +801,7 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     if [ "$why" = verified ] && printf '%s\t%s\n' "$aside" "$area" >> "$ok" 2>/dev/null; then
       continue
     fi
-    fp_thaw "$modes" "$aside" || true
+    fp_thaw "$modes" "$aside" || FP_GUARD_KEEP=1
     fp_restore "$aside" "$area" || true
     printf '%s\t%s\t%s\n' "${why:-unrecorded}" "$aside" "$area" >> "$kept" 2>/dev/null || bad=1
   done < "$pairs"
@@ -913,7 +1007,7 @@ fp_settle_one() {  # <aside> <dir>
   if [ -z "$f" ] || ! printf '%s\t%s\n' "$1" "$2" > "$f" 2>/dev/null; then
     [ -z "$f" ] || rm -f "$f"
     fp_restore "$1" "$2" || true
-    FP_BLOCKER="its check could not be recorded (is the temporary directory full?)"
+    FP_BLOCKER="its check could not be recorded (is the home's state folder or the temporary directory full?)"
     FP_KEPT_HINT='it stays until it can be'
     return 1
   fi
@@ -959,7 +1053,7 @@ fp_settle_one() {  # <aside> <dir>
       FP_KEPT_HINT='unmount it first'
       ;;
     unrecorded)
-      FP_BLOCKER="its check could not be recorded (is the temporary directory full?)"
+      FP_BLOCKER="its check could not be recorded (is the home's state folder or the temporary directory full?)"
       FP_KEPT_HINT='it stays until it can be'
       ;;
     unfinished)
@@ -1243,7 +1337,7 @@ cmd_task_close() {  # <id> <scratch> [project]
         scratch_result=partial
         FP_BLOCKER="what is left, including anything that appeared or changed after it was checked, is at $aside"
       fi
-      fp_guard_clear
+      fp_guard_finish "$aside"
       rm -f "$FP_SETTLED.snap" "$FP_SETTLED.modes" "$FP_SETTLED.rm" "$FP_SETTLED_PAIRS"
     fi
   fi
@@ -1784,14 +1878,14 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     fp_settle "$tmp.pairs" "$tmp.ok" "$tmp.kept" && settled=1
     if [ "$settled" = 0 ] || [ -s "$tmp.kept" ]; then
       while IFS='	' read -r aside entry; do
-        fp_thaw "$tmp.ok.modes" "$aside" || true
+        fp_thaw "$tmp.ok.modes" "$aside" || FP_GUARD_KEEP=1
         fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
       done < "$tmp.ok"
       case "$(cut -f1 "$tmp.kept" 2>/dev/null | head -n 1)" in
         in-use|unlisted) left="a running process still uses an entry, or the running processes could not be listed in full${FP_UNLISTED_NAMES:+ ($FP_UNLISTED_NAMES cannot be inspected; on Linux nothing is removed while such a process, for example ssh-agent or gpg-agent, runs)}" ;;
         linked) left="an entry holds a file hard-linked from elsewhere, such as a package store" ;;
         notool) left="python3, which removal needs, is not installed" ;;
-        unrecorded|'') left="the check could not be recorded (is the temporary directory full?)" ;;
+        unrecorded|'') left="the check could not be recorded (is the home's state folder or the temporary directory full?)" ;;
         unfinished) left="the check did not finish (the removal engine stopped or failed)" ;;
         *) left="an entry changed while it was being set aside or waiting to be removed" ;;
       esac
@@ -1804,7 +1898,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
     if ! fp_tree_print "$tmp.map" > "$tmp.print2" ||
       ! cmp -s <(fp_print_unfrozen < "$tmp.print") <(fp_print_unfrozen < "$tmp.print2"); then
       while IFS='	' read -r aside entry; do
-        fp_thaw "$tmp.ok.modes" "$aside" || true
+        fp_thaw "$tmp.ok.modes" "$aside" || FP_GUARD_KEEP=1
         fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
       done < "$tmp.ok"
       fp_guard_clear
@@ -1812,7 +1906,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
       die "an entry changed while it was being set aside or waiting to be removed; nothing removed - run old-tasks again"
     fi
     fp_remove_verified "$tmp.ok" "$tmp.rm" "${asides[@]}" || true
-    fp_guard_clear
+    fp_guard_finish "${asides[@]}"
     total=0 gone=0 left=0
     while IFS='	' read -r kind kb entry; do
       aside=$(awk -F '\t' -v e="$entry" '$2 == e { print $1; exit }' "$tmp.pairs")
@@ -1963,7 +2057,7 @@ cmd_sweep() {  # [--dry-run]
     # Removed at once after verification; the reclaimed size comes from the
     # verified snapshot, so nothing slow runs in between.
     fp_remove_verified "$work/ok" "$work/rm" "${asides[@]}" || true
-    fp_guard_clear
+    fp_guard_finish "${asides[@]}"
     for aside in "${asides[@]}"; do
       if kb=$(fp_removed "$work/rm" "$aside"); then
         id=${aside##*/.fm-reclaim-}
