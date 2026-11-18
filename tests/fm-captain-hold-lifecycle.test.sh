@@ -2522,6 +2522,26 @@ EOF
   show=$(tasks_in "$home" show scout-call-1 --full)
   assert_contains "$show" "held: yes" "an unbound board recorded an answer before any bind"
 
+  # A reconcile pass the backlog cut short must leave the whole round pending,
+  # or the answer pass would retire the capture with its selection unfiled.
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ -e "$FM_HOME/wedge-late-recheck" ] && [ "${1:-} ${2:-}" = "show scout-call-late-recheck" ]; then
+  exit 124
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+  : > "$home/wedge-late-recheck"
+  set +e
+  out=$(run_captain "$home" bind "$sid" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "bind reported success although the reconcile pass was cut short: $out"
+  show=$(tasks_in "$home" show scout-call-1 --full)
+  assert_contains "$show" "held: yes" "bind retired a round whose reconcile pass was cut short: $out"
+  rm -f "$home/wedge-late-recheck" "$home/fakebin/tasks-axi"
+
   out=$(run_captain "$home" bind "$sid" 2>&1) || fail "bind failed while replaying the captured round: $out"
   assert_contains "$out" "closed: scout-call-1" "bind did not replay the answer captured before it: $out"
   assert_contains "$out" "skipped: scout-call-closed (already closed)" \

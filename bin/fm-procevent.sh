@@ -517,7 +517,7 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
 }
 
 cmd_feed_answers() {  # <source-id>
-  local id=${1-} inbox result adapter marker report failed=0
+  local id=${1-} inbox result adapter marker report reconcile_rc failed=0
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
   "$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" >/dev/null 2>&1 || die "source $id is not bound to the keyed-answer intake"
@@ -527,12 +527,14 @@ cmd_feed_answers() {  # <source-id>
     [ -n "$result" ] || continue
     adapter=$(fm_procevent_result_adapter "$result") || { failed=1; continue; }
     # Reconcile selections go first because the keyed-answer pass removes the
-    # marker. A reconcile report with no summary line was cut short, so the
-    # marker stays; no report at all means the adapter offered no selections.
-    report=$(feed_reconcile_requests "$adapter" "$id" "$result") || true
+    # marker. The intake prints its summary line only once it has walked every
+    # row, so a reconcile pass that ended without one keeps the marker. Status
+    # 2 is an adapter with no `reconciles` command, which has nothing to file.
+    reconcile_rc=0
+    report=$(feed_reconcile_requests "$adapter" "$id" "$result") || reconcile_rc=$?
     [ -z "$report" ] || printf '%s\n' "$report"
-    case "$report" in
-      ''|*'reconcile-requests: created='*) feed_keyed_answers "$adapter" "$id" "$result" ;;
+    case "$reconcile_rc:$report" in
+      2:*|*'reconcile-requests: created='*) feed_keyed_answers "$adapter" "$id" "$result" ;;
     esac
     [ ! -e "${result%.result}.answers-pending" ] || {
       printf 'not-fed: %s\n' "$result" >&2
@@ -559,7 +561,7 @@ feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
   seq=$(fm_procevent_result_sequence "$result") || return 1
   owner=$(result_feed_owner "$result") || return 1
   [ -z "$owner" ] || scope=(--for "$owner")
-  rows=$("$script" reconciles "$result" 2>/dev/null) || return 1
+  rows=$("$script" reconciles "$result" 2>/dev/null) || return 2
   printf '%s\n' "$rows" \
     | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
         --source-id "$id" ${scope[@]+"${scope[@]}"} --source "the captured result $id sequence $seq" 2>/dev/null
