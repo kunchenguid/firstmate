@@ -236,6 +236,47 @@ assert_equals "0" "$(count_wakes "$home")" \
   "an acknowledged note never gets a repair wake"
 pass "repair and replay do not wake firstmate for an already-acknowledged note"
 
+# A note that WAS announced before firstmate acknowledged it is still
+# acknowledged: the announcement marker must not hide the handled/ location.
+home=$(make_home announced-then-acked)
+announced=$(run_inbox "$home" note --request-id seen-1 --json "announced then drained") \
+  || fail "announced note should be saved"
+announced_id=$(printf '%s' "$announced" | json_get id)
+assert_equals "True" "$(printf '%s' "$announced" | json_get announced)" \
+  "the first submission is announced"
+run_inbox "$home" drain --ack "$announced_id" >/dev/null || fail "drain --ack failed"
+wakes_before=$(count_wakes "$home")
+seen_replay=$(run_inbox "$home" note --request-id seen-1 --json "announced then drained") \
+  || fail "replay of an announced, acknowledged note should exit 0"
+assert_equals "replay" "$(printf '%s' "$seen_replay" | json_get outcome)" \
+  "retry of an announced, acknowledged note is a replay"
+assert_equals "$announced_id" "$(printf '%s' "$seen_replay" | json_get id)" \
+  "the replay returns the original note"
+assert_equals "True" "$(printf '%s' "$seen_replay" | json_get acknowledged)" \
+  "replay reports an announced, handled note as acknowledged"
+seen_human=$(run_inbox "$home" note --request-id seen-1 "announced then drained") \
+  || fail "human replay of an announced, acknowledged note should exit 0"
+assert_contains "$seen_human" "already acknowledged" \
+  "human replay names the acknowledgement"
+assert_not_contains "$seen_human" "will pick this up" \
+  "human replay does not promise a pickup for a handled note"
+seen_announce=$(run_inbox "$home" announce --json "$announced_id") \
+  || fail "announce of an announced, acknowledged note should exit 0"
+assert_equals "True" "$(printf '%s' "$seen_announce" | json_get acknowledged)" \
+  "announce reports an announced, handled note as acknowledged"
+assert_equals "True" "$(printf '%s' "$seen_announce" | json_get announced)" \
+  "announce keeps the recorded announcement"
+seen_announce_human=$(run_inbox "$home" announce "$announced_id") \
+  || fail "human announce of an announced, acknowledged note should exit 0"
+assert_contains "$seen_announce_human" "already-acknowledged $announced_id" \
+  "human announce names the acknowledgement"
+assert_equals "0" "$(count_notes "$home")" "the replay creates no pending note"
+assert_equals "1" "$(find "$home/state/inbox/handled" -name '*.note' | wc -l | tr -d ' ')" \
+  "the replay creates no second note"
+assert_equals "$wakes_before" "$(count_wakes "$home")" \
+  "replay and announce of a handled note append no wake"
+pass "an announced note acknowledged later still replays and announces as acknowledged"
+
 # --- bounded receipts JSON, omission disclosure, reply cursor ---------------
 
 json_len() {  # <key>
