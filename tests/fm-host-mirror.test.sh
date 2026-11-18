@@ -542,6 +542,17 @@ test_fresh_start_turn_boundaries_ride_the_hook() {
       | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude'
   assert_equals cancelled "$(sed -n 's/^step=//p' "$home/state/.daily-fresh-start")" "a new message after the save cancels the day's clear"
   [ ! -e "$home/state/.daily-fresh-start-ended" ] || fail "a cancelled save forgets its finished mark"
+  # A prompt that meets a committed clear in the save's session is refused:
+  # the hook's whole output is Claude Code's block decision, and the refused
+  # prompt is never mirrored as captain words.
+  printf 'date=2030-01-02\nstep=clearing\nat=%s\nnonce=%s\ntranscript=%s\n' "$(date +%s)" "$nonce" "$transcript" > "$home/state/.daily-fresh-start"
+  HOOK_T="$transcript" as_session "$home" '
+    jq -cn --arg t "$HOOK_T" "{hook_event_name: \"UserPromptSubmit\", prompt: \"REFUSED_DURING_CLEAR\", transcript_path: \$t}" \
+      | FM_ROOT_OVERRIDE="$PRIMARY_ROOT" "$MIRROR" hook claude > "$FM_HOME/hook.out"'
+  assert_equals block "$(jq -r .decision "$home/hook.out" 2>/dev/null)" "the hook prints the block decision"
+  assert_equals 1 "$(grep -c . "$home/hook.out")" "and nothing else"
+  ! grep -q REFUSED_DURING_CLEAR "$home/state/.host-mirror.jsonl" 2>/dev/null || fail "a refused prompt was mirrored"
+  assert_equals clearing "$(sed -n 's/^step=//p' "$home/state/.daily-fresh-start")" "the refusal leaves the commit alone"
   # Without the setting the hook leaves a saving record alone.
   printf 'date=2030-01-02\nstep=saving\nat=1\nnonce=%s\ntranscript=%s\n' "$nonce" "$transcript" > "$home/state/.daily-fresh-start"
   rm -f "$home/config/daily-fresh-start"

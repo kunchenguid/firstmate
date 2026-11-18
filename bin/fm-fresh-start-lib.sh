@@ -24,7 +24,7 @@
 #
 # THE STEPS, at most one per day (the local date), each on its own park so a
 # turn always ends between them, recorded in state/.daily-fresh-start as
-#   date=<YYYY-MM-DD>  step=<saving|cleared|skipped|cancelled>  at=<epoch>
+#   date=<YYYY-MM-DD>  step=<saving|clearing|cleared|skipped|cancelled>  at=<epoch>
 #   nonce=<random>     transcript=<the primary's session transcript>
 #   1. save   submit `/stow daily-fresh-start <nonce>`. The stow skill runs
 #             `bin/fm-fresh-start.sh attest <nonce>` as its last action only
@@ -38,8 +38,9 @@
 #             that session's newest human prompt is still the /stow carrying
 #             the nonce, so nothing was said after the save. These and the gate
 #             are checked again after the idle and composer probes, right
-#             before /clear is typed. Then submit /clear and a one-line resume
-#             prompt. Claude
+#             before /clear is typed, under the record lock the prompt hook
+#             shares (THE CLEAR BOUNDARY). Then submit /clear and a one-line
+#             resume prompt. Claude
 #             Code's SessionStart hook re-emits the startup digest into the
 #             new conversation (docs/sessionstart-nudge.md, source clear), and
 #             the resume turn's own Stop hook arms supervision again.
@@ -55,6 +56,21 @@
 # state/.daily-fresh-start-session (transcript=<path>), because the host keeps
 # running across turns and a fresh start changes the session: the host reads
 # that record (fm_fresh_start_transcript) rather than the path it started with.
+#
+# THE CLEAR BOUNDARY. A check and a keystroke are never one instant, so the last
+# check and the commit to clear are made under state/.daily-fresh-start.lock,
+# which the prompt hook takes too, and the commit is recorded as step=clearing
+# before /clear is typed. A prompt whose hook takes the lock first cancels the
+# day, and the check then sees that. A prompt for the save's own session whose
+# hook finds the commit already made, as step=clearing or a recent cleared
+# record naming that session, was submitted ahead of /clear, which would then
+# wipe its turn, so it is refused with a reason (the hook prints Claude Code's
+# block decision) and the captain sends it again into the fresh conversation.
+# After /clear every prompt belongs to a new session and is never refused. The
+# hook waits at most about four seconds for the lock and then cancels without
+# it, so the host abandons a commit whose locked section took two seconds or
+# more. A commit older than FM_FRESH_START_CLEARING_SECONDS (30) refuses
+# nothing, and a clearing record that old skips the day.
 #
 # A save that never attests (failed, interrupted, not reset-safe) never clears:
 # the day records skipped when its window closes. A save the session moved past
@@ -101,6 +117,8 @@ FM_FRESH_START_LIB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FM_FRESH_START_HOUR_DEFAULT=4
 FM_FRESH_START_WINDOW_DEFAULT=3
 FM_FRESH_START_MIN_DEFAULT=100000
+FM_FRESH_START_CLEARING_SECONDS=30
+FM_FRESH_START_BLOCK_REASON="Firstmate's daily fresh start is clearing this conversation right now, so this message was not sent. Send it again in a few seconds and it goes to the fresh conversation."
 FM_FRESH_START_RESUME_PROMPT='Daily fresh start: this conversation was cleared after /stow saved it and declared it safe to reset. The startup digest above is your current state; resume supervision exactly as after any session start.'
 
 # fm_fresh_start_config <config-dir>: succeed and set FM_FRESH_START_HOUR,
@@ -333,6 +351,40 @@ _fm_fresh_start_history() {
   fi
 }
 
+# _fm_fresh_start_lock <state-dir>: take the record lock the clear and the
+# prompt hook share (THE CLEAR BOUNDARY), waiting at most about four seconds,
+# well inside the hook's ten second budget. A dead holder is reclaimed.
+_fm_fresh_start_lock() {
+  local tries=0
+  if ! command -v fm_lock_try_acquire >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$FM_FRESH_START_LIB_DIR/fm-wake-lib.sh" || return 1
+  fi
+  until fm_lock_try_acquire "$1/.daily-fresh-start.lock"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 40 ] || return 1
+    sleep 0.1
+  done
+}
+
+_fm_fresh_start_unlock() {
+  fm_lock_release "$1/.daily-fresh-start.lock" 2>/dev/null || true
+}
+
+# _fm_fresh_start_clearing_live <state-dir> [step]: true while the record is a
+# committed clear (step clearing, or the given step) recent enough that a
+# prompt submitted ahead of its /clear may still be waiting.
+_fm_fresh_start_clearing_live() {
+  local at now step
+  step=$(fm_fresh_start_record_get "$1" step)
+  [ "$step" = clearing ] || [ "$step" = "${2:-clearing}" ] || return 1
+  at=$(fm_fresh_start_record_get "$1" at)
+  now=$(date +%s)
+  case "$at" in '' | *[!0-9]*) return 1 ;; esac
+  case "$now" in '' | *[!0-9]*) return 1 ;; esac
+  [ $((now - at)) -lt "$FM_FRESH_START_CLEARING_SECONDS" ]
+}
+
 # _fm_fresh_start_forget_save <state-dir>: remove the save attempt's markers.
 _fm_fresh_start_forget_save() {
   rm -f "$1/.daily-fresh-start-attest" "$1/.daily-fresh-start-ended"
@@ -348,9 +400,11 @@ _fm_fresh_start_prompt_is_save() {
 
 # fm_fresh_start_hook <state-dir> <event> <hook-payload>: the primary's own
 # turn boundaries (THE PRIMARY'S OWN TURN BOUNDARIES). Acts only while today's
-# save waits; never types anything.
+# save waits or its clear is committed; never types anything. Returns 3 after
+# printing Claude Code's block decision for a prompt that must not be sent
+# (THE CLEAR BOUNDARY); the hook command prints that line as its output.
 fm_fresh_start_hook() {
-  local state=$1 event=$2 payload=$3 rec_date rec_nonce rec_transcript prompt tp tmp
+  local state=$1 event=$2 payload=$3 rec_date rec_nonce rec_transcript prompt tp tmp locked rc
   if [ "$event" = Stop ]; then
     tp=$(printf '%s' "$payload" | jq -r '(.transcript_path // "") | tostring' 2>/dev/null) || tp=
     case "$tp" in
@@ -363,18 +417,50 @@ fm_fresh_start_hook() {
       fi ;;
     esac
   fi
-  [ "$(fm_fresh_start_record_get "$state" step)" = saving ] || return 0
-  rec_date=$(fm_fresh_start_record_get "$state" date)
-  rec_nonce=$(fm_fresh_start_record_get "$state" nonce)
-  rec_transcript=$(fm_fresh_start_record_get "$state" transcript)
+  case "$(fm_fresh_start_record_get "$state" step)" in saving | clearing | cleared) ;; *) return 0 ;; esac
   case "$event" in
   UserPromptSubmit)
     prompt=$(printf '%s' "$payload" | jq -r '(.prompt // "") | tostring | sub("^\\s+"; "") | sub("\\s+$"; "")' 2>/dev/null) || prompt=
-    case "$prompt" in "/stow daily-fresh-start $rec_nonce" | /clear) return 0 ;; esac
-    fm_fresh_start_record_put "$state" "$rec_date" cancelled || true
-    _fm_fresh_start_forget_save "$state"
+    case "$prompt" in /clear | "$FM_FRESH_START_RESUME_PROMPT") return 0 ;; esac
+    # Waiting longer than the host's commit bound means any commit it was
+    # making is abandoned, so cancelling without the lock is still safe.
+    locked=0
+    if _fm_fresh_start_lock "$state"; then locked=1; fi
+    rc=0
+    rec_date=$(fm_fresh_start_record_get "$state" date)
+    rec_nonce=$(fm_fresh_start_record_get "$state" nonce)
+    rec_transcript=$(fm_fresh_start_record_get "$state" transcript)
+    case "$(fm_fresh_start_record_get "$state" step)" in
+    saving)
+      if [ "$prompt" != "/stow daily-fresh-start $rec_nonce" ]; then
+        fm_fresh_start_record_put "$state" "$rec_date" cancelled || true
+        _fm_fresh_start_forget_save "$state"
+      fi ;;
+    clearing)
+      tp=$(printf '%s' "$payload" | jq -r '(.transcript_path // "") | tostring' 2>/dev/null) || tp=
+      if ! _fm_fresh_start_clearing_live "$state"; then
+        fm_fresh_start_record_put "$state" "$rec_date" skipped || true
+        _fm_fresh_start_forget_save "$state"
+      elif [ -z "$tp" ] || [ "$tp" = "$rec_transcript" ]; then
+        jq -cn --arg r "$FM_FRESH_START_BLOCK_REASON" '{decision: "block", reason: $r}'
+        rc=3
+      fi ;;
+    cleared)
+      # Submitted ahead of a /clear that has now gone through: its turn would
+      # run in the old session and then be wiped.
+      tp=$(printf '%s' "$payload" | jq -r '(.transcript_path // "") | tostring' 2>/dev/null) || tp=
+      if [ -n "$tp" ] && [ "$tp" = "$rec_transcript" ] && _fm_fresh_start_clearing_live "$state" cleared; then
+        jq -cn --arg r "$FM_FRESH_START_BLOCK_REASON" '{decision: "block", reason: $r}'
+        rc=3
+      fi ;;
+    esac
+    [ "$locked" = 0 ] || _fm_fresh_start_unlock "$state"
+    return "$rc"
     ;;
   Stop)
+    [ "$(fm_fresh_start_record_get "$state" step)" = saving ] || return 0
+    rec_nonce=$(fm_fresh_start_record_get "$state" nonce)
+    rec_transcript=$(fm_fresh_start_record_get "$state" transcript)
     tp=$(printf '%s' "$payload" | jq -r '(.transcript_path // "") | tostring' 2>/dev/null) || return 0
     [ -n "$rec_transcript" ] && [ "$tp" = "$rec_transcript" ] || return 0
     _fm_fresh_start_prompt_is_save "$rec_transcript" "$rec_nonce" || return 0
@@ -416,7 +502,7 @@ _fm_fresh_start_clear_check() {
 
 _fm_fresh_start_step_once() {
   local config=$1 state=$2 backend=$3 target=$4 transcript=$5
-  local today hour rec_date rec_step rec_nonce rec_transcript tokens why state_now nonce
+  local today hour rec_date rec_step rec_nonce rec_transcript tokens why state_now nonce locked_at
   fm_fresh_start_config "$config" || { printf 'off\n'; return 0; }
   today=$(date +%Y-%m-%d)
   hour=$(date +%H)
@@ -425,6 +511,18 @@ _fm_fresh_start_step_once() {
   rec_nonce=$(fm_fresh_start_record_get "$state" nonce)
   rec_transcript=$(fm_fresh_start_record_get "$state" transcript)
   if [ "$rec_date" = "$today" ] && [ "$rec_step" = cancelled ]; then printf 'cancelled\n'; return 0; fi
+  if [ "$rec_date" = "$today" ] && [ "$rec_step" = clearing ]; then
+    # Only a host stopped between its commit and its keystroke leaves this.
+    if _fm_fresh_start_clearing_live "$state"; then printf 'busy\n'; return 0; fi
+    _fm_fresh_start_lock "$state" || { printf 'busy\n'; return 0; }
+    if [ "$(fm_fresh_start_record_get "$state" step)" = clearing ] && ! _fm_fresh_start_clearing_live "$state"; then
+      fm_fresh_start_record_put "$state" "$today" skipped || true
+      _fm_fresh_start_forget_save "$state"
+    fi
+    _fm_fresh_start_unlock "$state"
+    printf 'skipped\n'
+    return 0
+  fi
   if [ "$rec_date" = "$today" ] && [ "$rec_step" != saving ]; then printf 'done\n'; return 0; fi
   if ! fm_fresh_start_in_window "$hour"; then
     if [ "$rec_date" = "$today" ] && [ "$rec_step" = saving ]; then
@@ -482,21 +580,42 @@ _fm_fresh_start_step_once() {
   fi
   # Anything that arrived during the probes above stops the clear: the save,
   # the gate, the attestation, and the newest prompt are read once more at the
-  # last moment before the one destructive keystroke.
+  # last moment, and the clear is committed, under the lock the prompt hook
+  # shares (THE CLEAR BOUNDARY).
+  _fm_fresh_start_lock "$state" || { printf 'busy\n'; return 0; }
+  locked_at=$(date +%s)
   why=$(_fm_fresh_start_clear_check "$state" "$transcript" "$rec_nonce")
   case "$why" in
   skipped)
     fm_fresh_start_record_put "$state" "$today" skipped || true
     _fm_fresh_start_forget_save "$state"
+    _fm_fresh_start_unlock "$state"
     printf 'skipped\n'
     return 0 ;;
-  ?*) printf '%s\n' "$why"; return 0 ;;
+  ?*) _fm_fresh_start_unlock "$state"; printf '%s\n' "$why"; return 0 ;;
   esac
+  # A hook that gave up waiting for the lock may have cancelled without it.
+  if [ $(($(date +%s) - locked_at)) -gt 1 ] \
+    || ! fm_fresh_start_record_put "$state" "$today" clearing "$rec_nonce" "$transcript"; then
+    _fm_fresh_start_unlock "$state"
+    printf 'busy\n'
+    return 0
+  fi
+  _fm_fresh_start_unlock "$state"
   if [ "$(fm_backend_send_text_submit "$backend" "$target" /clear 3 0.4 0.4 2>/dev/null)" != empty ]; then
+    # Hand the day back to the save, unless a prompt already settled it.
+    if _fm_fresh_start_lock "$state"; then
+      if [ "$(fm_fresh_start_record_get "$state" step)" = clearing ]; then
+        fm_fresh_start_record_put "$state" "$today" saving "$rec_nonce" "$transcript" || true
+      fi
+      _fm_fresh_start_unlock "$state"
+    fi
     printf 'failed\n'
     return 0
   fi
-  fm_fresh_start_record_put "$state" "$today" cleared || true
+  # The cleared record keeps the old session, so a prompt still on its way to
+  # it is refused (THE CLEAR BOUNDARY).
+  fm_fresh_start_record_put "$state" "$today" cleared "$rec_nonce" "$transcript" || true
   _fm_fresh_start_forget_save "$state"
   # The resume prompt starts the new conversation's first turn, whose Stop
   # hook re-arms supervision. A failed submit still leaves the cleared session

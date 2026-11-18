@@ -43,7 +43,10 @@ step() {
     . "$1/bin/fm-fresh-start-lib.sh"
     fm_backend_busy_state() { [ ! -x "$CASE_DIR/on-busy" ] || "$CASE_DIR/on-busy" >/dev/null 2>&1; cat "$CASE_DIR/busy" 2>/dev/null || printf "idle\n"; }
     fm_backend_composer_state() { [ ! -x "$CASE_DIR/on-composer" ] || "$CASE_DIR/on-composer" >/dev/null 2>&1; cat "$CASE_DIR/composer" 2>/dev/null || printf "empty\n"; }
-    fm_backend_send_text_submit() { printf "%s\n" "$3" >> "$CASE_DIR/typed"; printf "empty\n"; }
+    fm_backend_send_text_submit() {
+      if [ -f "$CASE_DIR/send-fails" ] && grep -qxF -- "$3" "$CASE_DIR/send-fails"; then printf "text\n"; return 0; fi
+      printf "%s\n" "$3" >> "$CASE_DIR/typed"; printf "empty\n"
+    }
     fm_fresh_start_step "$CASE_DIR/config" "$CASE_DIR/state" herdr pane-1 "$TRANSCRIPT"
   ' _ "$ROOT"
 }
@@ -467,6 +470,118 @@ test_input_during_the_probes_stops_the_clear() {
   pass "a wake, a chat question, a prompt, or a cancel that arrives during the idle or composer probe stops the clear before it is typed"
 }
 
+# Final review finding 1: a prompt submitted while the last check before /clear
+# is still running. A jq shim runs the real prompt hook after that check has
+# captured the newest prompt and before it matches it: inside the check, where
+# the hook can only wait out the lock, and beside it, as a real hook runs. A
+# prompt either cancels the clear or is refused and told to send again; it is
+# never let into the conversation that /clear then wipes.
+race_shim() {  # <case-dir> <inline|beside>
+  mkdir -p "$1/shim"
+  cat >"$1/shim/jq" <<SH
+#!/bin/bash
+if [ "\${1:-}" = -e ] && [ "\${2:-}" = --arg ] && [ "\${3:-}" = n ]; then
+  count=\$(cat "$1/jq-count" 2>/dev/null || echo 0)
+  count=\$((count + 1))
+  echo "\$count" >"$1/jq-count"
+  if [ "\$count" = 2 ]; then
+    printf '%s\n' '{"type":"user","message":{"content":"KEEP_THIS_NEW_INSTRUCTION"}}' >>"$1/transcript.jsonl"
+    run_hook() {
+      PATH="$FAKEBIN:$PATH" bash -c '. "\$1/bin/fm-fresh-start-lib.sh"; fm_fresh_start_hook "\$2" UserPromptSubmit "\$3"' \\
+        _ "$ROOT" "$1/state" '{"hook_event_name":"UserPromptSubmit","prompt":"KEEP_THIS_NEW_INSTRUCTION","transcript_path":"$1/transcript.jsonl"}' \\
+        >"$1/hook.out" 2>&1
+      echo \$? >"$1/hook.rc"
+    }
+    if [ "$2" = inline ]; then run_hook; else run_hook & sleep 0.5; fi
+  fi
+fi
+exec "$(command -v jq)" "\$@"
+SH
+  chmod +x "$1/shim/jq"
+}
+
+test_a_prompt_during_the_final_check_never_loses_to_the_clear() {
+  local mode nonce verdict tries
+  for mode in inline beside; do
+    new_case "final-check-$mode"
+    step "$CASE" >/dev/null
+    nonce=$(record nonce)
+    stow_turn "$nonce"
+    attest "$nonce"
+    turn_ends
+    race_shim "$CASE" "$mode"
+    verdict=$(PATH="$CASE/shim:$PATH" step "$CASE")
+    tries=0
+    until [ -s "$CASE/hook.rc" ] || [ "$tries" -ge 100 ]; do sleep 0.1; tries=$((tries + 1)); done
+    [ -s "$CASE/hook.rc" ] || fail "$mode: the prompt hook never finished"
+    if grep -qx /clear "$CASE/typed" && [ "$(cat "$CASE/hook.rc")" != 3 ]; then
+      fail "$mode: the prompt was let into the conversation and /clear was typed anyway (verdict $verdict, record $(record step), hook rc $(cat "$CASE/hook.rc"), hook output $(cat "$CASE/hook.out"))"
+    fi
+    case "$mode" in
+      inline)
+        [ "$verdict" != cleared ] || fail "inline: cleared over a cancelling prompt"
+        assert_equals cancelled "$(record step)" "inline: the prompt's cancellation stands"
+        assert_equals cancelled "$(step "$CASE")" "inline: and the day stays cancelled"
+        if grep -qx /clear "$CASE/typed"; then fail "inline: /clear was typed"; fi ;;
+      beside)
+        assert_equals cleared "$verdict" "beside: the committed clear goes ahead"
+        assert_equals 3 "$(cat "$CASE/hook.rc")" "beside: the prompt that met the committed clear is refused"
+        assert_equals block "$(jq -r .decision "$CASE/hook.out")" "beside: with Claude Code's block decision"
+        jq -e '.reason | contains("Send it again")' "$CASE/hook.out" >/dev/null || fail "beside: the refusal tells the captain to send it again" ;;
+    esac
+  done
+  pass "a prompt during the final check either cancels the clear or is refused with a reason; it never reaches the conversation /clear wipes"
+}
+
+# The clearing step the commit writes (THE CLEAR BOUNDARY) is short-lived and
+# belongs to the save's session only.
+test_the_clearing_commit_is_bounded() {
+  local nonce now out
+  now=$(date +%s)
+  new_case clearing-other-session
+  printf 'date=%s\nstep=clearing\nat=%s\nnonce=abc\ntranscript=%s\n' "$FAKE_DAY" "$now" "$CASE/transcript.jsonl" >"$CASE/state/.daily-fresh-start"
+  out=$(hook_event UserPromptSubmit "$(jq -cn --arg t "$CASE/other.jsonl" '{hook_event_name: "UserPromptSubmit", prompt: "hi", transcript_path: $t}')")
+  [ -z "$out" ] || fail "a prompt in another session is not refused: $out"
+  assert_equals clearing "$(record step)" "and it leaves the commit alone"
+  out=$(hook_event UserPromptSubmit '{"hook_event_name":"UserPromptSubmit","prompt":"/clear"}')
+  [ -z "$out" ] || fail "the clear itself is never refused"
+  assert_equals busy "$(step "$CASE")" "a fresh commit another host left makes the step wait"
+  new_case clearing-stale
+  printf 'date=%s\nstep=clearing\nat=%s\nnonce=abc\ntranscript=%s\n' "$FAKE_DAY" "$((now - 31))" "$CASE/transcript.jsonl" >"$CASE/state/.daily-fresh-start"
+  out=$(prompted 'hello after a stalled clear')
+  [ -z "$out" ] || fail "a stale commit refuses nothing: $out"
+  assert_equals skipped "$(record step)" "a stale commit skips the day"
+  new_case clearing-stale-step
+  printf 'date=%s\nstep=clearing\nat=%s\nnonce=abc\ntranscript=%s\n' "$FAKE_DAY" "$((now - 31))" "$CASE/transcript.jsonl" >"$CASE/state/.daily-fresh-start"
+  assert_equals skipped "$(step "$CASE")" "the step skips a stale commit too"
+  assert_equals skipped "$(record step)" "and records it"
+  [ ! -s "$CASE/typed" ] || fail "a stale commit typed something"
+  new_case cleared-recent
+  printf 'date=%s\nstep=cleared\nat=%s\nnonce=abc\ntranscript=%s\n' "$FAKE_DAY" "$now" "$CASE/transcript.jsonl" >"$CASE/state/.daily-fresh-start"
+  out=$(hook_event UserPromptSubmit "$(jq -cn --arg t "$CASE/transcript.jsonl" '{hook_event_name: "UserPromptSubmit", prompt: "late for the old session", transcript_path: $t}')")
+  assert_equals block "$(printf '%s' "$out" | jq -r .decision 2>/dev/null)" "a prompt still bound for the cleared session is refused"
+  out=$(hook_event UserPromptSubmit "$(jq -cn --arg t "$CASE/new.jsonl" '{hook_event_name: "UserPromptSubmit", prompt: "hello fresh session", transcript_path: $t}')")
+  [ -z "$out" ] || fail "a prompt in the fresh session is never refused: $out"
+  out=$(hook_event UserPromptSubmit "$(bash -c '. "$1/bin/fm-fresh-start-lib.sh"; jq -cn --arg p "$FM_FRESH_START_RESUME_PROMPT" --arg t "$2" "{hook_event_name: \"UserPromptSubmit\", prompt: \$p, transcript_path: \$t}"' _ "$ROOT" "$CASE/transcript.jsonl")")
+  [ -z "$out" ] || fail "the resume prompt is never refused: $out"
+  printf 'date=%s\nstep=cleared\nat=%s\nnonce=abc\ntranscript=%s\n' "$FAKE_DAY" "$((now - 31))" "$CASE/transcript.jsonl" >"$CASE/state/.daily-fresh-start"
+  out=$(hook_event UserPromptSubmit "$(jq -cn --arg t "$CASE/transcript.jsonl" '{hook_event_name: "UserPromptSubmit", prompt: "much later", transcript_path: $t}')")
+  [ -z "$out" ] || fail "an old cleared record refuses nothing: $out"
+  assert_equals cleared "$(record step)" "and the hook never rewrites a cleared day"
+  new_case clearing-send-fails
+  step "$CASE" >/dev/null
+  nonce=$(record nonce)
+  stow_turn "$nonce"
+  attest "$nonce"
+  turn_ends
+  echo /clear >"$CASE/send-fails"
+  assert_equals failed "$(step "$CASE")" "a /clear that did not go through fails"
+  assert_equals saving "$(record step)" "and hands the day back to the save, so nothing stays refused"
+  rm -f "$CASE/send-fails"
+  assert_equals cleared "$(step "$CASE")" "the next tick clears"
+  pass "the clearing commit refuses only the save session's prompts, for at most 30 seconds, and a failed /clear hands the day back"
+}
+
 # Deep review finding 2: in the real host the save is typed during a park and
 # the same park keeps ticking; no later park ever begins. The save turn's own
 # Stop is what lets that park clear, and only for the save's own session with
@@ -564,6 +679,8 @@ test_chat_question_record
 test_stall_note_once
 test_new_message_cancels_the_clear
 test_input_during_the_probes_stops_the_clear
+test_a_prompt_during_the_final_check_never_loses_to_the_clear
+test_the_clearing_commit_is_bounded
 test_the_same_park_clears_once_the_save_turn_ends
 test_unknown_size_is_not_a_run
 test_the_current_session_follows_each_stop
