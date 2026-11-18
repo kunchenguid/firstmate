@@ -202,6 +202,7 @@ test_fresh_spawn_reusing_an_id_never_shares_the_earlier_area() {
   assert_equals "$new_label" "$(lib 'fm_footprint_task_env "$H/config" "$H" fix-auth codex relaunch' | sed -n 's/^FM_DOCKER_LABEL=//p')" "a relaunch keeps the new task's generation"
   assert_absent "$root/$key/.fm-kept-fix-auth.2" "a relaunch must not set anything aside"
   printf 'worktree=/x\nscratch=%s\n' "$area" > "$H/state/fix-auth.meta"
+  assert_equals "2 1" "$(fp report --json | jq -r '.disk.scratch | "\(.areas) \(.areas_without_task)"')" "the report must count the kept area as an area without a task"
   now=$(date +%s)
   fm_touch_epoch $((now - 48 * 3600)) "$root/$key/.fm-kept-fix-auth.1"
   out=$(fp sweep)
@@ -511,7 +512,7 @@ test_old_tasks_preview_offers_only_rebuildable_outside_repositories() {
 # --- sweep and check -------------------------------------------------------------
 
 test_sweep_removes_only_old_orphaned_scratch() {
-  local key root now out
+  local key root now out close_out
   CASE=sweep
   new_home "$CASE"
   root="$SHORT/$CASE"
@@ -533,6 +534,16 @@ test_sweep_removes_only_old_orphaned_scratch() {
   assert_present "$root/$key/live-old" "a scratch area with a live task must stay"
   assert_present "$root/otherhom/orphan-old" "another home's scratch must never be removed"
   assert_contains "$out" "Removed 1 orphaned scratch area(s)" "the sweep must count what it removed"
+  fm_touch_epoch $((now - 48 * 3600)) "$root/$key/orphan-new"
+  printf 'scratch-root %s\ntask-cleanup off\n' "$root" > "$H/config/footprint"
+  close_out=$(fp task-close orphan-new "$root/$key/orphan-new")
+  out=$(fp sweep)
+  assert_present "$root/$key/orphan-new" "with task-cleanup off the daily pass must not remove a closed task's area"
+  assert_contains "$close_out" "the daily pass leaves the area while task-cleanup stays off" "the off message must say the pass keeps the area"
+  assert_contains "$out" "Kept 1 orphaned scratch area(s) because task-cleanup is off" "the pass must report what it left"
+  printf 'scratch-root %s\n' "$root" > "$H/config/footprint"
+  fp sweep >/dev/null
+  assert_absent "$root/$key/orphan-new" "with task-cleanup back on the pass removes the area"
   pass "the daily sweep removes only this home's orphaned scratch past its grace period"
 }
 

@@ -975,7 +975,7 @@ An unknown key, a repeated key, or a malformed value is an error naming the line
 
 ```text
 scratch-root /mnt/big/fm-scratch   # default: ~/Library/Caches/firstmate/scratch on macOS, ${XDG_CACHE_HOME:-~/.cache}/firstmate/scratch elsewhere
-task-cleanup on                    # remove a closed task's scratch area and labelled Docker material (default on)
+task-cleanup on                    # remove a closed task's scratch area and labelled Docker material (default on); off also stops the daily pass removing any scratch area
 task-tmpdir on                     # point TMPDIR, TMP, and TEMP into the scratch area for a verified worker tool (default on)
 docker-labels on                   # export FM_DOCKER_LABEL and COMPOSE_PROJECT_NAME (default on)
 daily-pass on                      # arm the daily orphan pass at startup (default on); off disarms it
@@ -1029,7 +1029,8 @@ Shared caches are never touched at task cleanup.
 The daily pass is on by default: startup (`bin/fm-bootstrap.sh`) runs `bin/fm-footprint.sh arm`, which registers it through the watcher's existing check mechanism, and with `daily-pass off` arm disarms it instead and the check starts nothing.
 The pass runs whenever this home's watcher runs; its registration alone never makes a home need a watcher.
 The check starts the pass as a detached run and returns at once, because one check may run for at most `FM_CHECK_TIMEOUT`, and a later check reports the finished run.
-The pass removes this home's scratch areas whose task has no record, including areas a fresh spawn kept aside, once they are older than `orphan-grace-hours` and that hold nothing it may not remove, each under that task's spawn lock with the record rechecked, retries queued Docker cleanups, and with `cache-cap-gb` set trims the shared cache with the oldest modification time first, only through that tool's own command, until the total is under the cap.
+While `task-cleanup` is off the pass removes no scratch area at all and only counts the ones it leaves, so a kept area stays kept.
+Otherwise the pass removes this home's scratch areas whose task has no record, including areas a fresh spawn kept aside, once they are older than `orphan-grace-hours` and that hold nothing it may not remove, each under that task's spawn lock with the record rechecked, retries queued Docker cleanups, and with `cache-cap-gb` set trims the shared cache with the oldest modification time first, only through that tool's own command, until the total is under the cap.
 It reports one line only when something needs a person (kept areas, including areas a running process still uses, set-aside folders left by an interrupted removal, pending Docker cleanups, caches still over the cap, a failed trim), and only when that finding changes.
 
 `bin/fm-footprint.sh old-tasks` previews rebuildable directories inside finished task folders older than `old-task-days`; records, reports, decisions, the backlog, evidence files, and anything inside a repository are never offered.

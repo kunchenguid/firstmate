@@ -196,7 +196,8 @@
 #   The daily pass, rebuildable classes only. When this home's key directory
 #   passes the ownership test, it removes the scratch areas there whose task
 #   has no record (including an earlier task's area a fresh spawn kept aside
-#   as .fm-kept-<id>.<n>), that are older than orphan-grace-hours, and that
+#   as .fm-kept-<id>.<n>), unless task-cleanup is off (then it removes none
+#   and only counts them), that are older than orphan-grace-hours, and that
 #   hold nothing in the never-removed list; each is set aside only after taking
 #   that task's spawn lock (bin/fm-spawn.sh holds it from before it makes the
 #   area until the task is recorded) and rechecking that no record exists, so
@@ -1377,7 +1378,7 @@ cmd_task_close() {  # <id> <scratch> [project]
   [ "$FP_DAILY_PASS" = on ] || pass='bin/fm-footprint.sh sweep (daily-pass is off)'
   fp_repair_stopped
   if [ "$FP_TASK_CLEANUP" = off ]; then
-    printf 'footprint: task-cleanup is off; kept the scratch area and Docker material of %s\n' "$id"
+    printf 'footprint: task-cleanup is off; kept the scratch area and Docker material of %s, and the daily pass leaves the area while task-cleanup stays off\n' "$id"
     return 0
   fi
   if ! fm_footprint_scratch_root "$FM_HOME" || ! FP_KEY=$(fm_footprint_home_key "$FM_HOME"); then
@@ -2086,6 +2087,11 @@ cmd_sweep() {  # [--dry-run]
         { p = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", p); if ($1 <= cut && $2 == dev && $3 == uid) print p }' > "$work/orphans"
     while IFS= read -r path; do orphans+=("$path"); done < "$work/orphans"
   fi
+  local held=0
+  if [ "$FP_TASK_CLEANUP" = off ]; then
+    held=${#orphans[@]}
+    orphans=()
+  fi
   if [ "${#orphans[@]}" -gt 0 ]; then
     # One scan across every orphan; an orphan holding version-controlled work
     # or an unsafe name, or one that cannot be read in full, is kept whole.
@@ -2170,6 +2176,7 @@ cmd_sweep() {  # [--dry-run]
   fp_guard_clear
   rm -rf "$work"
   [ "$dry" = 1 ] || printf 'Removed %s orphaned scratch area(s), %s.\n' "$removed" "$(fp_human "$removed_kb")"
+  [ "$held" = 0 ] || printf 'Kept %s orphaned scratch area(s) because task-cleanup is off.\n' "$held"
   if [ "$kept" -gt 0 ]; then
     printf 'Kept %s orphaned scratch area(s) whole because they hold version-controlled work, an unsafe name, or something that could not be checked in full: %s.\n' "$kept" "$kept_ids"
     findings="${findings:+$findings; }$kept orphaned scratch area(s) kept because they hold version-controlled work or could not be checked ($kept_ids)"
@@ -2443,7 +2450,7 @@ fp_scratch_summary() {  # sets FP_S_HOME_KB FP_S_HOME_N FP_S_ORPHAN_N FP_S_OTHER
   FP_S_HOME_KB=0 FP_S_HOME_N=0 FP_S_ORPHAN_N=0 FP_S_OTHER_KB=0
   if [ -d "$FP_ROOT/$FP_KEY" ]; then
     FP_S_HOME_KB=$(fp_du_kb "$FP_ROOT/$FP_KEY" 60) || FP_S_HOME_KB=
-    for area in "$FP_ROOT/$FP_KEY"/*; do
+    for area in "$FP_ROOT/$FP_KEY"/* "$FP_ROOT/$FP_KEY"/.fm-kept-*; do
       [ -d "$area" ] || continue
       id=${area##*/}
       FP_S_HOME_N=$((FP_S_HOME_N + 1))
