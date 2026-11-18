@@ -10,6 +10,11 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-hc-tests)
+# The adapter only reads a core whose socket is live (fm_backend_hc_get), so the
+# stub's session fmtest gets one at hc's own XDG_RUNTIME_DIR layout.
+HC_RUN=$(TMPDIR=/tmp fm_test_tmproot fm-hc-run)
+export XDG_RUNTIME_DIR=$HC_RUN
+fm_test_live_unix_sock "$HC_RUN/herdr-core/fmtest.sock" || { echo "error: could not park the fake core socket" >&2; exit 1; }
 
 # The stub answers `get` from <dir>/<address>.json (exit from <address>.exit,
 # 3 = not_found when no file exists), `ls` from <dir>/ls.json, `run` with
@@ -205,6 +210,30 @@ test_agent_state_classifies_foreground_and_absence() {
   pass "hc: agent_state maps foreground, finished, not_found and core errors onto the shared vocabulary"
 }
 
+# hc starts a fresh, empty core for a socket that is not live, and that core
+# reports every address not_found; reading that as `missing` would let recovery
+# respawn a second agent beside the live one, so no socket and a stale socket
+# file both read unreadable and hc is never asked. The gate runs on the
+# universal toolchain alone, so a host without python3 still reads the live
+# core normally.
+test_dead_core_socket_reads_unreadable_without_calling_hc() {
+  local tag out no_python
+  setup_case deadcore
+  tag=$(hometag_of)
+  write_terminal "$D" t1 finished fm-a1 "$tag" "" ""
+  python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$HC_RUN/herdr-core/stale.sock" \
+    || fail "could not leave a stale socket file"
+  no_python=$(fm_test_base_path_sans "$PATH" python3) || fail "could not build a PATH without python3"
+  # shellcheck disable=SC2016 # the inner shell expands it
+  out=$(PATH=$no_python hc_shell 'command -v python3 >/dev/null && echo "python3 still on PATH"
+    for s in gone stale fmtest; do printf "%s=%s/%s " $s "$(fm_backend_agent_state hc $s:t1)" "$(fm_backend_hc_endpoint_state $s:t1)"; done')
+  assert_equals "$out" "gone=unreadable/unreadable stale=unreadable/unreadable fmtest=missing/finished " \
+    "with no python3, a core with no socket or a dead one must read unreadable while the live core is still read"
+  [ "$(grep -c $'\x1fget\x1f' "$D/log")" -eq 2 ] \
+    || fail "hc must be asked only about the live core, got: $(grep $'\x1fget\x1f' "$D/log")"
+  pass "hc: a dead or absent core socket reads unreadable and never reaches hc get, with no python3 needed"
+}
+
 test_agent_state_reads_a_shell_wrappers_group() {
   local tag out wrapper
   setup_case wrapper
@@ -360,6 +389,53 @@ test_required_tool_check_uses_the_adapter_resolver() {
   pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
 }
 
+# A --secondmate launch is the PRIMARY's own fm-spawn.sh placing a DIFFERENT
+# home's agent. Identity labels must stay the primary's (its record owns the
+# terminal), while the Herdr.app space must be the mate home's own: the tag the
+# mate's crew will label their terminals with once that home spawns them.
+test_secondmate_spawn_lands_in_the_mates_own_space() {
+  local id="hcsm$$" mate primary_tag mate_tag out rc=0 run_line meta line
+  setup_case secondmate
+  mate="$D/mate"
+  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects" \
+    "$HOMEDIR/state" "$HOMEDIR/config" "$HOMEDIR/data" "$D/user-home"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf 'charter\n' > "$mate/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' > "$mate/.gitignore"
+  git -C "$mate" init -q -b main
+  printf 'codex\n' > "$HOMEDIR/config/crew-harness"
+  # The spawn runs from this checkout, so its own hometag hashes FM_TEST_ROOT;
+  # the mate's tag hashes the mate home, where its own scripts will run.
+  primary_tag=$(FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$FM_TEST_ROOT bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"; fm_backend_source hc >/dev/null 2>&1; fm_backend_hometag')
+  mate_tag=$(FM_HOME=$mate FM_ROOT_OVERRIDE=$mate bash -c '. "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"; fm_backend_source hc >/dev/null 2>&1; fm_backend_hometag')
+  [ -n "$primary_tag" ] && [ -n "$mate_tag" ] || fail "could not resolve the home tags"
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  write_terminal "$D" t9 live "fm-$id" "$primary_tag" zsh /bin/zsh
+  FM_TEST_CLEANUP_DIRS+=("/tmp/fm-$id")
+  # FM_HC_SPACE names the primary's own space; a mate must not be pulled into it.
+  out=$(env -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET -u HC_SCOPE -u HC_SOCKET -u TMUX -u HERDR_ENV \
+    PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FAKE_HC_DIR="$D" HOME="$D/user-home" \
+    FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$FM_TEST_ROOT" FM_SPAWN_NO_GUARD=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 FM_HC_SPACE=primary-space HC_SESSION=fmtest \
+    bash "$FM_TEST_ROOT/bin/fm-spawn.sh" "$id" "$mate" --secondmate --backend hc 2>&1) || rc=$?
+  expect_code 0 "$rc" "a --secondmate spawn on hc must succeed"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=codex kind=secondmate" "the spawn reports the mate"
+  run_line=$(grep $'\x1frun\x1f' "$D/log")
+  for line in "firstmate.task=fm-$id" "firstmate.home=$primary_tag" \
+    "herdr.space=fm-$mate_tag" "herdr.tab=$primary_tag-fm-$id"; do
+    assert_contains "$run_line" "$line" "the mate's terminal must carry $line"
+  done
+  assert_not_contains "$run_line" "herdr.space=primary-space" "FM_HC_SPACE must not move the mate out of its own space"
+  assert_not_contains "$run_line" "herdr.space=fm-$primary_tag" "the mate must not share the primary's space"
+  meta=$(cat "$HOMEDIR/state/$id.meta")
+  for line in kind=secondmate backend=hc hc_session=fmtest hc_terminal=t9 window=fmtest:t9 "home=$mate"; do
+    assert_contains "$meta" "$line" "the published record must carry $line"
+  done
+  assert_not_contains "$(cat "$D/log")" HC_SESSION=default "the spawn must never reach the default session"
+  pass "hc: a --secondmate spawn keeps this home's identity and lands in the mate home's own space"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
@@ -369,6 +445,7 @@ fm_test_run \
   test_invalid_session_never_reaches_hc \
   test_inherited_socket_never_overrides_the_session \
   test_agent_state_classifies_foreground_and_absence \
+  test_dead_core_socket_reads_unreadable_without_calling_hc \
   test_agent_state_reads_a_shell_wrappers_group \
   test_kill_proves_the_terminal_is_gone \
   test_kill_refuses_another_tasks_terminal \
@@ -376,4 +453,5 @@ fm_test_run \
   test_endpoint_validation_binds_hc_meta \
   test_container_ensure_gates_binary_version_and_generation \
   test_send_text_submit_confirms_through_send_wait \
-  test_send_delimiters_and_binary_socket_pins
+  test_send_delimiters_and_binary_socket_pins \
+  test_secondmate_spawn_lands_in_the_mates_own_space
