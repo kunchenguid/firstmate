@@ -233,6 +233,11 @@ test_direct_policy_contract() {
   assert_policy direct-watch-not-blessed $'deny\twatcher-direct' 'bin/fm-watch.sh'
   assert_policy direct-watch-expanded $'deny\twatcher-direct' '$FM_HOME/bin/fm-watch.sh'
   assert_policy direct-watch-safe-shape $'deny\twatcher-direct' 'cd /tmp; bin/fm-watch.sh'
+  # A dead home's own watcher is stopped by its recorded pid through the reclaim's
+  # home-scoped path, which names no process pattern; the pattern form stays denied.
+  assert_policy direct-reclaim-stop-watcher allow 'ak47/guards/agent-reclaim.sh --stop-watcher /home/aaron/Projects/firstmate'
+  assert_policy direct-reclaim-recorded-pid allow 'kill -TERM 4242'
+  assert_policy direct-reclaim-pattern-watcher-kill $'deny\tbroad-watcher-kill' 'kill $(pgrep -f "/home/aaron/Projects/firstmate/bin/fm-watch.sh")'
   heredoc_data=$'cat <<\'EOF\'\nbin/fm-watch-arm.sh &\nEOF'
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"

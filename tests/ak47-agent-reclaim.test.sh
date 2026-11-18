@@ -591,6 +591,45 @@ test_missing_classify_lib_keeps_tasks() {
   pass "a missing status classifier keeps every task"
 }
 
+test_every_pr_a_task_names_vetoes_a_stop() {
+  reset
+  local t s=$FM_HOME/state
+  declare -A A=()
+  local kept="status-open status-second-open status-unreadable"
+  local stopped="all-merged"
+  for t in $kept $stopped; do add_task main "$t" '-30 hours'; done
+  # 2026-11-17 encore-collab-verify-c2: the record names a merged PR while the
+  # live open one is named only in the last status line.
+  echo 'pr=https://github.com/o/r/pull/11' >>"$s/status-open.meta"; echo MERGED >"$SANDBOX/gh/11"
+  printf 'working: fixes\ndone: PR https://github.com/o/r/pull/12\n' >"$s/status-open.status"
+  echo OPEN >"$SANDBOX/gh/12"
+  # An open PR second in a line of several counts too, not only the first.
+  echo 'pr=https://github.com/o/r/pull/21' >>"$s/status-second-open.meta"; echo MERGED >"$SANDBOX/gh/21"
+  printf 'done: PR https://github.com/o/r/pull/22 then https://github.com/o/r/pull/23\n' >"$s/status-second-open.status"
+  echo MERGED >"$SANDBOX/gh/22"; echo OPEN >"$SANDBOX/gh/23"
+  # A named PR with no readable state keeps the task as well.
+  echo 'pr=https://github.com/o/r/pull/31' >>"$s/status-unreadable.meta"; echo MERGED >"$SANDBOX/gh/31"
+  printf 'done: PR https://github.com/o/r/pull/32\n' >"$s/status-unreadable.status"
+  # Nothing open anywhere: the task holds no unfinished work.
+  echo 'pr=https://github.com/o/r/pull/41' >>"$s/all-merged.meta"; echo MERGED >"$SANDBOX/gh/41"
+  printf 'done: PR https://github.com/o/r/pull/41\n' >"$s/all-merged.status"
+  for t in $kept $stopped; do touch -d '-30 hours' "$s/$t.status"; spawn_agent "$WT/$t"; A[$t]=$AGENT; done
+  run --apply
+  sleep 0.3
+  for t in $kept; do
+    alive "${A[$t]}" || fail "$t names an open or unreadable PR but was stopped"
+  done
+  for t in $stopped; do
+    alive "${A[$t]}" && fail "$t names only merged PRs but was kept: $(grep " $t " "$AK47_STATE/agent-reclaim-latest.md")"
+  done
+  for u in 'PR open, awaiting review: https://github.com/o/r/pull/12' \
+           'PR open, awaiting review: https://github.com/o/r/pull/23' \
+           'PR state unreadable: https://github.com/o/r/pull/32'; do
+    grep -qF "$u" "$AK47_STATE/agent-reclaim-latest.md" || fail "the report does not name the veto '$u'"
+  done
+  pass "every PR a task names counts: a record's merged pr= does not hide an open one in its last status, and each veto names its URL"
+}
+
 test_armed_check_vetoes_and_finished_work_goes_first() {
   reset
   register_secondmate capped
@@ -628,6 +667,7 @@ test_unfinished_work_vetoes_a_stop
 test_over_cap_home_stops_oldest_idle_first
 test_box_cap_reads_budget
 test_missing_classify_lib_keeps_tasks
+test_every_pr_a_task_names_vetoes_a_stop
 test_armed_check_vetoes_and_finished_work_goes_first
 test_chairs_and_check_monitors_are_never_touched
 test_dead_chair_watcher_stops_only_after_two_runs

@@ -53,8 +53,10 @@
 # classifier (status_open_decisions in bin/fm-classify-lib.sh); a last status
 # line that is
 # needs-decision, blocked, waiting, or paused, or that says it awaits a review,
-# approval, decision, or merge; a GitHub PR (the record's pr= or a PR URL in the
-# last status line) that `gh pr view` reads as open, or cannot read at all, or a
+# approval, decision, or merge; a GitHub PR the task names (the record's pr= and
+# every GitHub PR URL in its last status line, because the two can disagree and
+# only one of them may say the live PR) that `gh pr view` reads as open, or
+# cannot read at all, or a
 # PR on another forge, which is kept unread; and a worktree whose HEAD has
 # commits on no pushed branch (skipped once the PR reads merged), or uncommitted
 # changes to tracked files, or whose git state cannot be read.
@@ -507,6 +509,8 @@ validation_state() {
 declare -A PR_STATE=()
 held_work() {
   local home=$1 id=$2 cwd=$3 st=$1/state/$2.status meta=$1/state/$2.meta wt pr out n merged=0
+  local -a prs=()
+  local seen=' ' p
   HELD=
   if [ "$CLASSIFY_OK" != 1 ]; then
     HELD="decision state unreadable"
@@ -535,9 +539,17 @@ held_work() {
     fi
     [ -n "$out" ] && { HELD=$out; return 0; }
   fi
-  pr=$(sed -n 's/^pr=//p' "$meta" 2>/dev/null | head -1)
-  [ -n "$pr" ] || pr=$(tail -n 1 "$st" 2>/dev/null | grep -Eo 'https://github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+' | head -1)
-  if [ -n "$pr" ]; then
+  # Every PR the task names counts, not only the record's: on 2026-11-17
+  # encore-collab-verify-c2 had pr= at a merged PR (#5485) while its live open
+  # one (#5482) was named only in its last status line, so reading one of the two
+  # would have stopped a task with an open PR.
+  while IFS= read -r p; do [ -n "$p" ] && prs+=("$p"); done \
+    < <(sed -n 's/^pr=//p' "$meta" 2>/dev/null)
+  while IFS= read -r p; do [ -n "$p" ] && prs+=("$p"); done \
+    < <(tail -n 1 "$st" 2>/dev/null | grep -Eo 'https://github\.com/[^/ ]+/[^/ ]+/pull/[0-9]+')
+  for pr in ${prs[@]+"${prs[@]}"}; do
+    case $seen in *" $pr "*) continue ;; esac
+    seen="$seen$pr "
     case "$pr" in
       https://github.com/*/pull/*) ;;
       *) HELD="PR on a forge the reclaim cannot read"; return 0 ;;
@@ -548,10 +560,10 @@ held_work() {
     case "${PR_STATE[$pr]}" in
       MERGED) merged=1 ;;
       CLOSED) ;;
-      OPEN) HELD="PR open, awaiting review"; return 0 ;;
-      *) HELD="PR state unreadable"; return 0 ;;
+      OPEN) HELD="PR open, awaiting review: $pr"; return 0 ;;
+      *) HELD="PR state unreadable: $pr"; return 0 ;;
     esac
-  fi
+  done
   wt=$(sed -n 's/^worktree=//p' "$meta" 2>/dev/null | head -1)
   [ -d "$wt" ] || wt=$cwd
   [ -d "$wt" ] || return 0

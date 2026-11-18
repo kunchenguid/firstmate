@@ -291,8 +291,9 @@ unfinished no-mistakes validation, and anything on `~/.config/ak47/reclaim-keep`
 is never stopped.
 Neither is a task that still holds unfinished work for someone: an open
 decision, a last report that is waiting, paused, or awaiting a review, an open
-or unreadable PR (or one on another forge), or commits on no pushed branch or
-uncommitted changes to tracked files.
+or unreadable PR the task names in its record or its last report (or one on
+another forge), or commits on no pushed branch or uncommitted changes to
+tracked files.
 Every task stop is marked left stopped through `bin/fm-leave-stopped.sh`, so the
 fleet watchdog does not relaunch it; a mark that fails is a finding, and without
 that mark the box got no lighter, because the watchdog relaunched stopped agents
