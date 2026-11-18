@@ -594,6 +594,9 @@ WARM_COMPACT_VERDICT=
 # the save turn's own Stop hook marks the save finished (fm_fresh_start_hook,
 # through bin/fm-host-mirror.sh), so a later tick of this same park can clear.
 FRESH_START_LAST_TICK=-1
+# A step that repeats on every tick, such as a cancelled day, is logged once,
+# so it cannot crowd the bounded host log for the rest of the day.
+FRESH_START_LAST_VERDICT=
 
 fresh_start_tick() {
   local backend target verdict transcript
@@ -610,7 +613,12 @@ fresh_start_tick() {
   turn_crosses_boundary && return 0
   target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend) || return 0
   verdict=$(fm_fresh_start_step "$CONFIG" "$STATE" "$backend" "$target" "$transcript")
-  case "$verdict" in saving | cleared | skipped | cancelled | unknown | failed) log_line "fresh-start	$verdict" ;; esac
+  case "$verdict" in
+  saving | cleared | skipped | cancelled | unknown | failed)
+    [ "$verdict" = "$FRESH_START_LAST_VERDICT" ] || log_line "fresh-start	$verdict"
+    ;;
+  esac
+  FRESH_START_LAST_VERDICT=$verdict
 }
 
 # Outcome batching (bin/fm-outcome-batch-lib.sh owns the rule and the hold
