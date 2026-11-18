@@ -40,7 +40,8 @@
 # --request-id the historical one-note-per-call behaviour is unchanged.
 # `announce` repairs the wake for an already-saved note without creating another.
 # A note already acknowledged (in handled/) gets no wake from `announce` or a
-# request-id replay; both report it as acknowledged and exit 0.
+# request-id replay; both report it as acknowledged and exit 0, whether or not
+# it was announced before firstmate acknowledged it.
 # It refuses a note whose announcement state is UNKNOWN: a note written before
 # this home tracked announcement markers already appended its own wake at
 # creation, and there is no record to prove it, so announcing it again would be
@@ -370,7 +371,10 @@ finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summ
     0) announced=1 ;;
     2) acknowledged=1 ;;
   esac
-  [ -f "$INBOX/handled/$id.note" ] && path="$INBOX/handled/$id.note"
+  if [ -f "$INBOX/handled/$id.note" ]; then
+    path="$INBOX/handled/$id.note"
+    acknowledged=1
+  fi
   if [ "$json" -eq 1 ]; then
     emit_note_json "$outcome" "$id" "$request_id" 1 "$announced" "$path" "$acknowledged"
   else
@@ -380,10 +384,10 @@ finish_note_result() {  # <outcome> <id> <request-id> <json> <strict-exit> <summ
       printf 'queued %s\n' "$id"
     fi
     printf '  %s\n' "$summary"
-    if [ "$announced" -eq 1 ]; then
-      printf '  firstmate will pick this up at its next check.\n'
-    elif [ "$acknowledged" -eq 1 ]; then
+    if [ "$acknowledged" -eq 1 ]; then
       printf '  firstmate has already acknowledged this note.\n'
+    elif [ "$announced" -eq 1 ]; then
+      printf '  firstmate will pick this up at its next check.\n'
     fi
   fi
   if [ "$announced" -eq 1 ] || [ "$acknowledged" -eq 1 ]; then
@@ -510,8 +514,17 @@ cmd_announce() {
   path=$(note_path "$id") || die "no such note: $id"
   summary=$(note_summary_from_body "$(read_note_body "$path")")
   state=$(note_announce_state "$id" "$path")
-  if [ "$state" != true ] && [ "$path" = "$INBOX/handled/$id.note" ]; then
-    state=acknowledged
+  if [ "$path" = "$INBOX/handled/$id.note" ]; then
+    if [ "$json" -eq 1 ]; then
+      if [ "$state" = true ]; then
+        emit_note_json replay "$id" "" 1 1 "$path" 1
+      else
+        emit_note_json replay "$id" "" 1 0 "$path" 1
+      fi
+    else
+      printf 'already-acknowledged %s\n' "$id"
+    fi
+    return 0
   fi
   case "$state" in
     true)
@@ -540,7 +553,7 @@ cmd_announce() {
     fi
     return 0
   fi
-  if [ "$rc" -eq 2 ] || [ "$state" = acknowledged ]; then
+  if [ "$rc" -eq 2 ]; then
     path=$(note_path "$id") || path="$INBOX/handled/$id.note"
     if [ "$json" -eq 1 ]; then
       emit_note_json replay "$id" "" 1 0 "$path" 1
