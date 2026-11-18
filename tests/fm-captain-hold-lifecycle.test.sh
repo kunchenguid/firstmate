@@ -2505,11 +2505,16 @@ test_scout_board_answers_reach_only_its_own_held_calls() {
 session:
   status: feedback
   session_ended: false
-prompts[3]{tag,text,prompt}:
+prompts[5]{tag,text,prompt}:
   "choice","Round one: yes","Context data: {\"question\":\"scout-call-1\",\"answer\":\"yes\"}"
   "choice","Answered: again","Context data: {\"question\":\"scout-call-closed\",\"answer\":\"again\"}"
   "choice","Other: yes","Context data: {\"question\":\"other-origin-call\",\"answer\":\"yes\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"scout-call-late-recheck\",\"selection\":\"reconcile\",\"note\":\"\"}"
+  "choice","Reconcile","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"other-origin-call\",\"selection\":\"reconcile\",\"note\":\"\"}"
 EOF
+  run_captain "$home" hold scout-call-late-recheck --title "Call to re-check before bind" \
+    --reason "captain late re-check pending" --repo sample --origin sample-scout >/dev/null \
+    || fail "could not hold the scout's call to re-check before bind"
   run_procevent "$home" register-task lavish "$sid" sample-scout -- "$stub" >/dev/null \
     || fail "could not arm the board for the scout"
   out=$(run_procevent "$home" start "$sid" 2>&1) || fail "the unbound board round did not complete: $out"
@@ -2529,8 +2534,17 @@ EOF
     "the replayed answer did not name the captured round that carried it"
   show=$(tasks_in "$home" show other-origin-call --full)
   assert_contains "$show" "held: yes" "a scout board closed a call held for another task"
+  assert_contains "$out" "reconcile: scout-call-late-recheck" \
+    "bind did not report the reconcile selection captured before it: $out"
+  out=$(run_captain "$home" reconcile list) || fail "could not list the reconcile requests"
+  [ "$(printf '%s\n' "$out" | grep -c '^scout-call-late-recheck')" = 1 ] \
+    || fail "bind did not file exactly one request for the reconcile selection captured before it: $out"
+  assert_contains "$out" "reconcile-requests: 1" \
+    "the replay filed a reconcile request on a call held for another task: $out"
 
   out=$(run_captain "$home" bind "$sid" 2>&1) || fail "a repeat bind failed: $out"
+  assert_not_contains "$out" "scout-call-late-recheck" \
+    "a repeat bind replayed an already-filed reconcile selection: $out"
   assert_not_contains "$out" "scout-call-1" "a repeat bind replayed an already-replayed round: $out"
   [ "$(tasks_in "$home" show scout-call-1 --full | grep -c 'Answer: yes')" = 1 ] \
     || fail "a repeat bind recorded the replayed answer twice"

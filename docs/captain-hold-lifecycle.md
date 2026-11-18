@@ -243,6 +243,7 @@ An unbound source feeds nothing, so the path is opt-in per source.
 `bind` deliberately does not require the source to exist yet.
 A worker arms its own board, so firstmate often binds it after the captain has already answered.
 `bind` therefore replays each result captured for a worker-owned board that has not reached the intake yet, then prints the intake's report.
+The replay files the result's [reconcile](#reconcile-re-check-reality-never-a-blind-close) selections first, under the same `--for` scope, and prints that intake's report too.
 Once the intake has walked a captured result, no later `bind` replays it.
 A firstmate-owned source is never replayed, because it is bound before it is armed and an unscoped replay of an old capture could close any call held since.
 

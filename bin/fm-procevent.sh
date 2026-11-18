@@ -110,8 +110,9 @@
 #            that kept the board with its owner, and reports `retired:` too.
 # feed-answers
 #            Pass each result a now-bound source captured for its owning task
-#            that has not yet reached the keyed-answer intake to that intake,
-#            oldest first, and print what it reported. `fm-captain-hold.sh bind`
+#            that has not yet reached the keyed-answer intake to the reconcile
+#            intake and then to that intake, oldest first, and print what each
+#            reported. `fm-captain-hold.sh bind`
 #            runs this so an answer captured before the binding is not lost.
 #            Exits nonzero when the intake could not finish a result, which
 #            stays pending for the next run.
@@ -213,7 +214,9 @@
 # firstmate, arms such a board, firstmate can only bind it late, so each of its
 # captures gets an `.answers-pending` marker before the binding is checked. The
 # marker is removed once the intake has walked the result, whether at capture
-# or replayed by `feed-answers` after a late binding. Nothing else is replayed:
+# or replayed by `feed-answers` after a late binding. That replay passes the
+# result through the reconcile intake below first, so a reconcile selection
+# captured before the binding is filed too. Nothing else is replayed:
 # a firstmate-owned source is bound before it is armed, and an unscoped replay
 # of an old capture could close any call held since.
 # Reconcile selections use the parallel `reconciles` adapter command and the
@@ -514,7 +517,7 @@ feed_keyed_answers() {  # <adapter> <source-id> <result-file>
 }
 
 cmd_feed_answers() {  # <source-id>
-  local id=${1-} inbox result adapter marker failed=0
+  local id=${1-} inbox result adapter marker report failed=0
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
   "$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" >/dev/null 2>&1 || die "source $id is not bound to the keyed-answer intake"
@@ -523,7 +526,14 @@ cmd_feed_answers() {  # <source-id>
   while IFS= read -r result; do
     [ -n "$result" ] || continue
     adapter=$(fm_procevent_result_adapter "$result") || { failed=1; continue; }
-    feed_keyed_answers "$adapter" "$id" "$result"
+    # Reconcile selections go first because the keyed-answer pass removes the
+    # marker. A reconcile report with no summary line was cut short, so the
+    # marker stays; no report at all means the adapter offered no selections.
+    report=$(feed_reconcile_requests "$adapter" "$id" "$result") || true
+    [ -z "$report" ] || printf '%s\n' "$report"
+    case "$report" in
+      ''|*'reconcile-requests: created='*) feed_keyed_answers "$adapter" "$id" "$result" ;;
+    esac
     [ ! -e "${result%.result}.answers-pending" ] || {
       printf 'not-fed: %s\n' "$result" >&2
       failed=1
@@ -552,7 +562,7 @@ feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
   rows=$("$script" reconciles "$result" 2>/dev/null) || return 1
   printf '%s\n' "$rows" \
     | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
-        --source-id "$id" ${scope[@]+"${scope[@]}"} --source "the captured result $id sequence $seq" >/dev/null 2>&1
+        --source-id "$id" ${scope[@]+"${scope[@]}"} --source "the captured result $id sequence $seq" 2>/dev/null
 }
 
 read_adapter() {  # <source-id>
@@ -1457,7 +1467,7 @@ EOF
   # Independent of publication and acknowledgement, so it runs once per capture
   # for every adapter and cannot change what the handler receives.
   if [ "$extension_owner" -eq 0 ] \
-    && feed_reconcile_requests "$adapter" "$id" "$durable"; then
+    && feed_reconcile_requests "$adapter" "$id" "$durable" >/dev/null; then
     printf 'reconciles-fed: %s\n' "$id"
   fi
   if [ "$extension_owner" -eq 0 ] \
