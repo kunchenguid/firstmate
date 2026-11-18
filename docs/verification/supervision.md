@@ -250,7 +250,8 @@ The app-server protocol schema does define the required lifecycle (`turn/started
 ### Codex on Herdr
 
 On the Herdr backend, Herdr's own `herdr:codex` integration reports each Codex pane's `agent_status`, which the fleet view and Bearings display (not a supervision source).
-It was checked live with codex-cli 0.169.1 and Herdr 0.9.5 on Linux arm64, reading `herdr pane list` (a pane's `agent` is `codex` and its `agent_session.source` is `herdr:codex`) while several firstmate-launched Codex workers ran in isolated worktrees:
+It was checked live with codex-cli 0.169.1 and Herdr 0.9.5 on Linux arm64, reading `herdr pane list` (a pane's `agent` is `codex` and its `agent_session.source` is `herdr:codex`) while several firstmate-launched Codex workers ran in isolated worktrees.
+On Herdr 0.9.5, Codex workers launched with hooks disabled (`--disable hooks`, as `bin/fm-spawn.sh` launches them) still reported `agent_session` `{agent: codex, source: herdr:codex, kind: id}` in `herdr pane list`, with `agent_status` `working` or `done`, so the registration-bound check holds in practice.
 
 ```sh
 herdr pane list | jq -r '.result.panes[] | select(.agent=="codex") | [.pane_id, .agent_session.source, .agent_status, .terminal_title_stripped] | @tsv'
