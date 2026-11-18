@@ -414,6 +414,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/boot-resume.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/captain-pending-guard.md",
       "audience": "maintainer-architecture"
     },

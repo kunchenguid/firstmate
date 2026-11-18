@@ -92,3 +92,17 @@ When all quota evidence is unreadable, logged round-robin chooses within the ope
 
 **Why.** A supervisor login is never a worker reserve, and an unreadable quota must not turn Claude-first array declarations into a provider preference.
 The no-mistakes pool order is a separate policy, not a rationale for biasing ordinary worker selection.
+
+## 2026-11-18 - boot resume restores through the primary, bounded by a shared ledger
+
+**Decision.** A WSL reboot no longer requires captain action: a systemd user oneshot (`bin/fm-boot-resume.sh`, unit rendered by `bin/fm-boot-resume-install.sh`) and a 5-minute watchdog timer (`bin/fm-watchdog-beat.sh`) bring back the primary firstmate session, the secondmates, and the recorded workers, gated by the kill switch (`config/boot-resume-off`), the unattended posture (a standing away record or an active goal; quiet mode is not a resume posture), per-boot idempotence (`/proc/sys/kernel/random/boot_id`), and a live-primary skip.
+The primary restore is herdr-pane based: the exact conversation id recorded in `state/.lock-session` matched against herdr's per-pane `agent_session.value` (ambiguous or missing matches are typed refusals, never guesses), then `herdr agent start ... --resume <id>` plus one standing recovery prompt.
+Every attempt spends from one bounded ledger (`state/.boot-resume-attempts`, 2 per kind per 3600s) whose overflow parks the kind behind a marker and leaves exactly one idempotent inbox note.
+[`boot-resume.md`](boot-resume.md) owns the operator contract, including the Windows keepalive steps that stay a captain action.
+
+**Why restore through the primary.** A live primary harness is the one mechanism that already re-establishes everything else: its SessionStart hook runs the locked session-start sweeps (secondmate liveness included) and the wake-queue drain, and its Stop hook re-arms the watcher chain.
+Restoring anything around the primary would duplicate those owners with weaker guarantees, and a script blind-relaunching recorded workers would bypass the no-mistakes run rules, duplicate-worker guards, and fresh-dispatch-receipt judgment that the stuck-crewmate-recovery skill owns; the recovery prompt hands that judgment to the agent instead.
+
+**Why a watchdog beat.** The reboot can also kill only the watcher while the primary lives, so a boot-path-only resume would leave a silent beacon until the next reboot.
+The tick reuses `fm_watcher_healthy` (pid, lock identity, beacon) as the single health owner and answers through the primary (one standing nudge prompt plus one inbox note) rather than a shell-side arm, because the verified arm path and its stalled-holder eviction rules belong to the primary's turn-end chain.
+**Why one ledger.** Boot loops and a 5-minute timer can turn retries into a prompt storm; both actors spending from the same budget, with park markers and single durable notes, keeps the recovery bounded without adding a new supervision layer.
