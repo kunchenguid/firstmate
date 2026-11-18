@@ -125,7 +125,9 @@ assert_present "$STATE/live.turn-ended" 'agentStop raised no turn-end notificati
 echo "ok - $VERSION: a real prompt produced busy copilot-hook, agentStop closed it and raised the turn-end notification, /exit ended cleanly"
 # The cancel is recorded only in the session transcript, in a format Copilot does
 # not document, so this is the one place a release that renames the event shows up.
-# The default COPILOT_HOME is used because the login lives there.
+# This reads the private COPILOT_HOME exported above, so only this test's own
+# session can be found and concurrent Copilot use in the caller's home cannot
+# change the result; authentication does not depend on that home.
 events=
 for f in "${COPILOT_HOME:-$HOME/.copilot}"/session-state/*/events.jsonl; do
   [ -f "$f" ] && [ "$f" -nt "$START" ] || continue
