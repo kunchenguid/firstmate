@@ -860,6 +860,13 @@ case "$fault:$*" in
     printf '%s\n' "$FORGE_ERROR_TEXT" >&2
     exit "${FORGE_ERROR_RC:-1}"
     ;;
+  real-reviews-once:'api repos/o/r/pulls/8/reviews?'*)
+    if [ ! -e "$FORGE/real-reviews-once-spent" ]; then
+      : > "$FORGE/real-reviews-once-spent"
+      printf '%s\n' "$FORGE_ERROR_TEXT" >&2
+      exit "${FORGE_ERROR_RC:-1}"
+    fi
+    ;;
   real-core:'api repos/o/r/pulls/8')
     printf '%s\n' "$FORGE_ERROR_TEXT" >&2
     exit "${FORGE_ERROR_RC:-1}"
@@ -995,6 +1002,55 @@ test_real_gh_errors_drive_retry_and_summary() {
   [ "$calls" = 2 ] || fail "a gh DNS error made $calls review reads, expected 2"
   [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
     || fail 'a gh DNS error did not retain its error'
+
+  # A connection dropped as soon as it opened is reported as EOF, not
+  # unexpected EOF, so it must still earn the single retry.
+  home=$(new_home real-gh-bare-eof-once)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'real-reviews-once\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT='Post "https://api.github.com/graphql": EOF' \
+    "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed after one bare EOF'
+  [ -z "$out" ] || fail "one bare EOF printed an unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 2 ] || fail "one bare EOF made $calls review reads, expected 2"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'one bare EOF left an error in the contribution record'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'one bare EOF enqueued a wake'
+
+  for message in 'Post "https://api.github.com/graphql": EOF' 'EOF'; do
+    home=$(new_home "real-gh-bare-eof-$(printf '%s' "$message" | shasum | cut -c1-8)")
+    forge_home "$home"
+    wrap_forge "$home"
+    printf 'real-reviews\n' > "$home/forge/fault"
+    out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail 'poll failed on a persistent bare EOF'
+    why="reviews read exited 1 with Ns of budget left: $message"
+    [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+      || fail "a persistent bare EOF did not print one unavailable line: $out"
+    calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+    [ "$calls" = 2 ] || fail "a persistent bare EOF made $calls review reads, expected 2"
+    [ "$(jq -r .records[0].error "$home/data/delivery/contributions.json" | mask_budget)" = "forge observation unavailable: $why" ] \
+      || fail 'a persistent bare EOF did not retain its error'
+  done
+
+  # Only a standalone EOF or a colon-space EOF suffix is a connection error;
+  # unrelated text containing eof keeps its request-failed verdict.
+  message='Post "https://api.github.com/graphql": eof while reading response header'
+  home=$(new_home real-gh-eof-substring)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'real-reviews\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FORGE_ERROR_TEXT="$message" "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll failed on an unrelated eof substring'
+  why="reviews read exited 1 with Ns of budget left: $message"
+  [ "$(printf '%s\n' "$out" | mask_budget)" = "contributions: observation unavailable for https://github.com/o/r/pull/8 - $why" ] \
+    || fail "an unrelated eof substring did not print one unavailable line: $out"
+  calls=$(grep -cF 'api repos/o/r/pulls/8/reviews?' "$home/forge/calls")
+  [ "$calls" = 1 ] || fail "an unrelated eof substring made $calls review reads, expected 1"
 
   for row in \
     'kunchenguid/firstmate|proxyconnect tcp: dial tcp 127.0.0.1:1: connect: connection refused|connection error' \

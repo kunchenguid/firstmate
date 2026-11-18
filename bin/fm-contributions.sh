@@ -343,7 +343,7 @@ forge_error_summary() { # stderr-file
     printf 'DNS error\n'
   elif grep -Eqi 'tls: |x509: |TLS handshake|certificate (verify|signed)' "$err"; then
     printf 'TLS error\n'
-  elif grep -Eqi 'connection (reset|refused|closed|failed|error)|could not connect|failed to connect|error connecting|broken pipe|network is unreachable|dial (tcp|udp)|unexpected EOF' "$err"; then
+  elif grep -Eqi 'connection (reset|refused|closed|failed|error)|could not connect|failed to connect|error connecting|broken pipe|network is unreachable|dial (tcp|udp)|unexpected EOF|(^|: )EOF$' "$err"; then
     printf 'connection error\n'
   else
     printf 'request failed\n'
