@@ -397,6 +397,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/landing-proof.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/merge-queue.md",
       "audience": "operator-current"
     },

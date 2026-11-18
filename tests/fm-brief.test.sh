@@ -915,6 +915,75 @@ test_house_wiki_stanza_is_on_workers_not_secondmates() {
   pass "fm-brief.sh: house-wiki stanza is on ship/scout workers, not secondmate charters"
 }
 
+done_templates() {  # <brief>
+  # shellcheck disable=SC2016 # The backticks are literal Markdown in the brief.
+  grep -o 'append `done: [^`]*`' "$1" | sed 's/^append `//; s/`$//'
+}
+
+# Every worker's done: is a claim (docs/landing-proof.md): every brief kind a
+# worker ships from must demand the proof clauses, and every done: template the
+# brief hands the worker must itself parse as a well-formed claim through the
+# same public parser firstmate records claims with.
+test_every_worker_brief_requires_landing_proof() {
+  local home id kind brief templates tpl n out status report proof expect
+  home="$TMP_ROOT/landing-home"
+  write_registry "$home"
+  for id_kind in "land-nm-a1:no-mistakes" "land-dp-a2:direct-PR" "land-lo-a3:local-only" "land-sc-a4:scout"; do
+    id=${id_kind%%:*}
+    kind=${id_kind##*:}
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1; status=$?
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1; status=$?
+    fi
+    expect_code 0 "$status" "fm-brief.sh $id ($kind) should exit 0"
+    brief="$home/data/$id/brief.md"
+    assert_grep "## Landing proof" "$brief" "$id: brief has no landing-proof section"
+    assert_grep "Your \`done:\` line is a CLAIM, not proof" "$brief" "$id: brief does not call done: a claim"
+    assert_grep "MUST carry \`proof: {one shell command}\` and \`expect: {extended regex}\`" "$brief" \
+      "$id: brief does not require proof: and expect: on done:"
+    assert_grep "Customer-facing work also carries \`told: {command}\` and \`told-expect: {extended regex}\`" "$brief" \
+      "$id: brief does not require told:/told-expect: for customer-facing work"
+    assert_grep "A \`done:\` line without \`proof:\` is reported as unproven and the task goes back to in progress" "$brief" \
+      "$id: brief does not say an unproven done: goes back to in progress"
+    # shellcheck disable=SC2016 # The backticks are literal Markdown in the brief.
+    for word in '`pr`: landed means merged AND the deploy completed AND the running version contains the merge commit' \
+      '`data`: the production count or metric moved' '`flag` (a flag or config value): the live value read back through the application' \
+      '`asset` (copy or an asset): the deployed build serves the new bytes; `curl` the public URL' \
+      '`notify` (a notification): the send ledger holds a real provider message id'; do
+      grep -qF -- "$word" "$brief" || fail "$id: brief missing the per-kind landed definition: $word"
+    done
+    assert_grep "landing proof clauses" "$brief" "$id: status protocol does not point done: at the landing proof clauses"
+    templates=$(done_templates "$brief")
+    [ -n "$templates" ] || fail "$id: brief hands the worker no done: template"
+    n=0
+    while IFS= read -r tpl; do
+      n=$((n + 1))
+      out=$("$ROOT/bin/fm-landing-claim.sh" parse "$tpl" 2>&1); status=$?
+      expect_code 0 "$status" "$id: done: template $n is not a well-formed claim: $tpl ($out)"
+    done <<EOF_TEMPLATES
+$templates
+EOF_TEMPLATES
+    [ "$kind" = no-mistakes ] && { [ "$n" -eq 2 ] || fail "$id: expected both no-mistakes done: templates to carry proof, saw $n"; }
+  done
+  # The scout template is concrete: its proof must fail before the report
+  # exists and match once it does, exactly as the landing checker runs it.
+  brief="$home/data/land-sc-a4/brief.md"
+  report="$home/data/land-sc-a4/report.md"
+  tpl=$(done_templates "$brief")
+  out=$("$ROOT/bin/fm-landing-claim.sh" parse "$tpl")
+  proof=$(printf '%s\n' "$out" | sed -n 's/^proof=//p')
+  expect=$(printf '%s\n' "$out" | sed -n 's/^expect=//p')
+  [ "$(printf '%s\n' "$out" | sed -n 's/^kind=//p')" = report ] || fail "scout done: template is not kind report: $out"
+  if (cd / && bash -c "$proof") | grep -Eq -- "$expect"; then
+    fail "scout landing proof matched before the report existed: $proof"
+  fi
+  printf 'findings\n' > "$report"
+  (cd / && bash -c "$proof") | grep -Eq -- "$expect" \
+    || fail "scout landing proof did not match once the report existed: $proof / $expect"
+  pass "fm-brief.sh: every worker brief requires a parseable landing proof on done:"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -938,4 +1007,5 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_inbox_ack_command_runs_from_a_quoted_home_path
 test_scout_and_secondmate_scaffold
+test_every_worker_brief_requires_landing_proof
 test_house_wiki_stanza_is_on_workers_not_secondmates

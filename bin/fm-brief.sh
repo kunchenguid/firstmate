@@ -52,6 +52,9 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# Ship and scout scaffolds carry the landing-proof contract: every done: line
+# is a claim with proof:/expect: (and told:/told-expect: when customer-facing)
+# clauses, rendered by bin/fm-dod-lib.sh and owned by docs/landing-proof.md.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -373,6 +376,9 @@ EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
+SCOUT_LANDING=$(fm_landing_proof_block scout) || exit 1
+SCOUT_LANDING=${SCOUT_LANDING#$'\n'}
+REPORT_PATH_Q=$(shell_quote "$DATA/$ID/report.md")
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
@@ -401,6 +407,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
+   Every \`done:\` line is a claim that must carry its landing proof clauses (\`proof:\` and \`expect:\`,
+   plus \`told:\` and \`told-expect:\` for customer-facing work) as defined under Definition of done.
    Use \`$PAUSED_VERB: {why} until HH:MMZ\` - distinct from \`blocked:\`, and a pause naming no UTC wake time is treated as blocked - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
@@ -421,8 +429,10 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
-When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+When the report is complete, append \`done: {one-line conclusion} kind: report proof: test -s $REPORT_PATH_Q && echo PRESENT expect: ^PRESENT$\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
+
+$SCOUT_LANDING
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
@@ -482,6 +492,8 @@ $RULE1
    Whenever you mention a PR anywhere - a status line, your terminal, a summary - write its full
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
+   Every \`done:\` line is a claim that must carry its landing proof clauses (\`proof:\` and \`expect:\`,
+   plus \`told:\` and \`told-expect:\` for customer-facing work) as defined under Definition of done.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
    turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
    Use \`$PAUSED_VERB: {why} until HH:MMZ\` - distinct from \`blocked:\`, and a pause naming no UTC wake time is treated as blocked - ONLY when you are deliberately idling on a

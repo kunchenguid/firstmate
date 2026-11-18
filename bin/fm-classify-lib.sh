@@ -576,6 +576,105 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   status_line_note_core "$1"
   printf '%s' "$_FM_STATUS_NOTE"
 }
+
+# Landing-proof fields on a done: line (contract: docs/landing-proof.md).
+# A worker's done: note is a CLAIM followed by labeled clauses, each label a
+# whole word preceded by whitespace (or opening the note) and followed by
+# whitespace or the end of the line:
+#   done: <claim> kind: <kind> proof: <cmd> expect: <regex> told: <cmd> told-expect: <regex> lesson: <fact>
+# Every clause is optional at parse time and may appear in any order; a value
+# runs to the next label, trimmed, so a proof command keeps its inner spacing.
+# No-fork core in the same shape as status_line_note_core: it assigns
+# _FM_LANDING_CLAIM, _FM_LANDING_KIND, _FM_LANDING_PROOF, _FM_LANDING_EXPECT,
+# _FM_LANDING_TOLD, _FM_LANDING_TOLD_EXPECT, and _FM_LANDING_LESSON, and
+# _FM_LANDING_ERROR names why a malformed line was refused.
+# Returns 0 when proof and expect are both present and the line is well formed,
+# 1 when the line carries no proof clause at all (an unproven claim), and 2 when
+# it is malformed: a repeated or empty clause, proof without expect (or the
+# reverse), told without told-expect (or the reverse), a tab in any value, or a
+# kind outside FM_LANDING_KINDS.
+# An absent kind is inferred: pr when the claim names a pull-request URL,
+# branch when it says "ready in branch", otherwise other.
+FM_LANDING_KINDS='pr data flag asset notify branch report other'
+FM_LANDING_LABELS='kind proof expect told told-expect lesson'
+_FM_LANDING_CLAIM='' _FM_LANDING_KIND='' _FM_LANDING_PROOF='' _FM_LANDING_EXPECT=''
+_FM_LANDING_TOLD='' _FM_LANDING_TOLD_EXPECT='' _FM_LANDING_LESSON='' _FM_LANDING_ERROR=''
+_fm_landing_trim() {  # <text> -> _FM_LANDING_TRIMMED
+  local t=$1
+  t=${t#"${t%%[![:space:]]*}"}
+  _FM_LANDING_TRIMMED=${t%"${t##*[![:space:]]}"}
+}
+_fm_landing_store() {  # <label> <value>; 1 on a repeated or empty clause
+  local label=$1 value=$2
+  _fm_landing_trim "$value"
+  value=$_FM_LANDING_TRIMMED
+  if [ -z "$value" ]; then _FM_LANDING_ERROR="empty $label: clause"; return 1; fi
+  case "$label" in
+    kind) [ -z "$_FM_LANDING_KIND" ] || { _FM_LANDING_ERROR='repeated kind: clause'; return 1; }; _FM_LANDING_KIND=$value ;;
+    proof) [ -z "$_FM_LANDING_PROOF" ] || { _FM_LANDING_ERROR='repeated proof: clause'; return 1; }; _FM_LANDING_PROOF=$value ;;
+    expect) [ -z "$_FM_LANDING_EXPECT" ] || { _FM_LANDING_ERROR='repeated expect: clause'; return 1; }; _FM_LANDING_EXPECT=$value ;;
+    told) [ -z "$_FM_LANDING_TOLD" ] || { _FM_LANDING_ERROR='repeated told: clause'; return 1; }; _FM_LANDING_TOLD=$value ;;
+    told-expect) [ -z "$_FM_LANDING_TOLD_EXPECT" ] || { _FM_LANDING_ERROR='repeated told-expect: clause'; return 1; }; _FM_LANDING_TOLD_EXPECT=$value ;;
+    lesson) [ -z "$_FM_LANDING_LESSON" ] || { _FM_LANDING_ERROR='repeated lesson: clause'; return 1; }; _FM_LANDING_LESSON=$value ;;
+  esac
+}
+status_line_landing_fields_core() {  # <status-line> -> _FM_LANDING_* ; 0 proven-shape, 1 no proof, 2 malformed
+  local rest label best_label best_pre pre cur_label='' tab=$'\t'
+  _FM_LANDING_CLAIM='' _FM_LANDING_KIND='' _FM_LANDING_PROOF='' _FM_LANDING_EXPECT=''
+  _FM_LANDING_TOLD='' _FM_LANDING_TOLD_EXPECT='' _FM_LANDING_LESSON='' _FM_LANDING_ERROR=''
+  status_line_note_core "$1"
+  # Pad so a label that opens the note or ends the line still has whitespace
+  # on both sides; the padding is trimmed away from every stored value.
+  rest=" $_FM_STATUS_NOTE "
+  while :; do
+    best_label='' best_pre=$rest
+    for label in $FM_LANDING_LABELS; do
+      pre=${rest%%[[:space:]]"$label:"[[:space:]]*}
+      [ "$pre" = "$rest" ] && continue
+      # Keep the earliest label; on a tie the longer pre cannot win.
+      if [ "${#pre}" -lt "${#best_pre}" ]; then best_pre=$pre best_label=$label; fi
+    done
+    if [ -z "$cur_label" ]; then
+      _fm_landing_trim "$best_pre"
+      _FM_LANDING_CLAIM=$_FM_LANDING_TRIMMED
+    else
+      _fm_landing_store "$cur_label" "$best_pre" || return 2
+    fi
+    [ -n "$best_label" ] || break
+    rest=${rest:$(( ${#best_pre} + ${#best_label} + 2 ))}
+    cur_label=$best_label
+  done
+  case "$_FM_LANDING_CLAIM$_FM_LANDING_KIND$_FM_LANDING_PROOF$_FM_LANDING_EXPECT$_FM_LANDING_TOLD$_FM_LANDING_TOLD_EXPECT" in
+    *"$tab"*) _FM_LANDING_ERROR='tab inside a landing-proof value'; return 2 ;;
+  esac
+  if [ -z "$_FM_LANDING_KIND" ]; then
+    case "$_FM_LANDING_CLAIM" in
+      *://*/pull/[0-9]*|*://*/merge_requests/[0-9]*) _FM_LANDING_KIND='pr' ;;
+      *"ready in branch"*) _FM_LANDING_KIND=branch ;;
+      *) _FM_LANDING_KIND=other ;;
+    esac
+  fi
+  case " $FM_LANDING_KINDS " in
+    *" $_FM_LANDING_KIND "*) ;;
+    *) _FM_LANDING_ERROR="unknown kind '$_FM_LANDING_KIND' (one of: $FM_LANDING_KINDS)"; return 2 ;;
+  esac
+  if [ -z "$_FM_LANDING_PROOF" ] && [ -z "$_FM_LANDING_EXPECT" ]; then
+    if [ -n "$_FM_LANDING_TOLD$_FM_LANDING_TOLD_EXPECT" ]; then
+      _FM_LANDING_ERROR='told: without proof: and expect:'; return 2
+    fi
+    _FM_LANDING_ERROR='no proof: clause'
+    return 1
+  fi
+  [ -n "$_FM_LANDING_PROOF" ] || { _FM_LANDING_ERROR='expect: without proof:'; return 2; }
+  [ -n "$_FM_LANDING_EXPECT" ] || { _FM_LANDING_ERROR='proof: without expect:'; return 2; }
+  if [ -n "$_FM_LANDING_TOLD" ] && [ -z "$_FM_LANDING_TOLD_EXPECT" ]; then
+    _FM_LANDING_ERROR='told: without told-expect:'; return 2
+  fi
+  if [ -z "$_FM_LANDING_TOLD" ] && [ -n "$_FM_LANDING_TOLD_EXPECT" ]; then
+    _FM_LANDING_ERROR='told-expect: without told:'; return 2
+  fi
+  return 0
+}
 _FM_DECISION_KEY=
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   _fm_decision_key_core "$1" || return 1

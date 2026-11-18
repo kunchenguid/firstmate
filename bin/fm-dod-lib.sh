@@ -20,6 +20,11 @@
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
+# This file also owns the worker-facing landing-proof block every Definition of
+# done carries, ship and scout alike (fm_landing_proof_block): a done: line is a
+# claim and must name the command that proves it landed. docs/landing-proof.md
+# owns the contract and fm_landing_proof_block is its only worker-facing
+# rendering; bin/fm-classify-lib.sh owns the field grammar.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 
@@ -174,7 +179,44 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+# The landing-proof contract for every Definition of done. <ship|scout> only
+# changes which kinds the worker is most likely to claim; the rule is identical.
+fm_landing_proof_block() {  # <ship|scout>
+  local kind=$1
+  cat <<'EOF'
+
+## Landing proof
+Your `done:` line is a CLAIM, not proof: work has landed only when an independent read of the system of record shows it.
+Firstmate records every claim and keeps running its proof command with no model involved, so a worker saying "done" never counts as landed on its own.
+Every `done:` line you append MUST carry `proof: {one shell command}` and `expect: {extended regex}`, after the claim text and before any `lesson:` clause.
+The command must run unchanged from any directory within a few seconds: absolute paths, no variables from your own shell session, read-only, with the stdout the regex is matched against.
+It is the command that WILL pass once the work has truly landed, so it need not pass at the moment you write it.
+Name what you claim with `kind: {pr|data|flag|asset|notify|branch|report}` and point the proof at that kind's system of record:
+- `pr`: landed means merged AND the deploy completed AND the running version contains the merge commit, so read the running version and compare it with the PR's merge commit, for example `sha=$(gh pr view {url} --json mergeCommit --jq .mergeCommit.oid); curl -fsS {version url} | grep -q "${sha:0:10}" && echo LANDED` with `expect: ^LANDED$`; only when the project has no deploy step is merged itself landed: `gh pr view {url} --json state --jq .state` with `expect: ^MERGED$`.
+- `data`: the production count or metric moved in the expected direction; query the production store itself, never your local copy.
+- `flag` (a flag or config value): the live value read back through the application's own path, not the file you edited.
+- `asset` (copy or an asset): the deployed build serves the new bytes; `curl` the public URL and match the new text.
+- `notify` (a notification): the send ledger holds a real provider message id.
+- `branch`: the commit exists in the repository's shared object store, which survives cleanup of your local copy: `git --git-dir={absolute path from git rev-parse --path-format=absolute --git-common-dir} cat-file -t {full commit sha}` with `expect: ^commit$`.
+- `report`: the report file exists and has content.
+Customer-facing work also carries `told: {command}` and `told-expect: {extended regex}`, reading the proof that the customer was actually told, such as the sent message in its ledger.
+A `done:` line without `proof:` is reported as unproven and the task goes back to in progress; a claim whose proof still does not match 30 minutes later is treated as not landed.
+Never put a tab, a newline, or one of the words `kind:`, `proof:`, `expect:`, `told:`, `told-expect:`, or `lesson:` inside a value; each one starts the next clause.
+EOF
+  if [ "$kind" = scout ]; then
+    # shellcheck disable=SC2016 # The backticks are literal Markdown.
+    printf '%s\n' 'For this scout the claim is normally `kind: report`.'
+  fi
+}
+
+# The Definition of done a caller renders: the mode's own contract followed by
+# the landing-proof rule every mode shares.
 fm_dod_block() {  # <mode> <task-id>
+  fm_dod_mode_block "$1" "$2" || return 1
+  fm_landing_proof_block ship
+}
+
+fm_dod_mode_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
     direct-PR)
@@ -183,7 +225,7 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url} kind: pr proof: {command} expect: {regex}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -194,7 +236,8 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
+When it is implemented and committed, append \`done: ready in branch fm/$id kind: branch proof: {command} expect: {regex}\` to the status file and stop.
+For this claim the proof reads that your commit reached the default branch, which is what landing means here: \`git --git-dir={absolute path from git rev-parse --path-format=absolute --git-common-dir} merge-base --is-ancestor {full commit sha} main && echo LANDED\` with \`expect: ^LANDED$\`.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -203,7 +246,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+When you believe it is complete, append \`done: {summary} kind: branch proof: {command} expect: {regex}\` to the status file and stop; this first claim proves only that your commit exists, using the \`branch\` proof below.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
@@ -223,7 +266,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green kind: pr proof: {command} expect: {regex}\` and stop. You are finished.
 EOF
       ;;
     *)
