@@ -794,7 +794,7 @@ That count covers every hook Codex had no persisted trust for, drawn from both t
 Writing Codex's own trust store to pre-accept the modal would record an operator consent that was never given, so it is not an option either.
 
 `codex --help` documents `--dangerously-bypass-hook-trust` as "Run enabled hooks without requiring persisted hook trust for this invocation", which RUNS the untrusted hooks.
-That is the opposite of what an unattended worker needs, so the control used is the hook feature flag:
+The `enforce` posture of [Codex hook trust](../configuration.md#codex-hook-trust-configcodex-hook-trust) runs no hooks instead, so its control is the hook feature flag:
 
 ```sh
 codex features list | grep '^hooks'
@@ -826,9 +826,53 @@ $ ls "$TURNEND"
 ```
 
 `tests/fm-codex-hook-layer-live-e2e.test.sh` checks current flag acceptance; it does not repeat the composer and notification probe above.
-It captures the launch `bin/fm-spawn.sh` actually builds and confirms that the installed Codex accepts the requested hook-disablement flag.
-It does not claim that a managed policy cannot re-enable hooks after launch.
-The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the requested hook-disablement flag for crewmates and its omission for secondmates, which run primary sessions on this repository's own project hooks.
+It captures the launch `bin/fm-spawn.sh` actually builds and confirms that the installed Codex accepts the hook flags the launch selects.
+It does not claim that a managed policy cannot override the hook feature after launch.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the two `config/codex-hook-trust` postures: `enforce` keeps the hook-free crewmate launch and is the default when the file is absent, `bypass` sends `--dangerously-bypass-hook-trust` and omits `--disable hooks` for crewmates and scouts, and a secondmate carries no disablement in either.
+
+### Bypass runs the enabled hook and removes the modal
+
+Verified 2026-11-15 on codex-cli 0.169.0, macOS arm64, in an isolated lab with its own `CODEX_HOME`.
+Two separate observations, each recorded as what it actually showed.
+
+**Bypass: passed.** The lab carries one `SessionStart` hook appending a marker line and an empty hook-trust store, so the hook was untrusted.
+The launch was:
+
+```sh
+codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust 'reply ACK'
+```
+
+The pane reached the composer and answered, the marker file contained the hook's line, and grep for the modal text found nothing:
+
+```text
+> reply ACK
+- ACK
+Worked for 5s
+$ cat "$MARKER_FILE"
+marker-hook-ran
+$ tmux capture-pane -p -t probe -S -60 | grep -i 'hooks need review|new or changed|Review hooks|Trust all'
+<none>
+```
+
+**Without the flag: passed as the positive control.** The same lab with the store cleared again and the launch line `codex --dangerously-bypass-approvals-and-sandbox --no-daemon 'reply ACK'` parked on the modal and never ran the hook, which is what makes the arm above evidence rather than coincidence:
+
+```text
+Hooks need review
+1 hook is new or changed.
+Hooks can run outside the sandbox after you trust them.
+> 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+  enter confirm - esc skip
+$ cat "$MARKER_FILE"
+<absent>
+```
+
+`--no-daemon` is in that command because the shared app-server daemon socket collided in this lab; it changes how Codex starts, not which hooks are enabled, so the hook-trust verdict is the one being compared.
+
+Together the two arms show the flag is what makes an already-enabled hook execute and what removes the modal; it enables nothing on its own.
+The opt-in `bypass` posture applies that to ordinary workers as well as secondmates, while the default `enforce` retains the hook-free launch above.
+A managed policy can override the hook feature in either posture.
 
 ### Stop response parsing
 

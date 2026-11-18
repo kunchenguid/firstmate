@@ -3,18 +3,20 @@
 #
 # The verdict here comes from the installed codex, not from a stub: a stub can
 # only confirm the assumption already written into it, and what this guard
-# protects is exactly a vendor-owned surface. Codex blocks a fresh crewmate
-# launch on an unanswerable "Hooks need review" modal whenever the machine's
+# protects is exactly a vendor-owned surface. Codex parks a fresh launch on an
+# unanswerable "Hooks need review" modal whenever the machine's
 # ~/.codex/hooks.json or a project's .codex/hooks.json carries a hook it has no
-# persisted trust for, so the crewmate launch requests hook disablement
-# (bin/fm-spawn.sh's launch template owns the flag and policy limitation).
+# persisted trust for, so the launch posture has to be one Codex can actually
+# start under (bin/fm-spawn.sh's launch template owns the flags and the policy
+# limitation). config/codex-hook-trust selects between the two postures and this
+# guard captures both.
 #
 # The guard replays the REAL launch flags fm-spawn builds - captured from a
 # spawn driven through a fake pane - against the installed codex and verifies
-# that the requested hook disablement remains a recognized flag. Managed
-# settings can re-enable hooks after launch, so this guard pins construction
-# and capability rather than falsely treating the effective setting as a
-# portable invariant.
+# that every flag and feature name each posture names remains accepted. Managed
+# settings can override the hook feature after launch, so this guard pins
+# construction and capability rather than falsely treating the effective
+# setting as a portable invariant.
 #
 # The Stop-output cases use the installed app-server and a loopback Responses
 # fixture with fixed text and no tool calls. They trust only the fixture hook
@@ -34,8 +36,8 @@ TMP_ROOT=$(fm_test_tmproot fm-codex-hook-layer-live)
 # capture_codex_launch <name> <extra fm-spawn args...>: spawns a codex crewmate
 # against a fake pane and echoes the literal launch command firstmate sent.
 capture_codex_launch() {
-  local name=$1
-  shift
+  local name=$1 hook_trust=$2
+  shift 2
   local case_dir home proj wt fakebin launchlog id
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
@@ -46,6 +48,9 @@ capture_codex_launch() {
   fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" codex
   printf 'approve-for-me\n' > "$home/config/codex-approval-mode"
+  # `absent` leaves config/codex-hook-trust out entirely so the default posture
+  # is what the captured launch shows; any other value writes it.
+  [ "$hook_trust" = absent ] || printf '%s\n' "$hook_trust" > "$home/config/codex-hook-trust"
   fm_test_spawn_brief "$home" "$id"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   : > "$launchlog"
@@ -64,9 +69,9 @@ codex_global_flags() {
   printf '%s' "$flags"
 }
 
-test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch() {
+test_installed_codex_accepts_the_captured_crewmate_launch_flags() {
   local launch flags listing
-  launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
+  launch=$(capture_codex_launch ship bypass --mode no-mistakes --yolo off)
   flags=$(codex_global_flags "$launch")
   case " $flags " in
     *' --approve-for-me '*) ;;
@@ -78,20 +83,73 @@ test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmat
       ;;
   esac
 
+  # The opt-in config/codex-hook-trust=bypass posture sends the trust bypass and
+  # drops the blanket disablement, so the enabled hook layer actually runs.
+  case " $flags " in
+    *' --dangerously-bypass-hook-trust '*) ;;
+    *) fail "codex $CODEX_VERSION captured launch omitted --dangerously-bypass-hook-trust" ;;
+  esac
+  case " $flags " in
+    *' --disable hooks '*)
+      fail "codex $CODEX_VERSION captured launch disabled the hook layer instead of running it"
+      ;;
+  esac
+
   # The captured flags must remain accepted by the real Codex CLI. A managed
-  # setting can override hooks back on, so the effective feature value is not
-  # a portable assertion; an unknown feature remains a launch-breaking error.
+  # setting can override hooks either way, so the effective feature value is not
+  # a portable assertion; an unknown flag or feature remains a launch-breaking
+  # error.
   listing=$(eval "codex $flags features list" 2>&1) ||
     fail "codex $CODEX_VERSION rejected firstmate's crewmate launch flags: $listing"
+  case "$listing" in
+    *"Unknown feature flag"*)
+      fail "codex $CODEX_VERSION no longer knows a hook feature firstmate names: $listing"
+      ;;
+  esac
+  printf '%s\n' "$listing" | awk '{ print $1 }' | grep -qx hooks ||
+    fail "codex $CODEX_VERSION omitted the hook feature from the captured crewmate launch"
+
+  printf 'ok - codex %s accepts the captured crewmate launch flags and its hook bypass\n' "$CODEX_VERSION"
+}
+
+# assert_enforce_shape <id> <flags>: the hook-free posture shared by an absent
+# config/codex-hook-trust and an explicit `enforce`.
+assert_enforce_shape() {
+  local id=$1 flags=$2
+  case " $flags " in
+    *' --disable hooks '*) ;;
+    *) fail "codex $CODEX_VERSION $id launch lost its hook disablement: $flags" ;;
+  esac
+  case " $flags " in
+    *' --dangerously-bypass-hook-trust '*)
+      fail "codex $CODEX_VERSION $id launch bypassed hook trust"
+      ;;
+  esac
+}
+
+test_installed_codex_accepts_the_enforce_posture_flags() {
+  local launch flags listing
+  # `enforce` is the default, so an absent file and an explicit `enforce` must
+  # both build the hook-free posture; capture each and assert it independently,
+  # because the turn-end notify path differs per case directory.
+  launch=$(capture_codex_launch absent absent --mode no-mistakes --yolo off)
+  flags=$(codex_global_flags "$launch")
+  assert_enforce_shape absent "$flags"
+  launch=$(capture_codex_launch enforce enforce --mode no-mistakes --yolo off)
+  flags=$(codex_global_flags "$launch")
+  assert_enforce_shape enforce "$flags"
+  # An unknown feature name still has to stop the launch.
+  listing=$(eval "codex $flags features list" 2>&1) ||
+    fail "codex $CODEX_VERSION rejected firstmate's enforce launch flags: $listing"
   case "$listing" in
     *"Unknown feature flag"*)
       fail "codex $CODEX_VERSION no longer knows the hook feature firstmate disables: $listing"
       ;;
   esac
   printf '%s\n' "$listing" | awk '{ print $1 }' | grep -qx hooks ||
-    fail "codex $CODEX_VERSION omitted the hook feature from the captured crewmate launch"
+    fail "codex $CODEX_VERSION omitted the hook feature from the enforce launch"
 
-  printf 'ok - codex %s accepts the requested hook disablement for a firstmate crewmate launch\n' "$CODEX_VERSION"
+  printf 'ok - codex %s still accepts the enforce posture hook disablement\n' "$CODEX_VERSION"
 }
 
 test_installed_codex_still_reports_the_hook_feature() {
@@ -299,7 +357,8 @@ PY
 }
 
 test_installed_codex_still_reports_the_hook_feature
-test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch
+test_installed_codex_accepts_the_captured_crewmate_launch_flags
+test_installed_codex_accepts_the_enforce_posture_flags
 test_installed_codex_accepts_the_stop_wrapper_and_rejects_invalid_output
 
 echo "# all fm-codex-hook-layer-live-e2e tests passed"

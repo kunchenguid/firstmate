@@ -926,26 +926,31 @@ test_codex_omits_max_effort_for_unsupported_model() {
 }
 
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
-# unless the launch turns the hook layer off. These two cases pin the split:
-# a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
-# own primary-session turn-end guard and session-start digest.
-test_codex_crewmate_launch_disables_the_hook_layer() {
+# unless the launch either turns the hook layer off or bypasses its trust. A
+# secondmate always keeps the project hooks that carry its own primary-session
+# turn-end guard and session-start digest.
+# The default config/codex-hook-trust posture is `enforce`; `bypass` is the
+# opt-in posture where the enabled hook layer actually RUNS for an ordinary
+# worker, without codex's persisted-trust modal.
+# The two flags travel as a pair - hook-trust bypass on, blanket hook
+# disablement off - because bypassing trust on a layer that is turned off would
+# run nothing.
+test_codex_crewmate_launch_runs_the_enabled_hook_layer() {
   local rec id out status launch
   id=profile-codex-hooks-z4c
   rec=$(make_spawn_case profile-codex-hooks codex "$id")
   read_case_record "$rec"
   printf 'approve-for-me\n' > "$HOME_DIR/config/codex-approval-mode"
+  printf 'bypass\n' > "$HOME_DIR/config/codex-hook-trust"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "codex crewmate spawn should succeed"$'\n'"$out"
   launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
-  assert_contains "$launch" "--disable hooks" \
-    "codex crewmate launch did not disable the hook layer that blocks it on a trust modal"
-  # The opposite posture: this flag RUNS the untrusted hooks instead of
-  # disabling them, so a launch must never reach for it.
-  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
-    "codex crewmate launch ran the operator's untrusted hooks instead of disabling them"
+  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "codex crewmate launch did not bypass the hook-trust modal for the enabled hook layer"
+  assert_not_contains "$launch" "--disable hooks" \
+    "codex crewmate launch disabled the hook layer instead of running it"
   assert_contains "$launch" "--approve-for-me" \
     "codex crewmate launch did not use automatic approval review"
   assert_not_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" \
@@ -954,7 +959,7 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   # launch rather than any hook.
   assert_contains "$launch" "notify=" \
     "codex crewmate launch lost the turn-end notify program"
-  pass "a codex crewmate requests no hook layer and keeps its turn-end signal"
+  pass "a codex crewmate runs the enabled hook layer with no trust modal and keeps its turn-end signal"
 }
 
 test_codex_secondmate_launch_keeps_the_hook_layer() {
@@ -977,6 +982,73 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   assert_not_contains "$launch" "--dangerously-bypass-approvals-and-sandbox" \
     "codex secondmate launch retained the managed-settings-fragile complete-bypass posture"
   pass "a codex secondmate keeps its project hooks and uses automatic approval review"
+}
+
+# config/codex-hook-trust selects one of exactly two coherent postures for a
+# codex launch. `enforce` (the default, and what an absent file selects) keeps
+# the long-standing hook-free crewmate launch and codex's own trust requirement;
+# `bypass` runs the enabled hooks, for crewmates and scouts too, without codex's
+# persisted-trust modal. Any other value refuses before mutation. A secondmate never carries a hook
+# disablement, so the setting only moves its trust flag.
+test_codex_hook_trust_contract() {
+  local value kind rec id out launch status sm
+  for value in absent bypass enforce invalid; do
+    for kind in crewmate secondmate; do
+      id="hooktrust-$value-$kind"
+      rec=$(make_spawn_case "$id" codex "$id")
+      read_case_record "$rec"
+      case "$value" in
+        absent) ;;
+        *) printf '%s\n' "$value" > "$HOME_DIR/config/codex-hook-trust" ;;
+      esac
+      if [ "$kind" = secondmate ]; then
+        sm="$CASE_DIR/secondmate-home"
+        make_seeded_secondmate_home "$sm" "$id"
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate 2>&1)
+      else
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+      fi
+      status=$?
+      if [ "$value" = invalid ]; then
+        expect_code 1 "$status" "invalid Codex hook-trust setting must refuse ($id)"$'\n'"$out"
+        assert_contains "$out" 'config/codex-hook-trust' 'refusal must name setting'
+        assert_contains "$out" 'enforce (the default)' 'refusal must name enforce as the default'
+        assert_absent "$HOME_DIR/state/$id.meta" 'invalid setting published metadata'
+        [ ! -s "$LAUNCH_LOG" ] || fail 'invalid setting launched a worker'
+        continue
+      fi
+      expect_code 0 "$status" "$id spawn failed: $out"
+      launch=$(fm_test_launch_unframe "$(cat "$LAUNCH_LOG")")
+      if [ "$value" != bypass ]; then
+        assert_not_contains "$launch" '--dangerously-bypass-hook-trust' \
+          "$id: enforce must leave codex's own hook-trust requirement in place"
+      else
+        assert_contains "$launch" '--dangerously-bypass-hook-trust' \
+          "$id: the opt-in hook-trust bypass was not applied"
+      fi
+      # The hook layer follows the same posture as its trust flag, and the two
+      # must never disagree. A secondmate never carries a disablement.
+      if [ "$value" != bypass ]; then
+        if [ "$kind" = secondmate ]; then
+          assert_not_contains "$launch" '--disable hooks' \
+            "$id: a secondmate's own supervision hooks must stay enabled"
+        else
+          assert_contains "$launch" '--disable hooks' \
+            "$id: enforce must keep the long-standing hook-free crewmate launch"
+        fi
+      else
+        assert_not_contains "$launch" '--disable hooks' \
+          "$id: the bypass posture must actually run the enabled hooks, not disable them"
+      fi
+      # The turn-end signal rides the launch rather than any hook, so neither
+      # posture may drop it from a crewmate.
+      if [ "$kind" != secondmate ]; then
+        assert_contains "$launch" 'notify=' \
+          "$id: the hook-trust setting must not drop the turn-end notify program"
+      fi
+    done
+  done
+  pass 'Codex hook trust defaults to enforce, selects bypass opt-in, pairs flags coherently, and refuses invalid values'
 }
 
 test_codex_approval_mode_contract() {
@@ -2910,6 +2982,10 @@ test_codex_permission_modes() {
       if [ "$mode" != absent ]; then
         printf '%s\n' "$mode" > "$HOME_DIR/config/codex-permission-mode"
       fi
+      # Pin the opt-in `bypass` hook-trust posture here so the permission-mode
+      # assertions below run against the hook-running launch shape; the contract
+      # test owns the default `enforce` posture.
+      printf 'bypass\n' > "$HOME_DIR/config/codex-hook-trust"
       local args=("$id" "$PROJ_DIR")
       case "$kind" in
       ship) args+=(--mode no-mistakes --yolo off) ;;
@@ -2934,11 +3010,16 @@ test_codex_permission_modes() {
         assert_not_contains "$launch" '--sandbox' "default must not add a sandbox flag"
         assert_not_contains "$launch" '--ask-for-approval' "default must not add an approval flag"
       fi
+      # config/codex-hook-trust is pinned to the opt-in `bypass` posture above,
+      # so the trust flag is present and the crewmate/scout hook disablement is
+      # gone, and the enabled hook layer actually runs.
+      flags+='--dangerously-bypass-hook-trust '
       if [ "$kind" = secondmate ]; then
         assert_not_contains "$launch" '--disable hooks' "secondmate must retain primary hooks"
         assert_not_contains "$launch" 'notify=' "secondmate must retain its own turn-end wiring"
       else
-        flags+='--disable hooks -c '
+        assert_not_contains "$launch" '--disable hooks' "a bypass worker must run its enabled hooks"
+        flags+='-c '
         assert_contains "$launch" 'notify=' "worker must retain its turn-end notification"
       fi
       assert_contains "$launch" "$flags" "permission selection changed model, effort, or hook flags"
@@ -3048,9 +3129,10 @@ test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
-test_codex_crewmate_launch_disables_the_hook_layer
+test_codex_crewmate_launch_runs_the_enabled_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
 test_codex_approval_mode_contract
+test_codex_hook_trust_contract
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
