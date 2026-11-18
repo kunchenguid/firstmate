@@ -6291,10 +6291,14 @@ mkdir -p "$TASK_TMP/gotmp"
 # every landed-work check passes. bin/fm-footprint-lib.sh owns the layout,
 # config/footprint, the exported names, and which worker tools also get a
 # redirected TMPDIR; a malformed config or an unsafe existing area refuses
-# here, before any launch. An area a failed spawn leaves behind has no task
-# record, so the daily footprint pass removes it after its grace period.
+# here, before any launch. A relaunch keeps the task's area and generation; a
+# fresh spawn sets an earlier area for the id aside and gets a new one. An
+# area a failed spawn leaves behind has no task record, so the daily footprint
+# pass (on by default) removes it after its grace period.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  if ! SPAWN_SCRATCH_OUT=$(fm_footprint_task_env "$CONFIG" "$FM_HOME" "$ID" "$HARNESS"); then
+  SPAWN_SCRATCH_MODE=fresh
+  [ "$RELAUNCH" != 1 ] || SPAWN_SCRATCH_MODE=relaunch
+  if ! SPAWN_SCRATCH_OUT=$(fm_footprint_task_env "$CONFIG" "$FM_HOME" "$ID" "$HARNESS" "$SPAWN_SCRATCH_MODE"); then
     echo "error: could not prepare the task scratch area for $ID; refusing to launch" >&2
     exit 1
   fi

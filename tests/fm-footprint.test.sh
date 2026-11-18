@@ -98,19 +98,19 @@ SH
 test_config_defaults_and_refusals() {
   local out
   new_home config
-  out=$(lib 'fm_footprint_config_read "$H/config"; echo "$FP_TASK_CLEANUP $FP_TASK_TMPDIR $FP_DOCKER_LABELS [$FP_CACHE_CAP_GB] $FP_ORPHAN_GRACE_HOURS $FP_OLD_TASK_DAYS"; fm_footprint_scratch_root "$H"; echo "$FP_SCRATCH_ROOT"')
+  out=$(lib 'fm_footprint_config_read "$H/config"; echo "$FP_TASK_CLEANUP $FP_TASK_TMPDIR $FP_DOCKER_LABELS $FP_DAILY_PASS [$FP_CACHE_CAP_GB] $FP_ORPHAN_GRACE_HOURS $FP_OLD_TASK_DAYS"; fm_footprint_scratch_root "$H"; echo "$FP_SCRATCH_ROOT"')
   case "$(uname -s)" in
-    Darwin) assert_equals "on on on [] 24 30
+    Darwin) assert_equals "on on on on [] 24 30
 $U/Library/Caches/firstmate/scratch" "$out" "absent config must give the defaults" ;;
-    *) assert_equals "on on on [] 24 30
+    *) assert_equals "on on on on [] 24 30
 ${XDG_CACHE_HOME:-$U/.cache}/firstmate/scratch" "$out" "absent config must give the defaults" ;;
   esac
   out=$(lib 'fm_footprint_config_read "$H/config"; echo "$FP_REMOVAL_GRACE_SECONDS"')
   assert_equals 5 "$out" "the removal grace window must default to 5 seconds"
-  printf '# local choices\ncache-cap-gb 50\ntask-tmpdir off   # trailing comment\n\nold-task-days 7\nremoval-grace-seconds 12\n' > "$H/config/footprint"
-  out=$(lib 'fm_footprint_config_read "$H/config" && echo "$FP_CACHE_CAP_GB $FP_TASK_TMPDIR $FP_OLD_TASK_DAYS $FP_REMOVAL_GRACE_SECONDS"')
-  assert_equals "50 off 7 12" "$out" "valid keys must be read"
-  for bad in 'cache-cap-gb lots' 'task-cleanup maybe' 'frobnicate 1' 'old-task-days 1.5' 'cache-cap-gb 1 2' 'scratch-root' \
+  printf '# local choices\ncache-cap-gb 50\ntask-tmpdir off   # trailing comment\n\nold-task-days 7\nremoval-grace-seconds 12\ndaily-pass off\n' > "$H/config/footprint"
+  out=$(lib 'fm_footprint_config_read "$H/config" && echo "$FP_CACHE_CAP_GB $FP_TASK_TMPDIR $FP_OLD_TASK_DAYS $FP_REMOVAL_GRACE_SECONDS $FP_DAILY_PASS"')
+  assert_equals "50 off 7 12 off" "$out" "valid keys must be read"
+  for bad in 'cache-cap-gb lots' 'task-cleanup maybe' 'daily-pass yes' 'frobnicate 1' 'old-task-days 1.5' 'cache-cap-gb 1 2' 'scratch-root' \
     'removal-grace-seconds 0' 'removal-grace-seconds 601' 'removal-grace-seconds 2.5'; do
     printf '%s\n' "$bad" > "$H/config/footprint"
     out=$(lib 'fm_footprint_config_read "$H/config" && echo accepted || echo "refused: $FP_CONFIG_ERROR"')
@@ -154,7 +154,7 @@ TEMP=$root/$key/task-a1/tmp" "$out" "a covered tool must receive the scratch are
   out=$(lib 'fm_footprint_task_env "$H/config" "$H" Task.B2 pi')
   assert_contains "$out" "COMPOSE_PROJECT_NAME=fm-$key-task_b2-$(lib 'fm_footprint_task_generation '"$root/$key/Task.B2")" "a compose name must be lowercase with dots as underscores, ending in the generation"
   case "$(lib 'fm_footprint_task_generation '"$root/$key/task-a1")" in ????????????????) ;; *) fail "the area must record a 16 digit generation" ;; esac
-  assert_equals "$(label_for "$root/$key/task-a1" task-a1)" "$(lib 'fm_footprint_task_env "$H/config" "$H" task-a1 claude' | sed -n 's/^FM_DOCKER_LABEL=//p')" "a relaunch must keep the generation"
+  assert_equals "$(label_for "$root/$key/task-a1" task-a1)" "$(lib 'fm_footprint_task_env "$H/config" "$H" task-a1 claude relaunch' | sed -n 's/^FM_DOCKER_LABEL=//p')" "a relaunch must keep the generation"
   assert_contains "$out" "# pi is not verified with a redirected TMPDIR" "an unverified tool must be named as not covered"
   assert_not_contains "$out" "TMPDIR=" "an unverified tool must keep its inherited temp"
   printf 'scratch-root %s\ntask-tmpdir off\ndocker-labels off\n' "$root" > "$H/config/footprint"
@@ -174,6 +174,40 @@ TEMP=$root/$key/task-a1/tmp" "$out" "a covered tool must receive the scratch are
   out=$(lib 'fm_footprint_task_env "$H/config" "$H" linked-e5 codex && echo accepted')
   assert_not_contains "$out" accepted "a symlinked area must be refused"
   pass "the scratch area is private and exports follow the tool, length, and switches"
+}
+
+test_fresh_spawn_reusing_an_id_never_shares_the_earlier_area() {
+  local root key area old_label old_compose out new_label now
+  CASE=reuse
+  new_home "$CASE"
+  root="$SHORT/$CASE"
+  printf 'scratch-root %s\n' "$root" > "$H/config/footprint"
+  key=$(home_key)
+  area="$root/$key/fix-auth"
+  out=$(lib 'fm_footprint_task_env "$H/config" "$H" fix-auth codex fresh')
+  old_label=$(printf '%s\n' "$out" | sed -n 's/^FM_DOCKER_LABEL=//p')
+  old_compose=$(printf '%s\n' "$out" | sed -n 's/^COMPOSE_PROJECT_NAME=//p')
+  # The earlier task closed but its area survived (task-cleanup off, or it held a repository).
+  mkdir -p "$area/clone"
+  printf 'old work\n' > "$area/clone/state.db"
+  out=$(lib 'fm_footprint_task_env "$H/config" "$H" fix-auth codex fresh')
+  new_label=$(printf '%s\n' "$out" | sed -n 's/^FM_DOCKER_LABEL=//p')
+  [ -n "$new_label" ] && [ "$new_label" != "$old_label" ] || fail "a later task reusing an id must not share the earlier task's label ($old_label)"
+  assert_not_contains "$out" "COMPOSE_PROJECT_NAME=$old_compose" "a later task reusing an id must not share the earlier compose project"
+  assert_contains "$out" "FM_TASK_SCRATCH=$area" "the new task still gets the area under its own id"
+  assert_absent "$area/clone" "the new task must start with an empty area"
+  assert_contains "$out" "# an earlier scratch area for fix-auth was kept aside at $root/$key/.fm-kept-fix-auth.1" "spawn must name where the earlier area went"
+  assert_grep 'old work' "$root/$key/.fm-kept-fix-auth.1/clone/state.db" "the earlier area must be kept whole, never removed at spawn"
+  assert_equals "$old_label" "$(label_for "$root/$key/.fm-kept-fix-auth.1" fix-auth)" "the kept area keeps its own generation"
+  assert_equals "$new_label" "$(lib 'fm_footprint_task_env "$H/config" "$H" fix-auth codex relaunch' | sed -n 's/^FM_DOCKER_LABEL=//p')" "a relaunch keeps the new task's generation"
+  assert_absent "$root/$key/.fm-kept-fix-auth.2" "a relaunch must not set anything aside"
+  printf 'worktree=/x\nscratch=%s\n' "$area" > "$H/state/fix-auth.meta"
+  now=$(date +%s)
+  fm_touch_epoch $((now - 48 * 3600)) "$root/$key/.fm-kept-fix-auth.1"
+  out=$(fp sweep)
+  assert_absent "$root/$key/.fm-kept-fix-auth.1" "the daily pass must remove a disposable kept area past its grace period"
+  assert_present "$area/tmp" "the live task's new area must stay"
+  pass "a fresh spawn reusing an id keeps the earlier area aside and gets a new area, label and compose project"
 }
 
 test_two_homes_never_share_scratch() {
@@ -546,7 +580,17 @@ test_check_runs_daily_and_reports_changes_once() {
   out=$(fp disarm)
   assert_absent "$H/state/footprint.check.sh" "disarm must remove the shim"
   assert_absent "$H/state/footprint.check-trust" "disarm must remove the binding"
-  pass "the check runs at most daily, reports a finding once, and arms and disarms"
+  fp arm >/dev/null
+  printf 'daily-pass off\nscratch-root %s\n' "$SHORT/$CASE" > "$H/config/footprint"
+  out=$(fp arm)
+  assert_contains "$out" "daily-pass is off in config/footprint; not armed" "arm must say the pass is off"
+  assert_absent "$H/state/footprint.check.sh" "arm with daily-pass off must remove the shim"
+  assert_absent "$H/state/footprint.check-trust" "arm with daily-pass off must remove the binding"
+  out=$(FM_FOOTPRINT_NOW=$((now + 400000)) fp check)
+  assert_equals "" "$out" "check with daily-pass off must say nothing"
+  sleep 1
+  assert_absent "$H/state/.footprint-daily.result" "check with daily-pass off must start no pass"
+  pass "the check runs at most daily, reports a finding once, arms and disarms, and daily-pass off turns it off"
 }
 
 # --- report ---------------------------------------------------------------------
@@ -690,6 +734,7 @@ test_report_platform_linux_and_wsl() {
 fm_test_run \
   test_config_defaults_and_refusals \
   test_task_env_creates_private_area_and_exports \
+  test_fresh_spawn_reusing_an_id_never_shares_the_earlier_area \
   test_two_homes_never_share_scratch \
   test_task_close_removes_scratch_and_labelled_docker_only \
   test_task_close_with_its_own_temp_inside_scratch \

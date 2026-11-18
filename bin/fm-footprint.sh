@@ -195,8 +195,9 @@
 # sweep [--dry-run]
 #   The daily pass, rebuildable classes only. When this home's key directory
 #   passes the ownership test, it removes the scratch areas there whose task
-#   has no record, that are older than orphan-grace-hours, and that hold
-#   nothing in the never-removed list; each is set aside only after taking
+#   has no record (including an earlier task's area a fresh spawn kept aside
+#   as .fm-kept-<id>.<n>), that are older than orphan-grace-hours, and that
+#   hold nothing in the never-removed list; each is set aside only after taking
 #   that task's spawn lock (bin/fm-spawn.sh holds it from before it makes the
 #   area until the task is recorded) and rechecking that no record exists, so
 #   a spawn reusing the id either is recorded first and keeps its area or
@@ -212,9 +213,11 @@
 #   the cap or a failed trim command.
 #
 # check / arm / disarm
-#   arm writes state/footprint.check.sh and binds it through
+#   The daily pass is on by default: bin/fm-bootstrap.sh runs arm at every
+#   startup. arm writes state/footprint.check.sh and binds it through
 #   bin/fm-check-register.sh, so the existing watcher slow-check cadence calls
-#   check. Because one check may run for at most FM_CHECK_TIMEOUT (default
+#   check. With daily-pass off in config/footprint, arm disarms instead and
+#   check starts nothing, so the switch holds even before the next startup. Because one check may run for at most FM_CHECK_TIMEOUT (default
 #   30 s), check starts sweep at most once every 86400 seconds as a detached
 #   run in its own process group (daily-run; one at a time, lock
 #   state/.footprint-daily.lock, result state/.footprint-daily.result) and
@@ -1370,6 +1373,8 @@ cmd_task_close() {  # <id> <scratch> [project]
     printf 'footprint: %s; removed nothing for %s\n' "$FP_CONFIG_ERROR" "$id"
     return 0
   fi
+  local pass='the daily pass'
+  [ "$FP_DAILY_PASS" = on ] || pass='bin/fm-footprint.sh sweep (daily-pass is off)'
   fp_repair_stopped
   if [ "$FP_TASK_CLEANUP" = off ]; then
     printf 'footprint: task-cleanup is off; kept the scratch area and Docker material of %s\n' "$id"
@@ -1439,8 +1444,8 @@ cmd_task_close() {  # <id> <scratch> [project]
   case "$scratch_result" in
     refused) printf 'footprint: %s scratch path %s is not this home'"'"'s area for the task; left it in place. ' "$id" "$scratch" ;;
     partial) printf 'footprint: %s scratch area %s was only partly removed: %s. ' "$id" "$scratch" "$FP_BLOCKER" ;;
-    kept) printf 'footprint: %s scratch area %s kept whole (%s): %s; %s, and the daily pass removes the area. ' \
-      "$id" "$scratch" "$(fp_human "$scratch_kb")" "$FP_BLOCKER" "$kept_hint" ;;
+    kept) printf 'footprint: %s scratch area %s kept whole (%s): %s; %s, and %s removes the area. ' \
+      "$id" "$scratch" "$(fp_human "$scratch_kb")" "$FP_BLOCKER" "$kept_hint" "$pass" ;;
     *) printf 'footprint: %s scratch %s (%s). ' "$id" "$scratch_result" "$(fp_human "$scratch_kb")" ;;
   esac
   case "$FP_DOCKER_RESULT" in
@@ -1456,7 +1461,7 @@ cmd_task_close() {  # <id> <scratch> [project]
       if [ "$queue_lost" = 1 ]; then
         printf 'its cleanup could not be queued, so remove what carries label %s by hand.' "$(fm_footprint_docker_label "$FP_KEY" "$id" "$gen")"
       else
-        printf 'its cleanup is queued for the daily pass.'
+        printf 'its cleanup is queued for %s.' "$pass"
       fi
       ;;
   esac
@@ -2060,10 +2065,12 @@ cmd_sweep() {  # [--dry-run]
         leftover=$((leftover + 1))
         [ "$leftover" -gt 5 ] || leftover_names="$leftover_names${leftover_names:+, }${aside##*/}"
       done
-      for area in "$base"/*; do
+      # An area a fresh spawn kept aside (.fm-kept-<id>.<n>) belongs to an
+      # earlier, closed task and is judged like any orphan.
+      for area in "$base"/* "$base"/.fm-kept-*; do
         [ -d "$area" ] && [ ! -L "$area" ] || continue
         id=${area##*/}
-        fm_task_id_path_safe "$id" || continue
+        fm_task_id_path_safe "${id#.fm-kept-}" || continue
         fp_task_live "$id" && continue
         cands+=("$area")
       done
@@ -2239,6 +2246,9 @@ cmd_daily_run() {
 cmd_check() {
   local now last finished finding previous reported_at
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || exit 0
+  if fm_footprint_config_read "$CONFIG_DIR" && [ "$FP_DAILY_PASS" = off ]; then
+    exit 0
+  fi
   now=$(now_epoch)
   last=$(awk -F '\t' '$1 == "last_eval" {print $2; exit}' "$CHECK_RECORD" 2>/dev/null)
   previous=$(awk -F '\t' '$1 == "reported" {print $2; exit}' "$CHECK_RECORD" 2>/dev/null)
@@ -2268,6 +2278,12 @@ cmd_check() {
 cmd_arm() {
   local home device want
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
+  fm_footprint_config_read "$CONFIG_DIR" || die "$FP_CONFIG_ERROR"
+  if [ "$FP_DAILY_PASS" = off ]; then
+    cmd_disarm >/dev/null
+    printf 'daily-pass is off in config/footprint; not armed\n'
+    return 0
+  fi
   home=$(fm_footprint_physical_dir "$FM_HOME") || die "cannot resolve FM_HOME $FM_HOME"
   device=$(fm_pr_file_device "$STATE") || die "state directory is unavailable"
   fm_pr_regular_destination_on_device_or_absent "$CHECK_SHIM" "$device" || die "check shim path is unavailable"

@@ -329,6 +329,8 @@ test_record_hygiene_absent_flag_is_inert() {
   local case_dir fakebin out_off out_on before after
   case_dir="$TMP_ROOT/record-hygiene-off"
   fakebin=$(seed_record_hygiene_home "$case_dir")
+  # The footprint daily pass arms by default and writes its own state; switch it off to isolate record hygiene.
+  printf 'daily-pass off\n' > "$case_dir/home/config/footprint"
   before=$(cd "$case_dir/home" && ls -laR state data)
   out_off=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_NETWORK=skip FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
@@ -1496,6 +1498,8 @@ test_pr_health_monitor_arms_only_with_its_flag() {
     mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/state"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     [ "$flag" = off ] || : > "$case_dir/home/config/pr-health-monitor"
+    # The footprint daily pass is armed by default; switch it off so state/ shows only the PR health monitor.
+    printf 'daily-pass off\n' > "$case_dir/home/config/footprint"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -1510,6 +1514,28 @@ test_pr_health_monitor_arms_only_with_its_flag() {
     fi
   done
   pass "bootstrap arms the PR health monitor only when config/pr-health-monitor exists"
+}
+
+# The footprint daily pass is on by default; config/footprint daily-pass off disarms it.
+test_footprint_daily_pass_armed_by_default() {
+  local case_dir fakebin out
+  case_dir="$TMP_ROOT/footprint-pass"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/data" "$case_dir/home/state"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "bootstrap arming the footprint pass printed: $out"
+  [ -f "$case_dir/home/state/footprint.check.sh" ] && [ -f "$case_dir/home/state/footprint.check-trust" ] \
+    || fail "bootstrap did not register the footprint daily pass: $(ls -A "$case_dir/home/state")"
+  printf 'daily-pass off\n' > "$case_dir/home/config/footprint"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "bootstrap with daily-pass off printed: $out"
+  [ ! -e "$case_dir/home/state/footprint.check.sh" ] && [ ! -e "$case_dir/home/state/footprint.check-trust" ] \
+    || fail "bootstrap with daily-pass off left the footprint pass armed: $(ls -A "$case_dir/home/state")"
+  pass "bootstrap arms the footprint daily pass by default and disarms it with daily-pass off"
 }
 
 test_preferred_provider_validation() {
@@ -1950,5 +1976,6 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_pr_health_monitor_arms_only_with_its_flag
+test_footprint_daily_pass_armed_by_default
 test_preferred_provider_validation
 test_crew_dispatch_validation

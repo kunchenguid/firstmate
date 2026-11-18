@@ -35,8 +35,11 @@
 # keeps its inherited temp directory and is reported as not covered.
 #
 # Docker. Each task area holds a generation, 16 random hex digits written in
-# <area>/.fm-generation when spawn first makes the area and reused while it
-# exists (a relaunch keeps it). FM_DOCKER_LABEL is the one flag a worker
+# <area>/.fm-generation when spawn makes the area. A relaunch keeps the area
+# and its generation; a fresh spawn that finds an earlier area for its id (one
+# that survived its task's close) renames it aside to .fm-kept-<id>.<n>, never
+# removing it there, and makes a new area with a new generation, which the
+# daily pass later treats like any orphaned area. FM_DOCKER_LABEL is the one flag a worker
 # passes to docker run, docker create, docker volume create, docker network
 # create and docker build: firstmate.task=<home-key>/<task-id>/<generation>.
 # COMPOSE_PROJECT_NAME is fm-<home-key>-<task-id lowercased, "." as
@@ -90,7 +93,7 @@ _fm_footprint_whole() {  # <value>
 # shellcheck disable=SC2034 # FP_* are output globals read by the sourcing script.
 # fm_footprint_config_read <config-dir>
 #   Sets FP_SCRATCH_ROOT_CFG, FP_TASK_CLEANUP, FP_TASK_TMPDIR, FP_DOCKER_LABELS,
-#   FP_CACHE_CAP_GB (empty means no cap), FP_ORPHAN_GRACE_HOURS,
+#   FP_DAILY_PASS, FP_CACHE_CAP_GB (empty means no cap), FP_ORPHAN_GRACE_HOURS,
 #   FP_OLD_TASK_DAYS, FP_KEEP_WARN_MB and FP_REMOVAL_GRACE_SECONDS. Returns 1 with FP_CONFIG_ERROR set for an unsafe,
 #   unreadable or malformed file, leaving the defaults in place.
 fm_footprint_config_read() {  # <config-dir>
@@ -99,6 +102,7 @@ fm_footprint_config_read() {  # <config-dir>
   FP_TASK_CLEANUP=on
   FP_TASK_TMPDIR=on
   FP_DOCKER_LABELS=on
+  FP_DAILY_PASS=on
   FP_CACHE_CAP_GB=
   FP_ORPHAN_GRACE_HOURS=24
   FP_OLD_TASK_DAYS=30
@@ -136,7 +140,7 @@ fm_footprint_config_read() {  # <config-dir>
     case "$key" in
       scratch-root)
         FP_SCRATCH_ROOT_CFG=$value ;;
-      task-cleanup|task-tmpdir|docker-labels)
+      task-cleanup|task-tmpdir|docker-labels|daily-pass)
         _fm_footprint_onoff "$value" || {
           FP_CONFIG_ERROR="$file line $n: '$key' must be on or off"
           return 1
@@ -145,6 +149,7 @@ fm_footprint_config_read() {  # <config-dir>
           task-cleanup) FP_TASK_CLEANUP=$value ;;
           task-tmpdir) FP_TASK_TMPDIR=$value ;;
           docker-labels) FP_DOCKER_LABELS=$value ;;
+          daily-pass) FP_DAILY_PASS=$value ;;
         esac
         ;;
       cache-cap-gb)
@@ -326,15 +331,29 @@ fm_footprint_key_dir_trusted() {  # <root> <key> <home>
   [ "$current" = "$home_real" ]
 }
 
-# fm_footprint_task_env <config-dir> <home> <task-id> <harness>
+# fm_footprint_keep_aside <dir>: renames an earlier task's area to an unused
+#   .fm-kept-<id>.<n> beside it and prints the new path. Returns 1 when the
+#   rename fails.
+fm_footprint_keep_aside() {  # <dir>
+  local dir=$1 n=1 to
+  to="${dir%/*}/.fm-kept-${dir##*/}.$n"
+  while [ -e "$to" ] || [ -L "$to" ]; do n=$((n + 1)); to="${dir%/*}/.fm-kept-${dir##*/}.$n"; done
+  mv -- "$dir" "$to" 2>/dev/null || return 1
+  printf '%s\n' "$to"
+}
+
+# fm_footprint_task_env <config-dir> <home> <task-id> <harness> [fresh]
 #   Creates the task's private scratch area and prints the exports for it as
 #   NAME=VALUE lines: FM_TASK_SCRATCH always; FM_DOCKER_LABEL and
 #   COMPOSE_PROJECT_NAME unless docker-labels is off; TMPDIR, TMP and TEMP
 #   only for a covered tool within the path limit and unless task-tmpdir is
-#   off. Prints "#" note lines for anything left uncovered. Returns 1 with a
-#   reason on stderr for a malformed config or an unsafe scratch path.
-fm_footprint_task_env() {  # <config-dir> <home> <task-id> <harness>
-  local config=$1 home=$2 id=$3 harness=$4 root key dir tmp gen
+#   off. Prints "#" note lines for anything left uncovered. With fresh (a new
+#   task, not a relaunch) an existing private area for the id is kept aside
+#   (fm_footprint_keep_aside) so the task never shares its area, label or
+#   compose project. Returns 1 with a reason on stderr for a malformed config
+#   or an unsafe scratch path.
+fm_footprint_task_env() {  # <config-dir> <home> <task-id> <harness> [fresh]
+  local config=$1 home=$2 id=$3 harness=$4 mode=${5:-} root key dir tmp gen kept=
   if ! fm_footprint_config_read "$config"; then
     printf 'error: %s\n' "$FP_CONFIG_ERROR" >&2
     return 1
@@ -351,8 +370,17 @@ fm_footprint_task_env() {  # <config-dir> <home> <task-id> <harness>
   dir="$root/$key/$id"
   tmp="$dir/tmp"
   if ! fm_footprint_private_dir "$root" || ! fm_footprint_private_dir "$root/$key" ||
-    ! fm_footprint_key_dir_bind "$root/$key" "$home" ||
-    ! fm_footprint_private_dir "$dir" || ! fm_footprint_private_dir "$tmp" ||
+    ! fm_footprint_key_dir_bind "$root/$key" "$home"; then
+    printf 'error: task scratch area %s is not a private directory owned by this user with a valid .fm-generation; inspect and remove it, then retry\n' "$dir" >&2
+    return 1
+  fi
+  if [ "$mode" = fresh ] && [ -d "$dir" ] && [ ! -L "$dir" ] && fm_footprint_private_dir "$dir"; then
+    if ! kept=$(fm_footprint_keep_aside "$dir"); then
+      printf 'error: an earlier scratch area %s for this task id could not be set aside; inspect and remove it, then retry\n' "$dir" >&2
+      return 1
+    fi
+  fi
+  if ! fm_footprint_private_dir "$dir" || ! fm_footprint_private_dir "$tmp" ||
     ! gen=$(fm_footprint_generation_ensure "$dir"); then
     printf 'error: task scratch area %s is not a private directory owned by this user with a valid .fm-generation; inspect and remove it, then retry\n' "$dir" >&2
     return 1
@@ -371,4 +399,5 @@ fm_footprint_task_env() {  # <config-dir> <home> <task-id> <harness>
   else
     printf 'TMPDIR=%s\nTMP=%s\nTEMP=%s\n' "$tmp" "$tmp" "$tmp"
   fi
+  [ -z "$kept" ] || printf '# an earlier scratch area for %s was kept aside at %s; this task got a new one\n' "$id" "$kept"
 }

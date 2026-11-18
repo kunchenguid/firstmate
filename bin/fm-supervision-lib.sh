@@ -30,7 +30,10 @@ fm_sup_stat_mtime() {
 #                         bin/fm-check-register.sh writes. Task PR polls carry no
 #                         such binding and are torn down with their task, and the
 #                         relay shim keeps its own trust path, so neither counts
-#                         here. Presence of the binding is the whole test: whether
+#                         here. Nor does the footprint daily pass, which startup
+#                         arms in every home (bin/fm-footprint.sh): it is
+#                         housekeeping that rides any running watcher and never
+#                         by itself needs one. Presence of the binding is the whole test: whether
 #                         those bytes are still the registered ones is the check
 #                         sweep's call at execution time, and a home whose check
 #                         no longer validates needs the watcher precisely so the
@@ -66,7 +69,7 @@ fm_supervision_status() {
     [ -e "$check" ] || continue
     id=${check##*/}
     id=${id%.check.sh}
-    if [ "$id" = x-watch ]; then
+    if [ "$id" = x-watch ] || [ "$id" = footprint ]; then
       continue
     fi
     [ -e "$state/$id.check-trust" ] || continue
