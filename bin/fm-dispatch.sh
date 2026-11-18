@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # fm-dispatch.sh - the routed front door for crewmate and scout launches.
 # Usage:
-#   fm-dispatch.sh new <task-id> <project-dir> [spawn options]
+#   fm-dispatch.sh new <task-id> <project-dir> [--wait] [spawn options]
+# new durably queues the request and returns before resolving or launching.
+# The watcher admission retry finishes it and announces the result.
+# --wait requests the final verdict synchronously (also used by queue replay).
 #   fm-dispatch.sh relaunch <task-id> (--note <text> | --note-file <path>) [--priority <n>]
 #   fm-dispatch.sh promote <task-id> [promotion options]
 # All verbs accept --pick <CODE> to finish a verified captain pick instead of
@@ -45,9 +48,12 @@ if [ "$VERB" = new ]; then
   shift
   case "$PROJECT" in -*) die 'new requires a project directory, not a flag' ;; esac
 fi
+ORIGINAL_ARGS=(new "$ID" "$PROJECT" "$@")
+WAIT=0
 ARGS=() RESOLVE_ARGS=() PICK=
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --wait) [ "$VERB" = new ] || die '--wait is only for new'; WAIT=1; shift ;;
     --pick) [ "$#" -ge 2 ] && [ -n "$2" ] || die '--pick needs a code'; PICK=$2; shift 2 ;;
     --captain-pick) RESOLVE_ARGS+=(--captain-pick); shift ;;
     --harness|--model|--effort|--account|--harness=*|--model=*|--effort=*|--account=*)
@@ -80,6 +86,27 @@ if [ "$VERB" != new ]; then
   PROJECT=$(meta_value project)
 fi
 [ -r "$BRIEF" ] || die "unreadable brief $BRIEF"
+if [ "$VERB" = new ] && [ "$WAIT" = 0 ]; then
+  [ ! -e "$META" ] || die 'task already has a record'
+  exec "$SCRIPT_DIR/fm-admission-queue.sh" submit "$ID" -- "${ORIGINAL_ARGS[@]}" --wait
+fi
+# Template bindings are checked on replay, never just when submitted. The worker
+# repeats this guard before publishing because a head can move after launch.
+if [ "$VERB" = new ] && grep -q '^PR start:' "$BRIEF"; then
+  binding=$(grep '^PR start:' "$BRIEF")
+  read -r _ _ shape url head extra <<< "$binding"
+  [ -z "${extra:-}" ] && [ "$(printf '%s\n' "$binding" | wc -l)" -eq 1 ] || die 'invalid PR start binding'
+  constraint=()
+  case "$shape" in
+    review)
+      [[ " ${ARGS[*]} " = *' --scout '* ]] && [[ " ${ARGS[*]} " = *' --merge-review '* ]] || die 'review template requires --scout --merge-review'
+      ;;
+    follow-up) ;;
+    conflict) constraint=(conflict) ;;
+    *) die 'unknown PR start shape' ;;
+  esac
+  "$SCRIPT_DIR/fm-pr-start-template.sh" verify "$url" "$head" "${constraint[@]}"
+fi
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 if [ "$VERB" = promote ]; then
   if [ "$(meta_value kind)" = scout ]; then

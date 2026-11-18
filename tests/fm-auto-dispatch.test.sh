@@ -96,6 +96,14 @@ assert_contains "$out" 'started skip: already started' 'a row with a task record
 assert_contains "$out" 'mate-charter skip: secondmate-class row' 'a secondmate row is never dispatched'
 assert_contains "$out" 'sm2 skip: captain-class row' 'a captain-class row is never dispatched'
 pass 'verdicts: ready rows are classified; held, captain and secondmate rows wait'
+mkdir -p "$HOME_DIR/state/admission-queue"
+printf 'pending\n' > "$HOME_DIR/state/admission-queue/t1.start"
+printf 'PR start: review https://github.com/example/project/pull/1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >> "$HOME_DIR/data/sc1/brief.md"
+out=$(env "${AD_ENV[@]}" "$AD" list)
+assert_contains "$out" 't1 skip: admission queue owns start' 'async requests must not be redispatched'
+assert_contains "$out" '--scout --merge-review' 'known review template must retain reserved allowance'
+rm -f "$HOME_DIR/state/admission-queue/t1.start"
+pass 'pending requests have one owner and review templates retain reserved capacity'
 
 # A custom ship branch passes the prefix the brief recorded; a branch that is
 # not <prefix>/<id> parks instead of guessing; a clone that is missing waits.
@@ -133,7 +141,7 @@ printf 'enforce\n' > "$HOME_DIR/config/auto-dispatch"
 out=$(env "${AD_ENV[@]}" "$AD" run)
 assert_contains "$out" 'started t1' 'a dispatchable row is started'
 assert_equals 1 "$(wc -l < "$DISPATCH_ARGS")" 'one dispatch per pass, like the admission retry'
-assert_contains "$(cat "$DISPATCH_ARGS")" 'new t1 '"$HOME_DIR"'/projects/firstmate --mode direct-PR --yolo off' 'the dispatch goes through fm-dispatch.sh new with derived flags'
+assert_contains "$(cat "$DISPATCH_ARGS")" 'new t1 '"$HOME_DIR"'/projects/firstmate --wait --mode direct-PR --yolo off' 'the dispatch goes through fm-dispatch.sh new with derived flags'
 assert_contains "$(cat "$HOME_DIR/state/.wake-queue")" 'auto-dispatch: started t1' 'a start is announced as a durable wake row'
 pass 'enforce dispatches through fm-dispatch.sh and announces the start'
 

@@ -18,6 +18,10 @@ if [ "$1" = gate ]; then
 fi
 jq -cn --args '$ARGS.positional' -- "$@" >> "$BROKER_LOG"
 [ "$RESOLVE_MODE" != error ] || exit 7
+if [ "$RESOLVE_MODE" = held ]; then
+  printf 'dispatch-resolve:\n  status: held\n'
+  exit 3
+fi
 if [ "$RESOLVE_MODE" = pending ]; then
   printf 'dispatch-resolve:\n  status: captain-pick\n  receipt: none - captain must pick\n'
   exit 0
@@ -56,6 +60,16 @@ jq -cn --args '$ARGS.positional' -- "$@" >> "$BROKER_LOG"
 printf 'kind=ship\nproject=/projects/project\nharness=claude\nmodel=opus\neffort=high\naccount=seat\n' > "$FM_HOME/state/task.meta"
 printf 'ship instructions with spaces\n' > "$FM_HOME/data/task/ship-instructions.md"
 SH
+cat > "$TMP/bin/fm-pr-start-template.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'verify\n' >> "$BROKER_LOG"
+exit "${VERIFY_RC:-0}"
+SH
+cat > "$TMP/bin/fm-admission-queue.sh" <<'SH'
+#!/usr/bin/env bash
+exec "$QUEUE_REAL" "$@"
+SH
+export QUEUE_REAL="$ROOT/bin/fm-admission-queue.sh"
 chmod +x "$TMP/bin/"*.sh
 BROKER="$TMP/bin/fm-dispatch.sh"
 printf '# Task\nA written brief\n' > "$FM_HOME/data/task/brief.md"
@@ -69,10 +83,54 @@ reset_case() {
 }
 run_broker() {
   RC=0
-  bash "$BROKER" "$@" > "$TMP/out" 2>&1 || RC=$?
+  if [ "${1:-}" = new ]; then
+    bash "$BROKER" "$@" --wait > "$TMP/out" 2>&1 || RC=$?
+  else
+    bash "$BROKER" "$@" > "$TMP/out" 2>&1 || RC=$?
+  fi
 }
 assert_rc() { [ "$RC" -eq "$1" ] || fail "expected exit $1, got $RC: $(<"$TMP/out")"; }
 last_args() { tail -n 1 "$BROKER_LOG"; }
+
+reset_case
+rm -f "$FM_HOME/state/task.meta"
+export RESOLVE_MODE=error FM_ADMISSION_DISPATCH="$BROKER"
+bash "$BROKER" new task '/projects/project with spaces' --scout > "$TMP/out"
+assert_contains "$(<"$TMP/out")" 'queued: task' 'async submit did not return a durable receipt'
+[ ! -s "$BROKER_LOG" ] || fail 'async submit called resolver or launch'
+assert_present "$FM_HOME/state/admission-queue/task.start" 'request was not persisted'
+# Duplicate requests cannot overwrite arguments, consume quota or start twice.
+bash "$BROKER" new task /wrong-project --scout > "$TMP/out"
+export RESOLVE_MODE=clear
+bash "$QUEUE_REAL" retry > "$TMP/out"
+assert_contains "$(<"$TMP/out")" 'admission: started task' 'durable replay did not finish start'
+last_args | jq -e '.[1] == "/projects/project with spaces"' >/dev/null || fail 'duplicate replaced saved project'
+assert_absent "$FM_HOME/state/admission-queue/task.start" 'completed request remained queued'
+pass 'new returns before resolver and durable replay preserves the original request exactly once'
+
+: > "$BROKER_LOG"
+export RESOLVE_MODE=held
+bash "$BROKER" new task /projects/project --scout > "$TMP/out"
+bash "$QUEUE_REAL" retry > "$TMP/out"
+assert_contains "$(<"$TMP/out")" 'resolver held' 'weekly hold lost from async replay'
+lines=$(wc -l < "$BROKER_LOG")
+bash "$QUEUE_REAL" retry > "$TMP/out"
+[ "$(wc -l < "$BROKER_LOG")" -eq "$lines" ] || fail 'weekly hold retried without pacing'
+export RESOLVE_MODE=pending
+FM_ADMISSION_RESOLVER_RETRY_SECS=0 bash "$QUEUE_REAL" retry > "$TMP/out"
+assert_contains "$(bash "$QUEUE_REAL" list)" 'task failed' 'captain pick was silently retried or dropped'
+bash "$QUEUE_REAL" drop task
+pass 'async weekly holds are paced and captain picks park visibly'
+
+printf 'PR start: review https://github.com/example/project/pull/1 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >> "$FM_HOME/data/task/brief.md"
+: > "$BROKER_LOG"
+export VERIFY_RC=2
+run_broker new task /projects/project --scout --merge-review
+assert_rc 2
+[ "$(<"$BROKER_LOG")" = verify ] || fail 'stale PR head reached resolver or spawn'
+unset VERIFY_RC
+printf '# Task\nA written brief\n' > "$FM_HOME/data/task/brief.md"
+pass 'head-bound templates are reverified before quota intake and launch'
 
 reset_case
 run_broker new task '/projects/project with spaces' --mode direct-PR --yolo off --backend tmux

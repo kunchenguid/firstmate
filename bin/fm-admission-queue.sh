@@ -14,6 +14,9 @@
 #   fm-admission-queue.sh add <task-id> [--reason TEXT] -- <fm-spawn.sh args...>
 #                                 record or refresh a held start (idempotent:
 #                                 the first queued time and the order survive)
+#   fm-admission-queue.sh submit <task-id> -- <fm-dispatch.sh args...>
+#                                 queue a fresh routed start without waiting;
+#                                 duplicates keep the original request
 #   fm-admission-queue.sh list    one line per entry, reserved reviews first,
 #                                 then oldest first:
 #                                 <id> <held|failed> queued <age> tries <n> <reason> allowance=<ordinary|reserved-review>
@@ -39,12 +42,14 @@
 #
 # State: state/admission-queue/<task-id>.start, one `key=value` record per file
 # (mode 0600, written atomically) with queued_epoch, last_epoch, attempts,
-# state (held|failed), reason, cwd, and one `arg=` line per spawn argument.
+# state (held|failed), reason, cwd, command (spawn|dispatch; absent is spawn),
+# and one `arg=` line per argument.
 # retry serializes on state/.admission-queue.lock and exits 0 when another run
 # holds it. Arguments and directories containing a newline are refused.
 #
 # Environment: FM_HOME, FM_STATE_OVERRIDE resolve the home like the other bin/
-# scripts; FM_ADMISSION_SPAWN replaces the spawn script retry runs (tests only).
+# scripts; FM_ADMISSION_SPAWN and FM_ADMISSION_DISPATCH replace replay commands
+# (tests only). FM_ADMISSION_RESOLVER_RETRY_SECS (default 900) paces weekly holds.
 set -u
 export LC_ALL=C
 
@@ -54,6 +59,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 QUEUE="$STATE/admission-queue"
 SPAWN="${FM_ADMISSION_SPAWN:-$SCRIPT_DIR/fm-spawn.sh}"
+DISPATCH="${FM_ADMISSION_DISPATCH:-$SCRIPT_DIR/fm-dispatch.sh}"
 HELD_EXIT=75
 
 usage() {
@@ -76,6 +82,7 @@ read_entry() {  # <file>
   local line
   ENTRY_QUEUED=0 ENTRY_LAST=0 ENTRY_ATTEMPTS=0 ENTRY_STATE=held ENTRY_REASON='' ENTRY_CWD=''
   ENTRY_ARGS=()
+  ENTRY_COMMAND=spawn
   ENTRY_ALLOWANCE=ordinary
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -85,6 +92,7 @@ read_entry() {  # <file>
       state=*) ENTRY_STATE=${line#*=} ;;
       reason=*) ENTRY_REASON=${line#*=} ;;
       cwd=*) ENTRY_CWD=${line#*=} ;;
+      command=*) ENTRY_COMMAND=${line#*=} ;;
       arg=*)
         ENTRY_ARGS+=("${line#arg=}")
         [ "$line" != arg=--merge-review ] || ENTRY_ALLOWANCE=reserved-review
@@ -111,6 +119,7 @@ write_entry() {  # <id> <queued> <attempts> <state> <reason> <cwd> <arg>...
     printf 'state=%s\n' "$state"
     printf 'reason=%s\n' "$reason"
     printf 'cwd=%s\n' "$cwd"
+    printf 'command=%s\n' "${WRITE_COMMAND:-spawn}"
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the queue entry for $id"; }
   mv -f -- "$tmp" "$QUEUE/$id.start" || { rm -f -- "$tmp"; die "cannot publish the queue entry for $id"; }
@@ -165,6 +174,24 @@ cmd_add() {
   write_entry "$id" "$queued" "$attempts" held "$reason" "$cwd" "$@"
 }
 
+cmd_submit() {
+  local id=${1:-} lock
+  id_valid "$id" || die 'submit needs a valid task id'
+  # Serialize same-id submissions, not the replay: a slow launch must never
+  # prevent a different request from being durably accepted. Existing entries
+  # remain immutable here; spawn holds may refresh them through add.
+  mkdir -p "$STATE" || die 'cannot create state'
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh" || die 'cannot load lock library'
+  lock="$STATE/.admission-submit-$id.lock"
+  fm_lock_try_acquire "$lock" || die 'same task submission busy; retry submission'
+  if [ ! -e "$STATE/$id.meta" ] && [ ! -e "$QUEUE/$id.start" ]; then
+    WRITE_COMMAND=dispatch cmd_add "$id" --reason 'pending routed start' "${@:2}"
+  fi
+  fm_lock_release "$lock"
+  printf 'queued: %s (admission retry owns completion; not yet started)\n' "$id"
+}
+
 cmd_list() {
   local f id now
   now=$(date +%s)
@@ -203,7 +230,9 @@ announce() {  # <key> <text>
 }
 
 cmd_retry() {
-  local max=1 attempts_cap f id out rc reason started=0 tried=0 lock
+  local max=1 attempts_cap f id out rc reason started=0 tried=0 lock command resolver_retry
+  resolver_retry=${FM_ADMISSION_RESOLVER_RETRY_SECS:-900}
+  is_uint "$resolver_retry" || resolver_retry=900
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --max-starts)
@@ -227,6 +256,10 @@ cmd_retry() {
     id=$(basename "$f" .start)
     read_entry "$f"
     [ "$ENTRY_STATE" = held ] || continue
+    if [ "$ENTRY_COMMAND" = dispatch ] && [ "$ENTRY_REASON" = resolver-held ] &&
+       [ "$(( $(date +%s) - ENTRY_LAST ))" -lt "$resolver_retry" ]; then
+      continue
+    fi
     if [ -e "$STATE/$id.meta" ]; then
       rm -f -- "$f"
       echo "admission: $id already has a task record; dropped from the queue"
@@ -240,17 +273,29 @@ cmd_retry() {
     }
     tried=$((tried + 1))
     rc=0
-    out=$(cd "$ENTRY_CWD" && "$SPAWN" "${ENTRY_ARGS[@]}" 2>&1) || rc=$?
+    case "$ENTRY_COMMAND" in
+      spawn) command=$SPAWN ;;
+      dispatch) command=$DISPATCH ;;
+      *) command= ;;
+    esac
+    if [ -n "$command" ]; then
+      out=$(cd "$ENTRY_CWD" && "$command" "${ENTRY_ARGS[@]}" 2>&1) || rc=$?
+    else
+      out='invalid saved command'; rc=2
+    fi
     if [ "$rc" -eq 0 ]; then
       rm -f -- "$f"
       started=$((started + 1))
       echo "admission: started $id"
       announce "admission-started:$id" "held start $id was admitted and started"
+    elif [ "$rc" -eq 3 ] && [ "$ENTRY_COMMAND" = dispatch ] && printf '%s\n' "$out" | grep -q '^[[:space:]]*status: held'; then
+      WRITE_COMMAND=dispatch write_entry "$id" "$ENTRY_QUEUED" "$((ENTRY_ATTEMPTS + 1))" held resolver-held "$ENTRY_CWD" "${ENTRY_ARGS[@]}"
+      echo "admission: $id resolver held"
     elif [ "$rc" -eq "$HELD_EXIT" ]; then
       echo "admission: $id still held: $(one_line "$(printf '%s\n' "$out" | grep -m1 '^deferred:' || true)")"
     else
       reason="exit $rc: $(one_line "$(printf '%s\n' "$out" | tail -n 1)")"
-      write_entry "$id" "$ENTRY_QUEUED" "$((ENTRY_ATTEMPTS + 1))" failed "$reason" "$ENTRY_CWD" ${ENTRY_ARGS[@]+"${ENTRY_ARGS[@]}"}
+      WRITE_COMMAND=$ENTRY_COMMAND write_entry "$id" "$ENTRY_QUEUED" "$((ENTRY_ATTEMPTS + 1))" failed "$reason" "$ENTRY_CWD" ${ENTRY_ARGS[@]+"${ENTRY_ARGS[@]}"}
       announce "admission-failed:$id" "held start $id failed on retry ($reason); bin/fm-admission-queue.sh drop $id and dispatch it again"
       echo "admission: $id failed: $reason"
     fi
@@ -266,6 +311,7 @@ cmd_drop() {
 
 case "${1:-}" in
   add) shift; cmd_add "$@" ;;
+  submit) shift; cmd_submit "$@" ;;
   list) cmd_list ;;
   section) cmd_section ;;
   retry) shift; cmd_retry "$@" ;;

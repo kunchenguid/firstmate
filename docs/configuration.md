@@ -2717,7 +2717,9 @@ It is a dry run that prints counts by kind unless given `--apply`, and its heade
 ## Auto-dispatch (config/auto-dispatch)
 
 A queued backlog row whose brief is written no longer waits for a firstmate turn to start: while `config/auto-dispatch` exists, session start arms `bin/fm-auto-dispatch.sh` as the watcher check `state/auto-dispatch.check.sh`, which dispatches such rows through `bin/fm-dispatch.sh new` on the normal `FM_CHECK_INTERVAL` cadence.
-The admission queue still owns retries of starts the capacity guard held; auto-dispatch owns only rows that were never started.
+`bin/fm-dispatch.sh new` durably submits a start and returns before resolution or launch; its `--wait` option requests the final verdict synchronously.
+The existing admission queue owns completion and held-start retries, while auto-dispatch selects only rows with neither a task record nor a pending admission request.
+The detached auto-dispatch runner uses the synchronous verdict so a submission is never mistaken for an actual start.
 
 | `config/auto-dispatch` | Behavior |
 | --- | --- |
@@ -2730,6 +2732,10 @@ The launch passes only recorded decisions to `fm-dispatch.sh`: the mode, branch 
 Every existing guard keeps its verdict unchanged: the resolver's weekly start guard and receipts, the capacity and load guard, and the project delivery mode agreement - a start held by spawn admission lands in the admission queue exactly as a firstmate start would.
 A weekly-guard hold is retried at most every `FM_AUTODISPATCH_RETRY_SECS` (default 900) without a wake; a launch that ends in anything but a start or a hold is parked with one wake row naming the evidence and never retried blind - firstmate fixes it and runs `bin/fm-auto-dispatch.sh drop <id>`, or rewrites the brief, which clears the mark itself.
 The default is OFF: a dispatch spends quota, so the switch is provably safe only where a home turned it on deliberately.
+`bin/fm-auto-dispatch.sh --help` owns the per-home shadow rollout and captain-approved enablement procedure, including the live evidence required before enabling Miko; portable shadow fixtures alone do not authorize it.
+
+`bin/fm-pr-start-template.sh --help` owns the reusable independent-review, review-follow-up and confirmed-conflict fragments, exact-head verification and persistent review debounce/deduplication.
+These fragments fill a normal brief rather than bypassing its delivery or publication authority; the routed dispatcher revalidates their head binding before launch, and workers must revalidate before publishing.
 
 ## Toolchain
 

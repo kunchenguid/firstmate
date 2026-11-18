@@ -73,6 +73,20 @@
 # workers spends quota, so the switch is provably safe only where a home has
 # turned it on deliberately.
 #
+# Rollout in the target home (including a Miko secondmate): set FM_HOME to that
+# home, not the parent's home. Check for symlinks before writing config:
+#   test ! -L "$FM_HOME/config/auto-dispatch" &&
+#     printf 'shadow\n' > "$FM_HOME/config/auto-dispatch"
+#   FM_HOME="$FM_HOME" bash bin/fm-auto-dispatch.sh arm
+#   FM_HOME="$FM_HOME" bash bin/fm-auto-dispatch.sh list
+# Save the changed candidate reports from shadow checks for a week, compare
+# them with ready rows, filled briefs, captain holds and manual dispatches,
+# and confirm shadow launched nothing. Fixtures are not live Miko evidence.
+# Only after the captain accepts that evidence, change the file to `enforce`
+# (same symlink check); `shadow` rolls back new automatic starts. Already queued
+# admissions are separate work: inspect list/drop in fm-admission-queue.sh.
+# No rollout command changes another home's mode implicitly.
+#
 # State: state/auto-dispatch-failed/<id> (one-line reason) and
 # state/auto-dispatch-attempt/<id> (last attempt epoch), plus the run log
 # state/auto-dispatch-run.log and the run lock state/.auto-dispatch-run.lock.
@@ -157,6 +171,7 @@ verdict() {  # <id> <kind> <repo>
   fm_task_id_creation_valid "$id" || { printf 'skip: unusable task id\n'; return 1; }
   meta="$STATE/$id.meta"
   [ ! -e "$meta" ] || { printf 'skip: already started\n'; return 1; }
+  [ ! -e "$STATE/admission-queue/$id.start" ] || { printf 'skip: admission queue owns start\n'; return 1; }
   brief="$DATA/$id/brief.md"
   [ -s "$brief" ] && [ -f "$brief" ] && [ ! -L "$brief" ] || { printf 'skip: no written brief\n'; return 1; }
   if grep -q -e '{TASK}' -e '{FIRSTMATE_SPEC}' -e '{FILL:' "$brief"; then
@@ -183,6 +198,7 @@ verdict() {  # <id> <kind> <repo>
   fi
   if grep -q '^This is a SCOUT task' "$brief"; then
     printf 'start %s --scout' "$project"
+    if grep -q '^PR start: review ' "$brief"; then printf ' --merge-review'; fi
     [ -n "$base" ] && printf ' --base-branch %s' "$base"
     printf '\n'
     return 0
@@ -236,7 +252,7 @@ dispatch_one() {  # <id> <project-dir> <flag>...
   rc=0
   out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
     FM_PROJECTS_OVERRIDE="$PROJECTS" \
-    "$DISPATCH" new "$id" "$project" "$@" < /dev/null 2>&1) || rc=$?
+    "$DISPATCH" new "$id" "$project" --wait "$@" < /dev/null 2>&1) || rc=$?
   case "$rc" in
     0)
       rm -f -- "$ATTEMPT/$id" "$FAILED/$id"
