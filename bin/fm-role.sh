@@ -4,6 +4,7 @@
 # Usage:
 #   bin/fm-role.sh report
 #   bin/fm-role.sh check <project-dir> [upstream-consent <scope>]
+#   bin/fm-role.sh evidence <text-limit> <media-limit> <audience-limit>
 #
 #   report   prints one line: fm-role: <user|maintainer> [<scope>] (<source>)
 #            and, when a malformed or unverified input forced a closed result,
@@ -19,6 +20,20 @@
 #            project is not firstmate's own repository (the boundary does not
 #            apply). The optional `upstream-consent <scope>` argument is the
 #            recorded per-task consent a dispatcher captured.
+#
+#   evidence checks the installed no-mistakes before starting a publishing run.
+#            Each limit is explicit: unrestricted|none|restricted|unknown.
+#            Only unrestricted limits currently pass: no tool-side suppression
+#            or audience restriction is needed for the approved concrete payload.
+#            This never grants broader content permission. The check has no
+#            verified effective-config interface for enforcing narrower limits.
+#            Text includes deterministic raw-log/body embedding and evidence
+#            branches; media includes attachments AND repository storage.
+#            Audience is separate from the repository consent check above.
+#            Chain this predicate with && before the publishing command; it
+#            neither publishes nor authorizes a destination or payload itself.
+#            Nonzero means stop, not permission to skip required validation,
+#            change tools/settings, or replace controls with drafting prose.
 #
 # bin/fm-role-lib.sh owns the schema summary and mechanics;
 # docs/configuration.md "Firstmate role" owns the operator-facing schema.
@@ -72,11 +87,18 @@ check)
   printf 'refused: %s\n' "$FM_ROLE_PUB_DENIAL"
   exit 1
   ;;
+evidence)
+  [ "$#" -eq 4 ] || {
+    echo 'usage: bin/fm-role.sh evidence <text-limit> <media-limit> <audience-limit>' >&2
+    exit 1
+  }
+  fm_role_gate_nm_evidence "$2" "$3" "$4"
+  ;;
 -h | --help | help)
-  sed -n '3,25p' "$0"
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
   ;;
 *)
-  sed -n '3,25p' "$0" >&2
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0" >&2
   exit 1
   ;;
 esac

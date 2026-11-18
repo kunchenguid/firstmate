@@ -111,6 +111,9 @@
 # refuses to launch a ship task whose explicit --mode or registered forge
 # disagrees, so an adjusted brief and the recorded task metadata cannot drift
 # apart.
+# Ship briefs carry the single-record proof handoff and no-mistakes publication
+# prerequisite owned by bin/fm-dod-lib.sh; bin/fm-role.sh evidence owns the
+# executable capability check's supported limits.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # Both crewmate scaffolds carry one shared rule against administering the
 # infrastructure every lane shares - the no-mistakes daemon and the worktree pool

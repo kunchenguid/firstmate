@@ -715,6 +715,77 @@ test_secondmate_spawn_refuses_consent_flag() {
   pass "fm-spawn.sh: --upstream-consent is refused on secondmate charters"
 }
 
+# The evidence predicate is not a publishing wrapper. Exercise the generated
+# && calling shape with a synthetic side effect, never a forge or uploader.
+test_evidence_limits_stop_before_publication() {
+  local home fakebin out rc text media audience reason marker
+  home=$(make_role_home evidence-limits)
+  fakebin="$home/bin"
+  marker="$home/published"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/no-mistakes" <<'EOF'
+#!/usr/bin/env bash
+[ "$#" -eq 1 ] && [ "$1" = --version ] || exit 99
+printf '%s\n' 'no-mistakes version v1.72.0 (synthetic)'
+EOF
+  chmod +x "$fakebin/no-mistakes"
+  out=$(PATH="$fakebin:$PATH" run_role "$home" evidence unrestricted unrestricted unrestricted \
+    && printf 'synthetic publication\n' > "$marker"); rc=$?
+  expect_code 0 "$rc" "explicitly unrestricted evidence should pass the predicate (got: $out)"
+  assert_present "$marker" "passing evidence predicate did not reach the synthetic publishing side effect"
+  assert_contains "$out" 'destination authority and actual payload approval remain separate' \
+    "the predicate claimed to authorize the payload or destination"
+  rm "$marker"
+
+  while IFS='|' read -r text media audience reason; do
+    [ -n "$text" ] || continue
+    rc=0
+    out=$(PATH="$fakebin:$PATH" run_role "$home" evidence "$text" "$media" "$audience" \
+      && printf 'prohibited publication\n' > "$marker") || rc=$?
+    [ "$rc" -ne 0 ] || fail "evidence predicate accepted $text/$media/$audience"
+    assert_contains "$out" "$reason" "evidence refusal did not name the missing control"
+    assert_absent "$marker" "refused evidence limits invoked the publishing side effect"
+  done <<'ROWS'
+none|unrestricted|unrestricted|text/raw-log
+restricted|unrestricted|unrestricted|text/raw-log
+unknown|unrestricted|unrestricted|text/raw-log
+unrestricted|none|unrestricted|BOTH attach_media and store_in_repo
+unrestricted|restricted|unrestricted|media limit
+unrestricted|unknown|unrestricted|media limit
+unrestricted|unrestricted|none|audience control
+unrestricted|unrestricted|restricted|audience control
+unrestricted|unrestricted|unknown|audience control
+allow-by-prose|unrestricted|unrestricted|invalid evidence limit
+ROWS
+  pass "fm-role.sh evidence: explicit unrestricted limits pass; unsupported and unknown text/media/audience limits never publish"
+}
+
+test_evidence_requires_readable_installed_tool() {
+  local home fakebin out rc response
+  home=$(make_role_home evidence-tool)
+  fakebin="$home/bin"
+  mkdir -p "$fakebin"
+  for response in missing malformed; do
+    if [ "$response" = missing ]; then
+      printf '#!/bin/sh\nexit 127\n' > "$fakebin/no-mistakes"
+    else
+      printf '#!/bin/sh\nprintf "unexpected version response\\n"\n' > "$fakebin/no-mistakes"
+    fi
+    chmod +x "$fakebin/no-mistakes"
+    rc=0
+    out=$(PATH="$fakebin:$PATH" run_role "$home" evidence unrestricted unrestricted unrestricted) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$response installed tool was accepted"
+    assert_contains "$out" 'refused:' "$response installed tool had no refusal explanation"
+  done
+  rc=0
+  out=$(run_role "$home" evidence unrestricted unrestricted) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an omitted audience silently defaulted to unrestricted"
+  assert_contains "$out" 'usage:' "missing explicit evidence limit had no usage explanation"
+  out=$(run_role "$home" --help)
+  assert_contains "$out" 'Chain this predicate with &&' "help omitted the pre-publication calling contract"
+  pass "fm-role.sh evidence: unavailable or unrecognized tool and omitted limits refuse"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_report_default_and_local_grants
@@ -738,5 +809,7 @@ test_spawn_gate_on_self_repo
 test_spawn_consent_agreement
 test_promote_gate_on_self_repo
 test_secondmate_spawn_refuses_consent_flag
+test_evidence_limits_stop_before_publication
+test_evidence_requires_readable_installed_tool
 
 echo "# all fm-self-repo-role tests passed"

@@ -99,6 +99,10 @@
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
 # monitoring on a draft through the same reading bin/fm-pr-merge.sh uses.
+# fm_ship_proof_handoff_block owns the contract for the one mutable proof
+# handoff section in brief.md, including on promotion. Instruction copies point
+# there rather than carrying mutable proof. It stays outside # Task/--intent.
+# Initial acceptance is explicitly absent, never inferred from a base branch.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -426,13 +430,31 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+# The handoff stays in the current instruction record, not a second status copy.
+# Truth of acceptance and runtime equivalence belongs to the recorded evidence
+# and firstmate, not to a shell parser or an implementation worker's own verdict.
+fm_ship_proof_handoff_block() {  # <task-id>
+  local record="${DATA:-data}/$1/brief.md"
+  cat <<EOF
+# Proof handoff contract
+Before the implementation handoff and again before the ready report, maintain ONE \`# Proof handoff\` section outside \`# Task\` in \`$record\`; status lines point there instead of copying it, including after scout promotion.
+Keep it concise: Accepted baseline; Actual delta; one table mapping Acceptance criterion -> User path/setup and observable result -> Relevant source/build/runtime -> Current proof or missing acceptance.
+Record \`none accepted\` or \`unknown\` when appropriate; name an accepted baseline's explicit acceptance record, source identity, authority and scope, never infer acceptance from default-branch membership or earlier green checks.
+Preserve original intent separately, distinguish unchanged accepted behavior from the newly authorized delta, and retain the cumulative review target without treating baseline acceptance as new scope or merge authority.
+Reuse an earlier observation only when relevant source/build/runtime equivalence is established and cited; otherwise mark it invalidated or missing, including unobserved transitions rather than only settled appearance.
+Keep genuinely missing human/UI/device/account/security acceptance explicit; the implementation worker cannot grant it or answer its own finding.
+Required final-version validation and current-head CI still run even when earlier observations remain relevant.
+EOF
+}
+
 # The forge-independent middle of the no-mistakes contract: how a worker drives
 # the pipeline, what `--intent` may carry, and the two firstmate-specific rules.
 # Written once; only the two sentences about a green PR depend on the forge,
 # because on gerrit, and under pr=manual (the `no-ci` argument), the ci step is
 # skipped and the drive call never reports a green PR.
 fm_nm_driving_block() {  # <forge|no-ci>
-  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg
+  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg role_check
+  printf -v role_check '%q' "${FM_ROOT:-$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)}/bin/fm-role.sh"
   if [ "$1" != gerrit ] && [ "$1" != no-ci ]; then
     pr_return_line="Only a drive call's return reports the green PR: \`no-mistakes axi status\` shows progress but never reports \`checks-passed\` while the ci step is still monitoring the PR for merge, so never wait on a status poll for the next gate or outcome.
 "
@@ -457,6 +479,11 @@ ${pr_return_line}Whenever a drive call returns without a gate or an outcome - it
   cat <<EOF
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Publication capability: before starting a run that can publish, establish its actual fresh-run evidence selection and the requested text/raw-log, media and audience limits from these instructions against installed help/schema/source, including deterministic PR-body text, evidence branches and attachments.
+Use \`$role_check evidence <text-limit> <media-limit> <audience-limit> && no-mistakes axi run ...\` with the explicit limits its help names; never run the publishing command after a refusal or turn an unspecified limit into unrestricted permission.
+This predicate currently accepts only explicitly unrestricted tool limits, not a claim that selected evidence is safe: separately establish the permitted concrete payload and destination; a narrower or unknown limit stops before publication until supported enforcement is qualified.
+Supported media controls must cover both \`attach_media\` and \`store_in_repo\`; neither is a raw-text suppression switch, and a private repository alone does not establish attachment audience.
+Do not substitute drafting instructions for controls, skip required validation, change global/tool settings, intercept uploads, publish then remove links, or reuse an evidence exception from another task; any exception needs firstmate's exact prospective task-scoped authorization.
 When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
 Preserve the actual words without adding speaker labels or direct address; the subsection heading supplies provenance outside the pipeline input.
 For a legacy brief with no such subsection, include only words on lines marked \`[captain] \`, excluding that metadata prefix; never copy its mixed \`# Task\` wholesale.
@@ -564,6 +591,9 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
     nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto, opens its PR against, and watches CI for that branch.
 "
   fi
+  case "$mode" in
+    no-mistakes|direct-PR|local-only) fm_ship_proof_handoff_block "$id"; printf '\n' ;;
+  esac
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF

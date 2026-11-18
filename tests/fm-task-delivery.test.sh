@@ -1072,6 +1072,12 @@ EOF
   status=$?
   expect_code 0 "$status" "promotion of a filled scout brief should succeed"
   assert_grep 'kind=ship' "$meta" "filled promotion did not restore ship teardown protection"
+  for brief in "$home/data/$id/brief.md" "$home/data/$id/ship-instructions.md"; do
+    assert_grep "$home/data/$id/brief.md" "$brief" "promotion did not point at the single proof record"
+    assert_grep 'none accepted' "$brief" "promotion inferred baseline acceptance from an investigation"
+    assert_grep 'evidence <text-limit> <media-limit> <audience-limit> && no-mistakes axi run' "$brief" \
+      "promotion omitted the pre-publication predicate"
+  done
   brief="$home/data/$id/ship-instructions.md"
   assert_grep "Investigate why the identity check is failing." "$brief" \
     "promotion did not preserve the original Captain's intent"

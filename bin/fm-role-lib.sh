@@ -11,8 +11,9 @@
 # environment, or CI. docs/configuration.md "Firstmate role" owns the
 # operator-facing schema; this library owns parsing, repository-identity
 # normalization, self-repository detection, and the fail-closed gate the dispatch
-# surfaces share. Everything here resolves from files and local git plumbing
-# only; nothing calls gh or the network.
+# surfaces share. Role resolution uses files and local git plumbing only;
+# the separate evidence predicate reads the installed no-mistakes version.
+# Neither check invokes a publishing action.
 #
 # Role file: one directive line in config/firstmate-role (blank lines and
 # full-line # comments ignored), either
@@ -57,10 +58,48 @@
 #   fm_role_gate_self_publish <home> <config> <project> <root> [consent]
 #                                        - 0 authorized, 1 refused, 2 not self-repo
 #
+#   fm_role_gate_nm_evidence <text-limit> <media-limit> <audience-limit>
+#                                        - read-only pre-publication predicate;
+#                                          bin/fm-role.sh evidence owns its CLI
+#                                          contract and supported limits
+#
 # Global outputs: FM_ROLE (user|maintainer), FM_ROLE_SCOPE (maintainer scope),
 # FM_ROLE_SOURCE (absent|local|inherited), FM_ROLE_DIAG (narrow refusal or
 # malformed-input reason), FM_ROLE_PUB_TARGET, FM_ROLE_PUB_AUTHORITY,
 # FM_ROLE_PUB_DENIAL.
+
+# No supplied strings are shell commands or capability receipts. This predicate
+# deliberately accepts no caller-authored claim that a restriction is enforced.
+fm_role_gate_nm_evidence() {
+  local text=$1 media=$2 audience=$3 limit version
+  for limit in "$text" "$media" "$audience"; do
+    case "$limit" in
+      unrestricted|none|restricted|unknown) ;;
+      *) printf 'refused: invalid evidence limit %s; use unrestricted|none|restricted|unknown\n' "$limit" >&2; return 1 ;;
+    esac
+  done
+  if ! version=$(no-mistakes --version 2>/dev/null); then
+    echo 'refused: installed no-mistakes version cannot be established before publication' >&2
+    return 1
+  fi
+  case "$version" in
+    'no-mistakes version v'*) ;;
+    *) echo 'refused: unrecognized installed no-mistakes version response' >&2; return 1 ;;
+  esac
+  if [ "$text" != unrestricted ]; then
+    printf 'refused: no verified control for text/raw-log limit %s (%s); drafting instructions and media/storage switches do not suppress deterministic text embedding\n' "$text" "$version" >&2
+    return 1
+  fi
+  if [ "$media" != unrestricted ]; then
+    printf 'refused: no verified effective configuration for media limit %s (%s); qualify BOTH attach_media and store_in_repo before publication, not only attachments\n' "$media" "$version" >&2
+    return 1
+  fi
+  if [ "$audience" != unrestricted ]; then
+    printf 'refused: no verified evidence audience control for limit %s (%s); repository visibility alone does not constrain media attachments\n' "$audience" "$version" >&2
+    return 1
+  fi
+  printf 'evidence: no narrower tool-enforced limits requested (%s); destination authority and actual payload approval remain separate\n' "$version"
+}
 
 # fm_role_file <config-dir>
 fm_role_file() {

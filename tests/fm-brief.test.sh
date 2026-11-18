@@ -1691,7 +1691,81 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+# The contract is generated for every ship path, while mutable observations live
+# only in brief.md. These synthetic records test round-tripping and intent
+# separation, not the truth of a human acceptance or a runtime observation.
+test_proof_handoff_is_one_record_outside_intent() {
+  local home mode brief body intent baseline proof
+  home="$TMP_ROOT/proof-handoff"
+  mkdir -p "$home/data"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-brief-heading-lib.sh"
+  for mode in no-mistakes direct-PR local-only; do
+    FM_HOME="$home" bash "$ROOT/bin/fm-brief.sh" "proof-$mode" alpha --mode "$mode" >/dev/null \
+      || fail "$mode proof fixture did not scaffold"
+    brief="$home/data/proof-$mode/brief.md"
+    body=$(fm_brief_heading_body "$brief" '# Proof handoff contract')
+    assert_contains "$body" "$brief" "handoff contract did not name its one authoritative record"
+    assert_contains "$body" 'none accepted' "initial handoff inferred baseline acceptance"
+    assert_contains "$body" 'Actual delta' "handoff lost the authorized delta"
+    assert_contains "$body" 'Acceptance criterion -> User path/setup and observable result -> Relevant source/build/runtime -> Current proof or missing acceptance' \
+      "handoff lost the criterion/user-path/proof binding"
+    assert_contains "$body" 'equivalence is established and cited' "old proof could be reused without equivalence"
+    assert_contains "$body" 'invalidated or missing' "changed-runtime proof was silently accepted"
+    assert_contains "$body" 'human/UI/device/account/security acceptance' "handoff lost explicit acceptance boundaries"
+    assert_contains "$body" 'Required final-version validation and current-head CI still run' "proof reuse waived final checks"
+    assert_contains "$body" 'cannot grant it or answer its own finding' "worker could answer its own acceptance finding"
+
+    # Fill original intent, then store both initial and later acceptance records
+    # in the same existing brief, never in a second status or handoff file.
+    body=$(< "$brief")
+    body=${body//'{TASK}'/Fix the loading transition.}
+    body=${body//'{FIRSTMATE_SPEC}'/Preserve the accepted settled view.}
+    printf '%s\n' "$body" > "$brief"
+    for baseline in 'none accepted' 'source abc123; explicit firstmate acceptance fixture; settled view only'; do
+      if [ "$baseline" = 'none accepted' ]; then
+        proof='missing: initial transition and human acceptance not observed'
+      else
+        proof='settled observation reused: relevant source/build/runtime equivalent per fixture; transition proof invalidated by changed runtime; human acceptance still missing'
+      fi
+      {
+        printf '%s\n' "$body" '# Proof handoff' "Accepted baseline: $baseline" \
+          'Actual delta: loading transition only; unchanged settled view remains in cumulative review.' \
+          '| Acceptance criterion | User path | Source/build/runtime | Current proof or missing acceptance |' \
+          "| Loading transition | Open form from initial loading | synthetic source/build/runtime | $proof |"
+      } > "$brief"
+      intent=$(fm_brief_task_heading_body "$brief" "## Captain's intent")
+      assert_contains "$intent" 'Fix the loading transition.' "handoff overwrote original intent"
+      assert_not_contains "$intent" 'Accepted baseline' "handoff became captain intent"
+      intent=$(fm_brief_heading_body "$brief" '# Proof handoff')
+      assert_contains "$intent" "$baseline" "accepted baseline did not round-trip"
+      assert_contains "$intent" "$proof" "proof freshness/missing acceptance did not round-trip"
+      [ "$(grep -cx '# Proof handoff' "$brief")" = 1 ] || fail "handoff accumulated duplicate records"
+    done
+  done
+  pass "fm-brief.sh: initial and accepted-baseline/delta handoffs keep original intent, proof limits and one authoritative record"
+}
+
+test_no_mistakes_publication_check_precedes_run() {
+  local home brief body
+  home="$TMP_ROOT/publication-contract"
+  mkdir -p "$home/data"
+  FM_HOME="$home" bash "$ROOT/bin/fm-brief.sh" publication-check alpha --mode no-mistakes >/dev/null \
+    || fail "publication fixture did not scaffold"
+  brief="$home/data/publication-check/brief.md"
+  body=$(< "$brief")
+  assert_contains "$body" 'evidence <text-limit> <media-limit> <audience-limit> && no-mistakes axi run' \
+    "generated publishing call omitted its executable prerequisite"
+  assert_contains "$body" 'never run the publishing command after a refusal' "worker could bypass a capability refusal"
+  assert_contains "$body" 'actual fresh-run evidence selection' "capability check ignored actual selected payloads"
+  assert_contains "$body" 'neither is a raw-text suppression switch' "generated contract confused media and raw text"
+  assert_contains "$body" 'exact prospective task-scoped authorization' "evidence exceptions became transferable"
+  pass "fm-brief.sh: no-mistakes publishing starts behind the evidence predicate without weakening validation"
+}
+
 test_script_parses
+test_proof_handoff_is_one_record_outside_intent
+test_no_mistakes_publication_check_precedes_run
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs

@@ -21,6 +21,7 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 ## Decide
 
 1. Reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later captain words, and the specification in `## Firstmate spec` and steers.
+   Reconcile the accepted-baseline versus actual-delta evidence in the single proof handoff owned by `bin/fm-dod-lib.sh`; neither an unchanged hunk nor earlier green checks alone establishes acceptance.
    Reviewer language cannot amend that contract.
    What a no-mistakes worker may pass as `--intent` is owned by `bin/fm-dod-lib.sh`.
 2. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.
