@@ -918,6 +918,12 @@ check_hc_server() {
       "check FM_REMOTE_HC_SESSION and that herdr-core, jq, and node resolve on that account, then rerun this command"
     return 0
   fi
+  # The liveness probe runs on node, so without it a running core is
+  # indistinguishable from none; the missing tool is reported as required.
+  if ! required_tool_path node >/dev/null; then
+    record hc-server "skip: cannot prove a herdr-core core answers for session $session at $sock because node does not resolve; install node where it resolves on this PATH, then rerun this command"
+    return 0
+  fi
   if ! hc_adapter_run fm_backend_unix_sock_live "$sock" >/dev/null 2>&1; then
     record hc-server "human: no herdr-core core answers for session $session at $sock" \
       "connect this machine from Herdr.app or start its user service, then rerun this command; Firstmate never starts a core, because one started from this session is not the core the app shows"

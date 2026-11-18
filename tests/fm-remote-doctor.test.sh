@@ -1510,6 +1510,14 @@ if command -v node >/dev/null 2>&1; then
     expect_code 1 "$DOCTOR_RC" "an hc host without node was reported ready"
     assert_contains "$DOCTOR_OUT" 'required node=MISSING' "a missing node was not reported as a missing tool"
     pass "an hc host without node reports node as a missing required tool"
+    # The core is live here, so without node the core check cannot be proven
+    # either way: it must say so rather than claim no core answers.
+    assert_contains "$DOCTOR_OUT" 'check hc-server=skip: cannot prove a herdr-core core answers for session fmtest' \
+      "a missing node did not skip the core check"$'\n'"$DOCTOR_OUT"
+    assert_contains "$DOCTOR_OUT" 'install node' "the skipped core check did not tell the operator to install node"
+    assert_not_contains "$DOCTOR_OUT" 'no herdr-core core answers' \
+      "a missing node was reported as a missing core while the core is live"
+    pass "an hc host without node skips the core check instead of claiming no core answers"
   fi
 
   # With no live core the gap is a human one: the read-only check never calls
