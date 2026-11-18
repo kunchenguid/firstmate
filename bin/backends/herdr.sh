@@ -3857,6 +3857,19 @@ fm_backend_herdr_busy_state() {  # <target>
   printf '%s' "$verdict"
 }
 
+# fm_backend_herdr_codex_native_state: a Codex pane's busy state from Herdr's
+# herdr:codex integration, read without starting a stopped server. Exactly
+# `working` -> busy and `done` -> idle; every other status (idle, blocked,
+# missing, unreadable) and an unavailable session -> unknown.
+fm_backend_herdr_codex_native_state() {  # <target>
+  fm_backend_herdr_target_observable "$1" || { printf 'unknown'; return 0; }
+  case "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    working) printf 'busy' ;;
+    done) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_herdr_wait_for_working: poll <session>:<pane_id>'s NATIVE
 # agent-state (agent get) up to <polls> times spread evenly across
 # <budget-seconds>, returning on stdout the STRONGEST signal observed:

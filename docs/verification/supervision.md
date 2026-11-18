@@ -261,7 +261,7 @@ herdr pane list | jq -r '.result.panes[] | select(.agent=="codex") | [.pane_id, 
 | `working` | A Codex pane whose title carried the spinner glyph while it handled its launch brief | `busy herdr-native` |
 | `done` | Codex panes that had finished a turn and sat at the prompt | `idle herdr-native` |
 
-Any other, missing, or unreadable status, and every other backend, keeps `unknown codex-unverified`; the app-server and hook gates stay closed, so no Codex busy record is written or trusted.
+Only exactly `working` and `done` count; `idle`, `blocked`, any other, missing, or unreadable status, a stopped Herdr session (the probe never starts a server), and every other backend keeps `unknown codex-unverified`. The crew-state reader reports a `done` pane as idle instead of falling back to the status log; the app-server and hook gates stay closed, so no Codex busy record is written or trusted.
 `tests/fm-busy-state.test.sh` pins the mapping.
 
 Deterministic entry points:

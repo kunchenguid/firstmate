@@ -153,7 +153,7 @@
 # agent_status through its own herdr:codex integration (codex-cli 0.169.1
 # verdict, live: `working` during a turn, `done` after it), so a Herdr-backed
 # Codex worker classifies from that native status - working is busy herdr-native
-# and done or idle is idle herdr-native. The gate functions stay closed, so
+# and done is idle herdr-native; idle, blocked, or anything else stays unknown. The gate functions stay closed, so
 # fm-spawn still wires nothing and no record is ever trusted for Codex; a
 # missing or unmapped Herdr status keeps unknown codex-unverified.
 #
@@ -1163,9 +1163,9 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         # herdr:codex integration reports the pane's agent_status, so its
         # native verdict is the Codex busy source there. No status (any
         # other backend, an unreadable pane, an unmapped status) stays
-        # unknown codex-unverified, never idle.
-        if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
-          native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+        # unknown codex-unverified, never idle. Only exact working and done count.
+        if [ "$backend" = herdr ] && command -v fm_backend_herdr_codex_native_state >/dev/null 2>&1; then
+          native=$(fm_backend_herdr_codex_native_state "$target" 2>/dev/null || true)
           case "$native" in
             busy|idle)
               printf '%s herdr-native' "$native"

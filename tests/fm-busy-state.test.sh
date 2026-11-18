@@ -629,31 +629,39 @@ test_dead_endpoint_overrides() {
 }
 
 test_codex_herdr_native() {
-  local state out
+  local state out raw
   state=$(new_state_dir codex-herdr-native)
-  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
-  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE"; }
-  FAKE_NATIVE=busy
-  out=$(fm_busy_classify herdr s:p codex t1 "$state")
-  [ "$out" = "busy herdr-native" ] || fail "herdr codex working must classify busy, got '$out'"
-  FAKE_NATIVE=idle
-  out=$(fm_busy_classify herdr s:p codex t1 "$state")
-  [ "$out" = "idle herdr-native" ] || fail "herdr codex done must classify idle, got '$out'"
-  FAKE_NATIVE=unknown
-  out=$(fm_busy_classify herdr s:p codex t1 "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "herdr codex with no status must stay unverified, got '$out'"
-  FAKE_NATIVE=
-  out=$(fm_busy_classify herdr s:p codex t1 "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "herdr codex with empty status must stay unverified, got '$out'"
-  FAKE_NATIVE=busy
-  out=$(fm_busy_classify tmux w1 codex t1 "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "a non-herdr codex must not borrow the native verdict, got '$out'"
-  out=$(fm_busy_classify herdr s:p kimi t1 "$state")
-  [ "$out" = "unknown kimi-unverified" ] || fail "kimi must not borrow herdr's native verdict, got '$out'"
-  unset -f fm_backend_busy_state
-  out=$(fm_busy_classify herdr s:p codex t1 "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "herdr codex without the backend helper must stay unverified, got '$out'"
-  pass "a herdr-backed codex classifies from herdr's native status and nothing else"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/backends/herdr.sh"
+    # Stub only the Herdr CLI/server boundary; raw agent_status flows through the real adapter.
+    # shellcheck disable=SC2329
+    fm_backend_herdr_cli() { printf '{"result":{"agent":{"agent_status":"%s"}}}' "$FAKE_RAW"; }
+    # shellcheck disable=SC2329
+    fm_backend_herdr_server_running_state() { printf '%s' "$FAKE_SERVER"; }
+    # shellcheck disable=SC2329
+    fm_backend_herdr_server_ensure() { echo started >>"$state/ensure"; return 0; }
+    FAKE_SERVER=running
+    for raw in working:busy done:idle idle:unknown blocked:unknown unknown:unknown "":unknown; do
+      FAKE_RAW=${raw%%:*}
+      out=$(fm_busy_classify herdr s:p codex t1 "$state")
+      case "${raw#*:}" in
+        busy) [ "$out" = "busy herdr-native" ] || fail "raw '${raw%%:*}' must classify busy, got '$out'" ;;
+        idle) [ "$out" = "idle herdr-native" ] || fail "raw '${raw%%:*}' must classify idle, got '$out'" ;;
+        *) [ "$out" = "unknown codex-unverified" ] || fail "raw '${raw%%:*}' must stay unverified, got '$out'" ;;
+      esac
+    done
+    FAKE_RAW=working FAKE_SERVER=stopped
+    out=$(fm_busy_classify herdr s:p codex t1 "$state")
+    [ "$out" = "unknown codex-unverified" ] || fail "stopped herdr must stay unverified, got '$out'"
+    [ ! -e "$state/ensure" ] || fail "a status read must not start a stopped herdr server"
+    FAKE_SERVER=running
+    out=$(fm_busy_classify tmux w1 codex t1 "$state")
+    [ "$out" = "unknown codex-unverified" ] || fail "a non-herdr codex must not borrow the native verdict, got '$out'"
+    out=$(fm_busy_classify herdr s:p kimi t1 "$state")
+    [ "$out" = "unknown kimi-unverified" ] || fail "kimi must not borrow herdr's native verdict, got '$out'"
+  ) || exit 1
+  pass "a herdr-backed codex classifies only exact working/done, never starting herdr"
 }
 
 test_herdr_native_busy_only() {

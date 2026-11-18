@@ -1610,7 +1610,9 @@ if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
-    idle) ;;
+    idle)
+      [ "${BUSY_VERDICT#* }" != herdr-native ] || emit idle pane "harness idle (herdr-native)"
+      ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
 fi
