@@ -461,7 +461,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (if $all_landed == 1 then $landed_sorted else ($per_home_groups | round_robin_landed($landed_n)) end) as $done
   | ($done | map(.id)) as $done_ids
   | ([.tasks[] | select(.kind != "secondmate") | .id]) as $live_ids
-  | ([.tasks[] | select(.kind != "secondmate" and .current_state.state == "working") | .id]) as $working_ids
+  | ([.tasks[] | select(.kind != "secondmate" and ((.display_activity // .current_state).state) == "working") | .id]) as $working_ids
   | ($live_ids + $done_ids) as $rel_ids
   | ([ .tasks[]
        | select(.endpoint.exists == false or .endpoint.agent_alive == "dead")
@@ -507,9 +507,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | ([ .tasks[]
        | select(.kind != "secondmate")
        | select(.backlog.current_role != "program")
-       | select(.backlog.current_role != "held" or .current_state.state == "working")
+       | select(.backlog.current_role != "held" or ((.display_activity // .current_state).state) == "working")
        | {id, kind,
-        state: .current_state.state,
+        state: (.display_activity // .current_state).state,
         repo:(.backlog.repo // .project // null),
         name:((.backlog.title // "") as $name
               | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),

@@ -261,11 +261,12 @@ herdr pane list | jq -r '.result.panes[] | select(.agent=="codex") | [.pane_id, 
 | `working` | A Codex pane whose title carried the spinner glyph while it handled its launch brief | `working` |
 | `done` | Codex panes that had finished a turn and sat at the prompt | `idle` |
 
-This is display only, read by `bin/fm-crew-state.sh` through `fm_backend_herdr_codex_native_state`; the busy classifier, watcher, and park policy still treat Codex as `unknown codex-unverified`, and the app-server and hook gates stay closed.
+This is display only. `bin/fm-fleet-snapshot.sh` reads it through `fm_backend_herdr_codex_native_state` into a separate `display_activity` field (`{state, source}`) on the task row; `bin/fm-fleet-view.sh` and `bin/fm-bearings-snapshot.sh` show it.
+`bin/fm-crew-state.sh`, `current_state`, the busy classifier, and the watcher, park, stale-triage, completion, and reconciliation paths are unchanged and still read a Codex worker as `unknown codex-unverified`; the app-server and hook gates stay closed.
 The read never starts a stopped Herdr server, and it counts only a registration whose `agent` is `codex` and whose `agent_session.source` is `herdr:codex`, with `agent_status` exactly `working` or `done`.
-Any other status, a foreign or missing registration, a stopped session, and every other backend stay `unknown`.
-Native `done` yields `idle` only when there is no declaration or the last report is a stale `working`; an explicit `needs-decision`, `blocked`, paused, `done`, or `failed` report wins.
-`tests/fm-crew-state.test.sh` pins this through the crew-state executable.
+Any other status, a foreign or missing registration, a stopped session, a remote worker, and every other backend produce no `display_activity`.
+Native `working` shows `working` and `done` shows `idle`, unless the status log's last report is an explicit `needs-decision`, `blocked`, paused, `done`, or `failed` declaration; that declaration is shown instead, whether the pane is working or done.
+`tests/fm-fleet-snapshot-view.test.sh` pins this through the snapshot and view executables.
 
 Deterministic entry points:
 

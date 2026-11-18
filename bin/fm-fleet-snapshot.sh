@@ -636,6 +636,42 @@ snapshot_task_generation_is_current() {  # <captured-meta> <id>
   fi
 }
 
+# Display-only: a Herdr-backed Codex worker's exact native working/done status,
+# as {state,source}, so the fleet view and Bearings can tell working from idle.
+# It never enters current_state, so every supervision consumer reads the same
+# verdict as before. An explicit declaration in the captured status log
+# (needs-decision, blocked, paused, done, failed) is shown instead of the pane
+# activity; a stale working report or none leaves the native activity.
+codex_display_activity_json() {  # <meta> <backend> <target> <status-capture>
+  local meta=$1 backend=$2 target=$3 capture=$4 harness native line verb state=
+  harness=$(meta_value "$meta" harness)
+  case "$harness" in codex*) ;; *) return 0 ;; esac
+  [ "$backend" = herdr ] && [ -n "$target" ] || return 0
+  fm_backend_source herdr 2>/dev/null || return 0
+  native=$(fm_backend_herdr_codex_native_state "$target" 2>/dev/null || printf unknown)
+  case "$native" in
+    busy) native=working ;;
+    idle) ;;
+    *) return 0 ;;
+  esac
+  line=$(last_nonempty_line "$capture" 2>/dev/null || true)
+  if [ -n "$line" ]; then
+    verb=$(status_line_verb "$line")
+    if status_is_paused "$line"; then state=paused
+    else
+      case "$verb" in
+        needs-decision) state=parked ;;
+        blocked|done|failed) state=$verb ;;
+      esac
+    fi
+  fi
+  if [ -n "$state" ]; then
+    jq -n --arg state "$state" '{state:$state,source:"status-log"}'
+  else
+    jq -n --arg state "$native" '{state:$state,source:"herdr-native"}'
+  fi
+}
+
 prefetch_task_observations() {  # <meta> <id>
   local meta=$1 id=$2 remote_host current_file endpoint_file current_pid='' current_rc=0
   local status_log status_capture report_path report_capture open_file
@@ -667,6 +703,7 @@ prefetch_task_observations() {  # <meta> <id>
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     if [ -n "$target" ]; then
+      codex_display_activity_json "$meta" "$backend" "$target" "$status_capture" > "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null || true
       if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
         endpoint_exists=true
       else
@@ -767,7 +804,7 @@ task_json_row() {  # <captured-meta> <id>
   local remote_host remote_root current_file endpoint_file observation_line
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json display_json
 
   original_meta="$STATE/$id.meta"
   kind=$(meta_value "$meta" kind)
@@ -806,6 +843,9 @@ task_json_row() {  # <captured-meta> <id>
 
   current_file="$SNAPSHOT_TASK_DIR/$id.json"
   current_json=$(<"$current_file") || return 1
+  display_json=null
+  [ -s "$SNAPSHOT_TASK_DIR/$id.display" ] && display_json=$(jq -c . "$SNAPSHOT_TASK_DIR/$id.display" 2>/dev/null) || true
+  [ -n "$display_json" ] || display_json=null
   event_json=$(status_event_json "$status_log" "$STATE/$id.status")
   last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
   read -r current_state current_source < <(
@@ -888,6 +928,7 @@ task_json_row() {  # <captured-meta> <id>
     --arg observed_at "$SNAPSHOT_NOW" \
     --arg last_event_raw "$last_event_raw" \
     --argjson current_state "$current_json" \
+    --argjson display_activity "$display_json" \
     --argjson meta_path "$meta_json" \
     --argjson status_log "$status_json" \
     --argjson report "$report_json" \
@@ -918,6 +959,7 @@ task_json_row() {  # <captured-meta> <id>
       },
       secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
       current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+      display_activity:$display_activity,
       endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
         status:(if $endpoint_exists == false then "absent"
                 elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive

@@ -1152,6 +1152,60 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# Oracle: Herdr's herdr:codex integration reports agent=codex, agent_session.source=herdr:codex and
+# agent_status working|done (docs/verification/supervision.md "Codex on Herdr"). The status is a
+# display-only field: current_state stays the unchanged crew-state verdict, explicit declarations
+# are shown instead of pane activity, and any other status or a foreign registration shows nothing.
+test_codex_herdr_display_activity() {
+  local home fakebin out view case_name agent source status log want_state want_source
+  home=$(make_home codex-herdr)
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status) [ "${2:-}" = --json ] && printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  pane) printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  agent)
+    [ "${2:-}" = get ] && printf '{"result":{"agent":{"agent":"%s","agent_session":{"source":"%s"},"agent_status":"%s"}}}\n' \
+      "$FM_FAKE_AGENT" "$FM_FAKE_SOURCE" "$FM_FAKE_STATUS" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+  fm_write_meta "$home/state/cx.meta" "window=default:w1:p2" "worktree=$home/projects" "kind=scout" \
+    "backend=herdr" "harness=codex"
+  while IFS='|' read -r case_name agent source status log want_state want_source; do
+    printf '%s\n' "$log" > "$home/state/cx.status"
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_AGENT="$agent" FM_FAKE_SOURCE="$source" FM_FAKE_STATUS="$status" "$SNAPSHOT" --json)
+    printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .current_state.state == "unknown" and .current_state.source == "pane"' >/dev/null \
+      || fail "$case_name: current_state must stay the unchanged supervision verdict: $out"
+    if [ -z "$want_state" ]; then
+      printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .display_activity == null' >/dev/null \
+        || fail "$case_name: no display activity expected: $out"
+    else
+      printf '%s' "$out" | jq -e --arg s "$want_state" --arg src "$want_source" \
+        '.tasks[] | select(.id == "cx") | .display_activity == {state:$s,source:$src}' >/dev/null \
+        || fail "$case_name: wrong display activity: $out"
+    fi
+    view=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_AGENT="$agent" FM_FAKE_SOURCE="$source" FM_FAKE_STATUS="$status" "$VIEW")
+    assert_contains "$view" "| cx | ${want_state:-unknown} / ${want_source:-pane} |" "$case_name: view row"
+  done <<'ROWS'
+working|codex|herdr:codex|working||working|herdr-native
+done|codex|herdr:codex|done||idle|herdr-native
+stale-working-report|codex|herdr:codex|done|working: setup complete|idle|herdr-native
+decision-while-working|codex|herdr:codex|working|needs-decision [key=scope]: pick A or B|parked|status-log
+decision-while-done|codex|herdr:codex|done|needs-decision [key=scope]: pick A or B|parked|status-log
+blocked-report|codex|herdr:codex|done|blocked: waiting on review|blocked|status-log
+failed-report|codex|herdr:codex|working|failed: could not build|failed|status-log
+blocked-status|codex|herdr:codex|blocked||
+idle-status|codex|herdr:codex|idle||
+foreign-agent|pi|herdr:pi|working||
+foreign-source|codex|other|done||
+ROWS
+  pass "codex on herdr adds a display-only working/idle field, declarations first"
+}
+
 fm_test_run \
   test_empty_fleet_json \
   test_fixture_snapshot_json \
@@ -1170,4 +1224,5 @@ fm_test_run \
   test_scout_reports_include_teardown_reports \
   test_backlog_tasks_axi_forms_and_overrides \
   test_view_renders_snapshot \
+  test_codex_herdr_display_activity \
   test_view_renders_dead_secondmate_agent_status
