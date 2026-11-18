@@ -1015,6 +1015,36 @@ test_secondmate_marked_request_reporting_contract() {
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
 
+test_secondmate_quick_line_on_captain_answer() {
+  local home brief
+  home="$TMP_ROOT/quick-line-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" quick-line --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "quick-line secondmate scaffold failed"
+  brief="$home/data/quick-line/brief.md"
+
+  assert_grep '# Quick line on a captain answer' "$brief" \
+    "secondmate charter lost the quick-line section"
+  assert_grep 'a Lavish board answer, or the captain typing into your pane' "$brief" \
+    "secondmate charter quick line no longer names both captain answer sources"
+  assert_grep 'within 30 seconds and before any long work' "$brief" \
+    "secondmate charter quick line lost its 30 second, before-the-work timing"
+  assert_grep "append ONE short \`working [at=<epoch>]: captain answered" "$brief" \
+    "secondmate charter quick line lost its one-line working shape"
+  assert_grep 'This is the one exception to the no-acknowledgement rule above' "$brief" \
+    "secondmate charter quick line no longer carves itself out of the no-acknowledgement rule"
+  assert_grep 'still append the usual outcome when the work ends' "$brief" \
+    "secondmate charter quick line no longer keeps the end-of-work outcome"
+
+  # The rule belongs to the secondmate charter only, never to a crewmate brief.
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" quick-line-ship somerepo --mode direct-PR >/dev/null 2>&1 \
+    || fail "ship scaffold failed"
+  assert_no_grep 'Quick line on a captain answer' "$home/data/quick-line-ship/brief.md" \
+    "ship brief received the secondmate quick-line rule"
+  pass "fm-brief.sh: secondmate charter carries the quick line on a captain answer"
+}
+
 test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   local root home data_override state_override brief baseline err status
   root="$TMP_ROOT/relative-directory-inputs"
@@ -2001,6 +2031,7 @@ test_documented_global_replace_leaves_the_herdr_gate_intact
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
+test_secondmate_quick_line_on_captain_answer
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause

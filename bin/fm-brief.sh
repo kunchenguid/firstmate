@@ -632,6 +632,12 @@ When a keyed phase ends without another reportable state, append \`resolved [key
 The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
+# Quick line on a captain answer
+This is the one exception to the no-acknowledgement rule above.
+When a captain answer reaches you - a Lavish board answer, or the captain typing into your pane - your first action of that turn, within 30 seconds and before any long work, is to append ONE short \`working [at=<epoch>]: captain answered {the call}, next {what you do first}\` line to the parent channel, carrying the routed work's key when it has one.
+It tells the main firstmate the answer was seen and what happens next, so it is not a receipt: send it once per answer, never again for the same answer, and still append the usual outcome when the work ends.
+When the answer arrived as an unmarked captain message, send that one line, then stay conversational in chat.
+
 # Definition of done
 You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.

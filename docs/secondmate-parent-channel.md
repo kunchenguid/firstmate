@@ -43,6 +43,11 @@ The mate home's own status scans treat that remote channel the same way: `status
 The remote reply adapter already mirrors every channel line into the parent home, so folding the channel again here would only spin spurious wakes and a phantom `parent-replies` task, while a `parent-replies.status` in a main home or in a local mate is an ordinary task log that keeps folding and waking.
 A missed-reply escalation includes the complete first sighting path and line number in readable shell-escaped form.
 
+The one place the mate model must speak early is a captain answer, which leaves no durable evidence a script can publish at capture time.
+The charter's "Quick line on a captain answer" section therefore has the mate append one short `working` line within 30 seconds of the turn that receives a captain answer, before the long work, naming the answer and the first next step.
+The line is belt-and-braces beside any script that publishes the answer at capture time, and the later outcome line is still the mate's own.
+A running mate keeps the charter copy it was seeded with, so it picks the rule up through the normal update path: the bootstrap sweep advances the tracked `.agents/skills/captain-hold-lifecycle/` skill, whose "when recording or routing the captain's answer" trigger loads on every captain answer, and a re-seeded or newly scaffolded charter carries the full paragraph.
+
 ## What is deliberately not built
 
 - No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
@@ -57,7 +62,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 `tests/fm-pr-merge.test.sh` covers the PR-ready line at registration and the merge outcome's upward report.
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
 It also covers the registration-time ready line and its withholding until checks are green under `config/ready-after-green`.
-`tests/fm-brief.test.sh` pins the charter's channel rule.
+`tests/fm-brief.test.sh` pins the charter's channel rule and its quick line on a captain answer.
 `tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, and the rule that arbitrary mate-home sightings never acknowledge a reply.
 `tests/fm-parent-channel-scan-exclusion.test.sh` covers the home-shape-aware scan exclusion against real remote, main-home, and local-mate fixtures: the watcher signal scan, both heartbeat backstops, the fleet-wide folds, and the real `fm-wake-drain.sh` end to end.
 

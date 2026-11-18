@@ -35,6 +35,7 @@ Run the command in the originating work's authoritative `FM_HOME`; secondmate-ow
 Do not close a captain-held task merely because the originating investigation completed, its report was archived, its visual review ended, or its task was torn down.
 Holding the work item the question gates is safe for exactly that reason: cleanup keeps such a row open with the finished work's deliverable recorded and returns it to the queue, so it still reads as the captain's own call.
 Only `answer` with the captain's words or an evidence-backed `reconcile close` may resolve it.
+In a secondmate home, the first action on a captain answer is the one short parent-channel `working` line within 30 seconds, before this recording and any long work; [`docs/secondmate-parent-channel.md`](../../../docs/secondmate-parent-channel.md) owns that rule.
 
 Never close anything the captain owns without recording what he actually said: `bin/fm-captain-hold.sh answer` writes his exact words into the task and closes a question-shaped call, while `--release` frees a captain-gated work item to proceed.
 A merge approval uses that existing release path because approval permits the merge to proceed; cleanup closes the work only after it lands and records what shipped.
