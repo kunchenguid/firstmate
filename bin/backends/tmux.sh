@@ -57,6 +57,29 @@ fm_backend_tmux_send_key() {  # <target> <key>
   tmux send-keys -t "$1" "$2"
 }
 
+# fm_backend_tmux_cursor: the pane's cursor as `x.y`, the value
+# fm_backend_tmux_paste_submit_if_cursor compares against.
+fm_backend_tmux_cursor() {  # <target>
+  fm_backend_tmux_target_exists "$1" || return 1
+  tmux display-message -p -t "$1" '#{cursor_x}.#{cursor_y}'
+}
+
+# fm_backend_tmux_paste_submit_if_cursor: one server command list that checks
+# the cursor still sits at <cursor>, then bracket-pastes <text> and sends Enter.
+# The server runs the list without servicing other client input, so only a key
+# already written to the pane but not yet drawn can slip in. Returns 1, with the
+# pane untouched, when the cursor moved. The paste is bracketed because an
+# unbracketed burst loses its trailing Enter in Copilot's composer.
+fm_backend_tmux_paste_submit_if_cursor() {  # <target> <text> <cursor>
+  local buf=fm-submit-guarded-$$
+  fm_backend_tmux_target_exists "$1" || return 1
+  tmux set-buffer -b "$buf" -- "$2" || return 1
+  tmux if-shell -F -t "$1" "#{==:#{cursor_x}.#{cursor_y},$3}" \
+    "paste-buffer -p -d -b $buf -t '$1' ; send-keys -t '$1' Enter" || return 1
+  # paste-buffer -d consumed the buffer iff the conditional ran.
+  if tmux delete-buffer -b "$buf" 2>/dev/null; then return 1; fi
+}
+
 # fm_backend_tmux_send_text_submit: type <text> into <target> once, then
 # submit with Enter, retried (Enter only, never retyped) until the composer
 # clears. Re-exports fm_tmux_submit_core (bin/fm-tmux-lib.sh) verbatim; see

@@ -157,6 +157,9 @@ case "${1:-}" in
           : > "$D/first-ctrl-c"
         fi
       fi
+      if [ "$payload" = Escape ] && [ -n "${FM_FAKE_COPILOT_LOG:-}" ]; then
+        printf '%s\n' '{"type":"abort","data":{"reason":"user_abort"}}' >> "$FM_FAKE_COPILOT_LOG"
+      fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
           : > "$D/muse-ack-pending"
@@ -265,7 +268,7 @@ run_control() {
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 \
     FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
-    FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
+    FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" FM_FAKE_COPILOT_LOG="${FM_FAKE_COPILOT_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
     FM_FAKE_SECOND_CTRL_C_STOPS_AGENT="${FM_FAKE_SECOND_CTRL_C_STOPS_AGENT:-}" \
@@ -1145,6 +1148,26 @@ test_muse_interrupt_confirms_adapter_acknowledgement() {
   pass "fm-control interrupt: muse confirms cancellation from its session log"
 }
 
+test_copilot_interrupt_confirms_transcript_abort() {
+  local dir log out rc
+  dir=$(new_case copilot-abort)
+  add_task "$dir" t1 copilot
+  alive_as "$dir" copilot
+  printf ' ◉ Working · 824 B esc again to interrupt\n' > "$dir/fake/pane"
+  log="$dir/home/state/t1.copilot-home/session-state/sess-1/events.jsonl"
+  mkdir -p "$(dirname "$log")"
+  printf '%s\n' '{"type":"user.message","data":{}}' '{"type":"abort","data":{"reason":"user_abort"}}' '{"type":"user.message","data":{}}' > "$log"
+  out=$(FM_FAKE_COPILOT_LOG="$log" run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "a copilot interrupt should observe the new abort event"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive cancel=confirmed" \
+    "a new transcript abort should confirm the cancel despite an older one"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an interrupt with no new abort should still deliver"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive cancel=unconfirmed" \
+    "an old abort must not confirm a later cancel"
+  pass "fm-control interrupt: copilot confirms cancellation from a new transcript abort event"
+}
+
 test_interrupt_revalidates_agent_after_acknowledgement_wait() {
   local dir root log out rc
   dir=$(new_case ack-race)
@@ -1365,6 +1388,7 @@ test_exit_refuses_the_confirming_enter
 test_exit_names_a_picker_that_renders_after_the_submit
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
+test_copilot_interrupt_confirms_transcript_abort
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed

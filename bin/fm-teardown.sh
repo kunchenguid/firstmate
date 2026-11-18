@@ -3676,10 +3676,11 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.claude-settings.json" "$sub_state/$child_id.devin-config.json" \
       "$sub_state/$child_id.polytoken-busy.sh" \
       "$sub_state/.$child_id.branch-outcome-index"
-    rm -rf "$sub_state/$child_id.kiro-home"
+    rm -rf "$sub_state/$child_id.kiro-home" "$sub_state/$child_id.copilot-home"
     chmod u+w "$sub_state/$child_id.git-hooks" 2>/dev/null || true
     rm -rf "$sub_state/$child_id.git-hooks" "$sub_state/$child_id.push-guard" \
       "$sub_state/$child_id.cortex-plugin" "$sub_state/$child_id.hermes-hooks" \
+      "$sub_state/$child_id.copilot-plugin" \
       "$sub_state/$child_id.polytoken-config" \
       "$sub_state/$child_id.polytoken-sessions" \
       "$sub_state/$child_id.polytoken-sessions-v1"
@@ -4225,8 +4226,9 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
 # kiro's per-task home is a directory (its relocated KIRO_HOME holds the hook
 # agent config, the trust setting, and this task's sessions), so it needs a
-# recursive removal rather than the file rm above.
-rm -rf "$STATE/$ID.kiro-home"
+# recursive removal rather than the file rm above; copilot's relocated
+# COPILOT_HOME (trusted-folder seed, sessions, logs) is removed the same way.
+rm -rf "$STATE/$ID.kiro-home" "$STATE/$ID.copilot-home"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
@@ -4239,9 +4241,10 @@ chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 # beside its sessions root), so they are removed recursively with the inbox
 # and the git-hooks dir rather than the flat file list above.
 # state/<id>.cortex-plugin is the per-task Cortex Code plugin directory
-# (bin/fm-cortex-plugin.sh) carrying the busy-state hooks.
+# (bin/fm-cortex-plugin.sh) carrying the busy-state hooks, and
+# state/<id>.copilot-plugin is the Copilot CLI equivalent (bin/fm-copilot-plugin.sh).
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard" \
-  "$STATE/$ID.cortex-plugin" "$STATE/$ID.hermes-hooks" \
+  "$STATE/$ID.cortex-plugin" "$STATE/$ID.hermes-hooks" "$STATE/$ID.copilot-plugin" \
   "$STATE/$ID.polytoken-config" \
   "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1"
 # A presentation journal the close path left behind is orphaned once the

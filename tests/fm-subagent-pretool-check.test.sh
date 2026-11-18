@@ -25,7 +25,7 @@ SCOUT_ROUTE='first classify the work under the AGENTS.md intake contract: work a
 # This inventory is shape-classification coverage for the shipped guard and the
 # recommended local Claude deny-list hardening list, but tracked settings must
 # not ship that Claude-only permissions layer.
-DELEGATION_TOOLS='Task Agent Workflow RemoteTrigger Monitor ScheduleWakeup SendMessage EnterWorktree ExitWorktree CronCreate CronDelete CronList TaskCreate TaskGet TaskList TaskUpdate TaskStop TaskOutput'
+DELEGATION_TOOLS='Task Agent Workflow RemoteTrigger Monitor ScheduleWakeup SendMessage EnterWorktree ExitWorktree CronCreate CronDelete CronList TaskCreate TaskGet TaskList TaskUpdate TaskStop TaskOutput create_session send_session_message'
 
 # Tools that must stay available: denying these would break ordinary work.
 PRESERVED_TOOLS='Bash Edit Read Write Skill ToolSearch WebFetch WebSearch NotebookEdit ReportFindings DesignSync PushNotification'
@@ -106,7 +106,7 @@ test_guard_allows_ordinary_and_observe_only_tools() {
   done
   # Observing or stopping work that already exists is not creating unaccounted
   # work, and blocking it would strand a runaway task with no way to end it.
-  for tool in TaskOutput TaskStop TaskGet TaskList CronList BashOutput KillShell; do
+  for tool in TaskOutput TaskStop TaskGet TaskList CronList BashOutput KillShell read_agent list_agents; do
     expect_allow "observe-or-stop tool" "$tool"
   done
   pass "the guard leaves ordinary tools and observe-or-stop operations alone"
@@ -143,6 +143,19 @@ test_guard_never_classifies_mcp_tools() {
     expect_allow "MCP tool" "$tool"
   done
   pass "MCP tool names are never classified as harness delegation"
+}
+
+test_guard_classifies_copilot_github_tools_by_stem() {
+  # Copilot names MCP tools <server>-<tool>, so there is no prefix exemption: a tool is judged by its name.
+  local tool
+  expect_allow "verified read-only Copilot task status tool" "github-mcp-server-get_copilot_task_status"
+  for tool in github-mcp-server-run_workflow github-mcp-server-list_workflows github-mcp-server-dispatch_workflow \
+              not-github-mcp-server-run_workflow githubiq-create_task \
+              github-mcp-server-create_pull_request_with_copilot github-mcp-server-assign_copilot_to_issue; do
+    expect_deny "Copilot GitHub tool with a delegation stem" "$tool"
+  done
+  expect_allow "Copilot GitHub tool with no delegation stem" "github-mcp-server-get_file_contents"
+  pass "Copilot GitHub tools are classified by name, with only the verified read-only task status tool exempt"
 }
 
 test_deny_message_defers_to_intake_classification() {
@@ -282,6 +295,7 @@ test_guard_allows_ordinary_and_observe_only_tools
 test_guard_allows_session_local_todo_tools
 test_plan_only_exclusion_is_exact_name
 test_guard_never_classifies_mcp_tools
+test_guard_classifies_copilot_github_tools_by_stem
 test_deny_message_defers_to_intake_classification
 test_escape_hatch_allows_deliberate_use
 test_task_worktree_and_non_firstmate_repo_are_inert

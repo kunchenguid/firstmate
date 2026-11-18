@@ -28,6 +28,7 @@ It tokenizes the bytes and classifies lexical execution positions only.
 - `--background` as a compatibility-only field that never changes the decision.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 - `--agy` for Antigravity CLI, reading stdin JSON from `.toolCall.args.CommandLine`, `.toolCall.args.command`, `.toolInput.command`, or `.tool_input.command`, denying redundant manual arming when a watcher is healthy, and emitting `{"decision":"deny","reason":...}` on stdout with exit 0.
+- No flag for GitHub Copilot CLI: `bin/fm-pretool-copilot.sh` hands the check a synthesized Claude-shaped payload with `--claude` and re-emits a deny as Copilot's `{"permissionDecision":"deny","permissionDecisionReason":...}` on stdout with exit 0, because exit 2 shows Copilot's model only a generic reason.
 
 The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.

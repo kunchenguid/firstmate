@@ -406,6 +406,23 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+# A Copilot pane that exited leaves its login shell (verified live), so the
+# dead reading is authoritative and the mate is recoverable, not unverified.
+test_sweep_respawns_confirmed_dead_copilot_secondmate() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-dead-copilot)
+  add_sm_home "$w" sm1 firstmate:fm-sm1 copilot
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  fm_fake_exit0 "$fb" copilot
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" bash "$log")
+
+  assert_not_contains "$out" "unverified for recovery" "a dead Copilot secondmate must be recoverable"
+  assert_contains "$(cat "$log")" "new-window" "a confirmed-dead Copilot secondmate should be relaunched"
+  pass "sweep: a confirmed-dead Copilot secondmate endpoint is respawned"
+}
+
 test_sweep_respawns_on_the_recorded_backend() {
   local w fb tmuxfb log out
   w=$(new_world sweep-pinned-backend)
@@ -995,6 +1012,7 @@ test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_respawns_confirmed_dead_copilot_secondmate
 test_sweep_respawns_on_the_recorded_backend
 test_sweep_recovers_the_durable_secondmate_account
 test_sweep_serializes_distinct_secondmate_relaunches

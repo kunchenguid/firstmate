@@ -291,3 +291,17 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   return 1
 }
 
+# Lives here (fm-harness.sh is a script, not sourceable) so bin/fm-hook-host-lib.sh
+# and fm-harness.sh share one Copilot process identity.
+# True when the process's argv[0] is exactly `copilot`. The kernel name of the
+# Copilot CLI is `MainThread`, so argv[0] is the only identity. Linux argv
+# fields preserve spaces; the ps fallback reads the first whitespace word.
+fm_copilot_args_are_copilot() {  # <args> [pid]
+  local args=${1:-} pid=${2:-} first=
+  if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ]; then
+    IFS= read -r -d '' first < "/proc/$pid/cmdline" || true
+  else
+    first=${args%% *}
+  fi
+  [ "${first##*/}" = copilot ]
+}

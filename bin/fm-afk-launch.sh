@@ -24,7 +24,8 @@
 # session; `enter` there adds one line when the host has no
 # engine, because every away wake then reaches main. Every other harness still
 # runs the daemon for now, so `start` and `start-native` require the record
-# `enter` wrote before they launch the daemon.
+# `enter` wrote before they launch the daemon. A Copilot primary is one of
+# them: the host has no Copilot arm owner (docs/verification/copilot.md).
 # QUIET MODE on a home that runs the supervision host needs nothing
 # where the attended host runs (docs/supervision-host.md "Quiet mode"): its
 # primary is attended-ready (fm_supervision_host_attended_ready: engine, tools,

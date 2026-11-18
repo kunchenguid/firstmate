@@ -51,6 +51,10 @@
 #   kiro-hook        Kiro V2 agent-config hooks (userPromptSubmit opens; stop
 #                    closes) - kiro's ONLY state source; its per-turn stop hook
 #                    also keeps the turn-ended notification touch
+#   copilot-hook     GitHub Copilot CLI per-task plugin hooks (userPromptSubmitted
+#                    opens; agentStop and sessionEnd close) - copilot's ONLY state
+#                    source; agentStop does not fire on an interrupt, so the record
+#                    stays busy until the next prompt
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -95,7 +99,7 @@
 # launch whose busy record never advanced past the fm-spawn seed is
 # indistinguishable, from the record alone, between "still reading its
 # brief" and "parked on an interactive prompt the harness never gets past
-# without a human" - a Claude/Gemini/Pi workspace-trust dialog, a sign-in or
+# without a human" - a Claude/Gemini/Pi workspace-trust dialog, a Copilot sign-in failure, a sign-in or
 # auth-method picker, or a first-run setup menu. Left alone this reads as
 # ordinary busy for the full BUSY_TURN_MAX_SECS (one hour) before the
 # separate wedge-suspect bound even looks at it. The signature table matches
@@ -234,6 +238,40 @@ fm_busy_pi_stream_version_supported() {
   [ "${1:-}" = 1.2.0 ]
 }
 
+# The one owner of the Copilot range verified live (docs/verification/copilot.md)
+# and of the typed-wake lock directory that bin/fm-copilot-wake.sh holds.
+FM_COPILOT_VERIFIED_MIN=105
+FM_COPILOT_VERIFIED_MAX=109
+
+fm_copilot_wake_lock_dir() {  # <state-dir>
+  printf '%s/.copilot-wake.lock' "$1"
+}
+
+# The one owner of how a cancelled Copilot turn reads in its session transcript
+# (events.jsonl): a line whose first key is type, valued abort. The format is
+# undocumented, so tests/fm-copilot-signals-live-e2e.test.sh guards it live.
+FM_COPILOT_ABORT_EVENT='{"type":"abort"'
+
+fm_copilot_abort_count() {  # <events.jsonl> -> number of abort events
+  local n
+  n=$(grep -c "^$FM_COPILOT_ABORT_EVENT" "$1" 2>/dev/null) || true
+  printf '%s\n' "${n:-0}"
+}
+
+# 0 iff the `copilot --version` text names a release inside the verified range;
+# spawn and the session-start adapter warn, never refuse, outside it.
+fm_copilot_version_verified() {  # <copilot --version text>
+  local v
+  v=$(printf '%s\n' "${1:-}" | grep -oE '(^|[^0-9.])1\.0\.[0-9]+' | grep -oE '1\.0\.[0-9]+' | head -n 1)
+  [ -n "$v" ] || return 1
+  [ "${v##*.}" -ge "$FM_COPILOT_VERIFIED_MIN" ] && [ "${v##*.}" -le "$FM_COPILOT_VERIFIED_MAX" ]
+}
+
+fm_copilot_version_warning() {  # <copilot --version text>
+  printf 'warning: copilot version %s is outside the verified range 1.0.%s-1.0.%s; the composer, busy and interrupt reads may not match' \
+    "${1:-unknown}" "$FM_COPILOT_VERIFIED_MIN" "$FM_COPILOT_VERIFIED_MAX"
+}
+
 fm_busy_stream_seconds() {  # <configured seconds>; off/invalid prints 0
   local value=${1:-}
   case "$value" in ''|*[!0-9]*) printf '0'; return ;; esac
@@ -343,6 +381,7 @@ fm_busy_sources_for_harness() {  # <harness>
     commandcode) adapter=commandcode-mod ;;
     polytoken) adapter=polytoken-hook ;;
     kiro) adapter=kiro-hook ;;
+    copilot) adapter=copilot-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)
@@ -1103,10 +1142,19 @@ fm_busy_gemini_launch_prompt_tail() {
   printf '%s' "$buf" | grep -qiE "${FM_BUSY_GEMINI_APIKEY_PROMPT_REGEX:-Enter Gemini API Key}"
 }
 
+# Copilot with no usable login (copilot 1.0.109): `Please use /login to sign in
+# to use Copilot` when no token is found, `Authentication token found but could
+# not be validated.` when it is rejected; the TUI then waits for a human.
+fm_busy_copilot_launch_prompt_tail() {
+  local buf
+  buf=$(cat)
+  printf '%s' "$buf" | grep -qE 'Please use /login to sign in to use Copilot|Authentication token found but could not be validated'
+}
+
 # fm_busy_launch_prompt_parked: dispatch to the signature above for <harness>,
 # or fail when this harness has none. Consumes the tail on stdin. Scoped to
 # exactly the harnesses fm-spawn.sh arms with the fm-spawn busy source
-# (claude*, opencode*, pi, pi-signed, omp, gemini) since only those can ever
+# (claude*, opencode*, pi, pi-signed, omp, gemini, copilot) since only those can ever
 # read a pinned "busy fm-spawn" record; codex and standalone Kimi already
 # classify unknown before a record is ever consulted, and opencode ships no
 # trust dialog at all.
@@ -1115,6 +1163,7 @@ fm_busy_launch_prompt_parked() {  # <harness>
     claude*) fm_busy_claude_launch_prompt_tail ;;
     pi | pi-signed | omp) fm_busy_pi_launch_prompt_tail ;;
     gemini) fm_busy_gemini_launch_prompt_tail ;;
+    copilot) fm_busy_copilot_launch_prompt_tail ;;
     *) return 1 ;;
   esac
 }

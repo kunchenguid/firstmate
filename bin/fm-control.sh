@@ -535,6 +535,7 @@ send_interrupt_keys() {
 }
 
 prepare_interrupt_ack() {
+  local f
   INTERRUPT_ACK_SOURCE=$(fm_control_interrupt_ack_source "$HARNESS")
   INTERRUPT_ACK_LOG=
   INTERRUPT_ACK_RUN=
@@ -544,20 +545,38 @@ prepare_interrupt_ack() {
       [ -n "$INTERRUPT_ACK_LOG" ] || return 0
       INTERRUPT_ACK_RUN=$(fm_busy_muse_active_run_id "$INTERRUPT_ACK_LOG" 2>/dev/null || true)
       ;;
+    copilot-transcript-abort)
+      # The per-task COPILOT_HOME (bin/fm-spawn.sh) holds only this task's sessions.
+      for f in "$STATE/$ID.copilot-home"/session-state/*/events.jsonl; do
+        [ -f "$f" ] || continue
+        if [ -z "$INTERRUPT_ACK_LOG" ] || [ "$f" -nt "$INTERRUPT_ACK_LOG" ]; then INTERRUPT_ACK_LOG=$f; fi
+      done
+      [ -n "$INTERRUPT_ACK_LOG" ] || return 0
+      INTERRUPT_ACK_RUN=$(fm_copilot_abort_count "$INTERRUPT_ACK_LOG")
+      ;;
   esac
 }
 
 interrupt_cancel_claim() {
   local elapsed=0 terminal=
   case "$INTERRUPT_ACK_SOURCE:$INTERRUPT_ACK_RUN" in
-    muse-session-terminal:?*) ;;
+    muse-session-terminal:?*|copilot-transcript-abort:?*) ;;
     *) printf 'unconfirmed'; return 0 ;;
   esac
   while :; do
-    terminal=$(fm_busy_muse_run_terminal "$INTERRUPT_ACK_LOG" "$INTERRUPT_ACK_RUN" 2>/dev/null || true)
-    case "$terminal" in
-      cancelled) printf 'confirmed'; return 0 ;;
-      ?*) printf 'unconfirmed'; return 0 ;;
+    case "$INTERRUPT_ACK_SOURCE" in
+      copilot-transcript-abort)
+        # A new abort event in the transcript is Copilot's own record of the cancel.
+        [ "$(fm_copilot_abort_count "$INTERRUPT_ACK_LOG")" -le "$INTERRUPT_ACK_RUN" ] \
+          || { printf 'confirmed'; return 0; }
+        ;;
+      *)
+        terminal=$(fm_busy_muse_run_terminal "$INTERRUPT_ACK_LOG" "$INTERRUPT_ACK_RUN" 2>/dev/null || true)
+        case "$terminal" in
+          cancelled) printf 'confirmed'; return 0 ;;
+          ?*) printf 'unconfirmed'; return 0 ;;
+        esac
+        ;;
     esac
     awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' || break
     sleep "$POLL"

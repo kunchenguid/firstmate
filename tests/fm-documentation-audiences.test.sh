@@ -41,7 +41,7 @@ elif mode.name == "bad-setup-audience":
 elif mode.name == "missing-owner-pointer":
     data["requiredOwnerPointers"][0] = {
         "source": "README.md",
-        "target": "docs/sessionstart-nudge.md",
+        "target": "docs/cd-guard.md",
     }
 elif mode.name == "shrink-scope":
     data["scope"]["trackedPatterns"] = ["README.md"]

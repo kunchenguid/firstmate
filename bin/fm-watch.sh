@@ -4148,6 +4148,10 @@ while :; do
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
 
+  # A Copilot primary's wake loop that crashed leaves a lock with a dead pid and
+  # this watcher orphaned; `revive` restarts it only when the pane is idle.
+  [ ! -e "$(fm_copilot_wake_lock_dir "$STATE")/pid" ] || "$SCRIPT_DIR/fm-copilot-wake.sh" revive >/dev/null 2>&1 || true
+
   open_decision_reminder_tick || {
     echo 'watcher: open-decision reminder check failed' >&2
     exit 1

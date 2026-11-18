@@ -778,6 +778,18 @@ test_supervision_branch_resolves_the_primary_pin() {
   pass "a supervision branch resolves own, crew, and secondmate to the primary's pinned harness"
 }
 
+test_supervision_branch_accepts_a_copilot_primary_pin() {
+  local dir home bin got
+  dir="$TMP_ROOT/primary-pin-copilot"
+  home="$dir/home"
+  mkdir -p "$home/config"
+  bin=$(named_bin "$dir/pi-tree" pi)
+  got=$(pin_probe "$bin" "$home" '' PI_CODING_AGENT=true \
+    FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=copilot)
+  [ "$got" = 'copilot|0' ] || fail "a branch pinned to a Copilot primary resolved '$got', expected copilot"
+  pass "a supervision branch accepts copilot as the primary's pinned harness"
+}
+
 test_supervision_branch_refuses_an_unknown_primary_pin() {
   local dir home bin verb got
   dir="$TMP_ROOT/primary-pin-bad"
@@ -839,5 +851,6 @@ test_descent_probe_ignores_a_sibling_branch_the_walk_cannot_reach
 test_descent_probe_tolerates_an_args_only_foreign_verdict_at_the_deepest_vantage
 test_descent_probe_prefers_comm_strength_when_deepest_leaves_tie
 test_supervision_branch_resolves_the_primary_pin
+test_supervision_branch_accepts_a_copilot_primary_pin
 test_supervision_branch_refuses_an_unknown_primary_pin
 test_supervision_protocol_follows_corrected_verdict

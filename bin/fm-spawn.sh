@@ -259,7 +259,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|kiro)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|cortex|kiro|copilot)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -2670,7 +2670,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes | copilot)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -3146,6 +3146,31 @@ launch_template() {
   # because Cortex loads Claude-compatible hooks, and Herdr's claude integration
   # hook claims a pane as a claude session whenever that variable is set.
   cortex) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI __CORTEXBIN__ --dangerously-allow-all-tool-calls --plugin-dir __CORTEXPLUGIN__ __MODELFLAG____EFFORTFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # GitHub Copilot CLI: -i starts the supervised interactive session and
+  # auto-submits the typed launch envelope (verified, copilot 1.0.105).
+  # --allow-all is the YOLO equivalent of every permission prompt and path/URL
+  # check an unattended crewmate would otherwise hit. It does NOT skip the
+  # folder-trust dialog of a fresh worktree, which would hold the -i prompt
+  # unsent (verified, copilot 1.0.105). COPILOT_ALLOW_ALL=true would trust every
+  # directory, and answering the dialog is not unattended (declining exits the
+  # agent), so COPILOT_HOME is relocated onto a firstmate-owned per-task home
+  # whose config.json trusts exactly this worktree (bin/fm-copilot-plugin.sh);
+  # the user's ~/.copilot is never written; login still works because the
+  # credential is in the OS keyring (keyed by account) or, for a config.json login,
+  # carried over by that script (authTokens, copilotTokens, loggedInUsers, lastLoggedInUser).
+  # Trusting the worktree still loads its own project hooks, skills and MCP
+  # servers; no setting found suppresses that. --no-ask-user removes the ask_user
+  # tool, so an unattended worker decides alone instead of holding on a question
+  # nobody answers (verified, copilot 1.0.105). --no-auto-update keeps a worker from
+  # swapping its own binary mid-task. --plugin-dir loads the private per-task
+  # plugin (bin/fm-copilot-plugin.sh) carrying the lifecycle hooks, which is the
+  # only per-task hook channel: every other hook source is a user or project
+  # file. CLAUDECODE is cleared because Copilot loads Claude-compatible hooks,
+  # and Herdr's claude integration hook claims a pane as a claude session
+  # whenever that variable is set. Copilot publishes no identity marker of its
+  # own, so ancestry decides (its kernel process name is MainThread, argv[0] is
+  # copilot).
+  copilot) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI COPILOT_HOME=__COPILOTHOME__ __COPILOTBIN__ --allow-all --no-ask-user --no-auto-update --plugin-dir __COPILOTPLUGIN__ __MODELFLAG____EFFORTFLAG__-i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Hermes's native interactive query starts a visible TUI, never one-shot.
   hermes) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI FM_HERMES_HARNESS=hermes HERMES_HOME=__HERMESHOME__ HERMES_MANAGED_DIR=__HERMESHOOKS__ __HERMESBIN__ __HERMESPROFILE__chat --tui --yolo --accept-hooks -q "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
@@ -3283,7 +3308,7 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-disp
   fi
 fi
 
-# muse, gemini, devin, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, devin, commandcode, polytoken, cortex, kiro, and hermes are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -3304,6 +3329,9 @@ fi
 # kiro has none either: this task verified only crewmate-side launch, busy state,
 # interrupt, exit, and resume on the V2 engine, and docs/supervision-protocols/
 # carries no kiro wake protocol (kiro-cli 2.21.4).
+# copilot is NOT in this list: it has the typed-wake primary protocol
+# (docs/supervision-protocols/copilot.md) and a secondmate home is a primary home
+# whose tracked .github/hooks registration the per-task COPILOT_HOME trusts.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
@@ -3323,6 +3351,16 @@ fi
 # there the composer would never read empty and steering would stall.
 if [ "$HARNESS" = commandcode ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
   echo "error: commandcode is verified on the tmux and herdr backends only; backend=$BACKEND cannot prove its composer empty. Select backend tmux or herdr." >&2
+  exit 1
+fi
+
+# Copilot's composer shape is read from the recorded harness name and its
+# interrupt arming needs a visible-screen read between presses. Both rest on
+# backend-neutral code that tmux and Herdr share; a real Copilot pane has run on
+# each (docs/verification/copilot.md says exactly what was exercised), so every
+# other spawn-capable backend is refused before any endpoint or record exists.
+if [ "$HARNESS" = copilot ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != herdr ]; then
+  echo "error: copilot is enabled only on tmux and herdr; backend=$BACKEND has no verified Copilot pane for its composer and interrupt reads. Select backend tmux or herdr." >&2
   exit 1
 fi
 
@@ -3388,6 +3426,15 @@ cortex)
     echo "error: cortex executable not found on PATH" >&2
     exit 1
   }
+  ;;
+copilot)
+  COPILOT_BIN=$(resolve_pi_executable copilot) || {
+    echo "error: copilot executable not found on PATH; install GitHub Copilot CLI or select a different verified harness" >&2
+    exit 1
+  }
+  copilot_version=$(fm_run_timed 5 "$COPILOT_BIN" --version 2>/dev/null </dev/null | head -n 1 || true)
+  fm_copilot_version_verified "$copilot_version" \
+    || printf '%s\n' "$(fm_copilot_version_warning "$copilot_version")" >&2
   ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -3750,7 +3797,7 @@ model_flag_for_harness() {
     [ "$oc_major" = 1 ] || return 0
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
-  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex | kiro)
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | cortex | kiro | copilot)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   # polytoken encodes reasoning effort inside the model reference, so the
@@ -3793,6 +3840,14 @@ effort_flag_for_harness() {
     # than passing a known-bad value.
     case "$effort" in
     low | medium | high) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+    esac
+    ;;
+  copilot)
+    # copilot 1.0.105 --reasoning-effort lists none|minimal|low|medium|high|xhigh|max
+    # and accepted xhigh and max on both a GPT and a Claude model (verified), so
+    # the shared vocabulary passes through.
+    case "$effort" in
+    low | medium | high | xhigh | max) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
   cortex)
@@ -6509,7 +6564,7 @@ BUSY_GEN=
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini | devin | commandcode | polytoken | cortex | kiro | hermes)
+  gemini | devin | commandcode | polytoken | cortex | kiro | hermes | copilot)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -6610,6 +6665,11 @@ BUSY_GEN=
   cortex)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       "$SCRIPT_DIR/fm-cortex-plugin.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
+    fi
+    ;;
+  copilot)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      "$SCRIPT_DIR/fm-copilot-plugin.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" "$WT" || exit 1
     fi
     ;;
   gemini)
@@ -7628,6 +7688,11 @@ cortex)
   LAUNCH=${LAUNCH//__CORTEXBIN__/"$(shell_quote "$CORTEX_BIN")"}
   LAUNCH=${LAUNCH//__CORTEXPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.cortex-plugin")"}
   ;;
+copilot)
+  LAUNCH=${LAUNCH//__COPILOTBIN__/"$(shell_quote "$COPILOT_BIN")"}
+  LAUNCH=${LAUNCH//__COPILOTPLUGIN__/"$(shell_quote "$STATE_REAL/$ID.copilot-plugin")"}
+  LAUNCH=${LAUNCH//__COPILOTHOME__/"$(shell_quote "$STATE_REAL/$ID.copilot-home")"}
+  ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 opencode)
   # The resolved absolute path probed for the version gate above, so the pane
@@ -7682,7 +7747,7 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro | hermes)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro | hermes | copilot)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

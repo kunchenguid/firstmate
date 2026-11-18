@@ -746,6 +746,15 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+# The supervisor pane's composer is read by its primary's own shape: a Copilot
+# pane on Herdr draws a block-glyph box the generic scan reads as unknown
+# (bin/fm-composer-lib.sh), so a Copilot primary names itself and every other
+# primary keeps the generic read.
+fm_daemon_composer_harness() {
+  [ "$(fm_daemon_primary_harness)" = copilot ] && printf copilot
+  return 0
+}
+
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
   # T3 has no rendered busy fallback, so require positive proof that the
@@ -773,7 +782,7 @@ pane_is_busy() {  # <target> [backend]
 # directly and applies the same positive-proof boundary.
 pane_input_pending() {  # <target> [backend]
   local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
+  [ "$(FM_COMPOSER_HARNESS=$(fm_daemon_composer_harness) fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -1750,7 +1759,7 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   #      stays buffered for the next cycle or the catch-up flush. T3 Code has
   #      no composer, so its adapter reports empty and the native turn path can
   #      proceed.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  composer=$(FM_COMPOSER_HARNESS=$(fm_daemon_composer_harness) fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
     case "$composer" in
       pending|pending-unproven) reason='unsubmitted text in the composer' ;;
@@ -1787,7 +1796,7 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   errf=$(mktemp "$state/.subsuper-inject-err.XXXXXX" 2>/dev/null) || errf=
   INJECT_SUBMIT_ATTEMPTED=1
   INJECT_SENT_MSG=$msg
-  verdict=$(FM_T3CODE_CLIENT_REQUEST_ID=$request_id fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
+  verdict=$(FM_COMPOSER_HARNESS=$(fm_daemon_composer_harness) FM_T3CODE_CLIENT_REQUEST_ID=$request_id fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s" 2>"${errf:-/dev/null}")
   INJECT_LAST_VERDICT=$verdict
   if [ -n "$errf" ]; then
     err=$(cat "$errf" 2>/dev/null)

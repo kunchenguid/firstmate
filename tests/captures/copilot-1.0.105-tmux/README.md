@@ -1,0 +1,3 @@
+Plain-text visible-screen tails (last five rows) read with `tmux capture-pane -p -S -0` from a live Copilot 1.0.105 scout on tmux 3.7c, Linux, on 2026-11-05, in a private-socket lab.
+`busy-empty.pane` is a running `sleep 240` shell tool; `after-interrupt.pane` is the same pane after `fm-control interrupt`; `idle.pane` is the settled composer before `fm-control exit`; `idle-after-relaunch.pane` is the replacement agent after its turn; `idle-draft.pane` has `zzdraft words` typed and not submitted.
+Trailing blanks are trimmed; the pane was 200 columns wide. The top row had its worktree path and plan-usage text replaced with a placeholder.

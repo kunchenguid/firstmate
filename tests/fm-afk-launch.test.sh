@@ -1120,6 +1120,8 @@ unit_supervision_host_other_harnesses_run_no_away_daemon() {
     daemon_allowed "$harness" quiet >/dev/null || fail "$harness: quiet mode must still launch the daemon on an opted-in home"
   done
   daemon_allowed kimi >/dev/null || fail "kimi has no arm owner to run the host, so it must keep the away daemon"
+  daemon_allowed copilot >/dev/null || fail "copilot has no host arm owner, so an opted-in home must keep the away daemon"
+  daemon_allowed copilot quiet >/dev/null || fail "copilot: quiet mode must launch the daemon"
   pass "supervision host: away mode on an opted-in cursor, opencode, omp, grok, codex, or agy home launches no daemon"
 
   enter_with() {  # <harness> <config line, off for the opt-out, or ->

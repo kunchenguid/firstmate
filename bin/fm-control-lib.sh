@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes copilot
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -96,6 +96,7 @@ fm_control_harness_family() {  # <recorded-harness>
     cortex) printf 'cortex' ;;
     hermes) printf 'hermes' ;;
     kiro) printf 'kiro' ;;
+    copilot) printf 'copilot' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -137,7 +138,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes) printf 'key' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes|copilot) printf 'key' ;;
     *) return 1 ;;
   esac
 }
@@ -158,19 +159,19 @@ fm_control_interrupt_transport() {  # <harness>
 # composer does nothing (verified live, cortex 1.1.104).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes|copilot) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
 
-# How many times the interrupt key must be delivered. OpenCode, Devin and Hermes
-# need a double Escape; every other verified adapter interrupts on a single press. Command Code
+# How many times the interrupt key must be delivered. OpenCode, Devin, Hermes and
+# Copilot need a double Escape; every other verified adapter interrupts on a single press. Command Code
 # cancels a running turn on one Escape (verified live, Command Code 1.74.1), and a
 # second press is exactly what opens its rewind picker, so it gets one.
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
-    opencode|devin|hermes) printf '2' ;;
+    opencode|devin|hermes|copilot) printf '2' ;;
     claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) printf '1' ;;
     *) return 1 ;;
   esac
@@ -190,6 +191,10 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
+    # copilot renders `esc again to interrupt` in its footer after one Escape on a
+    # running turn and `esc again to rewind` on an idle one, where the second
+    # press opens its rewind picker (verified live, copilot 1.0.105).
+    copilot) printf '%s' 'again to interrupt' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|hermes) ;;
     *) return 1 ;;
   esac
@@ -205,6 +210,11 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin|commandcode) printf '0.5' ;;
+    # copilot's armed footer (`esc again to interrupt`) stays up for only about
+    # half a second (measured on a real Herdr pane), so the second press follows
+    # the proof at once; the proof, not the gap, is what keeps an idle agent out
+    # of the rewind picker (it renders `again to rewind` instead).
+    copilot) printf '0.05' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes) printf '0.2' ;;
     *) return 1 ;;
   esac
@@ -224,6 +234,9 @@ fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
     commandcode) printf '%s' 'Select a checkpoint to restore your session|Press Enter to select · Esc to cancel' ;;
+    # copilot's idle double Escape opens a `Rewind to a previous point` picker
+    # whose footer is `↑↓ Navigate · Enter Select · Esc Cancel`; Esc cancels it.
+    copilot) printf '%s' 'Rewind to a previous point|Navigate · Enter Select · Esc Cancel' ;;
     # polytoken's interrupt rides the REST API, never keys, so no key can open
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
@@ -252,7 +265,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes|copilot) ;;
     *) return 1 ;;
   esac
 }
@@ -270,6 +283,12 @@ fm_control_interrupt_ack_source() {  # <harness>
     # kiro's stop hook fires on normal completion but, like claude's, not on a
     # manual Escape, and its `Cancelled ...` row is likewise rendered rather than
     # recorded, so fm-control preserves the adapter-owned busy record instead.
+    # copilot's agentStop hook fires on normal completion but not on an
+    # interrupt (verified), so fm-control preserves the adapter-owned record. Its
+    # session transcript does record the cancel: an `abort` event 4-123 ms after
+    # the key (Copilot 1.0.109, five cancels, no false positives), so a new one
+    # is the acknowledgement.
+    copilot) printf 'copilot-transcript-abort' ;;
     claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'none' ;;
     *) return 1 ;;
   esac
@@ -290,7 +309,7 @@ fm_control_exit_command() {  # <harness> [opencode-major]
         *) printf 'C-c' ;;
       esac
       ;;
-    claude|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    claude|grok|kimi|cursor|muse|rovo|copilot) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro|hermes) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -602,6 +621,13 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
       printf '%s\n' "$state/$id.kiro-home/agents/firstmate.json"
       printf '%s\n' "$state/$id.kiro-home/hooks/user-prompt-submit"
       printf '%s\n' "$state/$id.kiro-home/hooks/stop"
+      ;;
+    # copilot's lifecycle hooks live in a firstmate-owned plugin directory the
+    # launch reaches through --plugin-dir. Only its two files are retired here
+    # (this table's consumer removes files); teardown removes the directory.
+    copilot)
+      printf '%s\n' "$state/$id.copilot-plugin/hooks/hooks.json"
+      printf '%s\n' "$state/$id.copilot-plugin/plugin.json"
       ;;
   esac
 }

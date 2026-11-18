@@ -36,6 +36,7 @@ Today it runs beside a Claude, Cursor, OpenCode, omp, Grok, Codex, or Antigravit
   While the daemon's flag `state/.afk` exists, the host stands aside exactly as the plain arm does.
 - Pi keeps its in-process branch whatever the file says, and no Pi engine is built.
 - Kimi has no primary supervision protocol, so it has no arm owner to run the host.
+- A Copilot primary has no arm owner either (a parked `agentStop` leaves its pane deaf), so `/afk` and `/quiet` run the away daemon there; [the Copilot verification](verification/copilot.md#away-mode-on-a-copilot-primary) records the run.
 
 ### Not yet on the host
 

@@ -2353,6 +2353,22 @@ fm_backend_herdr_pane_owns_session() {  # <session> <pane_id> <pid>
   [ -n "$pgid" ] && [ "$pgid" = "$fg_pgid" ]
 }
 
+# fm_backend_herdr_foreground_argv0s: argv[0] of each process in <target>'s
+# foreground, one per line, from Herdr's own `pane process-info` read. It
+# mirrors fm_backend_tmux_foreground_argv0s for a caller that must tell an agent
+# that is still running from one that exited (bin/fm-copilot-wake.sh). An
+# unreadable pane, an invalid response, and an empty foreground all print
+# nothing, so a caller that needs a verdict repeats the read before it acts.
+fm_backend_herdr_foreground_argv0s() {  # <target>
+  fm_backend_herdr_parse_target "$1" || return 0
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r --arg pane "$FM_BACKEND_HERDR_PANE" '
+        .result | select(.type == "pane_process_info" and .process_info.pane_id == $pane)
+        | .process_info.foreground_processes[]?
+        | ((.argv // [])[0] // .argv0 // empty) | select(type == "string" and . != "")
+      ' 2>/dev/null
+}
+
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|stale-agent|live|unknown, from the JSON body of two read-only
 # calls plus, for a registered agent, the pane's process-level view - never
