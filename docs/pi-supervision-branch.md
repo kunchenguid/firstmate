@@ -119,6 +119,21 @@ A second mate's status log is one shared channel carrying many independently key
 The row is excluded when one of those lines is a decision, blocked, or captain-held line, resolves a decision open just before it, or declares, in the status parser's key positions, the key of a decision still open in that log.
 A resolution that closes nothing, key-less beside only keyed decisions or keyed for a key never open, stays routine.
 A key-less line otherwise falls back to its verb; an unrelated open decision alone leaves a routine span eligible, while a mixed span goes wholly to main.
+
+### Captain board answers
+
+A second mate's relay of a captain's answer is not a decision line, yet main must hear it at once, so the span rule also excludes a signal row whose span holds one.
+Absorbing it left the captain's answer unread until the next hand-back, a median 10.7 minutes on 2026-11-17 and up to 37.
+The class is one status line, whatever its verb, that matches one of these patterns in its note after the stamp and key are removed:
+
+- The word `captain` followed, in the same sentence, by `answer`, `answered`, `answers`, `approved`, `declined`, `decided`, `chose`, `ordered`, or `gedaan`.
+- `captain`, `cockpit`, `board`, or `lavish` followed by `round` or `r` and a number, as in `captain r73` or `cockpit round 11`.
+- `board`, `cockpit`, or `lavish` and `answer` or `answered` in the same sentence, in either order.
+
+A `resolved` line whose key starts `captain-hold-` is also in the class, because a captain hold's resolution is the captain's answer even when this log never recorded the hold opening.
+A hyphenated word such as a task id that contains `captain` never counts, a different sentence never combines the two words, and a crewmate's log is not judged by this class.
+Every other second-mate line, including a resolution that closes nothing, stays routine and eligible for the host.
+`tests/fm-pi-branch-extension.test.sh` pins each pattern and its negatives, and `tests/fm-supervision-host.test.sh` replays the first close.
 The status-presentation cursor bounds that span, and a missing or unmatched cursor falls back to the whole log.
 Single-task crewmate signals keep their existing Pi payload and attended-host whole-log rules, except that the TypeScript decision fold now ignores bare transition words without a colon or complete key token, matching `bin/fm-classify-lib.sh` on both crewmate and second-mate logs.
 
@@ -655,7 +670,7 @@ The generated prompt includes the [scout-completion](../.agents/skills/scout-com
 - Post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, and report-before-error re-latch.
 - Cache key, and model and effort selection.
 - In `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`: decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
-- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, and resolution spans, the whole-log fallback, stale-row isolation, and crewmate routing.
+- In `test_branch_dispatch_routes_secondmate_signal_by_new_span`: second-mate signal routing by new span on the Pi and attended-host paths, including an unrelated open hold, mixed, same-key, stamped-key, key-less blocked, resolution, and captain board answer spans, the whole-log fallback, stale-row isolation, and crewmate routing.
 - In `test_branch_dispatch_resolves_terminal_keyed_orca_stale_row`: a unique Orca `terminal=` handle resolving to its task and project in routine and heartbeat scans, and conflicting terminal, window, or task aliases refusing the whole scan in either record order.
 
 `tests/fm-branch-supervision.test.sh` covers:

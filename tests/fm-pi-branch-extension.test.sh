@@ -5312,6 +5312,42 @@ expectRoute("resolution after a bare resolved word left the unkeyed decision ope
   "needs-decision: choose\nresolved\n", "resolved: answered\n", false);
 expectRoute("captain-held declaration", "working: history\n", "captain-held [key=parked]: deferred to Monday\n", false);
 
+// Captain board answers a second mate relays (docs/pi-supervision-branch.md
+// "Captain board answers"): main-only on both paths, whatever the verb, with
+// an unrelated open hold or none.
+for (const [label, line] of [
+  ["captain approved, the 2026-11-17 18:18:16 shape", "status [at=1794993496]: captain rounds 85-86 approved: fabric-admin-spn granted\n"],
+  ["captain answered a numbered round", "status: captain r73 answered UptimeRobot = C later\n"],
+  ["captain gedaan", "status: Hetzner drift rerun GREEN after captain gedaan on new read token\n"],
+  ["cockpit round", "status: cockpit round 15 (Instellen): CANNOT dispatch the proef PRs yet\n"],
+  ["board round in a child outcome", "done [key=child-outcome-x-done-1]: child x done: board round 3 (captain asked a question)\n"],
+  ["cockpit asks answered", "status: cockpit asks answered: ship dispatching, scout dispatching\n"],
+  ["answer then board", "status: answered the audit board question in place\n"],
+  ["captain hold resolved, never open in this log", "resolved [key=captain-hold-miko-hcloud-token-call-1]: captain hold answered\n"],
+]) {
+  expectRoute(`${label}, no other decisions`, "working: history\n", line, false);
+  expectRoute(`${label}, beside an unrelated open hold`, hold, line, false);
+}
+// Lines that merely sit near those words stay routine on both paths.
+for (const [label, line] of [
+  ["hyphenated task id holding the word", "status: closed i2-28-captain-en lane; pool back to 40/48; answered 8 review gates\n"],
+  ["captain with no answer in the sentence", "status: waiting for the captain.\nstatus: answered the review gate\n"],
+  ["cockpit host waiting without an answer", "status: Waiting on cockpit host for 'on cockpit: 3 questions'\n"],
+  ["answer word in another sentence than captain", "status: captain is away; the review answered itself\n"],
+  ["keyed resolution of a never-open ordinary key", "resolved [key=ordinary-key]: nothing to close\n"],
+]) {
+  expectRoute(label, "working: history\n", line, true);
+}
+// The host's offer agrees: the close of a board-answer span stays on main.
+stage("mate", "working: history\n", "status: captain approved the design\n");
+if (branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {
+  throw new Error("the attended-host offer gave a second mate's captain board-answer close to the branch");
+}
+// A crewmate's line with the same words is not a second mate's relay.
+stage("crew", "working: history\n", "status: captain approved the design\n");
+const [crewPiAnswer] = verdicts();
+if (!crewPiAnswer) throw new Error("a crewmate line naming the captain was treated as a second mate's board answer");
+
 // The host decides the whole close through the offer rule, which must agree.
 stage("mate", hold, "done: sample-c PR merged\n");
 if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {

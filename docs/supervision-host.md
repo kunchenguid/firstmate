@@ -128,6 +128,7 @@ It also passes the close through unchanged, with no added line, when any of thes
 
 A close the engine takes is handled as in [One wake](#one-wake), with the dialog mirror at the head of the wake message.
 A handled wake with only routine outcomes never reaches main.
+A close carrying a second mate's captain board answer is not handled: attended, it passes straight to main under the [captain board answer class](pi-supervision-branch.md#captain-board-answers).
 A handled wake that recorded a captain outcome while the captain is still attended exits with one `supervision-host: branch-outcome:` line naming its store rows, without the close it handled; see [Captain outcomes](#captain-outcomes).
 A turn that fails hands its close to main with one `supervision-host:` line, as away.
 Main-only rows that share the queue with the branch's rows stay queued for main.

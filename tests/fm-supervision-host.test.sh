@@ -229,6 +229,72 @@ test_attended_main_only_close_passes_straight_to_main() {
 }
 
 
+# F1, fm-comm-latency-scout 2026-11-17: the host's engine absorbed a second
+# mate's line about the captain's board answer (handled closes at 18:27:50,
+# 18:33:24, 18:39:38, 18:46:13) and main heard only at the next hand-back
+# (18:52:00, 17 minutes median). The class is documented in
+# docs/pi-supervision-branch.md "Captain board answers"; a routine second-mate
+# line keeps the host's benefit and stays handled.
+make_secondmate_home() {  # <name>
+  local home
+  home=$(make_home "$1" attended)
+  printf 'project=demo\nwindow=fm-mate\nkind=secondmate\nharness=claude\n' > "$home/state/mate.meta"
+  printf '%s\n' "$home"
+}
+append_mate_line() {  # <home> <verb> <text>
+  printf '%s [at=%s]: %s\n' "$2" "$(date +%s)" "$3" >> "$1/state/mate.status"
+}
+
+test_second_mate_captain_board_answer_line_passes_to_main_at_the_first_close() {
+  local home
+  home=$(make_secondmate_home mate-board-answer)
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "board answer: the host never started a watcher cycle"
+  # The 2026-11-17 18:18:16 line, as the Miko second mate forwarded it.
+  append_mate_line "$home" status 'captain rounds 85-86 approved: fabric-admin-spn granted; Instellen goes live in release 4'
+  wait_until_deadline 60 host_exited "$home" || fail "board answer: the close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "a board-answer close must exit 0"
+  assert_re '^signal: .*mate.status' "$home/host.out" "the close must carry the watcher's reason line"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "board answer: the engine absorbed the second mate's board-answer line"
+  [ "$(handled_count "$home")" -eq 0 ] || fail "board answer: the first close was logged handled, not handed to main"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" \
+    "the ledger must record the first close as a main-only pass-through"
+  assert_grep 'mate.status' "$home/state/.wake-queue" "the board-answer wake must stay queued for main"
+  pass "host: a second mate's captain board-answer line reaches main at the first close instead of being absorbed"
+}
+
+test_second_mate_routine_line_is_still_absorbed_by_the_host() {
+  local home
+  home=$(make_secondmate_home mate-routine)
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "routine: the host never started a watcher cycle"
+  # Lines of the same window that name no captain answer, including a task id
+  # that merely contains the word.
+  append_mate_line "$home" 'done' 'inactive terminal child=miko-build-beheer-schermstatus fingerprint=e612da03'
+  wait_until 250 handled_at_least "$home" 1 \
+    || fail "routine: the second mate's routine line was not handled on the engine: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  append_mate_line "$home" status 'closed i2-28-captain-en lane; treehouse pool back to 40/48; 1044 in queue, answered 8 review gates'
+  wait_until 250 handled_at_least "$home" 2 \
+    || fail "routine: the second mate's hyphenated-id line was not handled on the engine: $(cat "$home/host.out"; cat "$home/state/.supervision-host.log")"
+  [ ! -s "$home/host.rc" ] || fail "a routine second-mate line reached main: $(cat "$home/host.out")"
+  assert_no_re '	pass-through	attended	main-only	' "$home/state/.supervision-host.log" "a routine second-mate line must never be handed to main"
+  pass "host: routine second-mate lines are still absorbed, including a task id that merely contains the word captain"
+}
+
+test_second_mate_captain_hold_resolution_passes_to_main_at_the_first_close() {
+  local home
+  home=$(make_secondmate_home mate-hold-resolved)
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "hold resolved: the host never started a watcher cycle"
+  printf 'resolved [key=captain-hold-miko-hcloud-token-call-1] [at=%s]: captain hold miko-hcloud-token-call: answered\n' "$(date +%s)" >> "$home/state/mate.status"
+  wait_until_deadline 60 host_exited "$home" || fail "hold resolved: the close did not reach main: $(cat "$home/state/.supervision-host.log")"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "hold resolved: the engine absorbed the captain-hold resolution"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" \
+    "the ledger must record the captain-hold resolution as a main-only pass-through"
+  pass "host: a second mate's captain-hold resolution reaches main at the first close"
+}
+
+
 # The file is read at every wake (docs/configuration.md "Supervision host"), so
 # an off written while the host is parked sends the next attended close to main
 # exactly as the arm printed it, with the ledger naming the opt-out.
@@ -945,4 +1011,7 @@ fm_test_run \
   test_next_host_clears_a_turn_its_killed_predecessor_left \
   test_report_without_acknowledgement_hands_the_wake_to_main \
   test_return_during_a_failed_turn_still_hands_its_outcomes_to_main \
-  test_incomplete_engine_result_hands_the_wake_to_main
+  test_incomplete_engine_result_hands_the_wake_to_main \
+  test_second_mate_captain_board_answer_line_passes_to_main_at_the_first_close \
+  test_second_mate_routine_line_is_still_absorbed_by_the_host \
+  test_second_mate_captain_hold_resolution_passes_to_main_at_the_first_close

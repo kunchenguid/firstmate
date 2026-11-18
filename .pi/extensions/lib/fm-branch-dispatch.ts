@@ -346,6 +346,36 @@ function readPresentationCursor(state: string): Map<string, { ident: string; off
   }
 }
 
+// A second mate's relay of a captain's answer on a board or cockpit page.
+// It is not a decision line, so the decision fold above cannot see it, yet main
+// wants it at once: the captain is waiting on the reply, and a branch that
+// absorbed it left it unread until the next hand-back (17 minutes median on
+// 2026-11-17). Judged on the note only, after the stamp and key are stripped,
+// and never on a hyphenated word such as a task id that merely contains
+// "captain". docs/pi-supervision-branch.md "Captain board answers" owns the
+// class; every pattern here is covered in tests/fm-pi-branch-extension.test.sh.
+const CAPTAIN_ANSWER_NOTE_PATTERNS: readonly RegExp[] = [
+  // "captain answered ...", "captain approved ...", "captain gedaan ..."
+  /(?<![\w-])captain(?![\w-])[^.;\n]{0,80}?\b(?:answer(?:ed|s)?|approved|declined|decided|chose|ordered|gedaan)\b/i,
+  // "captain r73", "cockpit round 11", "board round 3", "Lavish round 2"
+  /(?<![\w-])(?:captain|cockpit|board|lavish)\s+(?:rounds?|r)\s*\d+/i,
+  // "cockpit asks answered", "audit board question answered in place"
+  /(?<![\w-])(?:board|cockpit|lavish)(?![\w-])[^.;\n]{0,60}?\banswer(?:ed|s)?\b/i,
+  /\banswer(?:ed|s)?\b[^.;\n]{0,60}?(?<![\w-])(?:board|cockpit|lavish)(?![\w-])/i,
+];
+
+// The resolution of a captain hold is the captain's answer even when the log
+// never recorded the hold opening (the hold lives in main's decision store).
+const CAPTAIN_HOLD_KEY_PREFIX = "captain-hold-";
+
+function isCaptainAnswerLine(line: string, resolveVerb: string): boolean {
+  if (statusLineVerb(line) === resolveVerb) {
+    return (declaredDecisionKey(line) ?? "").startsWith(CAPTAIN_HOLD_KEY_PREFIX);
+  }
+  const note = statusLineNote(line);
+  return CAPTAIN_ANSWER_NOTE_PATTERNS.some((pattern) => pattern.test(note));
+}
+
 // Walk the presented span in order: a resolution must close a decision that
 // was open immediately before that line, not one opened later in the span.
 // docs/pi-supervision-branch.md owns the routing contract.
@@ -367,6 +397,7 @@ function spanIsDecisionOwned(
     if (resolved !== null && wasOpen && !before.has(resolved)) return true;
     const key = declaredDecisionKey(line);
     if (key !== undefined && open.has(key)) return true;
+    if (isCaptainAnswerLine(line, resolveVerb)) return true;
   }
   return false;
 }
