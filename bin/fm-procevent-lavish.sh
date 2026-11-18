@@ -14,8 +14,8 @@
 #   fm-procevent-lavish.sh reply <artifact.html> <reply-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
-#   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
-#   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
+#   fm-procevent-lavish.sh poll <artifact.html> [--for <task-id>] [--agent-reply-file <path>]
+#   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path> [--for <task-id>]
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, disconnected, missing, or unknown.
@@ -52,7 +52,18 @@
 #            transient interruption described below. A staged reply still
 #            present when it starts is posted before the long-poll: through
 #            `lavish-axi reply` when supported, otherwise through the legacy
-#            best-effort `poll --agent-reply` path.
+#            best-effort `poll --agent-reply` path. A listener armed `--for` a
+#            task also posts the board received mark: the moment a completed
+#            poll classifies `feedback` - before this listener exits, so before
+#            the runner's capture and long before the owning worker's model
+#            turn - it best-effort posts `Received, passed on to <task-id>.`
+#            through `lavish-axi reply`, so the captain sees the answer was
+#            taken in within seconds instead of after the worker's whole turn.
+#            The mark never gates, fails, delays, or adds output to the capture
+#            path: an older or unreadable Lavish version, a refused or timed-
+#            out reply, and any other refusal are swallowed, and rounds that
+#            are not a captain answer (waiting, disconnected, missing, empty
+#            ended, errors) get no mark at all.
 # deliver-reply
 #            Run by `fm-procevent.sh register-task` under the source lock, only
 #            after the task is eligible to own the board, with the listener argv
@@ -241,6 +252,25 @@ post_lavish_reply() {  # <artifact> <reply-file>
   fi
 }
 
+# The board received mark, posted by a task-owned listener the instant its
+# completed poll classifies `feedback`: `Received, passed on to <task-id>.`
+# reaches the board before the listener exits - so before the runner's capture
+# and the worker's whole model turn - because without it the board showed
+# nothing for the duration of that turn. Deliberately not post_lavish_reply:
+# that helper dies on refusal, and the mark must never fail, delay, or add
+# output to the capture path. Best-effort by subshell, all output swallowed:
+# an older or unreadable Lavish version (lavish_reply_compatible exits 1 or
+# dies), a refused or timed-out reply (the 10 s bound is lavish-axi's own), and
+# a closed session all leave the round exactly as it would have been, because
+# the durable capture the listener already printed is the real acknowledgement
+# and the worker's re-arm reply follows anyway. The reply routes to the
+# session's own server: the poll that delivered this response already ran
+# apply_session_host in this process.
+post_board_received_mark() {  # <artifact> <task-id>
+  local message="Received, passed on to $2."
+  ( lavish_reply_compatible && lavish-axi reply "$1" --agent-reply "$message" ) >/dev/null 2>&1 || true
+}
+
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
 # source and must never become two owners.
@@ -290,6 +320,10 @@ cmd_arm() {
     || die "cannot resolve the artifact path: $artifact"
   listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
   [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
+  # The owner task rides the published listener argv so the listener itself
+  # can post the board received mark the moment its poll delivers the captain's
+  # answer, naming the worker the answer was passed on to.
+  [ -z "$task" ] || listener+=(--for "$task")
   if [ -n "$task" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" -- \
       "${listener[@]}" || exit 1
@@ -327,10 +361,34 @@ cmd_arm() {
 }
 
 cmd_deliver_reply() {
-  [ "$#" -eq 4 ] && [ "$1" = poll ] && [ "$3" = --agent-reply-file ] || usage
+  local artifact='' reply_file='' task=''
+  [ "$#" -ge 1 ] && [ "$1" = poll ] || usage
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --agent-reply-file)
+        [ "$#" -ge 2 ] || usage
+        reply_file=$2
+        shift 2
+        ;;
+      --for)
+        [ "$#" -ge 2 ] || usage
+        task=$2
+        fm_pr_task_id_valid "$task" || die "invalid task id: $task"
+        shift 2
+        ;;
+      --*) usage ;;
+      *)
+        [ -z "$artifact" ] || usage
+        artifact=$1
+        shift
+        ;;
+    esac
+  done
+  [ -n "$artifact" ] && [ -n "$reply_file" ] || usage
   lavish_reply_compatible || exit 3
-  apply_session_host "$2"
-  post_lavish_reply "$2" "$4"
+  apply_session_host "$artifact"
+  post_lavish_reply "$artifact" "$reply_file"
 }
 
 cmd_retire() {
@@ -352,18 +410,28 @@ POLL_RETRY_DELAY_MAX=60
 # Exit 0 only for the exact two-line interruption, and nothing else. The whole
 # response must be those two lines with those exact bytes: whitespace variants,
 # a longer response that merely opens with them, and any other SERVER_ERROR are
-# genuine errors this adapter must never swallow.
+# genuine errors this adapter must never swallow. Bytes are also staged to the
+# response file up to the runner's output bound, so a completed poll can
+# classify its own round from the stage without re-reading the stdout it
+# already printed; for the exact interruption the staged bytes are that whole
+# two-line response.
 poll_response_filter() {  # <response-file>
   perl -e '
     use strict;
     use warnings;
     my ($stage) = @ARGV;
     my $expected = "error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n";
+    # The listener shares the same output bound the runner caps its capture
+    # at, and the classification staging must not exceed it either: a response
+    # longer than the bound is truncated in the capture, so only its first
+    # bytes are staged and the stage can never grow a runaway document.
+    my $limit = $ENV{FM_PROCEVENT_MAX_OUTPUT_BYTES};
+    $limit = 1048576 unless defined $limit && $limit =~ /^\d+$/;
     open my $staged, ">", $stage or exit 2;
     binmode STDIN;
     binmode STDOUT;
     binmode $staged;
-    my ($candidate, $streaming) = ("", 0);
+    my ($candidate, $streaming, $staged_bytes) = ("", 0, 0);
     sub write_all {
       my ($handle, $bytes) = @_;
       my $offset = 0;
@@ -373,11 +441,21 @@ poll_response_filter() {  # <response-file>
         $offset += $written;
       }
     }
+    sub stage_bytes {
+      my ($bytes) = @_;
+      return unless length $bytes;
+      return if $staged_bytes >= $limit;
+      my $room = $limit - $staged_bytes;
+      $room = length $bytes if $room > length $bytes;
+      write_all($staged, substr($bytes, 0, $room));
+      $staged_bytes += $room;
+    }
     while (1) {
       my $count = sysread STDIN, my $chunk, 65536;
       exit 2 unless defined $count;
       last if $count == 0;
       if ($streaming) {
+        stage_bytes($chunk);
         write_all(*STDOUT, $chunk);
         next;
       }
@@ -385,10 +463,11 @@ poll_response_filter() {  # <response-file>
       my $take = length($chunk) < $room ? length($chunk) : $room;
       my $prefix = substr($chunk, 0, $take);
       $candidate .= $prefix;
-      write_all($staged, $prefix);
+      stage_bytes($prefix);
       my $matches_prefix = length($candidate) <= length($expected)
         && substr($expected, 0, length($candidate)) eq $candidate;
       if (!$matches_prefix) {
+        stage_bytes(substr($chunk, $take));
         write_all(*STDOUT, $candidate);
         write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
@@ -431,16 +510,32 @@ poll_iteration_floor_wait() {
 }
 
 cmd_poll() {
-  local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
-  local pipeline_status reply_file=''
+  local artifact='' delay attempt=0 response cleanup_command rc filter_rc iteration_started
+  local pipeline_status reply_file='' task=''
   local reply_text='' reply_pending=0
-  [ -n "$artifact" ] || usage
-  if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
-    reply_file=$3
-  elif [ "$#" -ne 1 ]; then
-    usage
-  fi
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --agent-reply-file)
+        [ "$#" -ge 2 ] || usage
+        reply_file=$2
+        shift 2
+        ;;
+      --for)
+        [ "$#" -ge 2 ] || usage
+        task=$2
+        fm_pr_task_id_valid "$task" || die "invalid task id: $task"
+        shift 2
+        ;;
+      --*) usage ;;
+      *)
+        [ -z "$artifact" ] || usage
+        artifact=$1
+        shift
+        ;;
+    esac
+  done
+  [ -n "$artifact" ] || usage
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
   printf -v cleanup_command 'rm -f -- %q' "$response"
@@ -499,6 +594,14 @@ cmd_poll() {
       *) die "cannot classify the poll response" ;;
     esac
   done
+  # The board received mark: only a task-owned listener, only for a completed
+  # poll that classifies as the captain's answer, posted before this listener
+  # exits so the board shows receipt in seconds rather than after the owning
+  # worker's model turn. Best-effort in every direction, as documented above.
+  if [ "$rc" -eq 0 ] && [ -n "$task" ] \
+      && [ "$(cmd_classify "$response")" = feedback ]; then
+    post_board_received_mark "$artifact" "$task"
+  fi
   return "$rc"
 }
 

@@ -4899,6 +4899,102 @@ wait_for "$LEGACY/home/state/procevent-inbox/$legacy_id.1.result" \
   || fail "the legacy Lavish reply round was not captured"
 pass "older compatible Lavish versions retain the poll-with-reply behavior"
 
+# --- end-user-aligned regression: the board shows receipt while the worker turns -
+# The dogfood defect: after the captain answered a worker-owned board, the
+# board showed nothing for the whole owning turn (measured median ~1 min, worst
+# ~6 min), because the only board acknowledgement was the worker's own re-arm
+# reply. A task-owned listener now posts `Received, passed on to <task>.` the
+# moment its poll classifies feedback - before it exits, so before the capture
+# that wakes the worker - and only best-effort: a refused mark may never delay
+# or block the round, and a round that is not a captain answer (an empty ended
+# close) gets no mark at all. The re-arms in this fixture also prove
+# deliver-reply keeps working now that the published listener argv carries
+# `--for <task-id>` alongside the staged reply.
+HMARK="$TMP_ROOT/hmark"; new_home "$HMARK"
+MARK_ROOT="$TMP_ROOT/lavish-mark-root"; mkdir -p "$MARK_ROOT"; export MARK_ROOT
+MARK_BIN=$(fm_fakebin "$TMP_ROOT/lavish-mark-stub")
+cat > "$MARK_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "${1-}" in
+  --version) printf '0.1.80\n' ;;
+  reply)
+    if [ "${3-}" = --agent-reply-file ]; then
+      printf '%s\n' "$(cat -- "$4")" >> "$MARK_ROOT/replies"
+      exit 0
+    fi
+    if [ -e "$MARK_ROOT/refuse-mark" ]; then
+      printf 'simulated mark timeout\n' >&2
+      exit 1
+    fi
+    printf 'mark %s:%s %s\n' "${LAVISH_AXI_HOST:-unset}" "${LAVISH_AXI_PORT:-unset}" "$4" >> "$MARK_ROOT/marks"
+    ;;
+  poll)
+    n=$(cat "$MARK_ROOT/count" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$MARK_ROOT/count"
+    while [ ! -e "$MARK_ROOT/release$n" ]; do sleep 0.02; done
+    if [ "$n" -lt 3 ]; then
+      printf 'session:\n  file: /mark.html\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+    else
+      printf 'session:\n  file: /mark.html\n  status: ended\n  ended_by: user\n'
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$MARK_BIN/lavish-axi"
+MARK_ART="$TMP_ROOT/mark-board.html"
+printf '<h1>mark</h1>\n' > "$MARK_ART"
+lavish_session "$MARK_ART"
+mark_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$MARK_ART")
+fm_test_track_procevent_home "$HMARK"
+new_task_endpoint "$HMARK" worker-mark
+# Round one: the captain answers, and the received mark is on the board before
+# the capture that reaches the worker's inbox, routed to the session's own
+# server rather than the ambient address the runner was started with.
+PATH="$MARK_BIN:$PATH" FM_HOME="$HMARK" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MARK_ART" --for worker-mark >/dev/null
+for _ in $(seq 1 100); do [ "$(cat "$MARK_ROOT/count" 2>/dev/null || true)" = 1 ] && break; sleep 0.03; done
+touch "$MARK_ROOT/release1"
+wait_for "$HMARK/state/worker-mark.inbox/001.msg" \
+  || fail "the marked round never reached the worker inbox"
+[ "$(wc -l < "$MARK_ROOT/marks" 2>/dev/null || true)" = 1 ] \
+  || fail "the captain's answer was not marked received exactly once: $(cat "$MARK_ROOT/marks" 2>/dev/null)"
+assert_contains "$(cat "$MARK_ROOT/marks")" "mark 127.0.0.1:14387 Received, passed on to worker-mark." \
+  "the received mark did not name the worker and route to the session server"
+# Round two: Lavish refuses the mark (a simulated timeout), and nothing about
+# the round may wait on it - the reply-carrying re-arm still delivers, the
+# feedback is still captured, and no partial mark reaches the board.
+touch "$MARK_ROOT/refuse-mark"
+printf 'applied round one\n' > "$MARK_ROOT/reply2"
+PATH="$MARK_BIN:$PATH" FM_HOME="$HMARK" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MARK_ART" --for worker-mark \
+  --agent-reply-file "$MARK_ROOT/reply2" >/dev/null \
+  || fail "the re-arm beside a refused mark did not stay deliverable"
+[ "$(cat "$MARK_ROOT/replies" 2>/dev/null || true)" = 'applied round one' ] \
+  || fail "the refused mark interfered with the worker's own staged reply"
+for _ in $(seq 1 100); do [ "$(cat "$MARK_ROOT/count" 2>/dev/null || true)" = 2 ] && break; sleep 0.03; done
+touch "$MARK_ROOT/release2"
+wait_for "$HMARK/state/worker-mark.inbox/002.msg" \
+  || fail "a refused received mark held up the round it belonged to"
+[ "$(wc -l < "$MARK_ROOT/marks" 2>/dev/null || true)" = 1 ] \
+  || fail "a refused mark leaked a partial receipt to the board: $(cat "$MARK_ROOT/marks" 2>/dev/null)"
+# Round three: the captain closes the board having said nothing new, so the
+# empty ended close is captured and concluded without any received mark.
+rm -f "$MARK_ROOT/refuse-mark"
+printf 'applied round two\n' > "$MARK_ROOT/reply3"
+PATH="$MARK_BIN:$PATH" FM_HOME="$HMARK" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MARK_ART" --for worker-mark \
+  --agent-reply-file "$MARK_ROOT/reply3" >/dev/null
+for _ in $(seq 1 100); do [ "$(cat "$MARK_ROOT/count" 2>/dev/null || true)" = 3 ] && break; sleep 0.03; done
+touch "$MARK_ROOT/release3"
+wait_for "$HMARK/state/procevent-inbox/$mark_id.3.result" \
+  || fail "the terminal close after marked rounds was never captured"
+[ "$(wc -l < "$MARK_ROOT/marks" 2>/dev/null || true)" = 1 ] \
+  || fail "a round with no captain answer still posted a received mark: $(cat "$MARK_ROOT/marks" 2>/dev/null)"
+pass "a worker-owned board shows receipt the moment the captain answers, and never depends on it"
+
 # A failed synchronous reply must leave the worker board unarmed.
 REPLY_FAIL="$TMP_ROOT/reply-fail"
 mkdir -p "$REPLY_FAIL/bin" "$REPLY_FAIL/home/state"
