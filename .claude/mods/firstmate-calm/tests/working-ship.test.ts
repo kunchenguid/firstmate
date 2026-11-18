@@ -2,6 +2,7 @@
 // working row while Calm is on, its cadence on the mocked clock, its size against the
 // viewport, and how it lets go of a site the surface no longer draws.
 import { describe, expect, test } from "claude-code/testing";
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 import { boxOf, calmCommand, decodeCells, isStock, rasterOf, spinner, themeChange, unmeasuredSpinner, world } from "./support.ts";
 
 const SAIL = "◿│◣";
