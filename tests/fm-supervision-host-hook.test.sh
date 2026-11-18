@@ -89,6 +89,10 @@ SH
   printf '❯ human draft\n' > "$home/screen"
   cat > "$home/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
+if [ "$1" = list-panes ]; then
+  printf '%s\n' '%77'
+  exit 0
+fi
 case "$*" in *'%77'*) ;; *) exit 1 ;; esac
 case "$1:$*" in
   display-message:*'#{pane_pid}'*)
