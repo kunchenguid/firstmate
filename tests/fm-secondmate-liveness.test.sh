@@ -1105,7 +1105,7 @@ test_goal_health_executable_projection() (
   fm_write_meta "$home/state/mate.meta" kind=secondmate backend=tmux window=s:fm-mate harness=pi
   "$ROOT/bin/fm-secondmate-health.sh" || fail 'health executable did not consume canonical startable projection'
   [ -s "$home/state/.secondmate-health-mate" ] || fail 'executable did not observe goal-owning mate'
-  "$ROOT/bin/fm-goal.sh" mark lab ready 'done' -- 'lab proof' >/dev/null || fail 'could not complete fixture item'
+  "$ROOT/bin/fm-goal.sh" mark lab ready 'done' --task lab-proof -- 'lab proof' >/dev/null || fail 'could not complete fixture item'
   "$ROOT/bin/fm-secondmate-health.sh" || fail 'health executable failed with completed goal item'
   [ ! -e "$home/state/.secondmate-health-mate" ] || fail 'completed goal left idle recovery armed'
   pass 'goal health executable: canonical goal projection arms and disarms observation without endpoint mutation'

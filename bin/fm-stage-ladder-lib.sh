@@ -19,6 +19,9 @@
 # home-local configuration and is trusted as such, so a ladder file is never
 # committed and never read from a project checkout. A symlinked ladder is
 # refused.
+# Miko has a bundled fallback when no home-local file exists: merged uses the
+# shared PR probe; deployed and live require explicit marks (their probes never
+# pass). A merge is progress, not evidence that a real finish condition holds.
 #
 # PROBE CONTRACT. Exit 0 means the rung is reached; any other exit means it is
 # not, and exit 124 means the bound was hit. The first stdout line is the
@@ -33,7 +36,8 @@
 #   fm_stage_ladder_path <config-dir> <project>
 #   fm_stage_ladder_load <config-dir> <project>
 #       rc 0 and FM_STAGE_LADDER_NAMES / FM_STAGE_LADDER_PROBES set; rc 1 when
-#       the project has no ladder file (FM_STAGE_LADDER_ERROR empty); rc 2 when
+#       the project has no ladder file or bundled default (FM_STAGE_LADDER_ERROR
+#       empty); rc 2 when
 #       the file is unreadable, a symlink, or malformed (FM_STAGE_LADDER_ERROR
 #       says why).
 #   fm_stage_ladder_rank <stage>   prints the 0-based rung, rc 1 when not on it
@@ -69,7 +73,15 @@ fm_stage_ladder_load() {  # <config-dir> <project>
     FM_STAGE_LADDER_ERROR="ladder is a symlink: $path"
     return 2
   fi
-  [ -e "$path" ] || return 1
+  if [ ! -e "$path" ]; then
+    [ "$2" = miko ] || return 1
+    FM_STAGE_LADDER_NAMES=(merged deployed live)
+    local probe_dir
+    probe_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    printf -v probe_dir '%q' "$probe_dir/fm-goal-probe-pr-merged.sh"
+    FM_STAGE_LADDER_PROBES=("bash $probe_dir" false false)
+    return 0
+  fi
   if ! { [ -f "$path" ] && [ -r "$path" ]; }; then
     FM_STAGE_LADDER_ERROR="ladder is unreadable: $path"
     return 2

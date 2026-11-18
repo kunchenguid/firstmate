@@ -109,7 +109,7 @@ test_mark_moves_an_item_in_the_next_drain() {
   lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail "first drain failed"
   grep -Fq 'startable, nobody on it: build [main]' "$out" || fail "build was not startable first: $(cat "$out")"
   grep -Fq 'waiting: verify after build' "$out" || fail "verify did not wait on build: $(cat "$out")"
-  lab_env "$dir" bash "$GOAL" mark I1 build 'done' -- landed >/dev/null || fail "mark failed"
+  lab_env "$dir" bash "$GOAL" mark I1 build 'done' --task build-task -- landed >/dev/null || fail "mark failed"
   lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail "second drain failed"
   grep -Fq 'progress: 1/3 items done or dropped' "$out" || fail "the mark did not move progress: $(cat "$out")"
   grep -Fq 'startable, nobody on it: verify [main]' "$out" || fail "verify did not become startable after the mark: $(cat "$out")"

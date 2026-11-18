@@ -3176,6 +3176,14 @@ EOF
 DRIVE_FLOOR_SCAN_SECS=${FM_DRIVE_FLOOR_SCAN_SECS:-}
 case "$DRIVE_FLOOR_SCAN_SECS" in ''|*[!0-9]*) DRIVE_FLOOR_SCAN_SECS=300 ;; esac
 FM_GOAL_BIN=${FM_GOAL_BIN:-$SCRIPT_DIR/fm-goal.sh}
+
+# Stage probes are observations, not finish-condition judgments. Reuse the
+# bounded slow-check runner and stay quiet on a successful stage update.
+goal_probe_tick() {
+  bash "$FM_GOAL_BIN" active >/dev/null 2>&1 || return 0
+  run_check_capture "$FM_GOAL_BIN" probe || return 1
+}
+
 FM_DRIVE_FLOOR_PROCEVENT_BIN=${FM_DRIVE_FLOOR_PROCEVENT_BIN:-$SCRIPT_DIR/fm-procevent.sh}
 # The ONE drive-floor gate for "work exists to drive": returns 0 while a sweep
 # has startable lanes or startable goal items to push forward.
@@ -5099,6 +5107,7 @@ EOF
       touch "$STATE/.last-check"
       wake "$reason"
     done
+    goal_probe_tick || exit 1
     # Recover missing registrations and moved heads on the existing slow PR
     # cadence, independently of done-wake delivery or a supervisor turn.
     for pr_meta in "$STATE"/*.meta; do

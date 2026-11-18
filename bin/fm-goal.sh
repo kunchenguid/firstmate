@@ -66,7 +66,7 @@
 #     the parent channel (bin/fm-parent-channel-lib.sh).
 # Mark grammar: `goal [goal=<id>] [item=<item>] [state=<s>] [stage=<stage>] [task=<task>] [at=<epoch>]: <note>`
 # with states open|running|waiting|blocked|done|dropped. `open` resets an item
-# to unstarted. A mark carries a state, a stage, or both; the stage folds on
+# to unstarted. A progress mark carries a state, a stage, or both; the stage folds on
 # its own newest-wins clock, so a stage-only mark never changes the item's
 # state or since. A secondmate runs `mark` in its own home; the command routes
 # the line through fm_parent_channel_report (stamped, deduplicated,
@@ -128,6 +128,7 @@
 #   fm-goal.sh edit <id> --items-file <path> [--title <text>] [--done-when <text>]
 #   fm-goal.sh mark <id> <item> <state> [--stage <stage>] [--task <task-id>] -- <note>
 #   fm-goal.sh mark <id> <item> stage=<stage> [--task <task-id>] -- <note>
+#   fm-goal.sh evidence <id> <item> -- <evidence>
 #   fm-goal.sh probe [<id> [<item>]] [--dry-run]
 #   fm-goal.sh close <id> --done | --captain --words <text>
 #   fm-goal.sh show [<id>]
@@ -138,6 +139,13 @@
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
 #   fm-goal.sh driven --since <epoch>
+#
+# Workers (FM_TASK_ID) may only record evidence on an item whose folded task
+# matches their launch identity. Evidence is a task-tagged, note-only mark;
+# it changes neither state nor stage nor their clocks. It remains in the
+# normal marks archive and is shown by `show`. Local parent-channel routes
+# validate the parent's linked task and owner; remote routes fail closed.
+# Done drive marks must identify a task or include a full PR URL in the note.
 #
 # `driven` renders every goal active at any point of the window (active now,
 # or closed since <epoch>) in the captain's words, for the return brief's
@@ -211,6 +219,7 @@ FM_GOAL_BRIEF_TOTAL_BYTES=3072
 FM_GOAL_BRIEF_ITEM_LIST=5
 FM_GOAL_FIELD_MAX=300
 FM_GOAL_ITEM_TITLE_MAX=300
+FM_GOAL_RECORDING_EVIDENCE=0
 
 # The one owner of a task's current state, asked read-only by the
 # orphaned-running predicate below; the projection never re-derives liveness.
@@ -818,6 +827,7 @@ _fm_goal_items_graph_ok() {
 # --- the mark fold -----------------------------------------------------------
 
 FM_GOAL_M_STATES=() FM_GOAL_M_ATS=() FM_GOAL_M_NOTES=() FM_GOAL_M_TASKS=()
+FM_GOAL_EVIDENCE=() FM_GOAL_EVIDENCE_ATS=()
 FM_GOAL_FOLD_IGNORED=0
 FM_GOAL_PROGRESS_ATS=()
 # Every valid mark on a planned item, in read order, for the since-epoch views
@@ -833,10 +843,13 @@ _FM_GOAL_FOLD_NOW=0
 _fm_goal_fold_reset() {
   local i=0
   FM_GOAL_M_STATES=(); FM_GOAL_M_ATS=(); FM_GOAL_M_NOTES=(); FM_GOAL_M_TASKS=()
+  FM_GOAL_EVIDENCE=(); FM_GOAL_EVIDENCE_ATS=()
   FM_GOAL_S_STAGES=(); FM_GOAL_S_ATS=()
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     FM_GOAL_S_STAGES[${#FM_GOAL_S_STAGES[@]}]=''
     FM_GOAL_S_ATS[${#FM_GOAL_S_ATS[@]}]=''
+    FM_GOAL_EVIDENCE[${#FM_GOAL_EVIDENCE[@]}]=''
+    FM_GOAL_EVIDENCE_ATS[${#FM_GOAL_EVIDENCE_ATS[@]}]=0
     FM_GOAL_M_STATES[${#FM_GOAL_M_STATES[@]}]=open
     FM_GOAL_M_ATS[${#FM_GOAL_M_ATS[@]}]=''
     FM_GOAL_M_NOTES[${#FM_GOAL_M_NOTES[@]}]=''
@@ -855,13 +868,24 @@ _fm_goal_fold_reset() {
 
 # Apply one parsed mark to the fold. rc 1 = invalid (counted by the caller),
 # rc 2 = a mark for another goal (skipped silently).
-# A mark carries a state, a stage, or both; each folds on its own newest-wins
-# clock, so a stage-only mark never touches the item's state, since or note.
+# Progress marks fold state/stage on independent clocks. Evidence-only marks
+# retain the latest evidence without touching either progress clock.
 _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now> <owner> <stage>
   local item=$2 state=$3 at=$4 task=$5 note=$6 now=$7 owner=$8 stage=${9-}
   local idx u known=0
   [ -z "$state" ] || fm_goal_state_valid "$state" || return 1
-  [ -n "$state" ] || [ -n "$stage" ] || return 1
+  if [ -z "$state$stage" ]; then
+    fm_goal_id_valid "$task" || return 1
+    case "$note" in 'evidence: '*) ;; *) return 1 ;; esac
+    case "$at" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$at" -le $((now + _FM_GOAL_MARK_FUTURE_TOLERANCE)) ] || return 1
+    idx=$(_fm_goal_index_of "$item") || return 1
+    if [ "$at" -ge "${FM_GOAL_EVIDENCE_ATS[$idx]}" ]; then
+      FM_GOAL_EVIDENCE[idx]="$task: ${note#evidence: }"
+      FM_GOAL_EVIDENCE_ATS[idx]=$at
+    fi
+    return 0
+  fi
   [ -z "$stage" ] || fm_stage_name_valid "$stage" || return 1
   case "$at" in ''|*[!0-9]*) return 1 ;; esac
   [ "$at" -le $((now + _FM_GOAL_MARK_FUTURE_TOLERANCE)) ] || return 1
@@ -932,7 +956,7 @@ _fm_goal_fold_goal_line() {  # <line> <goal-id> <now> <owner>
       *) return 1 ;;
     esac
   done
-  [ "$seen_goal" -eq 1 ] && [ -n "$item" ] && { [ -n "$state" ] || [ -n "$stage" ]; } && [ -n "$at" ] || return 1
+  [ "$seen_goal" -eq 1 ] && [ -n "$item" ] && [ -n "$at" ] || return 1
   fm_goal_id_valid "$item" || return 1
   [ -z "$task" ] || fm_goal_id_valid "$task" || return 1
   case "$at" in *[!0-9]*|0[0-9]*) return 1 ;; esac
@@ -1434,6 +1458,7 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
     line="$line]: ${FM_GOAL_ITEMS_TITLES[$i]}"
     printf '%s\n' "$line"
     _fm_goal_show_stage_lines "$i" "$now"
+    [ -z "${FM_GOAL_EVIDENCE[$i]}" ] || printf '    evidence: %s\n' "${FM_GOAL_EVIDENCE[$i]}"
     if [ -n "${FM_GOAL_M_ATS[$i]}" ]; then
       printf '    state: %s since %s (%s ago) - %s\n' \
         "${FM_GOAL_M_STATES[$i]}" "${FM_GOAL_M_ATS[$i]}" \
@@ -1756,6 +1781,7 @@ _fm_goal_actor() {
 
 _fm_goal_require_actor() {  # <allowed-actors, space separated>
   local actor
+  [ -z "${FM_TASK_ID-}" ] || { fm_goal_log 'workers may only record evidence'; return 1; }
   actor=$(_fm_goal_actor)
   case " $1 " in
     *" $actor "*) return 0 ;;
@@ -2019,13 +2045,58 @@ _fm_goal_mark_line() {  # <id> <item> <state> <task> <note> [stage] -> printed
   printf '%s: %s' "$head" "$5" | cut -c1-$cap
 }
 
+# Bind completion evidence to the folded task, including a task assigned by
+# an earlier mark. Planning items may remain unbound until work is dispatched.
+_fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
+  [ "$3" = 'done' ] || return 0
+  local idx word
+  local -a pr_words=()
+  if [ "${FM_PARENT_CHANNEL_ROUTE-}" != remote ]; then
+    fm_goal_fold "$1" "${4:-$FM_GOAL_STATE}" "${5:-$FM_GOAL_DATA}" "$(date +%s)"
+    idx=$(_fm_goal_index_of "$2") || return 1
+    [ -n "$task" ] || task=${FM_GOAL_ITEMS_TASKS[$idx]}
+    [ "${FM_GOAL_ITEMS_CLASSES[$idx]}" = drive ] || return 0
+  fi
+  [ -z "$task" ] || return 0
+  read -r -a pr_words <<< "$note"
+  for word in "${pr_words[@]}"; do
+    fm_pr_url_parse "$word" >/dev/null 2>&1 && return 0
+  done
+  fm_goal_log 'done drive items must name a task (--task) or a full PR URL'
+  return 1
+}
+
+# Recheck under the append lock too, so an edit/rebind cannot lend authority
+# from a stale snapshot. The launch marker is shared by every harness/backend.
+_fm_goal_check_evidence_link() {
+  local idx
+  fm_goal_fold "$1" "${2:-$FM_GOAL_STATE}" "${3:-$FM_GOAL_DATA}" "$(date +%s)"
+  idx=$(_fm_goal_index_of "$4") || return 1
+  [ "${FM_GOAL_ITEMS_TASKS[$idx]}" = "${FM_TASK_ID-}" ] || {
+    fm_goal_log 'evidence refused: worker is not linked to this item'; return 1;
+  }
+  [ -z "${5-}" ] || [ "${FM_GOAL_ITEMS_OWNERS[$idx]}" = "$5" ]
+}
+
+cmd_evidence() {
+  [ "$#" -ge 4 ] && [ "${3-}" = -- ] || _fm_goal_usage_error 'evidence needs <goal> <item> -- <evidence>'
+  fm_goal_id_valid "${FM_TASK_ID-}" || _fm_goal_die 1 'evidence needs a worker launch identity (FM_TASK_ID)'
+  local id=$1 item=$2
+  shift 3
+  FM_GOAL_RECORDING_EVIDENCE=1 cmd_mark "$id" "$item" evidence --task "$FM_TASK_ID" -- "$*"
+}
+
 cmd_mark() {
+  [ -z "${FM_TASK_ID-}" ] || [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ] || _fm_goal_die 1 'workers may only record evidence'
   local id item state='' task='' stage='' note='' dash_seen=0 flag what
   local rc=0 line stamped path
   [ "$#" -ge 3 ] || _fm_goal_usage_error 'mark needs <goal> <item> <state|stage=<stage>> -- <note>'
   id=$1
   item=$2
   case "$3" in
+    evidence)
+      [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ] || _fm_goal_usage_error 'use the evidence command'
+      ;;
     stage=*) stage=${3#stage=} ;;
     *) state=$3 ;;
   esac
@@ -2057,17 +2128,20 @@ cmd_mark() {
   fm_goal_id_valid "$id" || _fm_goal_usage_error "unsafe goal id: '$id'"
   fm_goal_id_valid "$item" || _fm_goal_usage_error "unsafe item id: '$item'"
   [ -z "$state" ] || fm_goal_state_valid "$state" || _fm_goal_usage_error "unknown mark state: '$state'"
-  [ -n "$state" ] || [ -n "$stage" ] || _fm_goal_usage_error 'mark needs a state or a stage'
+  [ -n "$state$stage" ] || [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ] || _fm_goal_usage_error 'mark needs a state or a stage'
   [ -z "$stage" ] || fm_stage_name_valid "$stage" || _fm_goal_usage_error "unsafe stage: '$stage'"
   what=${state:+$state}${stage:+${state:+ }stage=$stage}
   [ -z "$task" ] || fm_goal_id_valid "$task" || _fm_goal_usage_error "unsafe task id: '$task'"
   case "$(printf '%s' "$note" | LC_ALL=C tr -d '[:space:]')" in
     '') _fm_goal_usage_error 'mark needs a note after --' ;;
   esac
+  if [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ]; then note="evidence: $note"; fi
   fm_parent_channel_destination "$FM_GOAL_HOME" "$FM_GOAL_STATE" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     # secondmate home: publish through the parent channel.
-    line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || exit 2
+    if [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ] && [ "$FM_PARENT_CHANNEL_ROUTE" != local ]; then
+      _fm_goal_die 1 'worker evidence needs a readable local parent record'
+    fi
     if [ "$FM_PARENT_CHANNEL_ROUTE" = local ]; then
       path="$FM_SECONDMATE_PARENT_HOME/state/goals/$id.goal"
       _fm_goal_regular_file "$path"
@@ -2087,6 +2161,12 @@ cmd_mark() {
         exit 1
       }
     fi
+    if [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ]; then
+      _fm_goal_check_evidence_link "$id" "$FM_SECONDMATE_PARENT_HOME/state" "$FM_SECONDMATE_PARENT_HOME/data" "$item" "$FM_PARENT_CHANNEL_ID" || exit 1
+    else
+      _fm_goal_bind_mark_task "$id" "$item" "$state" "${FM_SECONDMATE_PARENT_HOME:-$FM_GOAL_HOME}/state" "${FM_SECONDMATE_PARENT_HOME:-$FM_GOAL_HOME}/data" || exit 1
+    fi
+    line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || exit 2
     fm_parent_channel_report "$FM_GOAL_HOME" "$FM_GOAL_STATE" "$line" || {
       fm_goal_log "could not publish the mark on the parent channel"
       exit 1
@@ -2097,20 +2177,27 @@ cmd_mark() {
   [ "$rc" -eq 1 ] || _fm_goal_die 1 'the secondmate identity of this home is unreadable'
   # parent home: append to the marks file.
   _fm_goal_parent_home || exit 1
-  _fm_goal_require_actor 'main branch' || exit 1
+  if [ "${FM_GOAL_RECORDING_EVIDENCE-}" != 1 ]; then
+    _fm_goal_require_actor 'main branch' || exit 1
+  fi
   _fm_goal_open_record "$id" || exit 1
   _fm_goal_index_of "$item" >/dev/null || {
     fm_goal_log "unknown item '$item' in goal '$id'"
     exit 1
   }
-  line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || exit 2
-  stamped=$(status_stamp_line "$line")
   path=$(fm_goal_marks_path "$id")
   fm_goal_lock_hold || exit 1
   if ! _fm_goal_open_record "$id" || ! _fm_goal_index_of "$item" >/dev/null; then
     fm_goal_lock_release
     exit 1
   fi
+  if [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ]; then
+    _fm_goal_check_evidence_link "$id" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$item" || { fm_goal_lock_release; return 1; }
+  else
+    _fm_goal_bind_mark_task "$id" "$item" "$state" || { fm_goal_lock_release; return 1; }
+  fi
+  line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || { fm_goal_lock_release; return 2; }
+  stamped=$(status_stamp_line "$line")
   if [ -e "$path" ] || [ -L "$path" ]; then
     _fm_goal_regular_file "$path" || { fm_goal_lock_release; return 1; }
   fi
@@ -2848,7 +2935,7 @@ main() {
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'needs a subcommand'
   shift
   case "$cmd" in
-    start|edit|mark|probe|show|brief|active|startable|export|exists|window|driven|close) ;;
+    start|edit|mark|evidence|probe|show|brief|active|startable|export|exists|window|driven|close) ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;
   esac

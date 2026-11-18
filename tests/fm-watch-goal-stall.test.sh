@@ -263,7 +263,23 @@ test_watcher_loop() {
   pass "the actual watcher wakes and exits on a stalled goal item, keeping the clock across a restart"
 }
 
-fm_test_run test_startable_command_lists_only_startable_items \
+test_slow_cycle_probes_stages() {
+  reset_case
+  start_goal merge-goal 'item [id=ship] [owner=main] [task=ship-task] [project=miko] [target=live]: ship task'
+  mkdir -p "$CONFIG/stage-ladders"
+  printf 'stage merged: printf "merge evidence\\n"\nstage deployed: false\nstage live: false\n' > "$CONFIG/stage-ladders/miko"
+  goal_probe_tick
+  local out
+  out=$(bash "$GOAL" show merge-goal)
+  assert_contains "$out" 'stage: merged since' 'slow cycle advances the stage'
+  assert_contains "$out" 'state: open (no mark yet)' 'merge does not finish the item'
+  assert_grep 'probe passed for merged: merge evidence' "$STATE/goals/merge-goal.marks" 'merge probe evidence retained'
+  goal_probe_tick
+  assert_equals 1 "$(wc -l < "$STATE/goals/merge-goal.marks" | tr -d ' ')" 'repeated sweep is idempotent'
+  pass 'slow cycle probes merged automatically without declaring done'
+}
+
+fm_test_run test_slow_cycle_probes_stages test_startable_command_lists_only_startable_items \
   test_idle_startable_item_wakes_after_the_hold \
   test_an_item_with_a_working_task_or_a_mark_is_not_stalled \
   test_an_orphaned_running_item_is_stalled_like_an_open_one \

@@ -115,7 +115,7 @@ test_local_mate() {
 test_remote_mate() {
   fixture; local_mate
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=fixture\n' > "$M/.fm-secondmate-parent"
-  mate_goal mark I1 unknown 'done' -- landed >/dev/null
+  mate_goal mark I1 unknown 'done' --task remote-child -- landed >/dev/null
   assert_grep 'goal [goal=I1] [item=unknown]' "$M/state/parent-replies.status" 'remote route allows unvalidated mark'
   assert_contains "$(mate_goal brief)" 'remote' 'remote parent brief unavailable'
   pass 'remote mate publishes to parent-replies without reading parent state'
@@ -218,7 +218,7 @@ test_close() {
   fixture; start >/dev/null
   expect_rc 1 goal close I1 --done
   goal mark I1 a 'done' -- landed >/dev/null
-  goal mark I1 b 'done' -- verified >/dev/null
+  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
   local now; now=$(date +%s)
   mark_line c dropped "$now" > "$H/state/captain.status"
   FM_SUPERVISION_ACTOR=branch goal close I1 --done >/dev/null
@@ -338,7 +338,7 @@ test_stage_marks() {
   assert_contains "$(goal show I1)" ', target: deployed' 'show prints the target beside the stage'
   assert_not_contains "$(goal show I1)" '(reached)' 'a stage short of target is not reached'
   goal mark I1 a 'done' --stage deployed -- 'live on dev' >/dev/null
-  assert_grep 'goal [goal=I1] [item=a] [state=done] [stage=deployed] [at=' "$H/state/goals/I1.marks" 'state and stage in one mark'
+  assert_grep 'goal [goal=I1] [item=a] [state=done] [stage=deployed] [task=child] [at=' "$H/state/goals/I1.marks" 'state and stage in one mark'
   assert_contains "$(goal show I1)" '(reached)' 'the target is reached when the stage equals it'
   mark_line a 'running' "$((now + 5))" > "$H/state/goals/I1.marks"
   printf 'goal [goal=I1] [item=a] [stage=later] [at=%s]: newest\ngoal [goal=I1] [item=a] [stage=earlier] [at=%s]: older\n' \
@@ -361,7 +361,7 @@ test_stage_marks() {
 test_ladder_targets() {
   fixture; v2_items
   start >/dev/null
-  assert_contains "$(goal show I1)" 'target: deployed' 'with no ladder a target is a free word'
+  assert_contains "$(goal show I1)" 'target: deployed' 'bundled Miko ladder accepts deployed'
   ladder miko 'stage merged: true' 'stage deployed: true' 'stage live: true'
   start I2 >/dev/null
   assert_contains "$(goal show I2)" 'target: deployed' 'a target on the ladder is accepted'
@@ -382,6 +382,8 @@ test_ladder_targets() {
   expect_rc 2 start
   assert_contains "$(cat "$TMP_ROOT/out")" 'ladder is a symlink' 'a symlinked ladder is refused'
   rm -f "$H/config/stage-ladders/miko"
+  expect_rc 2 start I3
+  printf '%s\n' 'item [id=a] [owner=terp] [project=unconfigured] [target=nowhere]: free target' > "$ITEMS"
   expect_rc 0 start I3
   pass 'a target is checked against the project ladder, and a damaged ladder fails closed'
 }
@@ -440,9 +442,13 @@ test_probe_bounds() {
   assert_absent "$H/state/goals/I1.marks" 'a probe error writes no mark'
   ladder miko 'stage merged: not a ladder line'
   rm -f "$H/config/stage-ladders/miko"
+  printf '%s\n' 'item [id=a] [owner=terp] [project=unconfigured]: no ladder' > "$ITEMS"
+  goal edit I1 --items-file "$ITEMS" >/dev/null
   out=$(goal probe I1)
   assert_contains "$out" 'no stage ladder for the project, skipped' 'a project with no ladder is skipped'
   expect_rc 1 goal probe I1 a
+  v2_items
+  goal edit I1 --items-file "$ITEMS" >/dev/null
   ladder miko 'garbage'
   expect_rc 1 goal probe I1
   local_mate
@@ -479,7 +485,7 @@ test_probe_pr_merged() {
   out=$(FM_GOAL_HOME="$H" FM_GOAL_TASK=child PATH="$H/bin:$PATH" bash "$probe") || fail 'the task PR is found'
   assert_equals https://github.com/example/fixture/pull/7 "$out" 'the PR is read from the task record'
   # the whole path: a ladder whose merged rung is this probe moves the stage on a merged PR
-  ladder miko "stage merged: bash $probe" 'stage deployed: false'
+  # No local ladder: exercise the bundled Miko default and real merge probe.
   start >/dev/null
   out=$(PATH="$H/bin:$PATH" goal probe I1)
   assert_contains "$out" 'probe I1/a [miko]: stage none -> merged (https://github.com/example/fixture/pull/7)' 'a merged PR moves the stage mark'
@@ -558,7 +564,7 @@ test_orphaned_running() {
 test_target_close_and_brief() {
   probe_fixture
   goal mark I1 a 'done' -- 'merged and done' >/dev/null
-  goal mark I1 b 'done' -- verified >/dev/null
+  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
   assert_contains "$(goal brief)" 'short of target: a at no stage, target deployed' 'the brief names an item short of target'
   expect_rc 1 goal close I1 --done
   assert_contains "$(cat "$TMP_ROOT/out")" 'short of their target stage: a' 'close --done refuses short of target'
@@ -567,7 +573,7 @@ test_target_close_and_brief() {
   expect_rc 0 goal close I1 --done
   fixture; v2_items; start >/dev/null
   goal mark I1 a dropped -- 'not needed' >/dev/null
-  goal mark I1 b 'done' -- verified >/dev/null
+  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
   expect_rc 0 goal close I1 --done
   pass 'close --done and the brief hold an item to its target; a dropped item owes none'
 }
@@ -630,7 +636,63 @@ test_driven() {
   pass 'driven reports start, now and target per item and an hourly timeline'
 }
 
-fm_test_run test_start test_validation test_marks test_local_mate test_remote_mate \
+test_worker_evidence() {
+  fixture; start >/dev/null
+  goal mark I1 a running -- started >/dev/null
+  local before
+  before=$(project | grep '^item ')
+  FM_TASK_ID=child goal evidence I1 a -- 'test passes at task child' >/dev/null
+  assert_equals "$before" "$(project | grep '^item ')" 'evidence cannot change state, since, task or stage'
+  assert_contains "$(goal show I1)" 'evidence: child: test passes at task child' 'evidence visible'
+  FM_TASK_ID=other expect_rc 1 goal evidence I1 a -- forged
+  FM_TASK_ID=child expect_rc 1 goal evidence I1 b -- forged
+  FM_TASK_ID=child expect_rc 1 goal mark I1 a 'done' -- forged
+  FM_TASK_ID=child expect_rc 1 goal probe I1
+  FM_TASK_ID=child expect_rc 1 goal mark I1 a stage=live -- forged
+  FM_TASK_ID=child expect_rc 1 goal edit I1 --items-file "$ITEMS"
+  FM_TASK_ID=child expect_rc 1 goal close I1 --captain --words forged
+  FM_TASK_ID=child FM_GOAL_RECORDING_EVIDENCE=1 expect_rc 1 goal mark I1 a 'done' -- forged
+  expect_rc 1 goal evidence I1 a -- missing-identity
+  goal mark I1 a running --task replacement -- rebound >/dev/null
+  FM_TASK_ID=child expect_rc 1 goal evidence I1 a -- stale-link
+  FM_TASK_ID=replacement goal evidence I1 a -- new-proof >/dev/null
+  goal mark I1 b running --task replacement -- same-task-other-owner >/dev/null
+  local_mate
+  FM_TASK_ID=replacement mate_goal evidence I1 a -- parent-proof >/dev/null
+  assert_contains "$(goal show I1)" 'evidence: replacement: parent-proof' 'local parent channel evidence folds'
+  FM_TASK_ID=replacement expect_rc 1 mate_goal evidence I1 b -- other-owner
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=fixture\n' > "$M/.fm-secondmate-parent"
+  FM_TASK_ID=replacement expect_rc 1 mate_goal evidence I1 a -- unverifiable
+  fixture; start >/dev/null
+  ln -s "$ITEMS" "$H/state/goals/I1.marks"
+  local checksum
+  checksum=$(cksum "$ITEMS")
+  FM_TASK_ID=child expect_rc 1 goal evidence I1 a -- symlink
+  assert_equals "$checksum" "$(cksum "$ITEMS")" 'worker evidence refuses symlinked marks'
+  fixture
+  printf '%s\n' 'item [id=a] [owner=main] [task=child]: archive proof' > "$ITEMS"
+  start >/dev/null
+  FM_TASK_ID=child goal evidence I1 a -- preserved-proof >/dev/null
+  goal mark I1 a 'done' -- real-finish >/dev/null
+  goal close I1 --done >/dev/null
+  local archive
+  archive=$(find "$H/state/goals/closed" -name '*.marks')
+  assert_grep 'evidence: preserved-proof' "$archive" 'evidence retained on close'
+  pass 'worker evidence is linked, visible, state-neutral and fails closed on stale, other or remote items'
+}
+
+test_done_identity() {
+  fixture; start >/dev/null
+  expect_rc 1 goal mark I1 b 'done' -- anonymous
+  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
+  assert_grep '[state=done] [task=verify-child]' "$H/state/goals/I1.marks" 'completion names its task'
+  fixture; start >/dev/null
+  goal mark I1 b 'done' -- 'verified https://github.com/example/fixture/pull/7' >/dev/null
+  assert_grep 'https://github.com/example/fixture/pull/7' "$H/state/goals/I1.marks" 'URL-only completion names the PR'
+  pass 'unbound drive completions require a task or full PR URL'
+}
+
+fm_test_run test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \
   test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
   test_probe_pr_merged test_limits test_orphaned_running test_target_close_and_brief test_export test_driven
