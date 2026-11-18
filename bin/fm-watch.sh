@@ -3923,8 +3923,12 @@ startup_lock_failed() {
   exit 1
 }
 WATCHER_RECOVERY_PENDING=0
+# Whether this cycle's startup recovered a stale watch lock, which is the one
+# recovery an empty queue must not resurface: see resurface_after_downtime.
+WATCHER_LOCK_RECOVERED=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
+  WATCHER_LOCK_RECOVERED=1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
   && [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ]; then
@@ -4053,6 +4057,20 @@ resurface_after_downtime() {
       exit 1
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  elif [ "${WATCHER_LOCK_RECOVERED:-0}" = 1 ]; then
+    # A recovered stale watch lock proves a previous cycle died mid-flight, but
+    # it is NOT itself evidence that anything is still waiting. Without this
+    # check an already acknowledged episode with an empty queue resurfaced on
+    # every cycle whose startup recovered a stale lock: an unbounded loop that
+    # woke main with no work to hand it. The queued-row test keeps a real
+    # appended row, and the episode that row reopens, deliverable as before.
+    # A recovery pending for any other reason, such as a close during handling
+    # republishing an unannounced episode, still announces itself once.
+    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
+      echo "watcher: recovery state could not be consumed safely" >&2
+      exit 1
+    fi
+    [ "$FM_RECOVERY_MARKER_QUEUED" = 1 ] || return 0
   fi
   wake "check: rearm-resurface"
 }

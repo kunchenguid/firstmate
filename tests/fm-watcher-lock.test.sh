@@ -347,6 +347,10 @@ SH
     done
     [ -e "$dir/old.paused" ] \
       || fail "old watcher never reached its lock-free poll sleep: $(cat "$old_out")"
+    # Recovering the stale lock alone no longer wakes a watcher; a queued row
+    # does. This case needs the successor to deliver a wake and exit before the
+    # paused holder resumes, so give it real work to hand main.
+    append_wake "$state" check inbox:takeover "check: captain inbox note takeover"
   fi
   # A pre-pin build recorded no start time either, so drop it to leave only the
   # legacy identity as the holder's record.
@@ -1702,6 +1706,10 @@ test_watch_restart_rejects_reused_pid() {
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
   printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "stale watcher identity" > "$state/.watch.lock/pid-identity"
+  # Recovering the stale lock alone no longer wakes a watcher; a queued row
+  # does. This case is about replacing the reused-pid lock and still surfacing
+  # the recovery, so give it real work to hand main.
+  append_wake "$state" check inbox:restart "check: captain inbox note restart"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" --restart > "$out" &
   pid=$!
   i=0
@@ -2062,6 +2070,9 @@ test_arm_starts_and_self_heals() {
       printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
       printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
       touch "$state/.last-watcher-beat"
+      # Recovering the stale lock alone no longer wakes a watcher; a queued row
+      # does. This row is what the reclaimed lock's recovery hands main.
+      append_wake "$state" check inbox:dead-pid "check: captain inbox note dead pid"
     fi
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
     armpid=$!
