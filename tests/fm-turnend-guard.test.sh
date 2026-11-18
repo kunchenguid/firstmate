@@ -1283,10 +1283,8 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
-# A Pi command started from inside the live session, such as the `pi --help`
-# capability probe, auto-loads this extension too and passes the ancestor walk
-# in lockOwnership. Its pid dies at once, so the marker must stay on the live
-# session above it, while a dead or foreign marker pid is still replaced.
+# Marker-preservation rationale: markerNamesLiveAncestor in
+# .pi/extensions/fm-primary-turnend-guard.ts.
 test_pi_extension_keeps_marker_of_live_ancestor_session() {
   local repo home ext marker_case out status
   repo="$TMP_ROOT/pi-marker-guard-root"
