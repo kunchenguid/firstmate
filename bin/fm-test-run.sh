@@ -297,7 +297,7 @@ family_for_basename() {
     fm-brief.test.sh|fm-dod-lib.test.sh|fm-merge-local.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-codex-account-pi-extension.test.sh|\
-    fm-classify-decision-key.test.sh|\
+    fm-classify-decision-key.test.sh|fm-classify-fold-equivalence.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
     fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-forge-detect.test.sh|fm-grok-harness.test.sh|\
@@ -802,6 +802,7 @@ tests/fm-ci-workflow.test.sh 5833
 tests/fm-ci-zombie-sweep.test.sh 1500
 tests/fm-classify-corr-token.test.sh 49294
 tests/fm-classify-decision-key.test.sh 4362
+tests/fm-classify-fold-equivalence.test.sh 6000
 tests/fm-classify-imposed-hold.test.sh 598
 tests/fm-claude-admission.test.sh 37243
 tests/fm-claude-bypass-prompt-live-e2e.test.sh 60

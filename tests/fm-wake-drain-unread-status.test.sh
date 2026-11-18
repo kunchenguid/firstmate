@@ -252,6 +252,61 @@ test_unread_output_over_cap_remains_recoverable() {
   pass "unread status over the former byte cap preserves every line"
 }
 
+test_unread_section_over_its_bounds_lists_newest_and_counts_the_rest() {
+  local dir state out status i payload shown
+  dir=$(make_case unread-bounded)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-bound.status"
+  prime_cursor "$state" "$status"
+  payload=$(printf '%0280d' 0)
+  printf 'note: PR ready for review, the captain should look\n' >> "$status"
+  i=1
+  while [ "$i" -le 80 ]; do
+    printf 'note: bulk-%02d %s\n' "$i" "$payload" >> "$status"
+    i=$((i + 1))
+  done
+
+  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_UNREAD_LINES=10 FM_WAKE_DRAIN_UNREAD_BYTES=100000 \
+    "$DRAIN" > "$out" || fail "drain failed over the unread bounds"
+  shown=$(grep -c '^task-bound note: bulk-' "$out")
+  [ "$shown" -eq 10 ] || fail "expected the 10 newest bulk notes listed, saw $shown: $(cat "$out")"
+  grep -F 'task-bound note: bulk-80 ' "$out" >/dev/null \
+    || fail "the newest note was not listed: $(cat "$out")"
+  if grep -F 'task-bound note: bulk-01 ' "$out" >/dev/null; then
+    fail "the oldest bulk note was listed ahead of newer ones"
+  fi
+  grep -F 'task-bound note: PR ready for review' "$out" >/dev/null \
+    || fail "a captain-relevant note was hidden by the bound: $(cat "$out")"
+  grep -F 'UNREAD STATUS: 70 older informational lines not listed (task-bound 70)' "$out" >/dev/null \
+    || fail "the unlisted count line is missing or wrong: $(grep 'UNREAD STATUS' "$out")"
+  [ "$(grep -c 'task-bound note: ' "$out")" -eq 11 ] || fail "listed lines are not exactly the bound plus the relevant note"
+  grep -F 'note: bulk-01 ' "$status" >/dev/null || fail "the durable status log lost a line"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain failed"
+  if grep -F 'UNREAD STATUS' "$out" >/dev/null; then
+    fail "a bounded presentation was replayed instead of acknowledged: $(cat "$out")"
+  fi
+  pass "unread status over its bounds lists the newest lines, keeps relevant notes, counts the rest, and still acknowledges all"
+}
+
+test_unread_section_under_its_bounds_is_unchanged() {
+  local dir state out status i
+  dir=$(make_case unread-under-bounds)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-small.status"
+  prime_cursor "$state" "$status"
+  i=1
+  while [ "$i" -le 5 ]; do
+    printf 'note: small-%02d\n' "$i" >> "$status"
+    i=$((i + 1))
+  done
+  FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_UNREAD_LINES=5 "$DRAIN" > "$out" || fail "drain failed"
+  [ "$(grep -c '^task-small note: small-' "$out")" -eq 5 ] || fail "a section at its bound lost lines: $(cat "$out")"
+  if grep -F 'not listed' "$out" >/dev/null; then fail "a section at its bound printed a not-listed line"; fi
+  pass "unread status at its bound prints every line with no summary"
+}
+
 test_snapshot_does_not_ack_a_later_append() {
   local dir state status first second
   dir=$(make_case snapshot-append)
@@ -456,6 +511,8 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_self_announced_pending_reply_close_still_surfaces
 test_unread_output_over_cap_remains_recoverable
+test_unread_section_over_its_bounds_lists_newest_and_counts_the_rest
+test_unread_section_under_its_bounds_is_unchanged
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances

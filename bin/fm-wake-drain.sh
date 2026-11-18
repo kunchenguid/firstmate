@@ -511,8 +511,19 @@ EOF
 # including the empty-queue fast path - so a buried answer cannot be swallowed
 # when the fold later advances the cursor. Prints nothing when nothing is
 # unread, which is the common case.
+#
+# Bounded. Up to FM_WAKE_DRAIN_UNREAD_LINES lines (default 40) totalling
+# FM_WAKE_DRAIN_UNREAD_BYTES bytes (default 16000) print exactly as they always
+# did. Past either bound the section lists the NEWEST lines (by [at=] stamp, then
+# log position) that fit, in log order, each cut to FM_WAKE_DRAIN_UNREAD_LINE_BYTES
+# (default 2000), and ends with one line counting what is not listed per task. A
+# line status_is_captain_relevant marks (a possible ask or result carried in a
+# note) is always listed and never counts against the bounds. This is
+# presentation only: the scan, the cursor and what the drain acknowledges are
+# unchanged, and every unlisted line stays in its state/<task>.status.
 print_unread_status_section() {
-  local snapshot=${1:-} unread task line shown=0
+  local snapshot=${1:-} unread task line shown=0 idx prot epoch meta keep=''
+  local max_lines max_bytes line_bytes rows bytes skipped='' skipped_n=0 summary
 
   if [ -n "$snapshot" ]; then
     unread=$(scan_unread_surface_snapshot "$STATE" "$snapshot") || return 1
@@ -521,10 +532,53 @@ print_unread_status_section() {
   fi
   [ -n "$unread" ] || return 0
 
+  max_lines=${FM_WAKE_DRAIN_UNREAD_LINES:-40}
+  case "$max_lines" in '' | *[!0-9]*) max_lines=40 ;; esac
+  max_bytes=${FM_WAKE_DRAIN_UNREAD_BYTES:-16000}
+  case "$max_bytes" in '' | *[!0-9]*) max_bytes=16000 ;; esac
+  line_bytes=${FM_WAKE_DRAIN_UNREAD_LINE_BYTES:-2000}
+  case "$line_bytes" in '' | *[!0-9]*) line_bytes=2000 ;; esac
+  [ "$line_bytes" -ge 240 ] || line_bytes=240
+  rows=$(printf '%s\n' "$unread" | wc -l)
+  bytes=$(printf '%s\n' "$unread" | wc -c)
+  if [ "$rows" -gt "$max_lines" ] || [ "$bytes" -gt "$max_bytes" ]; then
+    # Over a bound: protected lines stay; the rest are ranked newest first and
+    # kept while they fit. "keep" is the space-delimited set of kept positions.
+    idx=0 meta=''
+    while IFS=$(printf '\t') read -r task line; do
+      [ -n "$task" ] && [ -n "$line" ] || continue
+      idx=$((idx + 1))
+      prot=0
+      status_is_captain_relevant "$line" && prot=1
+      epoch=0
+      _fm_status_at_epoch "$line" epoch || epoch=0
+      meta="${meta:+$meta$'\n'}$idx"$'\t'"$prot"$'\t'"$epoch"$'\t'"$(( ${#task} + ${#line} + 2 ))"
+    done <<EOF
+$unread
+EOF
+    keep=$({
+      printf '%s\n' "$meta" | LC_ALL=C awk -F'\t' '$2 == 1 { print $1 }'
+      printf '%s\n' "$meta" | LC_ALL=C awk -F'\t' '$2 == 0 { print $3 "\t" $1 "\t" $4 }' \
+        | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2nr \
+        | LC_ALL=C awk -F'\t' -v ml="$max_lines" -v mb="$max_bytes" -v lb="$line_bytes" \
+            '{ c = ($3 > lb) ? lb : $3; if (n < ml && b + c <= mb) { print $2; n++; b += c } }'
+    } | tr '\n' ' ')
+    keep=" $keep "
+  fi
+
+  idx=0
   while IFS=$(printf '\t') read -r task line; do
     [ -n "$task" ] || continue
     [ -n "$line" ] || continue
+    idx=$((idx + 1))
+    if [ -n "$keep" ]; then
+      case "$keep" in
+        *" $idx "*) ;;
+        *) skipped="${skipped}${task}"$'\n'; skipped_n=$((skipped_n + 1)); continue ;;
+      esac
+    fi
     line="$task $line"
+    if [ -n "$keep" ]; then fm_cap_line_var "$line" "$line_bytes"; line=$FM_LINE_CAP_LINE; fi
     if [ "$shown" -eq 0 ]; then
       printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
     fi
@@ -534,7 +588,16 @@ print_unread_status_section() {
 $unread
 EOF
 
-  [ "$shown" -gt 0 ] || return 0
+  if [ "$skipped_n" -gt 0 ]; then
+    if [ "$shown" -eq 0 ]; then
+      printf 'UNREAD STATUS (new since last drain, not re-printed after this presentation):\n' || return 1
+    fi
+    summary=$(printf '%s' "$skipped" | LC_ALL=C sort | uniq -c | LC_ALL=C sort -rn \
+      | awk '{ if (NR <= 8) s = s (NR > 1 ? ", " : "") $2 " " $1; else more++ } END { if (more) s = s ", " more " more tasks"; print s }')
+    printf 'UNREAD STATUS: %d older informational lines not listed (%s); the durable lines stay in state/<task>.status, newest at the end\n' \
+      "$skipped_n" "$summary" || return 1
+  fi
+  [ "$shown" -gt 0 ] || [ "$skipped_n" -gt 0 ] || return 0
 }
 
 # Timed-view epochs for every task the listing fold scans: "<task> TAB <key>

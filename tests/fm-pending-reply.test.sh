@@ -254,19 +254,17 @@ test_recovery_waits_while_the_mate_has_an_open_decision() {
   pass "recovery never pokes a mate waiting on its own decision, and runs once it closes"
 }
 
-held_now_ms() {
-  perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'
-}
-
 # The watcher re-checks every held record on each poll pass, so the hold must
 # read a long mate log once per change, not once per record: refolding the
 # whole log for each of dozens of held records once stretched a single pass to
 # about half an hour, the liveness beacon went stale, and the turn-end guard
 # reported supervision off all night. The first hold pays the fold; every later
-# hold over the unchanged log must cost a small fraction of refolding it per
-# record, and each verdict stays exact.
+# hold over the unchanged log must fold no byte of it again (the read probe in
+# bin/fm-classify-lib.sh counts the bytes each fold call reads), and each
+# verdict stays exact. Wall time cannot state this: the fold itself is now fast
+# enough that a hold's fixed per-call work dominates both sides of a ratio.
 test_held_recoveries_fold_a_long_log_once() {
-  local home state corr hook_log pairs=250 records=12 first rest start i
+  local home state corr hook_log pairs=250 records=12 probe first_reads rest_reads i
   local -a corrs=()
   home=$(setup_parent held-long-log)
   state="$home/state"
@@ -295,25 +293,28 @@ test_held_recoveries_fold_a_long_log_once() {
     corrs+=("$corr")
   done
 
-  start=$(held_now_ms)
+  probe="$TMP_ROOT/held-long-log-probe.tsv"
+  : > "$probe"
+  export FM_OPEN_DECISIONS_READ_PROBE="$probe"
   if fm_pending_reply_send_recovery "$state" "${corrs[0]}" 2>/dev/null; then
     fail "the first held record must wait while the mate waits on its own decision"
   fi
-  first=$(( $(held_now_ms) - start ))
-  start=$(held_now_ms)
+  first_reads=$(grep -cF "$state/hibit.status" "$probe")
+  [ "$first_reads" -ge 1 ] || fail "the first hold did not fold the log it waits on"
   for corr in "${corrs[@]:1}" "${corrs[@]}"; do
     if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
       fail "a held record must stay unattempted while the decision is open"
     fi
   done
-  rest=$(( $(held_now_ms) - start ))
+  rest_reads=$(grep -cF "$state/hibit.status" "$probe")
+  unset FM_OPEN_DECISIONS_READ_PROBE
   [ ! -s "$hook_log" ] || fail "a held recovery poked a mate waiting on its decision"
   for corr in "${corrs[@]}"; do
     [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
       || fail "a held record must stay awaiting_report, got $(phase_of "$state" "$corr")"
   done
-  [ "$rest" -le $((first * 5)) ] \
-    || fail "$((records * 2 - 1)) holds over an unchanged ${pairs}-pair log took ${rest}ms against ${first}ms for the first fold: each hold still refolds the whole log"
+  [ "$rest_reads" -eq "$first_reads" ] \
+    || fail "$((records * 2 - 1)) holds over an unchanged ${pairs}-pair log folded it $((rest_reads - first_reads)) more times after the first hold's $first_reads: each hold still refolds the whole log"
 
   printf 'resolved [key=scope]: answered: narrow\n' >> "$state/hibit.status"
   fm_pending_reply_send_recovery "$state" "${corrs[0]}" \
