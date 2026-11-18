@@ -81,6 +81,18 @@ last_args | jq -e '. == ["task","/projects/project with spaces","--mode","direct
 [ "$(grep -E '^(intake|receipt|gate|spawn)$' "$BROKER_LOG" | tr '\n' ' ')" = 'intake receipt gate spawn ' ] || fail 'resolve/intake/gate/launch ordering'
 pass 'new composes resolver-owned intake, receipt, gate and guarded spawn'
 
+reset_case
+run_broker new task /projects/project --scout --merge-review
+assert_rc 0
+last_args | jq -e 'index("--scout") != null and index("--merge-review") != null' >/dev/null || fail 'explicit review marker was not forwarded'
+[ "$(grep -E '^(intake|receipt|gate|spawn)$' "$BROKER_LOG" | tr '\n' ' ')" = 'intake receipt gate spawn ' ] || fail 'review bypassed quota intake/receipt/gate'
+reset_case
+export GATE_RC=3
+run_broker new task /projects/project --scout --merge-review
+assert_rc 3
+! grep -qx spawn "$BROKER_LOG" || fail 'review bypassed receipt gate refusal'
+pass 'reserved review marker preserves resolver intake and receipt gates'
+
 for mode in pending error; do
   reset_case
   export RESOLVE_MODE=$mode

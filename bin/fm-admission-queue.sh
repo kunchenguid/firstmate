@@ -14,12 +14,14 @@
 #   fm-admission-queue.sh add <task-id> [--reason TEXT] -- <fm-spawn.sh args...>
 #                                 record or refresh a held start (idempotent:
 #                                 the first queued time and the order survive)
-#   fm-admission-queue.sh list    one line per entry, oldest first:
-#                                 <id> <held|failed> queued <age> tries <n> <reason>
+#   fm-admission-queue.sh list    one line per entry, reserved reviews first,
+#                                 then oldest first:
+#                                 <id> <held|failed> queued <age> tries <n> <reason> allowance=<ordinary|reserved-review>
 #   fm-admission-queue.sh section the ADMISSION block the drain prints, or
 #                                 nothing when the queue is empty
 #   fm-admission-queue.sh retry [--max-starts N]
-#                                 offer held starts again, oldest first, by
+#                                 offer held reviews first, then ordinary starts,
+#                                 oldest first within each allowance, by
 #                                 running fm-spawn.sh with the saved arguments
 #   fm-admission-queue.sh drop <task-id>
 #                                 forget an entry (a failed one Firstmate gave up on)
@@ -28,7 +30,7 @@
 # starts one tick at a time instead of all at once: that pacing is the
 # hysteresis, because every start raises the load the next verdict reads. It
 # tries at most FM_ADMISSION_RETRY_ATTEMPTS held entries per run (default 4),
-# oldest first, because a project-specific hold must not block the entries
+# reserved reviews first then oldest first, because a project-specific hold must not block the entries
 # behind it. A start that exits 0 is removed and announced to Firstmate with one
 # durable `check:` wake row; an entry whose task already has a record is
 # removed; a start that fails for any reason other than a hold stays as `failed`
@@ -74,6 +76,7 @@ read_entry() {  # <file>
   local line
   ENTRY_QUEUED=0 ENTRY_LAST=0 ENTRY_ATTEMPTS=0 ENTRY_STATE=held ENTRY_REASON='' ENTRY_CWD=''
   ENTRY_ARGS=()
+  ENTRY_ALLOWANCE=ordinary
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       queued_epoch=*) ENTRY_QUEUED=${line#*=} ;;
@@ -82,7 +85,10 @@ read_entry() {  # <file>
       state=*) ENTRY_STATE=${line#*=} ;;
       reason=*) ENTRY_REASON=${line#*=} ;;
       cwd=*) ENTRY_CWD=${line#*=} ;;
-      arg=*) ENTRY_ARGS+=("${line#arg=}") ;;
+      arg=*)
+        ENTRY_ARGS+=("${line#arg=}")
+        [ "$line" != arg=--merge-review ] || ENTRY_ALLOWANCE=reserved-review
+        ;;
     esac
   done < "$1"
   is_uint "$ENTRY_QUEUED" || ENTRY_QUEUED=0
@@ -110,14 +116,16 @@ write_entry() {  # <id> <queued> <attempts> <state> <reason> <cwd> <arg>...
   mv -f -- "$tmp" "$QUEUE/$id.start" || { rm -f -- "$tmp"; die "cannot publish the queue entry for $id"; }
 }
 
-# Entry files, oldest queued first (ties by name).
+# Reserved reviews first, then oldest queued first (ties by name).
 entries_sorted() {
-  local f
+  local f priority
   for f in "$QUEUE"/*.start; do
     [ -f "$f" ] || continue
     read_entry "$f"
-    printf '%s\t%s\n' "$ENTRY_QUEUED" "$f"
-  done | sort -n -k1,1 -k2,2 | cut -f2
+    priority=1
+    [ "$ENTRY_ALLOWANCE" != reserved-review ] || priority=0
+    printf '%s\t%s\t%s\n' "$priority" "$ENTRY_QUEUED" "$f"
+  done | sort -n -k1,1 -k2,2 -k3,3 | cut -f3
 }
 
 age_text() {  # <seconds>
@@ -164,8 +172,8 @@ cmd_list() {
     [ -n "$f" ] || continue
     id=$(basename "$f" .start)
     read_entry "$f"
-    printf '%s %s queued %s tries %s %s\n' "$id" "$ENTRY_STATE" \
-      "$(age_text $((now > ENTRY_QUEUED ? now - ENTRY_QUEUED : 0)))" "$ENTRY_ATTEMPTS" "$ENTRY_REASON"
+    printf '%s %s queued %s tries %s %s allowance=%s\n' "$id" "$ENTRY_STATE" \
+      "$(age_text $((now > ENTRY_QUEUED ? now - ENTRY_QUEUED : 0)))" "$ENTRY_ATTEMPTS" "$ENTRY_REASON" "$ENTRY_ALLOWANCE"
   done < <(entries_sorted)
 }
 
@@ -175,7 +183,14 @@ cmd_section() {
   [ -n "$rows" ] || return 0
   printf 'ADMISSION: %s start(s) held, retried by the watcher on its poll (bin/fm-admission-queue.sh list; drop <id> forgets one):\n' \
     "$(printf '%s\n' "$rows" | grep -c .)"
-  printf '%s\n' "$rows" | sed 's/^/  /'
+  if printf '%s\n' "$rows" | grep -q ' allowance=reserved-review$'; then
+    printf '  RESERVED REVIEWS:\n'
+    printf '%s\n' "$rows" | grep ' allowance=reserved-review$' | sed 's/^/    /'
+  fi
+  if printf '%s\n' "$rows" | grep -q ' allowance=ordinary$'; then
+    printf '  ORDINARY:\n'
+    printf '%s\n' "$rows" | grep ' allowance=ordinary$' | sed 's/^/    /'
+  fi
 }
 
 announce() {  # <key> <text>

@@ -918,20 +918,27 @@ A hold is a spawn deferral like the load guard's: nothing is created, the backlo
 Every held start is also written to the durable admission queue, `state/admission-queue/<task-id>.start`, with the exact arguments and directory it was given, before the spawn exits.
 That covers the load guard and project capacity holds as well as the admission verdict, so a hold survives the exit and is never forgotten.
 `bin/fm-watch.sh` runs `bin/fm-admission-queue.sh retry` detached at most once a minute while the queue holds anything, so a held start is offered again at every wake and heartbeat with no daemon of its own.
-A retry runs the saved start again, oldest first, and starts at most one task per tick, so a host that has just recovered takes starts one at a time instead of all at once.
+A retry runs reserved reviews first, then ordinary starts, oldest first within each group, and starts at most one task per tick, so a host that has just recovered takes starts one at a time instead of all at once.
 A start that launches is removed and announced with one `check:` wake row, and one that already has a task record is dropped.
 A start that fails for any reason other than a hold stays in the queue as `failed`, is announced the same way, and is never retried until `bin/fm-admission-queue.sh drop <task-id>` forgets it.
-The wake drain and the session-start digest print an `ADMISSION:` section listing what is held, how long, and why.
+The wake drain and the session-start digest print an `ADMISSION:` section listing reserved reviews separately from ordinary starts, including how long each is held and why.
 The scripts' headers own the queue record, the retry bounds, and the command forms.
 
 ### Spawn load guard
 
-`bin/fm-spawn.sh` holds a fresh ship or scout start while this machine's 1-minute load is above 2 per logical core, whether or not this file exists.
+`bin/fm-spawn.sh` holds an ordinary fresh ship or scout start while this machine's 1-minute load is above 2 per logical core, whether or not this file exists.
 A held spawn launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the load, the cores and the limit, and exits 75, so Firstmate dispatches the item again once the load drops.
 A relaunch, a restart of a task that already has a record, and a secondmate launch are not held, and an unknown load admits.
 A `max-load1` line in this file replaces the default with its raw limit, holding at or over that value on this machine's own load; the cap and the other limits do not affect the guard.
 
-The script's header owns the report line, the published document's fields, the verdict, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks.
+A merge-gating PR review scout explicitly launched with `--scout --merge-review` uses a separate reserved allowance instead of the CPU-load and lane/fleet admission holds above.
+Use this marker for independent G3 gate reviewers and other scouts reviewing a PR, never for ordinary investigation or implementation; neither task ids nor brief prose classify a start.
+The root local home's optional `config/review-capacity` sets the concurrent review allowance; absent means three, and ordinary work cannot consume it.
+Reviews still require available RAM and pass the existing project-resource, dispatch receipt, quota and credential-store release gates unchanged.
+`bin/fm-admission-queue.sh list` labels the allowance, and retries prioritize reserved reviews so ordinary queued work cannot hide them behind the retry-attempt bound.
+
+[`bin/fm-admission-lib.sh`](../bin/fm-admission-lib.sh) owns reserved occupancy and config validation; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) owns explicit marking and serialized admission across local homes, independent of harness and runtime backend.
+[`bin/fm-capacity.sh`](../bin/fm-capacity.sh)'s header owns the report line, the published document's fields, both admission verdicts including the reserved RAM floor, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks.
 
 ## PR-ready line after green (config/ready-after-green)
 

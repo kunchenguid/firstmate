@@ -9,6 +9,8 @@
 #   fm-capacity.sh --admit [--project DIR]
 #                             the admission verdict as an exit status
 #   fm-capacity.sh --load-guard  whether machine load holds a fresh worker start
+#   fm-capacity.sh --review-reserved [--project DIR]
+#                             reserved review admission with available-RAM floor
 #
 # It reads this home's state/*.meta, the optional config/lane-capacity, the
 # pressure files and reserve flags that file names, and the host's own probes.
@@ -134,6 +136,15 @@
 # for tests: bin/fm-test-run.sh and tests/lib.sh set it so a suite's verdict does
 # not depend on how busy its machine is.
 #
+# --review-reserved [--project DIR] uses the reserved-review admission path.
+# It requires this host's available RAM to be at least 8 GiB,
+# or min-avail-gb plus the 1 GiB lane footprint when that is larger. It fails
+# closed (exit 75) on an unreadable RAM probe or invalid lane config, even
+# without config/lane-capacity. It ignores CPU/load and lane/fleet caps only;
+# other configured constraints remain unchanged. fm-spawn.sh separately owns
+# the serialized reserved allowance;
+# dispatch receipts, quota and project-resource gates are not bypassed.
+#
 # Environment: FM_HOME, FM_STATE_OVERRIDE, FM_CONFIG_OVERRIDE, and
 # FM_PROJECTS_OVERRIDE resolve the home exactly as the other bin/ scripts do.
 #
@@ -162,7 +173,7 @@ ADMIT_RAM_ENOUGH_GB=8
 
 mode=report
 ADMIT_PROJECT=
-USAGE="usage: fm-capacity.sh [--json|--publish|--admit [--project DIR]|--load-guard|--help]"
+USAGE="usage: fm-capacity.sh [--json|--publish|--admit [--project DIR]|--load-guard|--review-reserved [--project DIR]|--help]"
 case "${1:-}" in
   -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
   "") ;;
@@ -170,9 +181,10 @@ case "${1:-}" in
   --publish) mode=publish ;;
   --admit) mode=admit ;;
   --load-guard) mode=load-guard ;;
+  --review-reserved) mode=review-reserved ;;
   *) echo "$USAGE" >&2; exit 2 ;;
 esac
-if [ "$mode" = admit ] && [ "$#" -eq 3 ] && [ "$2" = --project ] && [ -n "$3" ]; then
+if { [ "$mode" = admit ] || [ "$mode" = review-reserved ]; } && [ "$#" -eq 3 ] && [ "$2" = --project ] && [ -n "$3" ]; then
   ADMIT_PROJECT=$3
 elif [ "$#" -gt 1 ]; then
   echo "$USAGE" >&2; exit 2
@@ -388,6 +400,19 @@ else
   fi
 fi
 
+if [ "$mode" = review-reserved ]; then
+  review_floor=$ADMIT_RAM_ENOUGH_GB
+  if [ -n "$min_avail_gb" ]; then
+    configured_floor=$(awk -v k="$min_avail_gb" -v f="$LANE_FOOTPRINT_GB" 'BEGIN{print k + f}')
+    ! num_lt "$review_floor" "$configured_floor" || review_floor=$configured_floor
+  fi
+  if [ "$target" = invalid ] || [ -z "$probe_avail_gb" ] || num_lt "$probe_avail_gb" "$review_floor"; then
+    echo "deferred: reserved review RAM floor requires $review_floor GiB available (available=${probe_avail_gb:-unknown}; lane-config=$target)" >&2
+    exit 75
+  fi
+  [ -e "$LANE_CONFIG" ] || exit 0
+fi
+
 disk_free_mb=unknown
 v=$(df -Pk "$FM_HOME" 2>/dev/null | awk 'NR==2{print int($4 / 1024)}')
 is_uint "$v" && disk_free_mb=$v
@@ -550,6 +575,9 @@ constraints=
 reasons=
 pub_reasons=
 add_constraint() {  # <name> <reason> [published reason, default the reason]
+  if [ "$mode" = review-reserved ]; then
+    case "$1" in cpu|load) return 0 ;; esac
+  fi
   case ",$constraints," in *",$1,"*) ;; *) constraints=${constraints:+$constraints,}$1 ;; esac
   reasons="$reasons$2
 "
@@ -613,7 +641,12 @@ case "$target" in
 esac
 
 # --- admit ------------------------------------------------------------------
-if [ "$mode" = admit ]; then
+if [ "$mode" = admit ] || [ "$mode" = review-reserved ]; then
+  if [ "$mode" = review-reserved ] && [ -z "$constraints" ]; then
+    admit=true
+    reasons=
+    pub_reasons=
+  fi
   if [ "$target" = invalid ]; then
     echo "fm-capacity: $target_error" >&2
     exit 1
@@ -625,7 +658,7 @@ if [ "$mode" = admit ]; then
   . "$SCRIPT_DIR/fm-admission-lib.sh"
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$SCRIPT_DIR/fm-timeout-lib.sh"
-  if [ "$have_jq" -eq 1 ] && is_uint "$target"; then
+  if [ "$mode" != review-reserved ] && [ "$have_jq" -eq 1 ] && is_uint "$target"; then
     if fleet_working=$(fm_admission_fleet_working "$SCRIPT_DIR" "$STATE"); then
       if [ "$fleet_working" -ge "$target" ]; then
         add_constraint fleet "fleet: $fleet_working workers working across homes, at the cap of $target"

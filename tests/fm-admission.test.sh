@@ -382,7 +382,7 @@ make_spawn_case() {  # <name> <task-id>...
   mkdir -p "$dir/home/state" "$dir/home/config" "$dir/home/data" "$dir/home/projects"
   touch "$dir/home/state/.last-watcher-beat"
   printf '%s\n' codex > "$dir/home/config/crew-harness"
-  fakebin=$(fm_fakebin "$dir")
+  fakebin=$(make_probes "$dir" 0.50 60 8 20971520 68719476736)
   : > "$dir/calls.log"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -405,6 +405,7 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  # shellcheck disable=SC2016 # Expand the log binding in the fixture process.
   printf '#!/usr/bin/env bash\nprintf "treehouse %%s\\n" "$*" >> "$FM_FAKE_CALL_LOG"\nexit 0\n' > "$fakebin/treehouse"
   chmod +x "$fakebin/tmux" "$fakebin/treehouse"
   fm_fake_exit0 "$fakebin" gh gh-axi no-mistakes
@@ -489,6 +490,106 @@ test_load_guard_and_project_capacity_holds_are_queued_too() {
   assert_contains "$out" "task task-cap was not launched and its backlog item stays queued" "the capacity deferral lost its wording"
   assert_contains "$(queue_env "$home" "$QUEUE" list)" "task-cap held" "a project-capacity hold was not queued"
   pass "load-guard and project-capacity holds are recorded in the admission queue too"
+}
+
+test_reserved_review_admission() {
+  local dir out rc=0 i mate
+  dir=$(make_spawn_case lab-reviews review-a ordinary-a review-b review-ram review-invalid)
+  git clone --quiet "$dir/project" "$dir/wt"
+  make_probes "$dir" 500 60 8 20971520 68719476736 >/dev/null
+  printf '1\nmax-load1 1\n' > "$dir/home/config/lane-capacity"
+  # Ordinary occupancy already fills the lane, but cannot spend review slots.
+  for i in 1 2 3 4; do
+    fm_write_meta "$dir/home/state/ordinary-$i.meta" "kind=ship"
+  done
+  out=$(spawn_env "$dir" FM_LOAD1_OVERRIDE=500 "$SPAWN" review-a "$dir/project" --scout --merge-review 2>&1) || rc=$?
+  expect_code 0 "$rc" "reserved review was not admitted under load with full ordinary lanes: $out"
+  assert_contains "$(< "$dir/home/state/review-a.meta")" "merge_review=1" "review marker was not recorded"
+  rc=0
+  out=$(spawn_env "$dir" FM_LOAD1_OVERRIDE=500 "$SPAWN" ordinary-a "$dir/project" --scout 2>&1) || rc=$?
+  expect_code 75 "$rc" "ordinary scout bypassed load: $out"
+  assert_absent "$dir/home/state/ordinary-a.meta" "ordinary scout launched under load"
+  # Default is three concurrent reviews, counting real metadata until cleanup.
+  fm_write_meta "$dir/home/state/review-2.meta" "kind=scout" "merge_review=1"
+  mate=$dir/mate
+  mkdir -p "$mate/state" "$mate/data"
+  printf -- '- mate - a local mate (home: %s; scope: project work; projects: project; added 2026-09-01)\n' "$mate" > "$dir/home/data/secondmates.md"
+  fm_write_meta "$mate/state/review-3.meta" "kind=scout" "merge_review=1"
+  rc=0
+  out=$(spawn_env "$dir" "$SPAWN" review-b "$dir/project" --scout --merge-review 2>&1) || rc=$?
+  expect_code 75 "$rc" "fourth review exceeded default reserved capacity: $out"
+  assert_contains "$out" "reserved reviews full (3 of 3)" "reserved cap did not explain occupancy"
+  printf '4\n' > "$dir/home/config/review-capacity"
+  # Raising the cap does not let a review through the available-RAM floor.
+  make_probes "$dir" 500 5 8 20971520 68719476736 >/dev/null
+  rc=0
+  out=$(spawn_env "$dir" "$SPAWN" review-ram "$dir/project" --scout --merge-review 2>&1) || rc=$?
+  expect_code 75 "$rc" "review bypassed RAM floor: $out"
+  assert_contains "$out" "reserved review RAM floor" "review RAM refusal was not explicit"
+  assert_absent "$dir/home/state/review-ram.meta" "RAM refusal created a review record"
+  rc=0
+  out=$(spawn_env "$dir" "$SPAWN" review-invalid "$dir/project" --merge-review --mode no-mistakes --yolo off 2>&1) || rc=$?
+  expect_code 1 "$rc" "non-scout spent a reserved slot: $out"
+  assert_contains "$out" "--merge-review requires --scout" "invalid review marker was not refused"
+  out=$(queue_env "$dir/home" "$QUEUE" section)
+  assert_contains "$out" "RESERVED REVIEWS:" "digest did not separate reserved reviews"
+  assert_contains "$out" "ORDINARY:" "digest did not separate ordinary work"
+  assert_contains "$(queue_env "$dir/home" "$QUEUE" list)" "allowance=reserved-review" "list did not label reserved reviews"
+  # Configured limit is enforced, including fail-closed malformed config.
+  printf '1\n' > "$dir/home/config/review-capacity"
+  rc=0
+  out=$(spawn_env "$dir" "$SPAWN" review-b "$dir/project" --scout --merge-review 2>&1) || rc=$?
+  expect_code 75 "$rc" "configured reserved capacity was ignored: $out"
+  assert_contains "$out" "reserved reviews full (3 of 1)" "configured cap was not read"
+  printf 'invalid\n' > "$dir/home/config/review-capacity"
+  rc=0
+  out=$(spawn_env "$dir" "$SPAWN" review-b "$dir/project" --scout --merge-review 2>&1) || rc=$?
+  expect_code 1 "$rc" "malformed reserved cap failed open: $out"
+  pass "reserved review ignores load/full ordinary lanes, honors default/configured cap and RAM, rejects non-scouts, and is visible separately"
+}
+
+test_reserved_ram_without_lane_config() {
+  local dir out rc=0
+  dir=$(make_cap_case review-ram-no-config)
+  make_probes "$dir" 500 5 8 20971520 68719476736 >/dev/null
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" "$CAPACITY" --review-reserved 2>&1) || rc=$?
+  expect_code 75 "$rc" "review RAM floor disappeared without lane config: $out"
+  make_probes "$dir" 500 60 8 20971520 68719476736 >/dev/null
+  rc=0
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" "$CAPACITY" --review-reserved 2>&1) || rc=$?
+  expect_code 0 "$rc" "review with RAM headroom failed under CPU load: $out"
+  printf '1\nmin-avail-gb 40\n' > "$dir/home/config/lane-capacity"
+  rc=0
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" "$CAPACITY" --review-reserved 2>&1) || rc=$?
+  expect_code 75 "$rc" "configured RAM reserve was bypassed: $out"
+  printf '1\nreserve-flag %s reserved-for-captain\n' "$dir/reserved" > "$dir/home/config/lane-capacity"
+  touch "$dir/reserved"
+  rc=0
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" "$CAPACITY" --review-reserved 2>&1) || rc=$?
+  expect_code 75 "$rc" "review bypassed an unrelated captain reserve: $out"
+  assert_contains "$out" "reserved-for-captain" "review did not preserve the unrelated reserve gate"
+  printf '1\nmax-open-prs 1\n' > "$dir/home/config/lane-capacity"
+  write_graph "$dir/graph.json" 1 0
+  rc=0
+  out=$(env PATH="$dir/fakebin:$BASE_PATH" FM_HOME="$dir/home" FM_FAKE_GH_LOG="$dir/gh.log" \
+    FM_FAKE_GH_RUNS="$dir/runs.json" FM_FAKE_GH_GRAPH="$dir/graph.json" FM_ADMISSION_CACHE_TTL=0 \
+    "$CAPACITY" --review-reserved --project "$dir/project" 2>&1) || rc=$?
+  expect_code 75 "$rc" "review bypassed unrelated PR backlog limit: $out"
+  assert_contains "$out" "prs: 1 open pull requests" "reserved admission did not preserve the PR backlog gate"
+  pass "reserved RAM gate works without lane config and preserves configured memory reserve and unrelated admission limits"
+}
+
+test_reserved_retry_priority() {
+  local home=$TMP_ROOT/review-priority/home stub=$TMP_ROOT/review-priority/spawn log=$TMP_ROOT/review-priority/log out i
+  mkdir -p "$home/state" "$home/data"
+  make_spawn_stub "$stub" "$log"
+  for i in 1 2 3 4 5; do
+    queue_env "$home" "$QUEUE" add "ordinary-$i" -- "ordinary-$i"
+  done
+  queue_env "$home" "$QUEUE" add review-priority -- review-priority --scout --merge-review
+  out=$(queue_env "$home" FM_ADMISSION_SPAWN="$stub" "$QUEUE" retry)
+  assert_contains "$out" "admission: started review-priority" "review waited behind ordinary retry-attempt bound: $out"
+  pass "reserved review retries ahead of ordinary queue entries"
 }
 
 test_home_without_lane_capacity_is_unchanged() {
@@ -587,6 +688,9 @@ test_retry_offers_held_starts_and_survives_every_verdict
 test_retry_is_serialized_and_bounded
 test_a_held_spawn_is_queued_then_admitted_by_retry
 test_load_guard_and_project_capacity_holds_are_queued_too
+test_reserved_review_admission
+test_reserved_ram_without_lane_config
+test_reserved_retry_priority
 test_home_without_lane_capacity_is_unchanged
 test_drain_shows_held_starts
 test_worker_table_refresh_runs_only_when_the_cache_is_stale

@@ -284,6 +284,13 @@
 #   --load-guard holds new starts (its header owns the threshold). A relaunch, a
 #   --secondmate spawn, and a restart of a task that already has a record are not
 #   held.
+#   --merge-review explicitly marks a merge-gating PR review scout (including
+#   independent G3 gate reviewers); requires --scout and is never inferred from
+#   ids or prose. Fresh reviews use config/review-capacity (default 3) across
+#   local homes instead of the load/lane admission path. bin/fm-admission-lib.sh
+#   owns occupancy; fm-capacity.sh --review-reserved owns the RAM floor. Receipt,
+#   quota and project-resource gates remain unchanged. Task cleanup frees a slot.
+#
 #   Admission: the same fresh start then asks bin/fm-capacity.sh --admit (its
 #   header owns the verdict and inputs: the lane cap, memory, disk, the fleet-wide
 #   working count, and the project's GitHub queue depths) and is deferred the
@@ -1089,6 +1096,8 @@ fm_refuse_if_gate_agent
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 KIND_SET=0
+MERGE_REVIEW=0
+SPAWN_REVIEW_LOCK=
 HARNESS_ARG=
 MODEL=
 EFFORT=
@@ -1154,6 +1163,7 @@ for a in "$@"; do
   fi
   case "$a" in
     --scout) KIND=scout; KIND_SET=1 ;;
+    --merge-review) MERGE_REVIEW=1 ;;
     --secondmate) KIND=secondmate; KIND_SET=1 ;;
     --relaunch) RELAUNCH=1 ;;
     --herdr-resume-lock-wait) HERDR_RESUME_LOCK_WAIT=1 ;;
@@ -1820,6 +1830,10 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "$SPAWN_REVIEW_LOCK" ]; then
+    fm_lock_release "$SPAWN_REVIEW_LOCK" || true
+    SPAWN_REVIEW_LOCK=
+  fi
   # A start that sent no launch made no launch, so it hands back the receipt it
   # spent (bin/fm-dispatch-receipt-lib.sh owns the rule).
   if [ "$status" -ne 0 ] && [ "$SPAWN_RECEIPT_CONSUMED" = 1 ] && [ "$SPAWN_LAUNCH_SENT" = 0 ]; then
@@ -2230,6 +2244,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     fi
     pair_args=("${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}")
     [ "$KIND" != scout ] || pair_args+=(--scout)
+    [ "$MERGE_REVIEW" = 0 ] || pair_args+=(--merge-review)
     pair_rc=0
     FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair_args[@]}" || pair_rc=$?
     if [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
@@ -4446,10 +4461,41 @@ spawn_hold_start() {  # <hold-line>
   echo "$1; task $ID was not launched and its backlog item stays queued - the start is held in the admission queue (bin/fm-admission-queue.sh list), which the watcher retries once the hold clears" >&2
   exit "$FM_PROJECT_CAPACITY_DEFER_EXIT"
 }
+[ "$MERGE_REVIEW" = 0 ] || [ "$KIND" = scout ] || {
+  echo "error: --merge-review requires --scout (merge-gating PR review only)" >&2
+  exit 1
+}
+if [ "$MERGE_REVIEW" = 1 ] && [ -e "$STATE/$ID.meta" ] &&
+  [ "$(fm_meta_get "$STATE/$ID.meta" merge_review)" != 1 ]; then
+  echo "error: --merge-review cannot reclassify an existing ordinary task; dispatch a fresh review scout" >&2
+  exit 1
+fi
+if [ "$MERGE_REVIEW" = 1 ] && [ "$RELAUNCH" -eq 0 ] && [ ! -e "$STATE/$ID.meta" ]; then
+  # Serialize all local homes from the census through the new task record.
+  SPAWN_REVIEW_ROOT=$(fm_firstmate_root_home "$FM_HOME") || exit 1
+  SPAWN_REVIEW_CONFIG=$(fm_project_capacity_config_dir "$FM_HOME" "$CONFIG") || exit 1
+  SPAWN_REVIEW_LOCK_PATH="$SPAWN_REVIEW_ROOT/state/.review-admission.lock"
+  if ! fm_lock_try_acquire "$SPAWN_REVIEW_LOCK_PATH"; then
+    spawn_hold_start "deferred: reserved review admission is busy"
+  fi
+  SPAWN_REVIEW_LOCK=$SPAWN_REVIEW_LOCK_PATH
+  # shellcheck source=bin/fm-admission-lib.sh
+  . "$SCRIPT_DIR/fm-admission-lib.sh"
+  fm_admission_review_capacity "$SPAWN_REVIEW_CONFIG" "$STATE" || {
+    echo "error: reserved review capacity or local task census is unreadable" >&2
+    exit 1
+  }
+  if [ "$FM_REVIEW_OCCUPANTS" -ge "$FM_REVIEW_CAPACITY" ]; then
+    spawn_hold_start "deferred: reserved reviews full ($FM_REVIEW_OCCUPANTS of $FM_REVIEW_CAPACITY)"
+  fi
+  SPAWN_REVIEW_OUT=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-capacity.sh" --review-reserved --project "$PROJ_ABS" 2>&1) ||
+    spawn_hold_start "${SPAWN_REVIEW_OUT:-deferred: reserved review RAM probe failed}"
+fi
 # Load guard (bin/fm-capacity.sh --load-guard owns the verdict). It runs before
 # any lock or mutation, so a hold leaves the task exactly as queued as it was. A
 # guard that cannot answer warns and admits, as an unknown probe does.
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ ! -e "$STATE/$ID.meta" ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ ! -e "$STATE/$ID.meta" ] && [ "$MERGE_REVIEW" = 0 ]; then
   SPAWN_LOAD_RC=0
   SPAWN_LOAD_HOLD=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
     "$SCRIPT_DIR/fm-capacity.sh" --load-guard 2>&1) || SPAWN_LOAD_RC=$?
@@ -8072,6 +8118,7 @@ preserve_relaunch_meta() {
     esac
   fi
   echo "kind=$KIND"
+  [ "$MERGE_REVIEW" = 0 ] || echo "merge_review=1"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"

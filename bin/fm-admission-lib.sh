@@ -3,7 +3,7 @@
 #
 # Sourced, never executed. bin/fm-capacity.sh owns the verdict and the limits
 # (docs/configuration.md "Lane capacity" owns the config keys); this library
-# only reads the two facts a home's own probes cannot see, each one cached for
+# reads the two facts a home's own probes cannot see, each one cached for
 # a short time so a batch of spawns does not repeat the read, and each one
 # failing open (a non-zero return, which the caller treats as "unknown"):
 #
@@ -26,7 +26,38 @@
 #
 # The cache lives in <state-dir> as .admission-*.cache files holding one
 # "<epoch> <payload>" line; FM_ADMISSION_CACHE_TTL (default 60 seconds, 0 turns
-# the cache off) bounds its age.
+# the cache off) bounds its age. The reserved-review census below is uncached
+# and is read only by the explicitly marked spawn path under its shared lock.
+
+# Reserved review allowance. Only fm-spawn.sh's explicit --merge-review scout
+# path calls this while holding <root-home>/state/.review-admission.lock until
+# metadata publication (or failed-start cleanup). config/review-capacity in the
+# root home is one positive integer, at most six digits; absent means 3.
+# Every local home's merge_review=1 task record occupies a place until cleanup;
+# ordinary task records cannot spend this allowance. Requires the wake and
+# backend libraries for the local-home census and metadata reads.
+fm_admission_review_capacity() {  # <config-dir> <state-dir>
+  local file=$1/review-capacity state meta value
+  FM_REVIEW_CAPACITY=3
+  FM_REVIEW_OCCUPANTS=0
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ -r "$file" ] || return 1
+    value=$(< "$file")
+    case "$value" in ''|*[!0-9]*|0*) return 1 ;; esac
+    [ "${#value}" -le 6 ] || return 1
+    FM_REVIEW_CAPACITY=$value
+  fi
+  fm_local_firstmate_state_dirs "$2" || return 1
+  for state in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
+    [ ! -e "$state" ] || { [ -d "$state" ] && [ -r "$state" ] && [ -x "$state" ]; } || return 1
+    for meta in "$state"/*.meta; do
+      [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+      [ -r "$meta" ] || return 1
+      [ "$(fm_meta_get "$meta" merge_review)" = 1 ] || continue
+      FM_REVIEW_OCCUPANTS=$((FM_REVIEW_OCCUPANTS + 1))
+    done
+  done
+}
 
 _fm_admission_is_uint() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
