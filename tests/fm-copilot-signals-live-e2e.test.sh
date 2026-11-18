@@ -127,7 +127,8 @@ echo "ok - $VERSION: a real prompt produced busy copilot-hook, agentStop closed 
 # not document, so this is the one place a release that renames the event shows up.
 # This reads the private COPILOT_HOME exported above, so only this test's own
 # session can be found and concurrent Copilot use in the caller's home cannot
-# change the result; the plugin writer copied the caller's login into that home.
+# change the result; sign-in still works because the plugin writer copied the
+# caller's login into that home, or the login lives in the OS keyring.
 events=
 for f in "${COPILOT_HOME:-$HOME/.copilot}"/session-state/*/events.jsonl; do
   [ -f "$f" ] && [ "$f" -nt "$START" ] || continue

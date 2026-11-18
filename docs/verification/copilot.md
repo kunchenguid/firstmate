@@ -454,7 +454,7 @@ bash bin/fm-test-run.sh tests/fm-copilot-harness.test.sh
 
 The live guard needs a signed-in `copilot`, `python3`, and `jq`, creates its own pty and temporary directory, and spends one small prompt.
 An unavailable required tool is reported by the shared `fm_live_gate`; explicit opt-in refuses missing capabilities.
-It launches in a temporary directory with a private `COPILOT_HOME` that carries the caller's login and trusts only that directory, asserts that a real prompt produces `busy copilot-hook`, then the idle transition and turn-end notification, and that `/exit` ends the process with status 0.
+It launches in a scratch temporary directory with a private `COPILOT_HOME` that carries the caller's login (or relies on the OS keyring) and trusts only that directory, so concurrent Copilot use in the caller's own home cannot change its result; it asserts that a real prompt produces `busy copilot-hook`, then the idle transition and turn-end notification, and that `/exit` ends the process with status 0.
 The primary guard needs a signed-in `copilot`, `jq`, `tar`, and `git`, and spends one small prompt.
 It runs `copilot -p` in a scratch plain checkout of the working tree with a relocated `COPILOT_HOME` that trusts only that checkout, and asserts the `Denied by preToolUse hook: [persistent-cd]` text, which exercises session scope, the hook environment, and the deny object together.
 Run it after every Copilot upgrade: a release that changed the hook environment once made the shared stand-down predicate skip every primary check without any portable test noticing.
