@@ -45,6 +45,8 @@ unset FM_SCRATCH_ROOT_OVERRIDE
 SHORT=$(mktemp -d /tmp/fmfs.XXXXXX) || fail "cannot create a short temp root"
 SHORT=$(cd -P "$SHORT" && pwd -P) || fail "cannot resolve the short temp root"
 FM_TEST_CLEANUP_DIRS+=("$SHORT")
+# Processes started with a path under it are ended at exit too.
+printf '%s\n' "$SHORT" >> "$FM_TEST_CLEANUP_REGISTRY"
 export FM_FOOTPRINT_CACHE_NAMES='' FM_FOOTPRINT_SYSTEM_TMPDIR=''
 
 new_home() {  # <name>: sets H, U, FB, and a short scratch root for H
@@ -1191,6 +1193,108 @@ test_a_hard_linked_name_that_changes_before_its_unlink_is_kept() {
   pass "a hard-linked name whose link count drops or that is swapped is kept, and one changed before removal keeps the whole copy"
 }
 
+# outside_link_shim <outside> <keydir>: a sync on PATH that, during the
+# flush step after the freeze, links data.txt of the set-aside copy in
+# <keydir> from <outside>/linked.txt, as another process could.
+outside_link_shim() {  # <outside> <keydir>
+  local real_sync
+  real_sync=$(command -v sync)
+  cat > "$FB/sync" <<SH
+#!/usr/bin/env bash
+for a in "$2"/.fm-*; do
+  [ -f "\$a/lib/data.txt" ] && [ ! -e "$1/linked.txt" ] && ln "\$a/lib/data.txt" "$1/linked.txt"
+done
+exec "$real_sync" "\$@"
+SH
+  chmod +x "$FB/sync"
+}
+
+test_a_name_made_outside_during_the_close_keeps_its_permissions() {
+  local mode t out outside n
+  for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+    new_home "linkout-$mode"
+    outside="$TMP_ROOT/linkout-$mode/outside"
+    mkdir -p "$outside"
+    t=$(target "$mode" task-h5)
+    mkdir -p "$t/lib"
+    printf 'precious\n' > "$t/lib/data.txt"
+    printf 'x\n' > "$t/lib/other.txt"
+    chmod 644 "$t/lib/data.txt"
+    outside_link_shim "$outside" "${t%/*}"
+    out=$(run_target "$mode" task-h5 "$t")
+    rm -f "$FB/sync"
+    assert_present "$outside/linked.txt" "$mode: the probe must have linked the file from outside: $out"
+    assert_equals precious "$(cat "$outside/linked.txt")" "$mode: the outside name must keep its data"
+    assert_equals 644 "$(file_mode "$outside/linked.txt")" "$mode: a name made outside after the freeze must keep its permissions: $out"
+    [ -z "$(ls "$H/state/footprint-stopped" 2>/dev/null)" ] || fail "$mode: a finished run must drop its record"
+  done
+  # The same name made between the freeze's two walks, of a file whose
+  # every name was inside when it was counted.
+  new_home linkout-walks
+  outside="$TMP_ROOT/linkout-walks/outside"
+  mkdir -p "$outside"
+  t=$(scratch_for task-h6)
+  mkdir -p "$t/z"
+  printf 'pair\n' > "$t/a1"
+  chmod 644 "$t/a1"
+  ln "$t/a1" "$t/a2"
+  n=0
+  while [ "$n" -lt 40 ]; do printf '%s\n' "$n" > "$t/z/f$n"; n=$((n + 1)); done
+  export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=10 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid"
+  fp task-close task-h6 "$t" > "$TMP_ROOT/linkout-walks/out" 2>&1 &
+  n=0
+  until [ -s "$FB/engine.pid" ] || [ "$n" -ge 400 ]; do sleep .05; n=$((n + 1)); done
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE
+  [ "$n" -lt 400 ] || fail "the freeze never paused"
+  ln "$(find "${t%/*}" -maxdepth 1 -name '.fm-closing-*' | head -n 1)/a1" "$outside/linked"
+  kill -CONT "$(cat "$FB/engine.pid")"
+  wait
+  assert_equals pair "$(cat "$outside/linked")" "the outside name must keep its data: $(cat "$TMP_ROOT/linkout-walks/out")"
+  assert_equals 644 "$(file_mode "$outside/linked")" "a name made outside between the freeze's walks must keep its permissions: $(cat "$TMP_ROOT/linkout-walks/out")"
+  pass "a file that gains a name outside the copy during the close keeps its permissions there, in close, the daily pass and apply"
+}
+
+test_orphans_sharing_a_store_file_all_go_in_one_pass() {
+  local store t id out
+  new_home linkmany
+  store="$TMP_ROOT/linkmany/store"
+  store_files "$store"
+  for id in task-s1 task-s2 task-s3; do
+    t=$(scratch_for "$id")
+    mkdir -p "$t/node_modules/pkg"
+    ln "$store/pnpm/files/ab/c0" "$t/node_modules/pkg/index.js"
+    printf 'own\n' > "$t/node_modules/pkg/own.js"
+    age 3 "$t"
+  done
+  out=$(fp sweep)
+  assert_contains "$out" "Removed 3 orphaned" "three orphans sharing one store file must all go in one pass: $out"
+  [ -z "$(ls -d "${t%/*}"/.fm-reclaim-* "${t%/*}"/task-s* 2>/dev/null)" ] || fail "no orphan may be left: $(ls -A "${t%/*}")"
+  assert_equals 'module.exports=1' "$(cat "$store/pnpm/files/ab/c0")" "the store's data must be untouched"
+  assert_equals 644 "$(file_mode "$store/pnpm/files/ab/c0")" "the store file must keep its permissions"
+  assert_equals 1 "$(link_count "$store/pnpm/files/ab/c0")" "only the store's own name must be left"
+  pass "orphaned areas sharing a store file all go in one daily pass, and the store keeps its data"
+}
+
+test_a_thaw_restores_only_the_write_bits_it_took() {
+  local r id
+  new_home thawbits
+  r="$TMP_ROOT/thawbits/copy"
+  mkdir -p "$r"
+  printf 'x\n' > "$r/f"
+  chmod 644 "$r/f"
+  id=$(python3 -I -B -c 'import os, sys; s = os.lstat(sys.argv[1]); print(s.st_dev, s.st_ino)' "$r/f")
+  printf '%s 644\n' "$id" > "$TMP_ROOT/thawbits/modes"
+  # An object whose other bits differ is not the one recorded (a reused
+  # inode): it is left alone.
+  chmod 400 "$r/f"
+  python3 -I -B "$ROOT/bin/fm-footprint-fs.py" thaw "$TMP_ROOT/thawbits/modes" "$r" || true
+  assert_equals 400 "$(file_mode "$r/f")" "a thaw must not give a different object the recorded mode"
+  chmod 444 "$r/f"
+  python3 -I -B "$ROOT/bin/fm-footprint-fs.py" thaw "$TMP_ROOT/thawbits/modes" "$r" || fail "the thaw must succeed"
+  assert_equals 644 "$(file_mode "$r/f")" "a thaw must give the frozen object its write bits back"
+  pass "a thaw gives back only the write bits the freeze took, never another object's mode"
+}
+
 test_a_check_that_cannot_record_keeps_the_copy() {
   local mode t out d
   for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
@@ -1290,7 +1394,7 @@ test_a_key_helper_started_in_an_area_does_not_keep_it() {
   # Its socket is inside the area: the area stays.
   s=$(scratch_for task-k2)
   printf 'cache\n' > "$s/cache"
-  start_in / "$s/agent.sock" "$agent" -D -a "$s/agent.sock"; p=$SI_PID
+  start_in "$outside" "$s/agent.sock" "$agent" -D -a "$s/agent.sock"; p=$SI_PID
   pids="$pids $p"
   out=$(fp task-close task-k2 "$s")
   assert_present "$s/cache" "an ssh-agent with its socket inside must keep the area: $out"
@@ -1298,7 +1402,7 @@ test_a_key_helper_started_in_an_area_does_not_keep_it() {
   # A different program with its working directory there: the area stays.
   s=$(scratch_for task-k3)
   printf 'cache\n' > "$s/cache"
-  start_in "$s" '' sleep 300; p=$SI_PID
+  start_in "$s" '' perl -e 'sleep 300' "$outside/other"; p=$SI_PID
   pids="$pids $p"
   out=$(fp task-close task-k3 "$s")
   assert_present "$s/cache" "another program working there must keep the area: $out"
@@ -1449,6 +1553,84 @@ test_a_close_stopped_mid_step_stops_its_engine_first() {
     [ -z "$(ls "$H/state/footprint-stopped" 2>/dev/null)" ] || fail "$step: a finished stop must drop its record"
   done
   pass "a close stopped mid-freeze or mid-removal stops its engine, then puts the copy back writable"
+}
+
+test_a_close_stopped_as_its_engine_starts_changes_nothing() {
+  local s i n pids real_py out
+  new_home startstop
+  s=$(scratch_for task-m2)
+  mkdir -p "$s/d"
+  i=1
+  while [ "$i" -le 40 ]; do printf 'w\n' > "$s/d/f$i"; i=$((i + 1)); done
+  # The freeze engine starts slowly and, once it has changed five modes,
+  # pauses itself; the thaw that undoes the stop starts slower still.
+  real_py=$(command -v python3)
+  cat > "$FB/python3" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" freeze "*) : > "$FB/freeze-starting"; sleep .3 ;;
+  *" thaw "*) sleep 1 ;;
+esac
+exec "$real_py" "\$@"
+SH
+  chmod +x "$FB/python3"
+  export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid"
+  fp task-close task-m2 "$s" > "$TMP_ROOT/startstop/out" 2>&1 &
+  n=0
+  until [ -e "$FB/freeze-starting" ] || [ "$n" -ge 400 ]; do sleep .05; n=$((n + 1)); done
+  [ "$n" -lt 400 ] || fail "the freeze never started"
+  pids=$(pgrep -f "fm-footprint.sh task-close task-m2 $s" || true)
+  [ -n "$pids" ] || fail "the close must still be running"
+  # shellcheck disable=SC2086 # one pid per word
+  kill -TERM $pids
+  wait
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE
+  rm -f "$FB/python3"
+  # An engine that went on would have paused; let it finish, as it would.
+  if [ -s "$FB/engine.pid" ]; then
+    kill -CONT "$(cat "$FB/engine.pid")" 2>/dev/null || true
+    n=0
+    until engine_gone "$(cat "$FB/engine.pid")" || [ "$n" -ge 200 ]; do sleep .05; n=$((n + 1)); done
+  fi
+  out=$(cat "$TMP_ROOT/startstop/out")
+  assert_present "$s/d/f40" "the stopped close must put the copy back under its name: $out"
+  all_writable "$s" || fail "an engine starting as the close stops must not freeze the copy put back: $(find "$s" ! -perm -u+w | head -n 3)"
+  [ -z "$(ls "$H/state/footprint-stopped" 2>/dev/null)" ] || fail "a finished stop must drop its record"
+  pass "a close stopped while its engine is still starting leaves that engine nothing to do"
+}
+
+test_a_killed_close_is_repaired_only_after_its_engine_ends() {
+  local s i n pids epid out aside
+  new_home killmid
+  s=$(scratch_for task-m3)
+  mkdir -p "$s/a" "$s/d"
+  i=1
+  while [ "$i" -le 40 ]; do printf 'w\n' > "$s/a/f$i"; printf 'w\n' > "$s/d/f$i"; i=$((i + 1)); done
+  export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid"
+  fp task-close task-m3 "$s" > "$TMP_ROOT/killmid/out" 2>&1 &
+  n=0
+  until [ -s "$FB/engine.pid" ] || [ "$n" -ge 400 ]; do sleep .05; n=$((n + 1)); done
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE
+  [ "$n" -lt 400 ] || fail "the freeze never paused"
+  epid=$(cat "$FB/engine.pid")
+  pids=$(pgrep -f "fm-footprint.sh task-close task-m3 $s" || true)
+  [ -n "$pids" ] || fail "the close must still be running"
+  # The close is killed outright; its engine, under its timer, lives on.
+  # shellcheck disable=SC2086 # one pid per word
+  kill -KILL $pids
+  wait
+  engine_gone "$epid" && fail "the engine must outlive a close killed outright"
+  out=$(fp sweep)
+  [ -n "$(ls "$H/state/footprint-stopped" 2>/dev/null)" ] || fail "a pass must not undo a run whose engine still runs: $out"
+  kill -CONT "$epid" 2>/dev/null || true
+  n=0
+  until engine_gone "$epid" || [ "$n" -ge 200 ]; do sleep .05; n=$((n + 1)); done
+  out=$(fp sweep)
+  aside=$(find "${s%/*}" -maxdepth 1 -name '.fm-closing-*' 2>/dev/null | head -n 1)
+  [ -n "$aside" ] || aside=$s
+  all_writable "$aside" || fail "the next pass must give the copy its permissions back: $(find "$aside" ! -perm -u+w | head -n 3)"
+  [ -z "$(ls "$H/state/footprint-stopped" 2>/dev/null)" ] || fail "the next pass must drop the record once it is repaired: $out"
+  pass "a close killed outright is repaired by the next pass, only once its engine has ended"
 }
 
 test_an_engine_that_dies_during_removal_leaves_a_writable_copy() {
@@ -1798,12 +1980,17 @@ fm_test_run \
   test_a_file_saved_over_during_removal_is_kept \
   test_hard_linked_names_go_and_their_store_keeps_its_data \
   test_a_hard_linked_name_that_changes_before_its_unlink_is_kept \
+  test_a_name_made_outside_during_the_close_keeps_its_permissions \
+  test_orphans_sharing_a_store_file_all_go_in_one_pass \
+  test_a_thaw_restores_only_the_write_bits_it_took \
   test_a_check_that_cannot_record_keeps_the_copy \
   test_close_removes_docker_before_scratch_and_the_pass_measures_nothing_after_its_check \
   test_a_key_helper_started_in_an_area_does_not_keep_it \
   test_an_interrupted_freeze_leaves_a_writable_copy \
   test_an_interrupted_close_leaves_its_copy_writable \
   test_a_close_stopped_mid_step_stops_its_engine_first \
+  test_a_close_stopped_as_its_engine_starts_changes_nothing \
+  test_a_killed_close_is_repaired_only_after_its_engine_ends \
   test_an_engine_that_dies_during_removal_leaves_a_writable_copy \
   test_control_character_names_hide_the_whole_folder \
   test_only_rebuildable_directories_free_of_work_are_offered \
