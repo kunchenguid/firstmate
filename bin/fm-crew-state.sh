@@ -311,10 +311,6 @@ REMOTE_HOST=$(meta_value remote_host)
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
 # probe proves nothing for it - the remote arm below reads the true source.
-if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
-  emit unknown none "worktree gone (torn down?)"
-fi
-
 # A lane parked on review (bin/fm-park.sh) stopped its agent on purpose; its
 # record, not the stopped pane or an old run, is the current state.
 PARK_RECORD=$STATE/$ID.review-park
@@ -329,7 +325,17 @@ if [ -f "$PARK_RECORD" ]; then
   if [ -n "$(fm_meta_get "$PARK_RECORD" pending)" ]; then
     emit paused review-park "parking on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; the agent's stop is not yet confirmed"
   fi
+  if [ -n "$(fm_meta_get "$PARK_RECORD" released_at)" ]; then
+    if [ -n "$(fm_meta_get "$PARK_RECORD" acquire_wait)" ]; then
+      emit paused review-park "released on review: PR $PARK_PR; review activity is waiting for a free local copy"
+    fi
+    emit paused review-park "released on review: PR $PARK_PR at ${PARK_HEAD:0:12}; local copy returned"
+  fi
   emit paused review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; agent stopped, relaunches on review activity"
+fi
+
+if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
+  emit unknown none "worktree gone (torn down?)"
 fi
 
 # --- status log ------------------------------------------------------------

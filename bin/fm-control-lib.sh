@@ -411,6 +411,34 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
   esac
 }
 
+fm_control_remove_worktree_wiring() {  # <meta> <worktree> <state> <id>
+  local meta=$1 wt=$2 state=$3 id=$4 path harness
+  rm -f "$wt/.claude/settings.local.json" "$wt/.opencode/plugins/fm-turn-end.js" \
+    "$wt/.fm-grok-turnend" "$wt/.fm-kimi-turnend"
+  harness=$(fm_meta_get "$meta" harness)
+  [ "$harness" = polytoken ] || return 0
+  while IFS= read -r path; do
+    case "$path" in "$wt"/*) ;; *) continue ;; esac
+    git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue
+    rm -f "$path"
+  done < <(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id")
+}
+
+fm_control_release_closed() {  # <meta> <backend> <target>
+  local meta=$1 backend=$2 target=$3 record id wt
+  record=${meta%.meta}.review-park
+  [ "$backend" = tmux ] && [ -f "$record" ] &&
+    [ "$(fm_meta_get "$record" endpoint_closed)" = 1 ] &&
+    [ -z "$(fm_meta_get "$record" relaunch_started)" ] &&
+    [ -z "$(fm_meta_get "$record" releasing)$(fm_meta_get "$record" released_at)" ] &&
+    [ "$(fm_meta_get "$record" slot_leased)" = yes ] &&
+    [ "$(fm_meta_get "$record" closed_backend)" = "$backend" ] &&
+    [ "$(fm_meta_get "$record" closed_target)" = "$target" ] || return 1
+  id=${meta##*/}; id=${id%.meta}; wt=$(fm_meta_get "$meta" worktree)
+  fm_treehouse_slot_owner_state "$wt" "$id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]
+}
+
 # fm_control_endpoint_absence_verdict: the ONE owner of the per-backend proof
 # that an endpoint reading `missing` is actually GONE rather than merely
 # unreachable from this seat. Call it only for a raw state that
@@ -433,8 +461,8 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 # with "the endpoint is UNREACHABLE from here right now". An unreachable
 # endpoint can still hold a live agent on the task's worktree, so every caller
 # that would act on absence - `exit` claiming the agent stopped, `relaunch`
-# re-creating the endpoint - must come through here rather than trusting the
-# raw verdict.
+# re-creating the endpoint - must obtain a proof before trusting the raw
+# verdict. This function owns the live check.
 #
 # Whether absence is provable AT ALL is a property of the backend, not of the
 # reading:
@@ -458,11 +486,8 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     carry the endpoint's socket identity - so a different but running server
 #     would answer "not anywhere" about a window it was never able to see.
 #     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
-#
-# Both control-plane callers share this one implementation so the proof cannot
-# drift into two answers for the same endpoint.
+#     returns `unproven`. See fm_control_release_closed for the review-resume
+#     path, which relies on a recorded close instead of a live absence check.
 fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
   local backend=${1-} target=${2-} meta=${3-}
   fm_backend_source "$backend" \

@@ -2671,6 +2671,45 @@ test_tmux_refuses_a_window_missing_from_its_session() {
   pass "tmux: a window absent from its session refuses both verbs rather than being assumed gone"
 }
 
+test_tmux_relaunch_accepts_only_release_closed_endpoint() {
+  local dir out rc
+  dir=$(new_case tmux-release rlrelease)
+  add_ship_task "$dir" rlrelease claude
+  strand_endpoint "$dir" rlrelease
+  printf 'task=rlrelease\nhome=%s\n' "$dir/home" > "$(git -C "$dir/wt" rev-parse --path-format=absolute --git-dir)/fm-slot-owner"
+  printf 'slot_leased=yes\nendpoint_closed=1\nclosed_backend=tmux\nclosed_target=fmses:fm-other\n' > "$dir/home/state/rlrelease.review-park"
+  out=$(run_spawn "$dir" rlrelease --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a release proof for a different endpoint must refuse: $out"
+  assert_absent "$dir/fake/created-windows" "the wrong endpoint proof created a window"
+  printf 'slot_leased=yes\nendpoint_closed=1\nclosed_backend=tmux\nclosed_target=fmses:fm-rlrelease\n' > "$dir/home/state/rlrelease.review-park"
+  out=$(run_spawn "$dir" rlrelease --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "the endpoint closed by release must be recreated: $out"
+  grep -Fxq 'fm-rlrelease' "$dir/fake/created-windows" || fail "relaunch did not create its window"
+  grep -Fxq 'relaunch_started=1' "$dir/home/state/rlrelease.review-park" || fail "release proof was not consumed"
+  strand_endpoint "$dir" rlrelease
+  out=$(run_spawn "$dir" rlrelease --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a consumed release proof must not license a second endpoint: $out"
+  [ "$(wc -l < "$dir/fake/created-windows" | tr -d ' ')" = 1 ] || fail "consumed proof created another window"
+  pass "tmux relaunch accepts only the matching, unused release closure proof"
+}
+
+test_released_lane_requires_park_reacquisition() {
+  local dir out rc before
+  dir=$(new_case released-direct rlreleased)
+  add_ship_task "$dir" rlreleased claude
+  printf 'released_at=1\n' > "$dir/home/state/rlreleased.review-park"
+  before=$(cat "$dir/home/data/rlreleased/brief.md")
+  out=$(run_control "$dir" rlreleased relaunch --note 'do not launch'); rc=$?
+  expect_code 1 "$rc" "direct control relaunch must refuse a released lane: $out"
+  assert_contains "$out" 'reacquire its copy through bin/fm-park.sh resume' "direct control did not name reacquisition"
+  [ "$(cat "$dir/home/data/rlreleased/brief.md")" = "$before" ] || fail "direct control changed the released brief"
+  out=$(run_spawn "$dir" rlreleased --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "direct spawn relaunch must refuse a released lane: $out"
+  assert_contains "$out" 'reacquire its copy through bin/fm-park.sh resume' "direct spawn did not name reacquisition"
+  assert_absent "$dir/fake/created-windows" "direct relaunch created an endpoint"
+  pass "direct relaunch refuses a released lane until park reacquires its copy"
+}
+
 test_tmux_refuses_a_session_that_cannot_be_found() {
   local dir
   dir=$(new_case tmux-nosession rl61)
@@ -3334,6 +3373,8 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_released_lane_requires_park_reacquisition
+test_tmux_relaunch_accepts_only_release_closed_endpoint
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone

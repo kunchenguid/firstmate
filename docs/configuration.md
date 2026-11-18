@@ -14,7 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
-| Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
+| Parking workers, releasing worktrees, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -837,10 +837,19 @@ The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#poli
 
 ## Park on review
 
-The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
+The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose GitHub PR or GitLab merge request only awaits human review.
+The optional `config/release-on-review` presence flag also enables parking and returns eligible leased Treehouse worktrees on tmux, Herdr, and Rex.
+Before returning a worktree, Firstmate verifies that the agent has stopped, the steering inbox is empty, and the owned checkout is clean on the recorded branch at the current, review-ready forge head.
+Release closes the worker's endpoint and keeps the task record, branch, PR or merge request, and brief, so the backlog item stays open.
+The same events that wake a parked lane, such as new comments, requested changes, a conflict, or a new push, wake a released lane.
+Firstmate reacquires a free worktree, verifies the checkout against the current forge head, and includes the trigger in the replacement worker's instructions.
+If no worktree is available when the watcher detects a trigger, it retries while the trigger still applies.
+If the branch moved locally or the new forge head cannot be fast-forwarded, Firstmate preserves the branch and waits for an operator to resolve the mismatch and resume the lane.
+Use the `resume` command in [`bin/fm-park.sh --help`](../bin/fm-park.sh) to provide a manual trigger.
+On merge, the watcher runs normal teardown without touching the released worktree.
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
-Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
-Both flags are home-local and not inherited by secondmate homes.
+These flags also let `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; without them, teardown does not read GitLab merge requests.
+These flags are home-local and not inherited by secondmate homes.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
 
 ## PR registration scan (config/pr-register-scan)

@@ -1200,8 +1200,12 @@ record_note() {
         echo
         echo "## Progress note ($stamp)"
         echo
-        echo "This task was relaunched. Continue from here; the local copy and every"
-        echo "uncommitted change are exactly as the previous worker left them."
+        if [ "$(fm_meta_get "$STATE/$ID.review-park" endpoint_closed)" = 1 ]; then
+          echo "This task was relaunched in a reacquired local copy of its branch."
+        else
+          echo "This task was relaunched. Continue from here; the local copy and every"
+          echo "uncommitted change are exactly as the previous worker left them."
+        fi
         echo
         inbox_q=$(printf '%s' "$STATE/$ID.inbox" | sed "s/'/'\\\\''/g")
         echo "First, check your instruction inbox: list it with"
@@ -1220,6 +1224,9 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
+  if [ -n "$(fm_meta_get "$STATE/$ID.review-park" released_at)$(fm_meta_get "$STATE/$ID.review-park" releasing)" ]; then
+    die "task $ID is released on review; reacquire its copy through bin/fm-park.sh resume"
+  fi
   require_state_verified_backend relaunch
   fm_control_backend_relaunch_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, where a thread keeps its conversation and a new turn or provider change continues the same agent, so no fresh replacement can be launched into its endpoint; 'interrupt' ends its turn, and a fresh task needs a teardown and a new dispatch"
@@ -1257,7 +1264,11 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$BACKEND" = tmux ] && [ "$(agent_state)" = missing ] && fm_control_release_closed "$META" "$BACKEND" "$T"; then
+    exit_result=endpoint-gone
+  else
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's

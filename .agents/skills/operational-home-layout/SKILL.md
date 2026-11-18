@@ -116,6 +116,7 @@ state/               runtime records and signals; gitignored
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   Review-park records (`<id>.review-park` and `<id>.review-park-land`), locks, reports, and tick handoff files are owned by `bin/fm-park.sh`; see [Park on review](../../../docs/configuration.md#park-on-review) for the behavior contract.
+  A release-on-review record also indicates that its recorded worktree may belong to another lane.
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
