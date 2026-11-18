@@ -67,7 +67,15 @@ test_registration_record() {
   FM_STATE_OVERRIDE="$state" "$REGISTER" helper --audience supervision >/dev/null || fail "re-registration failed"
   printf 'extra\n' >>"$state/helper.check-trust"
   if registered "$state" helper >/dev/null; then fail "a fourth line must reject the record"; fi
-  pass "registration keeps the default record byte-identical and binds a supervision audience; other lines are refused"
+  # Final review finding 2: bytes after the last newline, as an interrupted
+  # append leaves them, are not end of file.
+  FM_STATE_OVERRIDE="$state" "$REGISTER" helper --audience supervision >/dev/null || fail "re-registration failed"
+  printf 'partial-extra-field' >>"$state/helper.check-trust"
+  if registered "$state" helper >/dev/null; then fail "an unterminated fourth line must reject the record"; fi
+  FM_STATE_OVERRIDE="$state" "$REGISTER" plain >/dev/null || fail "re-registration failed"
+  printf 'audience=supervision' >>"$state/plain.check-trust"
+  if registered "$state" plain >/dev/null; then fail "an unterminated third line must reject the record"; fi
+  pass "registration keeps the default record byte-identical and binds a supervision audience; other lines, whole or partial, are refused"
 }
 
 test_routing() {

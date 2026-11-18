@@ -15,7 +15,7 @@ fm_custom_check_sha256() {
 }
 
 fm_custom_check_trust_read() {
-  local state=$1 id=$2 trust state_device version hash extra audience
+  local state=$1 id=$2 trust state_device version hash extra audience _extra
   FM_CUSTOM_CHECK_HASH=
   FM_CUSTOM_CHECK_AUDIENCE=
   fm_pr_task_id_valid "$id" || return 1
@@ -27,14 +27,20 @@ fm_custom_check_trust_read() {
   IFS= read -r version <&9 || { exec 9<&-; return 1; }
   IFS= read -r hash <&9 || { exec 9<&-; return 1; }
   # An optional third line, exactly audience=supervision, is the only extension
-  # (bin/fm-check-register.sh --audience); anything else rejects the record.
+  # (bin/fm-check-register.sh --audience); anything else rejects the record,
+  # including bytes after the last newline, which read reports as end of file.
   audience=main
+  extra=
   if IFS= read -r extra <&9; then
-    if [ "$extra" != audience=supervision ] || IFS= read -r _extra <&9; then
+    _extra=
+    if [ "$extra" != audience=supervision ] || IFS= read -r _extra <&9 || [ -n "$_extra" ]; then
       exec 9<&-
       return 1
     fi
     audience=supervision
+  elif [ -n "$extra" ]; then
+    exec 9<&-
+    return 1
   fi
   exec 9<&-
   [ "$version" = fm-custom-check-v1 ] || return 1
