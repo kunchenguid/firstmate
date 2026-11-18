@@ -10,9 +10,10 @@ must be bound to the objects that were verified rather than to path text:
       following a link: each entry is opened relative to its already opened
       parent with O_NOFOLLOW and checked to be the object just listed before
       its mode changes. A directory is frozen before its entries are listed,
-      so its set of names cannot change afterwards. A non-directory with more
-      than one link is never changed (its mode belongs to every other name
-      too), and the whole root is reported "linked" and left as it was.
+      so its set of names cannot change afterwards. A file with more than one
+      link is frozen only when all of its names are inside the root; one with
+      a name elsewhere, such as in a package store, is never changed, since
+      its mode and data belong to that name too.
       Each object's "dev ino mode" line is appended to <record> and written
       out before its mode changes, so a freeze stopped at any point can be
       undone from <record>. Prints "root<TAB>ok" or "root<TAB><reason>" per
@@ -31,7 +32,10 @@ must be bound to the objects that were verified rather than to path text:
       snapshotted directory, then walks down by descriptor. Each directory
       gets its write bit back only when its own entries are about to go;
       each listed entry is checked (device, inode, type, size, times, links)
-      against the snapshot and unlinked by name in that directory. Anything
+      against the snapshot and unlinked by name in that directory. Before
+      anything goes, every name with more than one link is checked the same
+      way, and the root stays whole if one fails; unlinking such a name
+      never touches its data, which its other names keep. Anything
       that does not match, or is not listed, stays, and so does every
       directory above it, with the recorded modes restored. Prints
       "root<TAB>removed<TAB>kb" or "root<TAB>partial<TAB>kb".
@@ -199,11 +203,23 @@ class Freezer:
                 os.kill(os.getpid(), signal.SIGSTOP)
 
     def freeze_root(self, root: str, seen: list[tuple[int, int, int]]) -> None:
-        """Freezes <root>, appending every directory and singly linked file
-        it visits, with its mode before the freeze, to <seen>."""
+        """Freezes <root>, appending every directory and file whose mode it
+        changes, with its mode before the freeze, to <seen>. A file with more
+        than one link is frozen only when every one of its names is inside
+        <root>; otherwise its mode belongs to names elsewhere too, such as a
+        package store, and it is left exactly as it is."""
         pfd, fd, st = open_root(root)
         os.close(pfd)
         root_dev = st.st_dev
+        # (dev, ino) -> [link count, names seen inside root] for linked files.
+        multi: dict[tuple[int, int], list[int]] = {}
+        self.walk_freeze(fd, st, root_dev, seen, multi)
+        inside = {key for key, (links, count) in multi.items() if count >= links}
+        if inside:
+            self.freeze_inside_links(root, root_dev, inside, seen)
+
+    def walk_freeze(self, fd: int, st: os.stat_result, root_dev: int, seen: list[tuple[int, int, int]],
+                    multi: dict[tuple[int, int], list[int]]) -> None:
         stack: list[list] = []
         try:
             self.chmod_fd(fd, st, seen)
@@ -229,18 +245,66 @@ class Freezer:
                         raise
                     stack.append([cfd, entries, 0])
                 elif cst.st_nlink > 1:
-                    raise Keep("linked")
+                    if stat.S_ISREG(cst.st_mode):
+                        multi.setdefault((cst.st_dev, cst.st_ino), [cst.st_nlink, 0])[1] += 1
                 elif stat.S_ISREG(cst.st_mode):
                     cfd = open_child(frame[0], name, cst)
                     try:
                         now = os.fstat(cfd)
                         if now.st_nlink > 1:
-                            raise Keep("linked")
-                        self.chmod_fd(cfd, now, seen)
+                            multi.setdefault((now.st_dev, now.st_ino), [now.st_nlink, 0])[1] += 1
+                        else:
+                            self.chmod_fd(cfd, now, seen)
                     finally:
                         os.close(cfd)
                 # Links, sockets, FIFOs and devices hold no content to protect;
                 # their own modes are never changed.
+        finally:
+            close_all([frame[0] for frame in stack])
+
+    def freeze_inside_links(self, root: str, root_dev: int, inside: set[tuple[int, int]],
+                            seen: list[tuple[int, int, int]]) -> None:
+        """Freezes the linked files whose every name is inside <root>, once
+        each, checking at the moment of change that the link count is still
+        the one counted."""
+        pfd, fd, _st = open_root(root)
+        os.close(pfd)
+        done: set[tuple[int, int]] = set()
+        stack: list[list] = []
+        try:
+            stack.append([fd, names(fd), 0])
+            while stack:
+                frame = stack[-1]
+                if frame[2] >= len(frame[1]):
+                    os.close(frame[0])
+                    stack.pop()
+                    continue
+                name = frame[1][frame[2]]
+                frame[2] += 1
+                cst = os.stat(name, dir_fd=frame[0], follow_symlinks=False)
+                if cst.st_dev != root_dev:
+                    raise Keep("mount")
+                if stat.S_ISDIR(cst.st_mode):
+                    cfd = open_child(frame[0], name, cst)
+                    try:
+                        entries = names(cfd)
+                    except BaseException:
+                        os.close(cfd)
+                        raise
+                    stack.append([cfd, entries, 0])
+                    continue
+                key = (cst.st_dev, cst.st_ino)
+                if key not in inside or key in done or not stat.S_ISREG(cst.st_mode):
+                    continue
+                cfd = open_child(frame[0], name, cst)
+                try:
+                    now = os.fstat(cfd)
+                    if now.st_nlink != cst.st_nlink:
+                        raise Keep("changed")
+                    self.chmod_fd(cfd, now, seen)
+                    done.add(key)
+                finally:
+                    os.close(cfd)
         finally:
             close_all([frame[0] for frame in stack])
 
@@ -379,11 +443,18 @@ def read_snapshot(path: str, roots: set[str]) -> dict[str, dict[str, list[str]]]
     return snap
 
 
-def matches(cst: os.stat_result, want: list[str]) -> bool:
+def matches(cst: os.stat_result, want: list[str], gone: int = 0) -> bool:
+    """<cst> is still the snapshotted object: device, inode, type, size,
+    modification time and link count, less the <gone> names of the same
+    object this removal already unlinked; the change time only while none
+    were, since each unlink changes it."""
     kind, _mode, dev, ino, size, _blocks, mtime, ctime, nlink = want
-    return (type_char(cst.st_mode) == kind and str(cst.st_dev) == dev and str(cst.st_ino) == ino
-            and str(cst.st_size) == size and str(cst.st_mtime_ns) == mtime and str(cst.st_ctime_ns) == ctime
-            and str(cst.st_nlink) == nlink)
+    if not (type_char(cst.st_mode) == kind and str(cst.st_dev) == dev and str(cst.st_ino) == ino
+            and str(cst.st_size) == size and str(cst.st_mtime_ns) == mtime):
+        return False
+    if cst.st_nlink != int(nlink) - gone:
+        return False
+    return gone > 0 or str(cst.st_ctime_ns) == ctime
 
 
 def run_hook(root: str, rel: str) -> None:
@@ -416,6 +487,10 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
     top = entries.get(".")
     if top is None or top[0] != "d":
         return False, 0
+    # Names of an object with more than one link: each unlink lowers the
+    # link count the next name of the same object must show.
+    linked = [rel for rel, want in entries.items() if want[0] != "d" and int(want[8]) > 1]
+    gone: dict[tuple[str, str], int] = {}
     parent, name = os.path.split(root.rstrip("/"))
     pfd = os.open(parent, DIR_FLAGS)
     stack: list[Dir] = []
@@ -427,6 +502,18 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
         if not same(os.fstat(fd), before):
             os.close(fd)
             return False, 0
+        # Before anything goes, every hard-linked name must still be the
+        # snapshotted object with its link count; otherwise the whole copy
+        # stays. Each is checked again at its own unlink.
+        for rel in linked:
+            try:
+                now = os.stat(rel, dir_fd=fd, follow_symlinks=False)
+            except OSError:
+                os.close(fd)
+                return False, 0
+            if not matches(now, entries[rel]):
+                os.close(fd)
+                return False, 0
 
         def enter(dfd: int, rel: str, meta) -> Dir:
             frame = Dir(dfd, rel, children.get(rel, {}), meta)
@@ -480,7 +567,8 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
             except OSError:
                 frame.whole = False
                 continue
-            if not matches(cst, want):
+            key = (want[2], want[3])
+            if not matches(cst, want, gone.get(key, 0) if want[0] != "d" else 0):
                 frame.whole = False
                 continue
             if want[0] == "d":
@@ -499,7 +587,14 @@ def remove_root(root: str, entries: dict[str, list[str]]) -> tuple[bool, int]:
                 continue
             try:
                 os.unlink(cname, dir_fd=frame.fd)
-                removed_blocks += int(want[5])
+                if int(want[8]) > 1:
+                    gone[key] = gone.get(key, 0) + 1
+                    # The data stays reachable through its other names; only
+                    # the last name inside frees its blocks.
+                    if int(want[8]) - gone[key] == 0:
+                        removed_blocks += int(want[5])
+                else:
+                    removed_blocks += int(want[5])
             except OSError:
                 frame.whole = False
         if root_whole:

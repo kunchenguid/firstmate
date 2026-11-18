@@ -1087,35 +1087,108 @@ SH
 
 file_mode() { if [ "$(uname -s)" = Darwin ]; then /usr/bin/stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 
-test_freezing_never_changes_a_hard_linked_file() {
-  local mode t out outside
+link_count() { if [ "$(uname -s)" = Darwin ]; then /usr/bin/stat -f %l "$1"; else stat -c %h "$1"; fi; }
+
+# store_files <store>: a pnpm-style and a uv-style package store outside
+# every copy, each file mode 644.
+store_files() {
+  mkdir -p "$1/pnpm/files/ab" "$1/uv/archive-v0/x1/pkg"
+  printf 'module.exports=1\n' > "$1/pnpm/files/ab/c0"
+  printf '{"name":"pkg"}\n' > "$1/pnpm/files/ab/c1"
+  printf 'x = 1\n' > "$1/uv/archive-v0/x1/pkg/__init__.py"
+  chmod 644 "$1/pnpm/files/ab/c0" "$1/pnpm/files/ab/c1" "$1/uv/archive-v0/x1/pkg/__init__.py"
+}
+
+test_hard_linked_names_go_and_their_store_keeps_its_data() {
+  local mode t out store f
   for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
     new_home "link-$mode"
-    outside="$TMP_ROOT/link-$mode/outside"
-    mkdir -p "$outside"
-    printf 'user source\n' > "$outside/notes.txt"
-    chmod 644 "$outside/notes.txt"
+    store="$TMP_ROOT/link-$mode/store"
+    store_files "$store"
     t=$(target "$mode" task-h1)
-    ln "$outside/notes.txt" "$t/notes-link.txt"
+    # pnpm: node_modules/.pnpm/<pkg>/node_modules/<pkg>/* hard-linked from the store.
+    mkdir -p "$t/node_modules/.pnpm/pkg@1.0.0/node_modules/pkg" "$t/.venv/lib/python3.12/site-packages/pkg"
+    ln "$store/pnpm/files/ab/c0" "$t/node_modules/.pnpm/pkg@1.0.0/node_modules/pkg/index.js"
+    ln "$store/pnpm/files/ab/c1" "$t/node_modules/.pnpm/pkg@1.0.0/node_modules/pkg/package.json"
+    # uv: site-packages files hard-linked from its cache.
+    ln "$store/uv/archive-v0/x1/pkg/__init__.py" "$t/.venv/lib/python3.12/site-packages/pkg/__init__.py"
+    # A file whose two names are both inside the copy.
+    printf 'own\n' > "$t/own.txt"
+    ln "$t/own.txt" "$t/own-again.txt"
     out=$(run_target "$mode" task-h1 "$t")
-    assert_equals 644 "$(file_mode "$outside/notes.txt")" "$mode must never change a file whose other name lies outside"
-    printf 'edit\n' >> "$outside/notes.txt" || fail "$mode must leave the outside file writable"
-    assert_present "$t/notes-link.txt" "$mode must keep the copy holding a hard-linked file whole"
-    assert_contains "$out" "hard-linked" "$mode must say why the copy is kept"
+    claims_removed "$mode" "$out" || fail "$mode must remove a copy whose hard-linked names still match: $out"
+    assert_absent "$t" "$mode must remove the whole copy"
+    for f in "$store/pnpm/files/ab/c0" "$store/pnpm/files/ab/c1" "$store/uv/archive-v0/x1/pkg/__init__.py"; do
+      assert_present "$f" "$mode must leave the store's own name"
+      assert_equals 644 "$(file_mode "$f")" "$mode must never change a store file's mode"
+      assert_equals 1 "$(link_count "$f")" "$mode must leave the store file as its only name"
+      printf 'edit\n' >> "$f" || fail "$mode must leave the store file writable"
+    done
+    assert_equals 'module.exports=1' "$(head -n 1 "$store/pnpm/files/ab/c0")" "$mode must never touch the shared data"
   done
   # A link to a file outside is never followed: the outside file keeps its
   # mode and the copy is removed.
   new_home link-static
-  outside="$TMP_ROOT/link-static/outside"
-  mkdir -p "$outside"
-  printf 'user source\n' > "$outside/other.txt"
-  chmod 644 "$outside/other.txt"
+  store="$TMP_ROOT/link-static/outside"
+  mkdir -p "$store"
+  printf 'user source\n' > "$store/other.txt"
+  chmod 644 "$store/other.txt"
   t=$(scratch_for task-h2)
-  ln -s "$outside/other.txt" "$t/link"
+  ln -s "$store/other.txt" "$t/link"
   out=$(fp task-close task-h2 "$t")
   assert_absent "$t" "a copy holding only a link to an outside file is removed"
-  assert_equals 644 "$(file_mode "$outside/other.txt")" "the link's target must keep its mode"
-  pass "freezing never changes a hard-linked file or a link's target, in close, the daily pass and apply"
+  assert_equals 644 "$(file_mode "$store/other.txt")" "the link's target must keep its mode"
+  pass "hard-linked names from pnpm and uv stores are removed and the stores keep their data and modes, in close, the daily pass and apply"
+}
+
+test_a_hard_linked_name_that_changes_before_its_unlink_is_kept() {
+  local mode t out store how r
+  for how in count swap; do
+    for mode in ${FOOTPRINT_TEST_MODES:-close sweep apply}; do
+      new_home "linkchg-$how-$mode"
+      store="$TMP_ROOT/linkchg-$how-$mode/store"
+      store_files "$store"
+      t=$(target "$mode" task-h3)
+      mkdir -p "$t/pkg"
+      ln "$store/pnpm/files/ab/c0" "$t/pkg/index.js"
+      if [ "$how" = count ]; then
+        # The store's own name goes once the copy is writable again: the
+        # name in the copy is now the data's only name.
+        printf '#!/usr/bin/env bash\nrm -f "%s"\n' "$store/pnpm/files/ab/c0" > "$FB/change"
+      else
+        # The name is swapped for another file.
+        printf '#!/usr/bin/env bash\nprintf "a different file\\n" > "$1/pkg/.n" && mv -f "$1/pkg/.n" "$1/pkg/index.js"\n' > "$FB/change"
+      fi
+      chmod +x "$FB/change"
+      during_removal "$FB/change" pkg
+      out=$(run_target "$mode" task-h3 "$t")
+      unhook
+      ! claims_removed "$mode" "$out" || fail "$how/$mode: a hard-linked name that changed must not be reported removed: $out"
+      if [ "$how" = count ]; then
+        grep -rqs 'module.exports=1' "${t%/*}" || fail "$how/$mode: data whose other name went must be kept: $out"
+      else
+        grep -rqs 'a different file' "${t%/*}" || fail "$how/$mode: the file swapped in must be kept: $out"
+        assert_equals 'module.exports=1' "$(cat "$store/pnpm/files/ab/c0")" "$how/$mode: the store's data must be untouched"
+      fi
+    done
+  done
+  # A link that changes after the last snapshot but before removal starts
+  # keeps the whole copy: the engine checks every hard-linked name first.
+  new_home linkchg-before
+  store="$TMP_ROOT/linkchg-before/store"
+  store_files "$store"
+  r="$TMP_ROOT/linkchg-before/copy"
+  mkdir -p "$r/a"
+  printf 'own\n' > "$r/a/own.txt"
+  ln "$store/pnpm/files/ab/c0" "$r/linked.js"
+  python3 -I -B "$ROOT/bin/fm-footprint-fs.py" snapshot "$r" > "$TMP_ROOT/linkchg-before/snap"
+  : > "$TMP_ROOT/linkchg-before/modes"
+  rm -f "$store/pnpm/files/ab/c0"
+  out=$(python3 -I -B "$ROOT/bin/fm-footprint-fs.py" remove "$TMP_ROOT/linkchg-before/snap" "$TMP_ROOT/linkchg-before/modes" "$r")
+  assert_contains "$out" "partial	0" "a link changed before removal must keep the whole copy"
+  assert_present "$r/a/own.txt" "the copy's other files must stay"
+  assert_present "$r/linked.js" "the changed name must stay"
+  pass "a hard-linked name whose link count drops or that is swapped is kept, and one changed before removal keeps the whole copy"
 }
 
 test_a_check_that_cannot_record_keeps_the_copy() {
@@ -1186,27 +1259,68 @@ SH
   pass "close removes Docker objects before the area, and the pass measures nothing between its check and its removal"
 }
 
-test_an_uninspectable_process_is_named_on_linux() {
-  local s out agent
-  if [ "$(uname -s)" != Linux ] || ! command -v ssh-agent >/dev/null 2>&1; then
-    printf 'ok - # SKIP Linux with ssh-agent only\n'
-    return 0
-  fi
-  new_home agent
-  agent=$(ssh-agent -s | sed -n 's/^SSH_AGENT_PID=\([0-9]*\);.*/\1/p')
-  [ -n "$agent" ] || fail "ssh-agent must start"
-  s=$(scratch_for task-a1)
+# start_in <dir> <socket> <program> [args]: starts <program> with its working
+# directory <dir>, waits until <socket> exists (or 5 s), and prints its pid.
+start_in() {  # <dir> <socket> <program> [args...]
+  local dir=$1 sock=$2 n=0 pid
+  shift 2
+  ( cd "$dir" && exec "$@" ) >/dev/null 2>&1 </dev/null &
+  pid=$!
+  while [ -n "$sock" ] && [ ! -S "$sock" ] && [ "$n" -lt 100 ]; do sleep .05; n=$((n + 1)); done
+  [ -n "$sock" ] || sleep .3
+  printf '%s\n' "$pid"
+}
+
+test_a_key_helper_started_in_an_area_does_not_keep_it() {
+  local s out agent other pids='' outside p
+  agent=$(command -v ssh-agent) || { printf 'ok - # SKIP no ssh-agent\n'; return 0; }
+  new_home helper
+  outside="$TMP_ROOT/helper/outside"
+  mkdir -p "$outside"
+  # Its only tie is the working directory it started in: the area goes.
+  s=$(scratch_for task-k1)
   printf 'cache\n' > "$s/cache"
-  out=$(fp task-close task-a1 "$s")
-  assert_present "$s/cache" "an area must be kept while an uninspectable process runs"
-  assert_contains "$out" "ssh-agent (pid $agent) cannot be inspected" "close must name the process"
-  age 3 "$s"
-  out=$(fp sweep)
-  assert_contains "$out" "Linux cleanup removes nothing while such a process" "the daily finding must say so plainly"
-  kill "$agent" 2>/dev/null || true
-  out=$(fp task-close task-a1 "$s")
-  assert_absent "$s" "with the agent gone, the area is removed"
-  pass "on Linux an uninspectable process such as ssh-agent keeps every area and is named"
+  p=$(start_in "$s" "$outside/sock1" "$agent" -D -a "$outside/sock1")
+  pids="$pids $p"
+  out=$(fp task-close task-k1 "$s")
+  assert_contains "$out" "scratch removed" "an ssh-agent whose only tie is its working directory must not keep the area: $out"
+  assert_absent "$s" "the area must be gone"
+  # Its socket is inside the area: the area stays.
+  s=$(scratch_for task-k2)
+  printf 'cache\n' > "$s/cache"
+  p=$(start_in / "$s/agent.sock" "$agent" -D -a "$s/agent.sock")
+  pids="$pids $p"
+  out=$(fp task-close task-k2 "$s")
+  assert_present "$s/cache" "an ssh-agent with its socket inside must keep the area: $out"
+  ! claims_removed close "$out" || fail "a helper's open socket must keep the area: $out"
+  # A different program with its working directory there: the area stays.
+  s=$(scratch_for task-k3)
+  printf 'cache\n' > "$s/cache"
+  p=$(start_in "$s" '' sleep 300)
+  pids="$pids $p"
+  out=$(fp task-close task-k3 "$s")
+  assert_present "$s/cache" "another program working there must keep the area: $out"
+  kill "$p" 2>/dev/null || true
+  if [ "$(uname -s)" = Linux ]; then
+    # On Linux, the agent's own binary under another name cannot be
+    # inspected either, and is no key helper: the area stays and it is named.
+    other="$FB/other-agent"
+    cp "$agent" "$other"
+    p=$(start_in "$s" "$outside/sock3" "$other" -D -a "$outside/sock3")
+    pids="$pids $p"
+    out=$(fp task-close task-k3 "$s")
+    assert_present "$s/cache" "a program that cannot be inspected must keep the area: $out"
+    assert_contains "$out" "other-agent (pid $p) cannot be inspected" "on Linux a program that cannot be inspected is named"
+    age 3 "$s"
+    out=$(fp sweep)
+    assert_contains "$out" "Linux cleanup removes nothing while such a process runs" "the daily finding must say so plainly"
+  fi
+  # shellcheck disable=SC2086 # one pid per word
+  kill $pids 2>/dev/null || true
+  wait 2>/dev/null || true
+  out=$(fp task-close task-k3 "$s")
+  assert_absent "$s" "with those programs gone, the area is removed"
+  pass "a key helper whose only tie is its working directory no longer keeps an area; its open socket or another program there still does"
 }
 
 # all_writable <dir>: 0 when every directory and file under <dir> has its
@@ -1680,10 +1794,11 @@ fm_test_run \
   test_a_partial_open_file_listing_keeps_everything \
   test_a_directory_swapped_for_a_link_during_removal_removes_nothing_outside \
   test_a_file_saved_over_during_removal_is_kept \
-  test_freezing_never_changes_a_hard_linked_file \
+  test_hard_linked_names_go_and_their_store_keeps_its_data \
+  test_a_hard_linked_name_that_changes_before_its_unlink_is_kept \
   test_a_check_that_cannot_record_keeps_the_copy \
   test_close_removes_docker_before_scratch_and_the_pass_measures_nothing_after_its_check \
-  test_an_uninspectable_process_is_named_on_linux \
+  test_a_key_helper_started_in_an_area_does_not_keep_it \
   test_an_interrupted_freeze_leaves_a_writable_copy \
   test_an_interrupted_close_leaves_its_copy_writable \
   test_a_close_stopped_mid_step_stops_its_engine_first \

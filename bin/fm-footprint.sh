@@ -463,8 +463,10 @@ fp_set_aside() {  # <dir> <tag>
 #   1. freeze: write permission is removed from every directory and file, by
 #      descriptor and never through a link, so no ordinary process can
 #      create, rename, remove or open anything for writing there any more; a
-#      file with more than one link is never changed, because its mode is
-#      shared with a name outside, and keeps the whole copy;
+#      file with a name outside the copy as well (a hard link from a package
+#      store, say) is never changed, because its mode and data are shared;
+#      its name is removed by the final step only while its identity and
+#      link count still match, so its data stays with its other names;
 #   2. flush: dirty pages are written out, so a later write through a memory
 #      mapping or a descriptor opened earlier changes the entry's times;
 #   3. snapshot: type, permissions, device, inode, size, blocks,
@@ -711,7 +713,7 @@ fp_repair_stopped() {
 # snapshot to <ok-out>.snap and its recorded permissions to <ok-out>.modes
 # for fp_fs remove, and each kept one as "reason<TAB>aside<TAB>dir" to
 # <kept-out> after putting it back with its permissions restored. Reasons:
-# notool, frozen, linked, mount, unsafe, unreadable, in-use, unlisted,
+# notool, frozen, mount, unsafe, unreadable, in-use, unlisted,
 # blocked, changed, unfinished, unrecorded. A stop signal meanwhile puts
 # every copy back writable (fp_guard_set); the caller clears that guard once
 # it has removed the verified copies. Returns 1 when its own records could not be
@@ -752,7 +754,7 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     fm_run_timed 120 sync </dev/null >/dev/null 2>&1 || fp_why_all "$w" unreadable 2>/dev/null || bad=1
     fp_fs snapshot "${roots_all[@]}" > "$w/s1" 2>/dev/null || fp_engine_failed "$w" "$?" || bad=1
     # 4. The process check only adds reasons to keep.
-    if fp_in_use "$w/busy" "${roots_all[@]}"; then
+    if FP_IN_USE_PAIRS=$pairs fp_in_use "$w/busy" "${roots_all[@]}"; then
       awk '{ print $0 "\tin-use" }' "$w/busy" >> "$w/why" 2>/dev/null || bad=1
     else
       listed=0
@@ -765,15 +767,14 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
     fp_fs snapshot "${roots_all[@]}" > "$w/s2" 2>/dev/null || fp_engine_failed "$w" "$?" || bad=1
   fi
   # The positive record: a root is verified only when it was frozen, both
-  # snapshots hold it in full with every non-directory singly linked and
-  # are identical for it (each second-snapshot line is looked up by root and
+  # snapshots hold it in full and are identical for it (each second-snapshot line is looked up by root and
   # path in the first, and the counts must match, so the cost is linear), the process listing was complete and names
   # nothing in it, and the content check found nothing. Every other root
   # gets the first reason that applies.
   awk -F '\t' -v listed="$listed" '
     FILENAME == ARGV[1] { fz[$1] = $2; next }
-    FILENAME == ARGV[2] { if ($2 == "!") bad1[$1] = $3; else { one[$1 SUBSEP $11] = $0; n1[$1]++; if ($11 == ".") top1[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
-    FILENAME == ARGV[3] { if ($2 == "!") bad2[$1] = $3; else { k = $1 SUBSEP $11; if (!(k in one) || one[k] != $0) diff[$1] = 1; n2[$1]++; if ($11 == ".") top2[$1] = 1; if ($2 != "d" && $10 != 1) linked[$1] = 1 }; next }
+    FILENAME == ARGV[2] { if ($2 == "!") bad1[$1] = $3; else { one[$1 SUBSEP $11] = $0; n1[$1]++; if ($11 == ".") top1[$1] = 1 }; next }
+    FILENAME == ARGV[3] { if ($2 == "!") bad2[$1] = $3; else { k = $1 SUBSEP $11; if (!(k in one) || one[k] != $0) diff[$1] = 1; n2[$1]++; if ($11 == ".") top2[$1] = 1 }; next }
     FILENAME == ARGV[4] { busy[$0] = 1; next }
     FILENAME == ARGV[5] { blk[$0] = 1; next }
     FILENAME == ARGV[6] { if (!($1 in why)) why[$1] = $2; next }
@@ -782,7 +783,6 @@ fp_settle() {  # <pairs> <ok-out> <kept-out>
       else if (!(r in fz)) w = "unrecorded"
       else if (fz[r] != "ok") w = fz[r]
       else if (r in bad1) w = bad1[r]
-      else if (r in linked) w = "linked"
       else if (!(r in top1) || !(r in top2)) w = "unrecorded"
       else if (r in busy) w = "in-use"
       else if (listed != 1) w = "unlisted"
@@ -842,7 +842,8 @@ fp_restore() {  # <aside> <dir>
 # fp_in_use <out> <dir>...: the quiescence check, made after directories are
 # set aside and before their contents are checked the last time and removed.
 # Writes to <out> each listed directory a running process of this user still
-# uses: its working directory, or any file it holds open, at or below it. A
+# uses: its working directory, or any file it holds open, at or below it, by
+# its set-aside name or the old name in FP_IN_USE_PAIRS. A
 # set-aside directory has a name no other process knows, so once no process
 # is rooted in it or holds anything open inside it, nothing can write there
 # again, and the content check that follows sees everything ever written.
@@ -855,10 +856,22 @@ fp_restore() {  # <aside> <dir>
 # macOS lists with lsof, which names memory-mapped files too; Linux reads
 # each process's cwd and fd links and its file-backed memory maps under /proc
 # (FM_PROC_ROOT_OVERRIDE in tests), where a readable fd directory and maps
-# file are the proof that process was read. This check only ever adds reasons
-# to keep: fp_settle never takes its silence as proof that a copy is safe.
+# file are the proof that process was read. A key helper (FP_KEY_HELPERS)
+# is the one exception to both: its working directory is not counted, and on
+# Linux, where it cannot be inspected, its bound sockets stand for its open
+# files. This check only ever adds reasons to keep: fp_settle never takes its
+# silence as proof that a copy is safe.
+# Key helpers, exact program names: an ssh-agent or gpg-agent outlives the
+# task that started it, keeping the working directory it started in, so that
+# directory alone is no tie to an area; anything it holds open there still
+# is. Its name is read in the same listing that decides.
+FP_KEY_HELPERS=' ssh-agent gpg-agent '
+fp_key_helper() {  # <name>
+  case "$FP_KEY_HELPERS" in *" $1 "*) [ -n "$1" ] ;; *) return 1 ;; esac
+}
+
 fp_in_use() {  # <out> <dir>...
-  local out=$1 dir parent phys last_parent='' last_phys='' rc=0 lrc probe_dir probe uid p st proc
+  local out=$1 dir parent phys last_parent='' last_phys='' rc=0 lrc probe_dir probe uid p st proc comm sockets=0
   local -a fds=() cwds=() maps=()
   shift
   : > "$out" || return 1
@@ -873,6 +886,15 @@ fp_in_use() {  # <out> <dir>...
     phys="$last_phys/${dir##*/}"
     printf '%s\t%s\n%s\t%s\n' "$dir" "$dir" "$phys" "$dir"
   done > "$out.dirs"
+  # A socket keeps the path it was bound at, so each set-aside directory is
+  # also known by its old name (FP_IN_USE_PAIRS: "aside<TAB>dir" lines).
+  if [ -n "${FP_IN_USE_PAIRS:-}" ] && [ -f "$FP_IN_USE_PAIRS" ]; then
+    while IFS='	' read -r dir parent; do
+      [ -n "$dir" ] && [ -n "$parent" ] || continue
+      phys=$(fm_footprint_physical_dir "${parent%/*}") || phys=${parent%/*}
+      printf '%s\t%s\n%s\t%s\n' "$parent" "$dir" "$phys/${parent##*/}" "$dir"
+    done < "$FP_IN_USE_PAIRS" >> "$out.dirs"
+  fi
   probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-footprint-probe.XXXXXX") || { rm -f "$out.dirs"; return 1; }
   probe_dir=$(fm_footprint_physical_dir "$probe_dir") || probe_dir=
   probe="$probe_dir/open"
@@ -881,7 +903,7 @@ fp_in_use() {  # <out> <dir>...
     rc=1
   elif [ "$FP_OS" = Darwin ]; then
     ps -u "$uid" -o pid=,stat= > "$out.ps1" 2>/dev/null || rc=1
-    fm_run_timed 120 lsof -n -P -w -u "$uid" -Fpn </dev/null > "$out.lsof" 2>/dev/null
+    fm_run_timed 120 lsof +c 0 -n -P -w -u "$uid" -Fpcfn </dev/null > "$out.lsof" 2>/dev/null
     lrc=$?
     ps -u "$uid" -o pid=,stat= > "$out.ps2" 2>/dev/null || rc=1
     [ "$lrc" != 124 ] || rc=1
@@ -893,7 +915,12 @@ fp_in_use() {  # <out> <dir>...
       rc=1
     fi
     grep -Fqx -- "n$probe" "$out.lsof" || rc=1
-    sed -n 's/^n//p' "$out.lsof" > "$out.paths"
+    # Every named file of every process, except a key helper's working
+    # directory.
+    awk -v helpers="$FP_KEY_HELPERS" '/^p/ { cmd = ""; fd = ""; next }
+      /^c/ { cmd = substr($0, 2); next }
+      /^f/ { fd = substr($0, 2); next }
+      /^n/ { if (fd == "cwd" && cmd != "" && index(helpers, " " cmd " ")) next; print substr($0, 2) }' "$out.lsof" > "$out.paths"
     rm -f "$out.ps1" "$out.ps2" "$out.lsof"
   else
     # This user's processes that are not zombies: state is the first field
@@ -905,7 +932,9 @@ fp_in_use() {  # <out> <dir>...
       st=${st##*) }
       case "${st%% *}" in Z|X|'') continue ;; esac
       fds+=("$p/fd")
-      cwds+=("$p/cwd")
+      comm=
+      { read -r comm < "$p/comm"; } 2>/dev/null || comm=
+      fp_key_helper "$comm" || cwds+=("$p/cwd")
       maps+=("$p/maps")
     done < <(find "$proc" -mindepth 1 -maxdepth 1 -name '[0-9]*' -user "$uid" 2>/dev/null)
     if [ "${#fds[@]}" -eq 0 ]; then
@@ -930,8 +959,24 @@ fp_in_use() {  # <out> <dir>...
         while IFS= read -r p; do
           case "$p" in "$proc"/[0-9]*) ;; *) rc=1; continue ;; esac
           if ! fp_proc_reread "$p" "$out.paths"; then
-            rc=1
             st=$(head -c 64 "$p/comm" 2>/dev/null | tr -cd 'A-Za-z0-9._+-') || st=
+            if fp_key_helper "$st"; then
+              # A key helper cannot be inspected on Linux; the only open
+              # files of it this check can see are its sockets, by the path
+              # they were bound at, and any socket bound inside a directory
+              # keeps that directory.
+              if [ "$sockets" = 0 ]; then
+                sockets=1
+                if [ -r "$proc/net/unix" ]; then
+                  awk 'NR > 1 && NF >= 8 { p = $0; for (i = 1; i <= 7; i++) sub(/^[^ ]+ +/, "", p); if (p ~ /^\//) print p }' \
+                    "$proc/net/unix" >> "$out.paths" 2>/dev/null || rc=1
+                else
+                  rc=1
+                fi
+              fi
+              continue
+            fi
+            rc=1
             FP_UNLISTED_NAMES="${FP_UNLISTED_NAMES:+$FP_UNLISTED_NAMES, }${st:-a process} (pid ${p##*/})"
           fi
         done < <(grep -Eo "$proc/[0-9]+/(fd|maps)" "$out.err2" | sed 's|/[a-z]*$||' | sort -u)
@@ -1035,16 +1080,12 @@ fp_settle_one() {  # <aside> <dir>
       FP_KEPT_HINT='end that process once its work is safe'
       ;;
     unlisted)
-      FP_BLOCKER="the running processes could not be listed in full${FP_UNLISTED_NAMES:+ ($FP_UNLISTED_NAMES cannot be inspected; on Linux nothing is removed while such a process, for example ssh-agent or gpg-agent, runs)}"
+      FP_BLOCKER="the running processes could not be listed in full${FP_UNLISTED_NAMES:+ ($FP_UNLISTED_NAMES cannot be inspected; on Linux nothing is removed while such a process runs)}"
       FP_KEPT_HINT='it stays until they can be'
       ;;
     changed)
       FP_BLOCKER="something in it changed while it waited to be removed"
       FP_KEPT_HINT='whatever still writes there should finish first'
-      ;;
-    linked)
-      FP_BLOCKER="it holds a file hard-linked from elsewhere, such as a package store, whose permissions it shares"
-      FP_KEPT_HINT='remove those links by hand once its work is safe'
       ;;
     notool)
       FP_BLOCKER="python3, which removal needs, is not installed"
@@ -1884,8 +1925,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
         fp_restore "$aside" "$entry" || printf 'could not put %s back; it is at %s\n' "$entry" "$aside"
       done < "$tmp.ok"
       case "$(cut -f1 "$tmp.kept" 2>/dev/null | head -n 1)" in
-        in-use|unlisted) left="a running process still uses an entry, or the running processes could not be listed in full${FP_UNLISTED_NAMES:+ ($FP_UNLISTED_NAMES cannot be inspected; on Linux nothing is removed while such a process, for example ssh-agent or gpg-agent, runs)}" ;;
-        linked) left="an entry holds a file hard-linked from elsewhere, such as a package store" ;;
+        in-use|unlisted) left="a running process still uses an entry, or the running processes could not be listed in full${FP_UNLISTED_NAMES:+ ($FP_UNLISTED_NAMES cannot be inspected; on Linux nothing is removed while such a process runs)}" ;;
         notool) left="python3, which removal needs, is not installed" ;;
         unrecorded|'') left="the check could not be recorded (is the home's state folder or the temporary directory full?)" ;;
         unfinished) left="the check did not finish (the removal engine stopped or failed)" ;;
@@ -1953,7 +1993,7 @@ cmd_old_tasks() {  # [--days N] | --apply <id>
 
 cmd_sweep() {  # [--dry-run]
   local dry=0 base area id age_cut now uid work removed=0 removed_kb=0 kb path aside entry
-  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0 inuse=0 inuse_ids='' unlisted=0 changed=0 changed_ids='' linked=0 linked_ids='' kb
+  local kept=0 kept_ids='' busy=0 findings='' leftover=0 leftover_names='' back=0 inuse=0 inuse_ids='' unlisted=0 changed=0 changed_ids='' kb
   local -a cands=() orphans=() asides=()
   [ "${1:-}" = --dry-run ] && dry=1
   fp_config
@@ -2038,10 +2078,6 @@ cmd_sweep() {  # [--dry-run]
           [ "$inuse" -gt 5 ] || inuse_ids="$inuse_ids${inuse_ids:+, }${area##*/}"
           ;;
         unlisted) unlisted=$((unlisted + 1)) ;;
-        linked)
-          linked=$((linked + 1))
-          [ "$linked" -gt 5 ] || linked_ids="$linked_ids${linked_ids:+, }${area##*/}"
-          ;;
         changed)
           changed=$((changed + 1))
           [ "$changed" -gt 5 ] || changed_ids="$changed_ids${changed_ids:+, }${area##*/}"
@@ -2086,16 +2122,12 @@ cmd_sweep() {  # [--dry-run]
   fi
   if [ "$unlisted" -gt 0 ]; then
     if [ -n "$FP_UNLISTED_NAMES" ]; then
-      printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed in full: %s cannot be inspected. On Linux, cleanup removes nothing while a process of this user that cannot be inspected, such as ssh-agent or gpg-agent, is running.\n' "$unlisted" "$FP_UNLISTED_NAMES"
-      findings="${findings:+$findings; }$unlisted orphaned scratch area(s) kept because the running processes could not be listed ($FP_UNLISTED_NAMES cannot be inspected; Linux cleanup removes nothing while such a process, for example ssh-agent or gpg-agent, runs)"
+      printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed in full: %s cannot be inspected. On Linux, cleanup removes nothing while a process of this user that cannot be inspected is running.\n' "$unlisted" "$FP_UNLISTED_NAMES"
+      findings="${findings:+$findings; }$unlisted orphaned scratch area(s) kept because the running processes could not be listed ($FP_UNLISTED_NAMES cannot be inspected; Linux cleanup removes nothing while such a process runs)"
     else
       printf 'Kept %s orphaned scratch area(s) because the running processes could not be listed in full.\n' "$unlisted"
       findings="${findings:+$findings; }$unlisted orphaned scratch area(s) kept because the running processes could not be listed"
     fi
-  fi
-  if [ "$linked" -gt 0 ]; then
-    printf 'Kept %s orphaned scratch area(s) whole because they hold files hard-linked from elsewhere, such as a package store, whose permissions they share: %s. Remove them by hand once their work is safe.\n' "$linked" "$linked_ids"
-    findings="${findings:+$findings; }$linked orphaned scratch area(s) kept because they hold hard-linked files ($linked_ids)"
   fi
   if [ "$inuse" -gt 0 ]; then
     printf 'Kept %s orphaned scratch area(s) a running process still works in or holds open: %s. End that process when its work is safe, and the daily pass removes the area.\n' "$inuse" "$inuse_ids"
