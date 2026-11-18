@@ -17,7 +17,9 @@
 # own open decision or blocker), and
 # escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
-# records, and never treat wrong-home or structured-home heuristics as
+# records (a request older than FM_PENDING_REPLY_MAX_AGE_SECS is closed with a
+# recorded resolved_via=expired-unanswered instead of reposted, see
+# fm_pending_reply_expire_stale), and never treat wrong-home or structured-home heuristics as
 # acknowledgement. A same-basename restatement-copy of the mate home's
 # state/<task_id>.status onto the parent channel is a repair of the
 # FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
@@ -62,7 +64,7 @@
 #                           escalation was closed again (see the escalation
 #                           lifecycle note below); empty until then
 #   resolved_epoch=
-#   resolved_via=           status | document | helper | empty
+#   resolved_via=           status | document | helper | expired-unanswered | empty
 #   wrong_home_hits=        count of corr sightings under the secondmate home
 #   wrong_home_first_sighting= encoded path:line identity of the first sighting
 #   wrong_home_sightings=   comma-separated encoded path:line identities
@@ -114,6 +116,15 @@
 #                                 completion for the recovery repost, and from
 #                                 the recovery turn's completion for the
 #                                 missed-report escalation - never from delivery
+#   FM_PENDING_REPLY_MAX_AGE_SECS default 21600 (6 h); a still-unanswered request
+#                                 older than this, counted from created_epoch, is
+#                                 never reposted: it is closed as
+#                                 expired-unanswered. 0 turns the cutoff off
+#   FM_PENDING_REPLY_REPOST_CAP   default 3; most recovery reposts one task may
+#                                 start inside one window, so a backlog cannot
+#                                 flood a single inbox (the rest wait for the
+#                                 next window, still due). 0 turns the cap off
+#   FM_PENDING_REPLY_REPOST_WINDOW_SECS default 600; length of that window
 #   FM_PENDING_REPLY_DIR_OVERRIDE override the pending-replies directory (tests)
 #   FM_PENDING_REPLY_SEND_HOOK    optional command template for recovery delivery
 #                                 (tests); receives task_id and full message as args
@@ -140,6 +151,9 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
+FM_PENDING_REPLY_MAX_AGE_DEFAULT=21600
+FM_PENDING_REPLY_REPOST_CAP_DEFAULT=3
+FM_PENDING_REPLY_REPOST_WINDOW_DEFAULT=600
 
 fm_pending_reply_now() {
   if [ -n "${FM_PENDING_REPLY_NOW:-}" ]; then
@@ -155,6 +169,14 @@ fm_pending_reply_grace_secs() {
     ''|*[!0-9]*) g=$FM_PENDING_REPLY_GRACE_DEFAULT ;;
   esac
   printf '%s' "$g"
+}
+
+# Non-negative integer knob: the env value when it is all digits, else <default>.
+_fm_pending_reply_uint_knob() {  # <value> <default>
+  case "$1" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 # Directory holding durable pending-reply records for <state-dir>.
@@ -978,6 +1000,95 @@ fm_pending_reply_recovery_message() {  # <record-path>
   printf '%s' "$msg"
 }
 
+# Close an unanswered request that is too old to repost. After a watcher gap
+# every old record turns due at once, and one repost per record rang the mate's
+# doorbell dozens of times in minutes. A request older than
+# FM_PENDING_REPLY_MAX_AGE_SECS (counted from created_epoch) is closed through
+# the ordinary resolve fields with resolved_via=expired-unanswered, so the record
+# stays as the durable trace and is never deleted. A correlated report that
+# already exists still wins: it is tried first, under the same per-correlation
+# lock, and resolves the record as an ordinary answer. Only a record that is
+# still awaiting_report with no recovery attempted is touched; a record whose one
+# repost already went out keeps the existing escalation path. Returns 0 when the
+# record is closed after the call, 1 when it is left as it was.
+fm_pending_reply_expire_stale() {  # <state-dir> <corr_id>
+  local state=$1 corr=$2 rec max created now lock rc=1 status_file
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  max=$(_fm_pending_reply_uint_knob "${FM_PENDING_REPLY_MAX_AGE_SECS:-}" "$FM_PENDING_REPLY_MAX_AGE_DEFAULT")
+  [ "$max" -gt 0 ] || return 1
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] || return 1
+  [ -z "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ] || return 1
+  created=$(fm_pending_reply_get "$rec" created_epoch)
+  case "$created" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(fm_pending_reply_now)
+  [ $((now - created)) -gt "$max" ] || return 1
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  status_file=$(fm_pending_reply_get "$rec" parent_status)
+  if _fm_pending_reply_try_resolve_locked "$state" "$corr" "$status_file" \
+    || [ "$(fm_pending_reply_get "$rec" phase)" != awaiting_report ] \
+    || [ -n "$(fm_pending_reply_get "$rec" recovery_attempted_epoch)" ]; then
+    # Answered (or advanced) in the meantime: nothing left to expire.
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if fm_pending_reply_set "$rec" phase resolved \
+    && fm_pending_reply_set "$rec" resolved_epoch "$now" \
+    && fm_pending_reply_set "$rec" resolved_via expired-unanswered \
+    && fm_pending_reply_set "$rec" expired_age_secs "$((now - created))"; then
+    rc=0
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+# How many recovery reposts <task_id> started inside the last <window> seconds,
+# read from the records' own recovery_attempted_epoch so the count survives a
+# watcher restart and needs no second store. recovery_attempted_epoch is written
+# before the send, so a repost still in flight counts.
+_fm_pending_reply_recent_reposts() {  # <state-dir> <task_id> <now> <window>
+  local dir rec
+  local -a records=()
+  dir=$(fm_pending_reply_dir "$1")
+  [ -d "$dir" ] || { printf '0'; return 0; }
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "${rec##*/}" in .*) continue ;; esac
+    case "$rec" in *$'\n'*) continue ;; esac
+    records+=("$rec")
+  done
+  [ "${#records[@]}" -gt 0 ] || { printf '0'; return 0; }
+  printf '%s\n' "${records[@]}" | LC_ALL=C awk -v task="$2" -v now="$3" -v win="$4" '
+    {
+      path = $0; tid = ""; att = ""
+      while ((getline line < path) > 0) {
+        if (index(line, "task_id=") == 1) tid = substr(line, 9)
+        else if (index(line, "recovery_attempted_epoch=") == 1) att = substr(line, 26)
+      }
+      close(path)
+      if (tid == task && att ~ /^[0-9]+$/ && now - att >= 0 && now - att < win) n++
+    }
+    END { print n + 0 }
+  '
+}
+
+# 0 when <task_id> may start another recovery repost now, 1 when it has already
+# used its FM_PENDING_REPLY_REPOST_CAP for the current window.
+fm_pending_reply_repost_allowed() {  # <state-dir> <task_id>
+  local cap window now recent
+  cap=$(_fm_pending_reply_uint_knob "${FM_PENDING_REPLY_REPOST_CAP:-}" "$FM_PENDING_REPLY_REPOST_CAP_DEFAULT")
+  [ "$cap" -gt 0 ] || return 0
+  window=$(_fm_pending_reply_uint_knob "${FM_PENDING_REPLY_REPOST_WINDOW_SECS:-}" "$FM_PENDING_REPLY_REPOST_WINDOW_DEFAULT")
+  now=$(fm_pending_reply_now)
+  recent=$(_fm_pending_reply_recent_reposts "$1" "$2" "$now" "$window")
+  [ "$recent" -lt "$cap" ]
+}
+
 # Deliver the recovery message once. Caller must hold phase awaiting_report with
 # turn completed and grace elapsed. Uses FM_PENDING_REPLY_SEND_HOOK when set
 # (tests), otherwise invokes fm-send with FM_PENDING_REPLY_EXISTING_CORR so a
@@ -994,6 +1105,10 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   attempted=$(fm_pending_reply_get "$rec" recovery_attempted_epoch)
   if [ -n "$attempted" ]; then
     fm_pending_reply_reconcile_recovery "$state" "$corr" || true
+    return 1
+  fi
+  # A request past the age cutoff is closed, never reposted.
+  if fm_pending_reply_expire_stale "$state" "$corr"; then
     return 1
   fi
   completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch)
@@ -1016,6 +1131,10 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
     [ -z "$(status_own_open_decisions "$state/$task_id.status")" ] || return 1
   fi
+  # Last guard before the repost: one task's inbox takes at most the cap per
+  # window, so a backlog drains over several windows instead of in one burst.
+  # The record stays awaiting_report and due; nothing is written.
+  fm_pending_reply_repost_allowed "$state" "$task_id" || return 1
   status_file=$(fm_pending_reply_get "$rec" parent_status)
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
@@ -1537,6 +1656,12 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
   if [ -n "$sm_home" ]; then
     fm_pending_reply_detect_wrong_home "$state" "$corr" "$sm_home" || true
     fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" || true
+  fi
+  # An over-age request is closed here, before any observation, so a record
+  # that never saw its turn complete is still drained.
+  if [ "$(fm_pending_reply_get "$rec" phase)" = awaiting_report ] \
+    && fm_pending_reply_expire_stale "$state" "$corr"; then
+    return 0
   fi
   fm_pending_reply_observe_busy "$state" "$corr" "$busy_state" || true
   # Re-check resolve after observation in case a concurrent status write landed.

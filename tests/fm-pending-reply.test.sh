@@ -42,6 +42,9 @@
 #      grow a fork per status line, and keep their exact verdicts
 #  21. A recovery held by the mate's own open decision reads a long log once
 #      per change, not once per held record, so a pass stays short
+#  22. A backlog of old unanswered requests produces no repost burst: requests
+#      past the age cutoff close as expired-unanswered (record kept, an answer
+#      still wins), and recent ones repost at most the per-mate cap per window
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2262,6 +2265,144 @@ test_summary_keeps_accents_and_caps_by_character() {
   pass "the summary keeps accented letters, drops control characters, and caps by character"
 }
 
+# Seed <count> delivered, turn-completed, unanswered requests for one task,
+# all created at <created>; prints the correlation ids one per line.
+seed_due_backlog() {  # <home> <state> <task> <count> <created>
+  local home=$1 state=$2 task=$3 count=$4 created=$5 i corr rec
+  for ((i = 1; i <= count; i++)); do
+    FM_PENDING_REPLY_NOW=$created corr=$(fm_pending_reply_create "$home" "$state" "$task" "request $i")
+    FM_PENDING_REPLY_NOW=$created fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" request_turn_completed_epoch "$created"
+    printf '%s\n' "$corr"
+  done
+}
+
+# A backlog of old unanswered requests must not become a burst of reposts: each
+# one past the age cutoff is closed as expired-unanswered, with its record kept.
+# Fixture overrides are scoped to this isolated subshell.
+# shellcheck disable=SC2030,SC2031
+test_old_backlog_expires_without_a_repost_burst() (
+  local home state corr rec n=0 expired=0 hook_log
+  home=$(setup_parent old-backlog)
+  state="$home/state"
+  hook_log="$TMP_ROOT/old-backlog-hook.log"
+  : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+  export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+  unset FM_PENDING_REPLY_NOW FM_PENDING_REPLY_MAX_AGE_SECS FM_PENDING_REPLY_REPOST_CAP
+  # Three days old: far past the default 6 h cutoff.
+  local created=1000000
+  local -a corrs=()
+  while IFS= read -r corr; do corrs+=("$corr"); done \
+    < <(seed_due_backlog "$home" "$state" hibit 30 "$created")
+  [ "${#corrs[@]}" = 30 ] || fail "fixture should seed 30 records, got ${#corrs[@]}"
+  export FM_PENDING_REPLY_NOW=$((created + 3 * 86400))
+  fm_pending_reply_tick "$state"
+  [ ! -s "$hook_log" ] || fail "no repost may go out for old records: $(wc -l < "$hook_log") sent"
+  for corr in "${corrs[@]}"; do
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    [ -f "$rec" ] || fail "an expired record must stay as the durable trace"
+    n=$((n + 1))
+    [ "$(phase_of "$state" "$corr")" = resolved ] || fail "old record $corr should be closed, got $(phase_of "$state" "$corr")"
+    [ "$(fm_pending_reply_get "$rec" resolved_via)" = expired-unanswered ] \
+      || fail "old record $corr should record resolved_via=expired-unanswered"
+    [ -n "$(fm_pending_reply_get "$rec" resolved_epoch)" ] || fail "an expired record needs resolved_epoch"
+    expired=$((expired + 1))
+  done
+  [ "$expired" = 30 ] || fail "all 30 old records should expire, got $expired of $n"
+  # A second pass changes nothing and still sends nothing.
+  fm_pending_reply_tick "$state"
+  [ ! -s "$hook_log" ] || fail "a second pass must not repost either"
+  pass "30 old unanswered requests expire as expired-unanswered with no repost"
+)
+
+# Reposts for one task are capped per window: a backlog of recent requests
+# drains a few at a time instead of ringing the inbox all at once, and each
+# record still gets its one repost.
+# Fixture overrides are scoped to this isolated subshell.
+# shellcheck disable=SC2030,SC2031
+test_repost_cap_spreads_a_recent_backlog_over_windows() (
+  local home state corr hook_log sent created=1000000 w
+  home=$(setup_parent repost-cap)
+  state="$home/state"
+  hook_log="$TMP_ROOT/repost-cap-hook.log"
+  : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+  export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+  unset FM_PENDING_REPLY_REPOST_CAP FM_PENDING_REPLY_REPOST_WINDOW_SECS FM_PENDING_REPLY_MAX_AGE_SECS
+  seed_due_backlog "$home" "$state" hibit 30 "$created" > /dev/null
+  # One hour old: inside the age cutoff, so every record is due for a repost.
+  export FM_PENDING_REPLY_NOW=$((created + 3600))
+  fm_pending_reply_tick "$state"
+  sent=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$sent" = 3 ] || fail "first window must repost exactly the cap (3), got $sent"
+  fm_pending_reply_tick "$state"
+  sent=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$sent" = 3 ] || fail "a second pass in the same window must add nothing, got $sent"
+  export FM_PENDING_REPLY_NOW=$((created + 3600 + 599))
+  fm_pending_reply_tick "$state"
+  sent=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$sent" = 3 ] || fail "one second before the window ends must still add nothing, got $sent"
+  for w in 1 2; do
+    export FM_PENDING_REPLY_NOW=$((created + 3600 + 600 * w))
+    fm_pending_reply_tick "$state"
+    sent=$(wc -l < "$hook_log" | tr -d ' ')
+    [ "$sent" = $((3 + 3 * w)) ] || fail "window $w must add exactly 3 more, got total $sent"
+  done
+  # Another task is counted on its own: the cap is per mate.
+  corr=$(FM_PENDING_REPLY_NOW=$((created + 3600)) fm_pending_reply_create "$home" "$state" other "other mate")
+  FM_PENDING_REPLY_NOW=$((created + 3600)) fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_set "$(fm_pending_reply_path "$state" "$corr")" request_turn_completed_epoch "$created"
+  fm_pending_reply_tick "$state"
+  grep -q "^other	" "$hook_log" || fail "another mate's repost must not share this mate's cap"
+  # Nothing is ever reposted twice.
+  [ "$(cut -f2 "$hook_log" | sort | uniq -d | wc -l | tr -d ' ')" = 0 ] \
+    || fail "a record was reposted more than once"
+  pass "recovery reposts are capped per mate and window, one repost per record"
+)
+
+# The cutoff never discards an answer, and a request inside it is untouched.
+# Fixture overrides are scoped to this isolated subshell.
+# shellcheck disable=SC2030,SC2031
+test_age_cutoff_keeps_answers_and_fresh_requests() (
+  local home state old fresh rec hook_log created=1000000
+  home=$(setup_parent age-cutoff)
+  state="$home/state"
+  hook_log="$TMP_ROOT/age-cutoff-hook.log"
+  : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  recovery_hook() { printf '%s\t%s\n' "$1" "$2" >> "$hook_log"; }
+  export FM_PENDING_REPLY_SEND_HOOK=recovery_hook
+  unset FM_PENDING_REPLY_MAX_AGE_SECS FM_PENDING_REPLY_REPOST_CAP
+  old=$(seed_due_backlog "$home" "$state" hibit 1 "$created")
+  fresh=$(seed_due_backlog "$home" "$state" other 1 $((created + 70000)))
+  # The old request has a correlated report in the mate's status log.
+  printf 'done [at=%s]: report corr=%s\n' "$created" "$old" > "$state/hibit.status"
+  fm_pending_reply_set "$(fm_pending_reply_path "$state" "$old")" parent_status "$state/hibit.status"
+  export FM_PENDING_REPLY_NOW=$((created + 86400))
+  fm_pending_reply_tick "$state"
+  rec=$(fm_pending_reply_path "$state" "$old")
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
+    || fail "a correlated report must resolve as an answer, not expire (via=$(fm_pending_reply_get "$rec" resolved_via))"
+  # 70000 s old is under the 21600 s cutoff only if measured from its own age.
+  rec=$(fm_pending_reply_path "$state" "$fresh")
+  [ "$(phase_of "$state" "$fresh")" = recovery_sent ] \
+    || fail "a request inside the cutoff must still get its one repost, got $(phase_of "$state" "$fresh")"
+  [ -z "$(fm_pending_reply_get "$rec" resolved_via)" ] || fail "a fresh request must not be expired"
+  # Cutoff 0 turns expiry off.
+  export FM_PENDING_REPLY_MAX_AGE_SECS=0
+  old=$(seed_due_backlog "$home" "$state" third 1 "$created")
+  fm_pending_reply_tick "$state"
+  [ "$(phase_of "$state" "$old")" = recovery_sent ] || fail "cutoff 0 must keep the repost, got $(phase_of "$state" "$old")"
+  pass "the age cutoff yields to a correlated answer and leaves fresh requests alone"
+)
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2315,5 +2456,8 @@ test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
+test_old_backlog_expires_without_a_repost_burst || exit 1
+test_repost_cap_spreads_a_recent_backlog_over_windows || exit 1
+test_age_cutoff_keeps_answers_and_fresh_requests || exit 1
 
 printf 'ok - all pending-reply tests passed\n'

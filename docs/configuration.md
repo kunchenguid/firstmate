@@ -4188,6 +4188,9 @@ FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing 
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after the request turn completes without a correlated parent report before its one recovery repost is eligible, and after the recovery turn completes before the missed-report escalation is eligible; never counted from delivery
+FM_PENDING_REPLY_MAX_AGE_SECS=21600   # a still-unanswered request older than this (from its creation) is never reposted: it closes with resolved_via=expired-unanswered and its record is kept; 0 disables the cutoff
+FM_PENDING_REPLY_REPOST_CAP=3         # most recovery reposts one mate may start per window, so a backlog cannot flood one inbox; the rest stay due for the next window; 0 disables the cap
+FM_PENDING_REPLY_REPOST_WINDOW_SECS=600   # length of that repost window
 # sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
 FM_SUPERVISOR_BACKEND=             # optional supervisor endpoint backend override; see "Away-mode supervisor backend" for supported backends and detection
 FM_SUPERVISOR_TARGET=              # optional supervisor endpoint target override; tmux uses the exact forms owned by fm_backend_target_exists in bin/fm-backend.sh, herdr uses <session>:<pane-id>, t3code uses the thread id, otherwise auto-detected
