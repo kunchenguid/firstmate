@@ -192,6 +192,7 @@ While a signal or stale prompt is open, `fm_branch_report` accepts only the task
 A report for any other task id, `fleet` included, is refused before the store is touched.
 That way, a task remembered from an earlier wake cannot become a delivered outcome.
 A heartbeat review is not scoped by task.
+When the claimed rows resolve to exactly one task, the `task` argument may be omitted and defaults to it.
 
 The branch's guarded commands never tell it to drain queued rows mid-handling.
 For that actor, `bin/fm-guard.sh` keeps the queued-wakes warning silent.
