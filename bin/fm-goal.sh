@@ -829,6 +829,7 @@ _fm_goal_fold_reset() {
   FM_GOAL_FOLD_LAST_AT=''
   FM_GOAL_FOLD_LAST_OWNER=''
   FM_GOAL_UNPLANNED_IDS=();FM_GOAL_UNPLANNED_STATES=(); FM_GOAL_UNPLANNED_ATS=()
+  _fm_goal_merged_forget
   FM_GOAL_MERGED_TASKS=(); FM_GOAL_MERGED_ATS=()
 }
 
@@ -919,6 +920,27 @@ _fm_goal_fold_goal_line() {  # <line> <goal-id> <now> <owner>
   _fm_goal_fold_apply_mark "$goal" "$item" "$state" "$at" "$task" "${note# }" "$now" "$owner" "$stage"
 }
 
+# The name of the variable holding <key>'s position in FM_GOAL_MERGED_TASKS, set in
+# _FM_GOAL_MERGED_VAR. A key is id-valid (letters, digits, dot, underscore, dash),
+# and each of the three non-alphanumeric bytes is escaped so distinct keys never
+# share a name.
+_fm_goal_merged_var() {  # <key>
+  local enc=$1
+  enc=${enc//_/_5f}
+  enc=${enc//./_2e}
+  enc=${enc//-/_2d}
+  _FM_GOAL_MERGED_VAR=_FM_GOAL_MIDX_$enc
+}
+
+# Drop every position variable the current fold recorded.
+_fm_goal_merged_forget() {
+  local key
+  for key in ${FM_GOAL_MERGED_TASKS[@]+"${FM_GOAL_MERGED_TASKS[@]}"}; do
+    _fm_goal_merged_var "$key"
+    unset "$_FM_GOAL_MERGED_VAR"
+  done
+}
+
 # Track a done [key=merged-<task>] landing line in an owner stream.
 _fm_goal_fold_landing_line() {  # <line>
   local line=$1 key='' at_epoch token head rest verb i
@@ -943,16 +965,19 @@ _fm_goal_fold_landing_line() {  # <line>
   _fm_status_at_epoch "$line" at_epoch || return 0
   case "$at_epoch" in ''|*[!0-9]*) return 0 ;; esac
   [ "$at_epoch" -le $((_FM_GOAL_FOLD_NOW + _FM_GOAL_MARK_FUTURE_TOLERANCE)) ] || return 0
-  i=0
-  while [ "$i" -lt "${#FM_GOAL_MERGED_TASKS[@]}" ]; do
-    if [ "${FM_GOAL_MERGED_TASKS[$i]}" = "$key" ]; then
-      [ "$at_epoch" -le "${FM_GOAL_MERGED_ATS[i]}" ] || FM_GOAL_MERGED_ATS[i]=$at_epoch
-      return 0
-    fi
-    i=$((i + 1))
-  done
-  FM_GOAL_MERGED_TASKS[${#FM_GOAL_MERGED_TASKS[@]}]=$key
-  FM_GOAL_MERGED_ATS[${#FM_GOAL_MERGED_ATS[@]}]=$at_epoch
+  # Each recorded task keeps its position in a variable named after its key, so a
+  # task already seen is found by one lookup instead of a walk over every task
+  # recorded so far (a long log carries thousands of landing lines).
+  _fm_goal_merged_var "$key"
+  i=${!_FM_GOAL_MERGED_VAR:-}
+  if [ -n "$i" ]; then
+    [ "$at_epoch" -le "${FM_GOAL_MERGED_ATS[i]}" ] || FM_GOAL_MERGED_ATS[i]=$at_epoch
+    return 0
+  fi
+  i=${#FM_GOAL_MERGED_TASKS[@]}
+  FM_GOAL_MERGED_TASKS[i]=$key
+  FM_GOAL_MERGED_ATS[i]=$at_epoch
+  printf -v "$_FM_GOAL_MERGED_VAR" '%s' "$i"
   return 0
 }
 
@@ -969,15 +994,25 @@ _fm_goal_owner_stream() {  # <state-dir> <data-dir> <owner>
 }
 
 _fm_goal_fold_stream() {  # <state> <data> <owner> <id> <now>
-  local state=$1 data=$2 owner=$3 id=$4 now=$5 path line rc
+  local state=$1 data=$2 owner=$3 id=$4 now=$5 path line rc candidates
   path=$(_fm_goal_owner_stream "$state" "$data" "$owner") || return 0
+  # An owner stream is a whole task log, and walking every line through the two
+  # line parsers below cost seconds per brief on a large fleet. A line can only
+  # matter to them when it opens with the goal verb (a `goal` word, or the whole
+  # line) or carries a merged-landing key token, so one grep pass keeps exactly
+  # those lines, in file order, and the parsers still decide what each one means.
+  # NUL bytes are dropped first because the read loop drops them too.
+  candidates=$(LC_ALL=C tr -d '\000' < "$path" 2>/dev/null \
+    | LC_ALL=C grep -a -e '^goal\( \|$\)' -e '\[key=merged-' 2>/dev/null)
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     _fm_goal_fold_goal_line "$line" "$id" "$now" "$owner"
     rc=$?
     [ "$rc" -ne 1 ] || FM_GOAL_FOLD_IGNORED=$((FM_GOAL_FOLD_IGNORED + 1))
     _fm_goal_fold_landing_line "$line"
-  done < "$path"
+  done <<EOF
+$candidates
+EOF
   return 0
 }
 

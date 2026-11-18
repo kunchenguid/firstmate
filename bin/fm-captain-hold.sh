@@ -152,6 +152,9 @@
 # of the same task starts a new lifecycle the stop does not cover.
 # `defaults-due` lists due calls as
 # `<task-id>\t<deadline>\t<value>\t<label>\t<close>\t<title>` and changes nothing.
+# It keeps what the backlog says about each pending default in state/.defaults-due-cache
+# (keyed on the backlog, its backend and these scripts, so any change rereads it) and
+# reads the clock live, so a default still comes due at its instant.
 # `answer --deadline-default` is the only way to apply one: it rechecks that the
 # call is due, generates the words itself, and records them through the same
 # guarded answer path under a label that says they are not the captain's. It uses
@@ -2672,27 +2675,110 @@ EOF
   done
 }
 
+# `defaults-due` runs on every wake, and reading each open captain call costs one
+# backlog-backend process, so what the backlog says about each pending default is
+# kept in $STATE/.defaults-due-cache between runs. The cache holds only what the
+# records themselves say (every call carrying a pending default, with its clock),
+# keyed on a checksum of the backlog file, its backend config, the backend binary
+# and the scripts that read a call; the clock is still read live, so a default
+# comes due at its instant whatever the cache holds.
+DEFAULTS_DUE_CACHE_VERSION=1
+DEFAULTS_DUE_SEP=$'\037'
+# Far past any real deadline: asks deadline_default_due for every pending default
+# regardless of the clock, so the candidate list does not depend on it.
+DEFAULTS_DUE_ANY_TIME=9999-12-31T23:59:59Z
+
+# Sets DEFAULTS_DUE_CACHE_KEY, or fails when this home's backlog is not a plain
+# markdown file this script can checksum (the read then goes uncached).
+defaults_due_cache_key() {
+  local data sums tasks_axi
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  fm_backlog_tasks_axi_addressing "$data" || return 1
+  [ -n "$FM_BACKLOG_AXI_FILE" ] && [ -f "$FM_BACKLOG_AXI_FILE" ] || return 1
+  tasks_axi=$(command -v tasks-axi) || return 1
+  sums=$(LC_ALL=C cksum "$FM_BACKLOG_AXI_FILE" "$FM_BACKLOG_AXI_ROOT/.tasks.toml" "$tasks_axi" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" "$SCRIPT_DIR/fm-captain-question-context.jq" 2>/dev/null | tr '\n' ' ') || return 1
+  [ -n "$sums" ] || return 1
+  DEFAULTS_DUE_CACHE_KEY="v$DEFAULTS_DUE_CACHE_VERSION $sums"
+}
+
+# Print one row per open captain call that carries a pending default, whatever the
+# clock says: id, hold-until gate, due instant, date, value, label, close, title,
+# separated by DEFAULTS_DUE_SEP (a byte no field can hold, so an empty gate or
+# title keeps its place). Fails, leaving nothing worth caching, when the open
+# calls cannot be listed or any one of them cannot be read.
+defaults_due_candidates() {
+  local ids id pending complete=0 hold_until due_at date value label close title
+  ids=$(open_captain_task_ids) || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    task_show "$id" || { complete=1; continue; }
+    pending=$(deadline_default_due "$TASK_SHOW_OUTPUT" "$DEFAULTS_DUE_ANY_TIME") || continue
+    hold_until=$(show_field_value "$TASK_SHOW_OUTPUT" hold_until)
+    due_at=$(printf '%s' "$pending" | jq -r .due_at)
+    date=$(printf '%s' "$pending" | jq -r .date)
+    value=$(printf '%s' "$pending" | jq -r .value)
+    label=$(sanitize_field "$(printf '%s' "$pending" | jq -r .label)")
+    close=$(printf '%s' "$pending" | jq -r .close)
+    title=$(sanitize_field "$(show_field_value "$TASK_SHOW_OUTPUT" title)")
+    printf '%s\n' "$id$DEFAULTS_DUE_SEP$hold_until$DEFAULTS_DUE_SEP$due_at$DEFAULTS_DUE_SEP$date$DEFAULTS_DUE_SEP$value$DEFAULTS_DUE_SEP$label$DEFAULTS_DUE_SEP$close$DEFAULTS_DUE_SEP$title"
+  done <<EOF
+$ids
+EOF
+  [ "$complete" -eq 0 ]
+}
+
+# Print the rows of <candidates> that are due at <now> in the report format, with
+# the same two gates deadline_default_due applies: the captain's own date gate and
+# the deadline instant.
+defaults_due_report() {  # <now> <candidates>
+  local now=$1 today=${1%%T*} row id hold_until due_at date value label close title
+  while IFS=$DEFAULTS_DUE_SEP read -r id hold_until due_at date value label close title; do
+    [ -n "$id" ] || continue
+    case "$hold_until" in
+      ''|-) : ;;
+      *) if [[ "$hold_until" > "$today" ]]; then continue; fi ;;
+    esac
+    # shellcheck disable=SC2310 # A deadline later than now is simply not due.
+    if (LC_ALL=C; [[ "$due_at" > "$now" ]]); then continue; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$date" "$value" "$label" "$close" "$title"
+  done <<EOF
+$2
+EOF
+}
+
 command_defaults_due() {
-  local ids id now pending
+  local now candidates='' cache cached_key key='' have=0 tmp
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   # A read-only listing on a per-wake path, like `diverged`: what it cannot read
   # stays undue, so a default only ever proceeds on a record it read in full.
   command -v tasks-axi >/dev/null 2>&1 || return 0
   require_context_codec
   now=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
-  ids=$(open_captain_task_ids) || return 0
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    task_show "$id" || continue
-    pending=$(deadline_default_due "$TASK_SHOW_OUTPUT" "$now") || continue
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" \
-      "$(printf '%s' "$pending" | jq -r .date)" "$(printf '%s' "$pending" | jq -r .value)" \
-      "$(sanitize_field "$(printf '%s' "$pending" | jq -r .label)")" \
-      "$(printf '%s' "$pending" | jq -r .close)" \
-      "$(sanitize_field "$(show_field_value "$TASK_SHOW_OUTPUT" title)")"
-  done <<EOF
-$ids
-EOF
+  cache="$STATE/.defaults-due-cache"
+  if defaults_due_cache_key; then
+    key=$DEFAULTS_DUE_CACHE_KEY
+    if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -r "$cache" ]; then
+      { IFS= read -r cached_key && [ "$cached_key" = "$key" ] && have=1 && { IFS= read -r -d '' candidates || true; }; } < "$cache" 2>/dev/null || true
+    fi
+  fi
+  if [ "$have" -eq 0 ]; then
+    candidates=$(defaults_due_candidates) || {
+      # Part of the backlog could not be read: report what was readable, as before,
+      # but keep it out of the cache so the next run reads those calls again.
+      defaults_due_report "$now" "$candidates"
+      return 0
+    }
+    if [ -n "$key" ] && [ ! -L "$cache" ]; then
+      tmp="$cache.tmp.$$"
+      if { printf '%s\n' "$key"; [ -z "$candidates" ] || printf '%s\n' "$candidates"; } > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$cache" 2>/dev/null || rm -f "$tmp"
+      else
+        rm -f "$tmp"
+      fi
+    fi
+  fi
+  defaults_due_report "$now" "$candidates"
 }
 
 # Stop this lifecycle's deadline default (see the header). The line goes

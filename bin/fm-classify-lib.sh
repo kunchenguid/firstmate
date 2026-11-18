@@ -1678,9 +1678,23 @@ EOF
 # equal to or behind an already-recorded byte position, and the next call
 # re-derives from whatever offset actually landed on disk.
 _fm_open_decisions_cursor_path() {  # <status-file>
-  local f=$1 dir base
-  dir=${FM_OPEN_DECISIONS_CURSOR_DIR:-$(dirname "$f")}
-  base=$(basename "$f")
+  local f=$1 dir='' base=''
+  # The drain asks for this path once per status file several times over, and a
+  # dirname plus a basename fork each time was a measurable share of it. A path
+  # with a plain directory part and a plain final name takes the expansions
+  # below, which print exactly what dirname and basename print for it; anything
+  # unusual (a root-level name, doubled or trailing slashes) keeps the forks.
+  case "$f" in
+    *//*|*/) ;;
+    /*/*|[!/]*/*) dir=${f%/*} base=${f##*/} ;;
+    /*) ;;
+    ?*) dir=. base=$f ;;
+  esac
+  if [ -z "$dir" ] || [ -z "$base" ]; then
+    dir=$(dirname "$f")
+    base=$(basename "$f")
+  fi
+  dir=${FM_OPEN_DECISIONS_CURSOR_DIR:-$dir}
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
@@ -2030,29 +2044,89 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
+# The fleet presentation manifest, parsed once and kept in these globals. Every
+# per-file cursor lookup used to re-read the manifest and re-walk every row in a
+# bash read loop (a quadratic walk across a large fleet), and the lookups run
+# in command substitutions, so a cache has to be primed in the shell that owns
+# the loop (_fm_cursor_manifest_prime) to reach them through the subshell copy.
+# The cache is keyed on the manifest's own bytes, compared on every lookup, so a
+# manifest replaced or rewritten by anyone is read afresh and never stale.
+_FM_CURSOR_MANIFEST_HAVE=0
+_FM_CURSOR_MANIFEST_RAW=
+_FM_CURSOR_MANIFEST_ROWS=
+_FM_CURSOR_MANIFEST_BAD=0
+
+# Load <manifest> into the cache when its bytes changed. ROWS holds every row up
+# to the first malformed one as "\n<task>\t<ident>\t<offset>\t<backstop>" (the
+# fields exactly as the tab-separated read below splits them) and BAD records
+# whether a malformed row ended the walk. Fails only when the file cannot be read.
+_fm_cursor_manifest_load() {  # <manifest>
+  local manifest=$1 data="" opened="" row_task ident legacy backstop extra rows="" bad=0
+  { opened=1; IFS= read -r -d '' data; } 2>/dev/null < "$manifest"
+  [ -n "$opened" ] || return 1
+  while :; do
+    case "$data" in *$'\n') data=${data%$'\n'} ;; *) break ;; esac
+  done
+  if [ "$_FM_CURSOR_MANIFEST_HAVE" = 1 ] && [ "$data" = "$_FM_CURSOR_MANIFEST_RAW" ]; then return 0; fi
+  while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
+    [ -n "$row_task" ] || continue
+    if [ -n "$extra" ]; then bad=1; break; fi
+    case "$legacy:$backstop" in *[!0-9:]*) bad=1; break ;; esac
+    if [ -z "$legacy" ] || [ -z "$ident" ]; then bad=1; break; fi
+    rows="$rows"$'\n'"$row_task"$'\t'"$ident"$'\t'"$legacy"$'\t'"$backstop"
+  done <<EOF
+$data
+EOF
+  _FM_CURSOR_MANIFEST_RAW=$data
+  _FM_CURSOR_MANIFEST_ROWS=$rows
+  _FM_CURSOR_MANIFEST_BAD=$bad
+  _FM_CURSOR_MANIFEST_HAVE=1
+}
+
+# Parse the manifest under <state> into the cache from the shell that is about to
+# loop over many status files, so the per-file lookups below reuse it.
+_fm_cursor_manifest_prime() {  # <state>
+  local manifest="$1/.status-presentation-cursor"
+  [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 0
+  _fm_cursor_manifest_load "$manifest" || true
+}
+
+# Find the first row for <task> in the loaded cache: sets _FM_CURSOR_ROW_IDENT,
+# _FM_CURSOR_ROW_OFFSET and _FM_CURSOR_ROW_BACKSTOP, and _FM_CURSOR_ROW_REPEATED to 1
+# when a later row names the same task. Fails when no row does.
+_fm_cursor_manifest_row() {  # <task>
+  local task=$1 key before after rest
+  _FM_CURSOR_ROW_REPEATED=0
+  key=$'\n'"$task"$'\t'
+  case "$_FM_CURSOR_MANIFEST_ROWS" in *"$key"*) ;; *) return 1 ;; esac
+  # Cut at the first row start for <task>. A longest-suffix removal runs one
+  # linear scan; the shortest-prefix form (${rows#*$key}) retries every prefix
+  # and cost milliseconds per lookup on a large fleet's manifest.
+  before=${_FM_CURSOR_MANIFEST_ROWS%%"$key"*}
+  after=${_FM_CURSOR_MANIFEST_ROWS:$((${#before} + ${#key}))}
+  case "$after" in *"$key"*) _FM_CURSOR_ROW_REPEATED=1 ;; esac
+  rest=${after%%$'\n'*}
+  _FM_CURSOR_ROW_IDENT=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+  _FM_CURSOR_ROW_OFFSET=${rest%%$'\t'*}
+  _FM_CURSOR_ROW_BACKSTOP=${rest#*$'\t'}
+}
+
 status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
+  local f=$1 state task manifest offset ident cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
   manifest="$state/.status-presentation-cursor"
   if [ -e "$manifest" ] || [ -L "$manifest" ]; then
     [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
-    data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
+    _fm_cursor_manifest_load "$manifest" || return 1
+    [ "$_FM_CURSOR_MANIFEST_BAD" = 0 ] || return 1
     offset=
-    while IFS=$(printf '\t') read -r row_task ident legacy backstop extra; do
-      [ -n "$row_task" ] || continue
-      [ -z "$extra" ] || return 1
-      case "$legacy:$backstop" in *[!0-9:]*) return 1 ;; esac
-      [ -n "$legacy" ] && [ -n "$ident" ] || return 1
-      if [ "$row_task" = "$task" ]; then
-        [ -z "$offset" ] || return 1
-        offset=$legacy
-        cur_ident=$ident
-      fi
-    done <<EOF
-$data
-EOF
+    if _fm_cursor_manifest_row "$task"; then
+      [ "$_FM_CURSOR_ROW_REPEATED" = 0 ] || return 1
+      offset=$_FM_CURSOR_ROW_OFFSET
+      cur_ident=$_FM_CURSOR_ROW_IDENT
+    fi
     if [ -z "$offset" ]; then
       printf '0'
       return 0
@@ -2075,34 +2149,29 @@ EOF
 }
 
 status_outcome_backstop_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task ident presented row_backstop backstop extra current size
+  local f=$1 state task manifest ident backstop current size
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
   manifest="$state/.status-presentation-cursor"
   [ -e "$manifest" ] || { printf '0'; return 0; }
   [ -f "$manifest" ] && [ -r "$manifest" ] && [ ! -L "$manifest" ] || return 1
-  data=$(LC_ALL=C command cat "$manifest" 2>/dev/null) || return 1
-  backstop=0
-  while IFS=$(printf '\t') read -r row_task ident presented row_backstop extra; do
-    [ -n "$row_task" ] || continue
-    [ -z "$extra" ] || return 1
-    case "$presented:$row_backstop" in *[!0-9:]*) return 1 ;; esac
-    [ -n "$presented" ] && [ -n "$ident" ] || return 1
-    if [ "$row_task" = "$task" ]; then
-      _fm_status_read_ident_size "$f" || return 1
-      current=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
-      case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$ident" = "$current" ] || { printf '0'; return 0; }
-      backstop=${row_backstop:-0}
-      [ "$backstop" -le "$size" ] || backstop=0
-      printf '%s' "$backstop"
-      return 0
-    fi
-  done <<EOF
-$data
-EOF
-  printf '0'
+  _fm_cursor_manifest_load "$manifest" || return 1
+  # The walk stops at the first row naming this task, so a malformed row only
+  # fails the lookup when it comes before that row (or when none matches).
+  if ! _fm_cursor_manifest_row "$task"; then
+    [ "$_FM_CURSOR_MANIFEST_BAD" = 0 ] || return 1
+    printf '0'
+    return 0
+  fi
+  ident=$_FM_CURSOR_ROW_IDENT
+  _fm_status_read_ident_size "$f" || return 1
+  current=$_FM_STAT_IDENTITY size=${_FM_STAT_SIZE//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$ident" = "$current" ] || { printf '0'; return 0; }
+  backstop=${_FM_CURSOR_ROW_BACKSTOP:-0}
+  [ "$backstop" -le "$size" ] || backstop=0
+  printf '%s' "$backstop"
 }
 
 status_signal_seen_marker_path() {  # <state> <task-id>
@@ -2347,6 +2416,7 @@ EOF
 
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
   local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
+  _fm_cursor_manifest_prime "$state"
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     safe=false
@@ -2383,6 +2453,7 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f cur_ident size tmp backstop acknowledged_task acknowledged_endpoint
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
+  _fm_cursor_manifest_prime "$state"
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     case "$endpoint" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
@@ -2557,10 +2628,20 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
 status_line_is_unread_surface() {  # <status-line>
   local line=$1 verb key note resolve held prefix
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
-  [ "$verb" = note ] && return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  # This runs once per unread line of every task, and nearly every line is
+  # neither a note nor a reserved-key resolution. The verb is made of the line's
+  # own words, so a line holding none of the three verbs cannot have one of them
+  # as its verb. A verb name with whitespace in it could match across a collapsed
+  # run of spaces, so those keep the full check.
+  case "$resolve$held" in
+    *[[:space:]]*) ;;
+    *) case "$line" in *note*|*"$resolve"*|*"$held"*) ;; *) return 1 ;; esac ;;
+  esac
+  # Take the verb without forking a command substitution for the same reason.
+  status_line_verb "$line" verb
+  [ "$verb" = note ] && return 0
   case "$verb" in
     "$resolve"|"$held") ;;
     *) return 1 ;;
@@ -2585,6 +2666,7 @@ status_line_is_unread_surface() {  # <status-line>
 scan_unread_surface_lines() {  # <state>
   local state=$1 f task lines line exclude
   exclude=$(status_scan_parent_channel_exclude "$state")
+  _fm_cursor_manifest_prime "$state"
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
@@ -2604,6 +2686,7 @@ EOF
 
 scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
   local state=$1 snapshot=$2 task endpoint ident f lines line
+  _fm_cursor_manifest_prime "$state"
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"

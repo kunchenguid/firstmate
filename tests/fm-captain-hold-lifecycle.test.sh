@@ -5615,6 +5615,66 @@ hold_default() {  # <home> <id> [<extra hold args...>]
     --category captain-only-fact --reason "Choose go or wait" --repo sample --context-file "$home/context.json" "$@" >/dev/null
 }
 
+# `defaults-due` keeps what the backlog says about each pending default between
+# runs, but never the clock and never a partial read.
+test_defaults_due_cache_serves_the_live_clock_and_follows_the_backlog() {
+  (
+    local home cache fakebin due key sep
+    home=$(make_home default-cache)
+    cache="$home/state/.defaults-due-cache"
+    sep=$'\037'
+    default_context "$home" "$DEFAULT_OK"
+    hold_default "$home" sample-cache || fail "eligible default refused"
+
+    # A backend read that fails halfway must leave no cache behind, or the call
+    # it could not read would stay invisible until the backlog next changed.
+    fakebin="$home/fakebin"
+    cat > "$fakebin/tasks-axi" <<SHIM
+#!/usr/bin/env bash
+case "\$1" in show) exit 3 ;; esac
+exec "$TASKS_AXI_BIN" "\$@"
+SHIM
+    chmod +x "$fakebin/tasks-axi"
+    due=$(FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z run_captain "$home" defaults-due) || fail "defaults-due failed"
+    [ -z "$due" ] || fail "an unreadable call was listed: $due"
+    [ ! -e "$cache" ] || fail "a partial read was cached"
+    rm -f "$fakebin/tasks-axi"
+
+    # A whole read is cached, and the clock is still read live from it.
+    due=$(FM_CAPTAIN_HOLD_NOW=2026-08-01T23:59:59Z run_captain "$home" defaults-due) || fail "defaults-due failed"
+    [ -z "$due" ] || fail "default came due before its date: $due"
+    [ -s "$cache" ] || fail "a whole read was not cached"
+    due=$(FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z run_captain "$home" defaults-due) || fail "defaults-due failed"
+    [ "$due" = "$(printf 'sample-cache\t2026-08-01\tgo\tGo live\tdone\tPick the wording')" ] \
+      || fail "the cached default did not come due with the clock: $due"
+
+    # Rows come from the cache while the backlog is unchanged ...
+    key=$(sed -n 1p "$cache")
+    {
+      printf '%s\n' "$key"
+      printf '%s\n' "cached-only${sep}${sep}2026-01-01T00:00:00Z${sep}2026-01-01${sep}go${sep}Go live${sep}done${sep}From the cache"
+    } > "$cache"
+    due=$(FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z run_captain "$home" defaults-due) || fail "defaults-due failed"
+    [ "$due" = "$(printf 'cached-only\t2026-01-01\tgo\tGo live\tdone\tFrom the cache')" ] \
+      || fail "an unchanged backlog was read again instead of served from the cache: $due"
+    # ... and a captain's date gate on a cached row still defers it.
+    {
+      printf '%s\n' "$key"
+      printf '%s\n' "gated${sep}2030-01-01${sep}2026-01-01T00:00:00Z${sep}2026-01-01${sep}go${sep}Go live${sep}done${sep}Gated"
+    } > "$cache"
+    due=$(FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z run_captain "$home" defaults-due) || fail "defaults-due failed"
+    [ -z "$due" ] || fail "a cached row ignored its date gate: $due"
+
+    # Any backlog change discards the cache and reads the records again.
+    default_context "$home" "$DEFAULT_OK"
+    hold_default "$home" sample-second || fail "second eligible default refused"
+    due=$(FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z run_captain "$home" defaults-due) || fail "defaults-due failed"
+    [ "$(printf '%s\n' "$due" | cut -f1 | sort | tr '\n' ' ')" = 'sample-cache sample-second ' ] \
+      || fail "a changed backlog was not read afresh: $due"
+    pass "defaults-due caches only what the records say, serves the live clock, and rereads a changed or partly unreadable backlog"
+  ) || exit 1
+}
+
 test_deadline_default_refuses_ineligible_calls() {
   (
     local home patch expected
@@ -5938,6 +5998,7 @@ test_structured_context_keeps_origin_and_encoded_reason() {
 
 test_deadline_default_refuses_ineligible_calls
 test_deadline_default_due_and_applied_as_not_the_captains_words
+test_defaults_due_cache_serves_the_live_clock_and_follows_the_backlog
 test_captain_answer_wins_over_deadline_default
 test_deadline_default_respects_deferral_release_and_stored_rules
 test_hour_default_comes_due_on_the_minute_and_is_labelled

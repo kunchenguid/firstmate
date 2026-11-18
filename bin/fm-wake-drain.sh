@@ -440,6 +440,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   fi
 
   STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
+  _fm_cursor_manifest_prime "$STATE"
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     receipt=$(status_outcome_backstop_cursor_offset "$STATE/$task.status") || { rc=1; break; }

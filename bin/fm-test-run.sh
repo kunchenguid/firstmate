@@ -323,6 +323,7 @@ family_for_basename() {
     fm-parent-channel-scan-exclusion.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
+    fm-wake-drain-pass-equivalence.test.sh|\
     fm-tool-update-check.test.sh|fm-claude-admission.test.sh|fm-home-identity.test.sh|\
     fm-mail.test.sh|fm-mail-check.test.sh|\
     fm-turnend-foreign-owner-arm-fix.test.sh|\
@@ -1029,6 +1030,7 @@ tests/fm-wake-drain-goal.test.sh 50000
 tests/fm-wake-drain-open-decisions-cursor.test.sh 47677
 tests/fm-wake-drain-open-decisions.test.sh 8781
 tests/fm-wake-drain-outcome-backstop.test.sh 46316
+tests/fm-wake-drain-pass-equivalence.test.sh 70000
 tests/fm-wake-drain-unread-status.test.sh 35078
 tests/fm-wake-queue.test.sh 165906
 tests/fm-warm-compact-herdr-live-e2e.test.sh 170
