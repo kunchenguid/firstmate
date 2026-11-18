@@ -306,7 +306,7 @@ test_real_drain_presents_a_buried_decision_from_a_multi_megabyte_log() {
 # not leave its scratch chunk in the drain-owned state dir, so the read-only
 # caller points the fold at a scratch dir it owns and cleans.
 test_read_only_fold_keeps_scratch_out_of_state_dir() {
-  local dir state status scratch reader cursor open pid waited leaked
+  local dir state status scratch reader reader_pid_file reader_pid cursor open pid waited leaked
 
   dir=$(make_case readonly-fold-scratch)
   state="$dir/state"
@@ -334,29 +334,40 @@ test_read_only_fold_keeps_scratch_out_of_state_dir() {
   # the snapshot's deadline; the scratch chunk it is writing must already be
   # in the caller-owned scratch dir, not beside the cursor.
   reader="$dir/slow-reader.sh"
+  reader_pid_file="$dir/slow-reader.pid"
   cat > "$reader" <<'SH'
 #!/usr/bin/env bash
 printf 'needs-decision [key=partial]: a fold caught mid-read\n'
+printf '%s\n' "$$" > "${FM_TEST_READER_PID_FILE:?}"
 exec sleep 600
 SH
   chmod +x "$reader"
   FM_STATUS_SPAN_READER="$reader" FM_OPEN_DECISIONS_READONLY=1 \
     FM_OPEN_DECISIONS_SCRATCH_DIR="$scratch" \
+    FM_TEST_READER_PID_FILE="$reader_pid_file" \
     status_open_decisions_incremental "$status" > /dev/null 2>&1 &
   pid=$!
-  # The chunk appears as soon as the fold opens its span read, but a loaded
-  # host can delay that background subshell by well over ten seconds; wait on a
-  # generous wall-clock deadline (the stub reader sleeps longer than this) so
-  # host load cannot expire the wait before the chunk exists.
+  # Wait for the reader to announce itself rather than polling for the scratch
+  # chunk: the chunk is transient if the reader exits early, and catching it in
+  # that window would make this test flaky. A live reader pid proves the fold is
+  # genuinely parked mid-read with its chunk open.
   waited=$SECONDS
-  while [ -z "$(find "$scratch" -name '*.read.*' 2>/dev/null)" ] \
-    && [ -z "$(find "$state" -name '*.read.*' 2>/dev/null)" ] \
-    && [ $((SECONDS - waited)) -lt 120 ]; do
+  while [ ! -s "$reader_pid_file" ] && [ $((SECONDS - waited)) -lt 120 ]; do
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.2
   done
+  [ -s "$reader_pid_file" ] \
+    || fail "the slow span reader never started, so the fold was not caught mid-read"
+  reader_pid=$(cat "$reader_pid_file")
+  kill -0 "$reader_pid" 2>/dev/null \
+    || fail "the slow span reader exited before the fold could be killed mid-read"
+  [ -n "$(find "$scratch" -name '*.read.*')" ] \
+    || fail "the read-only fold never wrote its scratch chunk into the caller-owned scratch dir"
   leaked=$(find "$state" -name '*.read.*')
-  pkill -P "$pid" 2>/dev/null || :
+  # Kill the fold first so it cannot clean up its scratch chunk on the way out;
+  # then reap the reader it was blocked on.
   kill -KILL "$pid" 2>/dev/null || :
+  kill -KILL "$reader_pid" 2>/dev/null || :
   wait "$pid" 2>/dev/null || :
   [ -z "$leaked" ] \
     || fail "the read-only fold wrote its scratch chunk into the drain-owned state dir: $leaked"

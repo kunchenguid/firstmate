@@ -6,6 +6,7 @@ description: >-
   `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake, on a
   `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a
   `check: change-watch <task-id> <pr-url> unmeasurable (<reason>)` wake, on a
+  `check: change-watch <task-id> <pr-url|claim> absent (<reason>)` wake, on a
   `procevent when-cw-... <sequence>` completion wake for an armed change watch,
   or when deciding whether a merged change needs a by-effect watch.
   Owns how a regression is read, routed, and closed, what a clean completion
@@ -17,7 +18,7 @@ metadata:
 
 # change-watch
 
-Load this on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a `check: change-watch <task-id> <pr-url> unmeasurable (<reason>)` wake, on a `procevent when-cw-<hash> <sequence>` completion wake, or when deciding whether a merged change needs a by-effect watch.
+Load this on a `check: change-watch <task-id> <pr-url> <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> beta <metric> regressed` wake, on a `check: change-watch <task-id> <pr-url> interrupted at +Nm` wake, on a `check: change-watch <task-id> <pr-url> unmeasurable (<reason>)` wake, on a `check: change-watch <task-id> <pr-url|claim> absent (<reason>)` wake, on a `procevent when-cw-<hash> <sequence>` completion wake, or when deciding whether a merged change needs a by-effect watch.
 
 ## What the watch is
 
@@ -89,6 +90,18 @@ It is the one change-watch outcome that is captain-facing, because it means a re
 4. Escalate to the captain with the service, the reason, and what is unverified - this is the case the watch exists to make loud.
 5. Acknowledge the wake through the ordinary `check` acknowledgement.
 
+## Handling an absent wake
+
+`check: change-watch <task-id> <pr-url|claim> absent (<reason>)`
+
+Absent is a FAILURE: the change is not on the live surface, so the done claim is false.
+For a merge watch the deploy run carrying the merge failed, and the owning task has already been steered with that; for a claim row the task's acceptance probe still did not pass at its last reading.
+1. Read the row at `state/change-watch/rows/<watch-id>.json` for the readings and, on a claim row, the acceptance binding.
+2. Route it to the owning task, or to a fresh task when that one is gone, to get the change deployed or fixed; a merged PR is not landed while its row reads absent.
+3. Teardown refuses the task until evidence clears the row: re-register a merge watch, or claim again for a claim row, then record a passing reading; never delete the row to clear it.
+4. Escalate to the captain only when the fix needs a decision, with the service and what is not live.
+5. Acknowledge the wake through the ordinary `check` acknowledgement.
+
 ## Handling a completion wake
 
 `procevent when-cw-<hash> <sequence>`
@@ -97,7 +110,7 @@ The armed watch drives itself through `bin/fm-procevent-when.sh`, so its one ter
 Load `process-event-sources` for the `classify` and `handled` mechanics; the adapter commands and the acknowledgement contract are owned there.
 
 - `fired` means the drive ran to the end of its schedule.
-  Read `bin/fm-change-watch.sh verdict <watch-id>`: `change-watch clean` is the clean +12h completion, `change-watch unmeasurable-with-reason: <reason>` means the schedule ended without the evidence a clean verdict needs and the change is unverified by effect, and a `regressed ...` line means the check wake above is the real signal.
+  Read `bin/fm-change-watch.sh verdict <watch-id>`: `change-watch clean` is the clean +12h completion, `change-watch unmeasurable-with-reason: <reason>` means the schedule ended without the evidence a clean verdict needs and the change is unverified by effect, an `absent ...` line means the deploy run carrying the merge failed so the change never reached production, and a `regressed ...` line means the check wake above is the real signal.
   An unmeasurable watch is a measurement gap to raise with the owning lane, never a pass, and it has already queued its own check wake.
 - `action-failed`, `condition-error`, `never-true`, `rejected`, or `ambiguous` means the watch stopped without completing its schedule.
   Report what it actually says and re-register through the interruption path above when the verdict is `interrupted at +Nm`; a `rejected` watch is usually one whose script bytes changed under it, and an `ambiguous` one needs its verdict read before anything else.
@@ -111,16 +124,16 @@ A clean completion is not captain-facing news, so never surface it to the captai
 
 ## The durable row and the 7-day acceptance
 
-Every merge writes exactly one row at `state/change-watch/rows/<watch-id>.json`, holding the +15m, +1h and +6h readings, the real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason` (plus `open` while the watch runs, and `not-applicable` for a merge that touched no deployable surface at all; a merge whose surface could not be read is `unmeasurable-with-reason`, never `not-applicable`).
+Every merge writes exactly one row at `state/change-watch/rows/<watch-id>.json`, holding a reading for every scheduled offset, the real-user check, a `deploy` field (`expected`, or `not-applicable` when the diff touched nothing deployable), and a terminal state of `proven`, `regressed`, `absent`, or `unmeasurable-with-reason` (plus `open` while the watch runs, and `not-applicable` for a merge that touched no deployable surface at all; a merge whose surface could not be read is `unmeasurable-with-reason`, never `not-applicable`). `absent` means the deploy run carrying the merge failed, so the change never reached production: a failure, never a regression of the running service; a merge whose diff touches nothing deployable keeps no deploy-workflow target and records `"deploy": "not-applicable"` in its row. A done claim registered before any PR exists writes a `claim` row with a null `pr_url` and its acceptance probe binding (`bin/fm-change-watch.sh claim`; the script's "claim rows" section owns it). `bin/fm-change-watch.sh acceptance <watch-id> <offset-seconds>` re-hashes the bound probe, runs it from `/` under `env -i` with a bounded timeout, and records its exit status; a probe whose bytes changed records 125 without running.
 `state/change-watch/` is not a task record, so `bin/fm-teardown.sh` never removes it and the row outlives the task; the schema is owned by the `durable row` section of `bin/fm-change-watch.sh`.
 `proven` needs all three readings present, every one of them measured, and every target measured at least once; a missing reading is never a pass.
 A reading counts as measured when it scored something, or when everything it could not score was only waiting for the rollout to land - a sample taken before the deploy landed has nothing to read yet, so it is recorded as awaiting rather than as a failed read.
 A watch whose rollout never landed at all still ends unmeasurable, because no target ever scored.
 The real-user check is `observed` when `http_5xx_per_min` - the only metric read from the pods' own access logs - was scored, `not-observed` when it was never scored, and `not-applicable` when the watch has no such target; it is recorded, never a gate on `proven`.
 
-`bin/fm-change-watch.sh gate <task-id>` is the done-claim gate: it exits 0 only when every watch that task registered is terminal and not a measurement gap, so a task cannot claim done while its merge has no evidence.
-`bin/fm-teardown.sh` is the boundary that enforces it: it runs `bin/fm-change-watch.sh gate <task-id> --terminal-gap` on every teardown and REFUSES a task whose watch ended `unmeasurable-with-reason` or `interrupted`, naming the watch, the reason, and the recovery commands (`verdict <watch-id>`, `doctor <watch-id>`, then re-registering once the read path is fixed). Both gate modes decide from the durable row, so deleting a watch's verdict file cannot turn a failing row into a pass, and a row whose merge never created a watch directory is still seen. `not-applicable` is a valid terminal state and passes both modes, so a docs-only merge is never refused. Re-registering a watch that ended unmeasurable reopens its row and re-measures from that point, clearing its samples, previous values and read failures and moving its measurement epoch to the re-registration, so no evidence from before the re-registration can score and the recovery instruction actually clears the refusal. A watch still running does NOT block teardown, because `state/change-watch/` is not a task record: it survives the task and keeps sampling on its own.
-`bin/fm-change-watch.sh audit [<days>]` is the 7-day acceptance, measured: it fails when any status log under `state/` carries the literal `change-watch completed unmeasured` line, or when any row completed inside the window ended `unmeasurable-with-reason`.
+`bin/fm-change-watch.sh gate <task-id>` is the done-claim gate: it exits 0 only when every watch and claim row that task registered is terminal and not a measurement gap, so a task cannot claim done while its merge has no evidence.
+`bin/fm-teardown.sh` is the boundary that enforces it: it runs `bin/fm-change-watch.sh gate <task-id> --terminal-gap` on every teardown and REFUSES a task whose watch ended `unmeasurable-with-reason`, `absent`, or `interrupted`, naming the watch, the reason, and the recovery commands (`verdict <watch-id>`, `doctor <watch-id>`, then re-registering once the read path is fixed). Both gate modes decide from the durable row, so deleting a watch's verdict file cannot turn a failing row into a pass, and a row whose merge never created a watch directory is still seen. `not-applicable` is a valid terminal state and passes both modes, so a docs-only merge is never refused. Re-registering a watch that ended unmeasurable or absent reopens its row and re-measures from that point, clearing its samples, previous values and read failures and moving its measurement epoch to the re-registration, so no evidence from before the re-registration can score and the recovery instruction actually clears the refusal; an absent watch always resets its measurement window, so the next sample reads the deploy run that follows the fix rather than the original failed one. A watch still running does NOT block teardown, because `state/change-watch/` is not a task record: it survives the task and keeps sampling on its own.
+`bin/fm-change-watch.sh audit [<days>]` is the 7-day acceptance, measured: it fails when any status log under `state/` carries the literal `change-watch completed unmeasured` line, or when any row completed inside the window ended `unmeasurable-with-reason` or `absent`.
 The watch is read-only against the cluster; it writes only under the home's `state/change-watch/`, a metric it cannot read is `unmeasured` and skipped rather than scored as a pass, and a relative bar whose baseline was never read is recorded but not scored.
 An unmeasured metric is never left silent: `bin/fm-change-watch.sh doctor <watch-id>` proves each target's own read live - the cluster answering under the kubeconfig in use, a Deployment's pods and their images, a pool through the pooler console, a Sentry project, a mapped workflow's run list - and states each one as `doctor: ok`, `doctor: awaiting` for a deploy that has not landed yet, or `doctor: FAIL` with its reason (unreachable cluster, unreadable kubeconfig, refused login, timed-out console, no row for the database); with no watch id it proves the documented pooler path itself answers.
 It also replays the reason the last sample recorded for every metric it could not read, so "why was nothing measured" is answered with evidence instead of silence.

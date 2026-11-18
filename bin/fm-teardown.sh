@@ -50,7 +50,7 @@
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
 # REFUSES when this task's change watch ended in a measurement gap - a verdict of
-# `unmeasurable-with-reason` or `interrupted` - because cleanup removes the task
+# `unmeasurable-with-reason`, `absent`, or `interrupted` - because cleanup removes the task
 # records that made the gap actionable, and a merge whose watch measured nothing
 # has no evidence it was safe. This is the enforcement boundary for the done
 # claim: it consults `bin/fm-change-watch.sh gate <task-id> --terminal-gap` on
