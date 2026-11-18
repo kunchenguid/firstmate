@@ -36,6 +36,9 @@ config/backend  runtime session-provider backend override for new tasks; LOCAL, 
 config/t3code-token  LOCAL, gitignored T3 Code mcp-client credential; docs/t3code-backend.md "Sign-in" owns minting, expiry, and secondmate linking
 config/t3code-instances  LOCAL, gitignored, inherited T3 provider-instance map; docs/t3code-backend.md "Provider instances and models" owns schema and catalog validation
 config/calm     Calm presentation preference shared by the Pi extension and the Claude Code mod; LOCAL, gitignored, and not inherited; see docs/configuration.md "Calm preference"
+config/context-ceiling  optional conversation size at which launched workers and secondmates are summarized, plus fresh-worker advice lines; LOCAL, gitignored; inherited by secondmate homes; docs/configuration.md "Context ceiling" owns the schema
+config/daily-fresh-start  optional quiet-hour daily fresh conversation for a Claude primary; LOCAL, gitignored, not inherited; docs/configuration.md "Daily fresh start" owns the schema
+config/outcome-batch  optional hold that delivers routine supervision-session captain outcomes together; LOCAL, gitignored, not inherited; docs/configuration.md "Outcome batching" owns the schema
 config/keep-ai-trailers  optional presence flag to keep AI co-author trailers in this home's fleet commits; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Commit attribution"
 config/supervision-branch-model config/supervision-branch-effort  Pi supervision-branch model and reasoning-effort pins written by /supervision-model; LOCAL, gitignored, independently settable, and not inherited; see docs/configuration.md "Pi supervision branch model and effort"
 config/supervision-host  optional supervision-host engine setting: the host runs the supervision branch's contract on a headless engine beside a non-Pi primary, away and, on a Claude or Cursor primary, attended; absent runs it on a Claude primary and nowhere else; LOCAL, gitignored, not inherited; see docs/configuration.md "Supervision host"
@@ -128,6 +131,9 @@ state/               runtime records and signals; gitignored
   .branch-eligible-rows .branch-eligible-owner .main-eligible-rows  per-actor wake-row claims and branch-owner evidence; docs/watcher-continuity.md owns the acknowledgement contract
   .supervision-host*  supervision host process record, engine conversation, current turn scope and report receipts, and bounded ledger of every close and engine turn; bin/fm-supervision-host.sh owns them; never touch
   .supervision-handoff-pending .supervision-handoff-owner .supervision-handoff.log  the opt-in acknowledged hand-back's unacknowledged token, retry-owner process record, and bounded retry log; bin/fm-supervision-handoff.sh owns them; never touch
+  .daily-fresh-start .daily-fresh-start-attest .daily-fresh-start-ended .daily-fresh-start-session .daily-fresh-start-history  the daily fresh start's step record, the stow skill's reset-safe attestation, the save turn's end, the primary's current session transcript, and the two-day safety net's history; bin/fm-fresh-start-lib.sh owns them
+  chat-questions/    one record per question firstmate asked the captain in chat that is still unanswered; bin/fm-chat-question.sh owns the format, and the daily fresh start waits while any exists
+  .outcome-batch     outcome batching's release record for held captain outcomes; bin/fm-outcome-batch-lib.sh owns it
   .lease-<task>        per-task supervision lease naming which actor (main or branch) may change that task; bin/fm-lease-lib.sh owns the contract the guarded scripts enforce
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll

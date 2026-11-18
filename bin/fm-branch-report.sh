@@ -16,10 +16,13 @@
 #
 # Usage:
 #   fm-branch-report.sh --task <id|fleet> --verdict routine|captain \
-#       --summary <text> [--silent true|false] [--wake <text>]
+#       --summary <text> [--silent true|false] [--batchable true|false] \
+#       [--wake <text>]
 #
 # The verdict criteria are owned by bin/fm-branch-prompt.sh ("Verdict: routine
-# or captain"); --silent true is legal only for a routine outcome.
+# or captain"); --silent true is legal only for a routine outcome, and
+# --batchable true (the store's structured "this asks nothing" claim, read only
+# by bin/fm-outcome-batch-lib.sh) only for a captain one.
 # --wake defaults to the wake reason the host recorded for the turn.
 #
 # Only the branch actor of a live host turn may report: FM_SUPERVISION_ACTOR
@@ -63,13 +66,14 @@ refuse() {
   exit 3
 }
 
-TASK='' VERDICT='' SUMMARY='' SILENT=false WAKE='' WAKE_SET=0
+TASK='' VERDICT='' SUMMARY='' SILENT=false BATCHABLE=false WAKE='' WAKE_SET=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --task) TASK=${2:-}; shift 2 || usage ;;
     --verdict) VERDICT=${2:-}; shift 2 || usage ;;
     --summary) SUMMARY=${2:-}; shift 2 || usage ;;
     --silent) SILENT=${2:-}; shift 2 || usage ;;
+    --batchable) BATCHABLE=${2:-}; shift 2 || usage ;;
     --wake) WAKE=${2:-}; WAKE_SET=1; shift 2 || usage ;;
     -h|--help) usage ;;
     *) usage ;;
@@ -80,12 +84,17 @@ TASK=$(printf '%s' "$TASK" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 SUMMARY=$(printf '%s' "$SUMMARY" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 case "$VERDICT" in routine|captain) ;; *) VERDICT= ;; esac
 case "$SILENT" in true|false) ;; *) usage ;; esac
+case "$BATCHABLE" in true|false) ;; *) usage ;; esac
 if [ -z "$TASK" ] || [ -z "$SUMMARY" ] || [ -z "$VERDICT" ]; then
   echo "invalid report: --task, --verdict (routine|captain), and --summary are required" >&2
   exit 2
 fi
 if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
   echo "invalid report: --silent true requires the routine verdict" >&2
+  exit 2
+fi
+if [ "$BATCHABLE" = true ] && [ "$VERDICT" != captain ]; then
+  echo "invalid report: --batchable true requires the captain verdict" >&2
   exit 2
 fi
 
@@ -118,6 +127,7 @@ fi
 [ "$WAKE_SET" -eq 1 ] || WAKE=$(turn_field wake)
 
 set -- append --task "$TASK" --verdict "$VERDICT" --summary "$SUMMARY" --silent "$SILENT"
+[ "$BATCHABLE" = false ] || set -- "$@" --batchable true
 [ -z "$WAKE" ] || set -- "$@" --wake "$WAKE"
 if ! SEQ=$("$SCRIPT_DIR/fm-branch-outcome.sh" "$@"); then
   echo "outcome store append failed (nothing recorded)" >&2

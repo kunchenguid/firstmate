@@ -144,6 +144,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-send.sh`             | Steer a task via a durable inbox record plus doorbell, or send a supported key or typed harness invocation through the recorded backend |
 | `fm-branch-prompt.sh`    | Emit the shared supervision branch's byte-stable system prompt ([pi-supervision-branch.md](pi-supervision-branch.md), [supervision-host.md](supervision-host.md)) |
 | `fm-branch-outcome.sh`   | Own the supervision branch's append-only outcome store, cursors, bounded status-coverage indexes, and session-start replay |
+| `fm-fresh-start.sh`      | Record that `/stow` declared the session reset-safe for a waiting daily fresh start ([contract](configuration.md#daily-fresh-start-configdaily-fresh-start)) |
+| `fm-chat-question.sh`    | Open and close the durable record of a question asked in chat and not yet answered, which the daily fresh start waits on |
 | `fm-lease.sh`            | Claim, release, inspect, and sweep per-task supervision leases                       |
 | `fm-lease-lib.sh`        | One owner of the supervision lease contract and the main-only role-partition guards  |
 | `fm-control.sh`          | Agent lifecycle control plane: allowlisted `interrupt`, `exit`, and transactional `relaunch` verbs for an exact task id ([agent-control.md](agent-control.md)) |
@@ -152,7 +154,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-busy-event.sh`       | The only writer of task busy and progress evidence under the contract in `fm-busy-lib.sh`; its header and help own lifecycle and optional stream operations |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
-| `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
+| `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes and audience          |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |

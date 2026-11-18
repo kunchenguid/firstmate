@@ -116,6 +116,26 @@ test_branch_prompt_home_include_is_appended_last() {
   pass "fm-branch-prompt.sh: the home prompt include lands last, verbatim, and refuses an unusable path"
 }
 
+# The rule for marking an outcome batchable reaches the engine only in a home
+# that turned outcome batching on; any other home gets the prompt it had before.
+test_branch_prompt_batchable_rule_needs_outcome_batch() {
+  local home base out
+  home="$TMP_ROOT/prompt-batch-home"
+  mkdir -p "$home/config"
+  base=$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt failed without outcome batching"
+  case "$base" in *--batchable*) fail "a home without config/outcome-batch must not be told to mark outcomes batchable" ;; esac
+  : > "$home/config/outcome-batch"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt failed with outcome batching"
+  # shellcheck disable=SC2016 # Literal prompt text.
+  assert_contains "$out" 'There, add `--batchable true` to a captain outcome only when it reports a finished result that asks nothing of MAIN or the captain' \
+    "a home with config/outcome-batch must carry the batchable rule"
+  [ "$(printf '%s\n' "$out" | grep -v -e '--batchable true')" = "$base" ] || fail "outcome batching may add only the batchable line"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh")" = "$out" ] || fail "the prompt with outcome batching is not byte-stable across runs"
+  rm -f "$home/config/outcome-batch"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh")" = "$base" ] || fail "removing config/outcome-batch must restore the prompt"
+  pass "fm-branch-prompt.sh: the batchable rule appears only while config/outcome-batch exists"
+}
+
 test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
   local prompt skill
   prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
@@ -1657,6 +1677,7 @@ WRAPPER
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_branch_prompt_home_include_is_appended_last
+test_branch_prompt_batchable_rule_needs_outcome_batch
 test_branch_prompt_routes_completed_scouts_through_guarded_cleanup
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail

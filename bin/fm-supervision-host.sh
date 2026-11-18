@@ -214,6 +214,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 # shellcheck source=bin/fm-warm-compact-lib.sh
 . "$SCRIPT_DIR/fm-warm-compact-lib.sh"
+# shellcheck source=bin/fm-fresh-start-lib.sh
+. "$SCRIPT_DIR/fm-fresh-start-lib.sh"
+# shellcheck source=bin/fm-outcome-batch-lib.sh
+. "$SCRIPT_DIR/fm-outcome-batch-lib.sh"
 
 FIRST_ARM_RESTART=0
 case "${1:-}" in
@@ -585,8 +589,66 @@ WARM_COMPACT_LAST_TICK=-1
 WARM_COMPACT_PRIMARY_DONE=0
 WARM_COMPACT_VERDICT=
 
+# Daily fresh start (bin/fm-fresh-start-lib.sh owns the setting, the gate, and
+# the steps). Ticks on the warm-compact cadence for as long as this park lasts:
+# the save turn's own Stop hook marks the save finished (fm_fresh_start_hook,
+# through bin/fm-host-mirror.sh), so a later tick of this same park can clear.
+FRESH_START_LAST_TICK=-1
+# A step that repeats on every tick, such as a cancelled day, is logged once,
+# so it cannot crowd the bounded host log for the rest of the day.
+FRESH_START_LAST_VERDICT=
+
+fresh_start_tick() {
+  local backend target verdict transcript
+  [ "$PRIMARY" = claude ] && [ -f "$CONFIG/daily-fresh-start" ] || return 0
+  # The session this host started for may have been replaced by a fresh
+  # start; the primary's latest Stop names the current one.
+  transcript=$(fm_fresh_start_transcript "$STATE" "${FM_WARM_COMPACT_TRANSCRIPT:-}")
+  [ -n "$transcript" ] || return 0
+  park_elapsed
+  if [ "$FRESH_START_LAST_TICK" -ge 0 ] && [ $((PARK_ELAPSED - FRESH_START_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then
+    return 0
+  fi
+  FRESH_START_LAST_TICK=$PARK_ELAPSED
+  turn_crosses_boundary && return 0
+  target=$(discover_supervisor_target) && backend=$(discover_supervisor_backend) || return 0
+  verdict=$(fm_fresh_start_step "$CONFIG" "$STATE" "$backend" "$target" "$transcript")
+  case "$verdict" in
+  saving | cleared | skipped | cancelled | unknown | failed)
+    [ "$verdict" = "$FRESH_START_LAST_VERDICT" ] || log_line "fresh-start	$verdict"
+    ;;
+  esac
+  FRESH_START_LAST_VERDICT=$verdict
+}
+
+# Outcome batching (bin/fm-outcome-batch-lib.sh owns the rule and the hold
+# record). While parked, held routine outcomes are handed to main once their
+# window passes, the setting is removed, or the store cannot be read, without
+# starting a model; the cheap record test runs every poll, the store read at
+# most every OUTCOME_BATCH_TICK seconds. Away, captain outcomes wait for the
+# return as they always do.
+OUTCOME_BATCH_TICK=${FM_OUTCOME_BATCH_TICK:-15}
+OUTCOME_BATCH_NEXT=0
+outcome_batch_tick() {
+  [ -e "$STATE/.outcome-batch" ] || [ -L "$STATE/.outcome-batch" ] || return 0
+  [ "$SECONDS" -ge "$OUTCOME_BATCH_NEXT" ] || return 0
+  OUTCOME_BATCH_NEXT=$((SECONDS + OUTCOME_BATCH_TICK))
+  fm_afk_contract_away_present "$STATE" && return 0
+  fm_outcome_batch_due "$CONFIG" "$STATE" || return 0
+  log_line "outcome-batch	release"
+  local why='branch-outcome: the supervision session held routine captain outcomes for you until their batching window passed; run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints'
+  acknowledged_handback "supervision-host: $why"
+  retire_arm "$ARM_PID" "$ARM_OUT"
+  ARM_PID=
+  ARM_OUT=
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  exit_to_main "$why"
+}
+
 warm_compact_tick() {
   local backend target verdict ended compacted
+  outcome_batch_tick
+  fresh_start_tick
   [ -f "$CONFIG/warm-compact" ] || return 0
   park_elapsed
   if [ "$WARM_COMPACT_LAST_TICK" -ge 0 ] && [ $((PARK_ELAPSED - WARM_COMPACT_LAST_TICK)) -lt "$WARM_COMPACT_TICK" ]; then
@@ -1365,12 +1427,23 @@ while :; do
   fi
   # Attended captain outcomes are main's to process; away they wait for the
   # return, including when the captain left while this turn ran. The close
-  # itself was handled, so only the host's lines reach main.
+  # itself was handled, so only the host's lines reach main. With
+  # config/outcome-batch, a turn whose outcomes are all positively routine is
+  # held instead, and released together (bin/fm-outcome-batch-lib.sh).
   if [ -n "$LAST_TURN" ] && ! fm_afk_contract_away_present "$STATE"; then
     CAPTAIN_SEQS=$(turn_captain_seqs "$LAST_TURN")
     if [ -n "$CAPTAIN_SEQS" ]; then
+      # shellcheck disable=SC2086 # the store rows are plain numbers, one word each
+      if [ "$(fm_outcome_batch_verdict "$CONFIG" "$STATE" ${CAPTAIN_SEQS//,/})" = hold ]; then
+        log_line "outcome-batch	hold	$CAPTAIN_SEQS"
+      else
+        ARM_TEXT=
+        exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
+          "$HEALTH_NOTE"
+      fi
+    elif fm_outcome_batch_due "$CONFIG" "$STATE"; then
       ARM_TEXT=
-      exit_to_main "branch-outcome: the supervision session handled this wake and recorded captain outcomes for you (store rows $CAPTAIN_SEQS); run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
+      exit_to_main "branch-outcome: the supervision session held routine captain outcomes for you until their batching window passed; run bin/fm-wake-drain.sh, act on its BRANCH OUTCOMES section, and acknowledge them as it prints" \
         "$HEALTH_NOTE"
     fi
   fi

@@ -200,7 +200,7 @@ CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
-PORTABLE_SERIAL_SHARDS=11
+PORTABLE_SERIAL_SHARDS=12
 
 # Conservative balance hint for a portable-serial script with no measurement.
 # Rounded above the current CI mean, including the capability-skipped scripts.
@@ -392,14 +392,17 @@ family_for_basename() {
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
-    fm-claude-tool-exclude-live.test.sh)
+    fm-claude-tool-exclude-live.test.sh|\
+    fm-context-ceiling-live.test.sh|fm-context-ceiling-codex-live.test.sh|\
+    fm-fresh-start-block-live.test.sh|\
+    fm-supervision-engine-start-size-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-backend-t3code.test.sh|fm-t3-mcp.test.sh|fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
-    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
+    fm-send-inbox.test.sh|fm-send-fresh-worker-advice.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-worker-account.test.sh|\
     fm-git-strip-ai-trailers.test.sh|\
@@ -407,6 +410,7 @@ family_for_basename() {
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
     fm-project-capacity.test.sh|fm-lane-capacity-integration.test.sh|\
+    fm-context-ceiling.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
@@ -773,6 +777,7 @@ tests/fm-calm-claude-mod.test.sh 2527
 tests/fm-calm-pi-extension.test.sh 56463
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh 1345
 tests/fm-capacity-auto.test.sh 36243
+tests/fm-check-audience.test.sh 550000
 tests/fm-check-unregister.test.sh 469
 tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 23085
@@ -790,6 +795,9 @@ tests/fm-commandcode-harness.test.sh 8182
 tests/fm-commandcode-signals-live-e2e.test.sh 49
 tests/fm-composer-codex-idle-live-e2e.test.sh 77
 tests/fm-composer-matrix-live-e2e.test.sh 51
+tests/fm-context-ceiling-codex-live.test.sh 300
+tests/fm-context-ceiling-live.test.sh 23000
+tests/fm-context-ceiling.test.sh 32000
 tests/fm-contributions.test.sh 140911
 tests/fm-control-relaunch.test.sh 114115
 tests/fm-control.test.sh 72794
@@ -810,6 +818,8 @@ tests/fm-fleet-snapshot-view.test.sh 23334
 tests/fm-fleet-sync.test.sh 40541
 tests/fm-forge-detect.test.sh 193
 tests/fm-fork-free-helpers.test.sh 746
+tests/fm-fresh-start-block-live.test.sh 6000
+tests/fm-fresh-start.test.sh 50000
 tests/fm-gate-refuse.test.sh 9953
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
@@ -858,6 +868,8 @@ tests/fm-on.test.sh 11473
 tests/fm-opencode-primary-live-e2e.test.sh 47
 tests/fm-operational-input.test.sh 2404
 tests/fm-osc7501.test.sh 14000
+tests/fm-outcome-batch-host.test.sh 30000
+tests/fm-outcome-batch.test.sh 13000
 tests/fm-peek-remote.test.sh 1082
 tests/fm-pending-reply.test.sh 41090
 tests/fm-pi-branch-extension.test.sh 77218
@@ -899,8 +911,8 @@ tests/fm-remote-secondmate-trace-context.test.sh 74870
 tests/fm-remote-transport-lanes.test.sh 66089
 tests/fm-rovo-harness.test.sh 15691
 tests/fm-rovo-signals-live-e2e.test.sh 52
-tests/fm-secondmate-harness.test.sh 188187
 tests/fm-secondmate-busy-contract-live-e2e.test.sh 90000
+tests/fm-secondmate-harness.test.sh 188187
 tests/fm-secondmate-lifecycle-e2e.test.sh 11268
 tests/fm-secondmate-liveness.test.sh 24564
 tests/fm-secondmate-reconcile.test.sh 100853
@@ -908,6 +920,7 @@ tests/fm-secondmate-restart.test.sh 52591
 tests/fm-secondmate-safety.test.sh 69424
 tests/fm-secondmate-sync.test.sh 55501
 tests/fm-send-agy-confirm.test.sh 4440
+tests/fm-send-fresh-worker-advice.test.sh 27000
 tests/fm-send-inbox-doorbell-live-e2e.test.sh 108
 tests/fm-send-inbox.test.sh 41713
 tests/fm-send-remote-delivery.test.sh 31964
@@ -933,6 +946,7 @@ tests/fm-stat-shadowing.test.sh 75
 tests/fm-stow-cascade.test.sh 3058
 tests/fm-stow-guard.test.sh 30000
 tests/fm-subagent-pretool-check.test.sh 998
+tests/fm-supervision-engine-start-size-live.test.sh 2500
 tests/fm-supervision-events.test.sh 673
 tests/fm-supervision-host-attended-live-e2e.test.sh 49
 tests/fm-supervision-host-drain.test.sh 45950
@@ -976,9 +990,9 @@ tests/fm-watch-recovery-loop.test.sh 59092
 tests/fm-watch-triage-pause.test.sh 466750
 tests/fm-watch-triage-wedge-defer.test.sh 526980
 tests/fm-watch-triage.test.sh 592950
-tests/fm-watch-wedge-cap.test.sh 374225
-tests/fm-watch-wedge-cap-unconfigured-parity.test.sh 27763
 tests/fm-watch-wedge-cap-live.test.sh 74
+tests/fm-watch-wedge-cap-unconfigured-parity.test.sh 27763
+tests/fm-watch-wedge-cap.test.sh 374225
 tests/fm-watcher-lock.test.sh 72022
 tests/fm-worker-account-live-e2e.test.sh 3179
 tests/fm-worker-account.test.sh 37445
@@ -1673,6 +1687,34 @@ families_for_changed_path() {
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-context-ceiling.test.sh"
+      ;;
+    bin/fm-check-register.sh|bin/fm-check-lib.sh)
+      printf '%s\n' "__script__:fm-check-audience.test.sh"
+      printf '%s\n' "__script__:fm-check-unregister.test.sh"
+      printf '%s\n' "__script__:fm-wake-queue.test.sh"
+      ;;
+    bin/fm-outcome-batch-lib.sh)
+      printf '%s\n' "__script__:fm-outcome-batch.test.sh"
+      printf '%s\n' "__script__:fm-outcome-batch-host.test.sh"
+      printf '%s\n' "__script__:fm-supervision-host.test.sh"
+      ;;
+    bin/fm-fresh-start-lib.sh|bin/fm-fresh-start.sh|bin/fm-chat-question.sh)
+      printf '%s\n' "__script__:fm-fresh-start.test.sh"
+      printf '%s\n' "__script__:fm-fresh-start-block-live.test.sh"
+      printf '%s\n' "__script__:fm-warm-compact.test.sh"
+      ;;
+    bin/fm-branch-prompt.sh)
+      printf '%s\n' "__script__:fm-supervision-engine-start-size-live.test.sh"
+      ;;
+    bin/fm-session-size-lib.sh)
+      printf '%s\n' "__script__:fm-send-fresh-worker-advice.test.sh"
+      ;;
+    bin/fm-context-ceiling-lib.sh)
+      printf '%s\n' "__script__:fm-send-fresh-worker-advice.test.sh"
+      printf '%s\n' "__script__:fm-context-ceiling.test.sh"
+      printf '%s\n' "__script__:fm-context-ceiling-live.test.sh"
+      printf '%s\n' "__script__:fm-context-ceiling-codex-live.test.sh"
       ;;
     bin/fm-capacity.sh)
       printf '%s\n' "__script__:fm-capacity.test.sh"
@@ -1707,6 +1749,7 @@ families_for_changed_path() {
       # these suites sit in four different families, so that pulls in dozens
       # of suites with nothing to do with Pi.
       printf '%s\n' __script__:fm-pi-branch-extension.test.sh
+      printf '%s\n' __script__:fm-check-audience.test.sh
       printf '%s\n' __script__:fm-pi-watch-extension.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-watch-recovery-loop.test.sh

@@ -235,7 +235,9 @@ test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted() {
     FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
   wait_until 150 watcher_live "$home" || fail "warm-compact-stale: no watcher started"
   seed_idle_engine_record "$home" 600
-  sed -i 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine"
+  # Portable in-place edit: BSD sed reads a bare -i's next word as its suffix.
+  sed 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine" > "$home/state/.supervision-host-engine.new" \
+    && mv -f "$home/state/.supervision-host-engine.new" "$home/state/.supervision-host-engine"
   echo 10 > "$home/park-clock"
   sleep 3
   [ "$(compact_calls "$home")" = 0 ] || fail "warm-compact-stale: compacted a conversation the next turn would not resume"
@@ -262,6 +264,32 @@ test_compaction_abandoned_at_the_park_boundary_is_not_marked_done() {
   ! grep -q '^compacted=' "$home/state/.supervision-host-engine" || fail "warm-compact-abandon: an abandoned compaction was marked done"
   stop_home_processes "$home"
   pass "host: a compaction abandoned at the park boundary is not marked done"
+}
+
+# Found in the live Herdr lab run: a cancelled day is re-reported on every tick
+# for the rest of the day, and each report was a host log line, so one cancel
+# could push a day of real history out of the bounded log.
+test_repeated_fresh_start_verdict_is_logged_once() {
+  local home clock
+  home=$(make_home fresh-start-log attended claude)
+  printf 'hour=%s\nwindow-hours=12\nmin-context-tokens=1\n' "$(( (10#$(date +%H) + 23) % 24 ))" > "$home/config/daily-fresh-start"
+  printf 'date=%s\nstep=cancelled\nat=1\nnonce=\ntranscript=\n' "$(date +%Y-%m-%d)" > "$home/state/.daily-fresh-start"
+  printf 'transcript=%s\n' "$home/primary.jsonl" > "$home/state/.daily-fresh-start-session"
+  : > "$home/primary.jsonl"
+  FM_SUPERVISION_HOST_PRIMARY=claude FM_SUPERVISOR_TARGET=fm-demo FM_SUPERVISOR_BACKEND=tmux \
+    FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=3000 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "fresh-start-log: no watcher started"
+  for clock in 10 20 30 40; do
+    echo "$clock" > "$home/park-clock"
+    wait_until 100 sh -c '[ "$(grep -c "	fresh-start	" "$1" 2>/dev/null)" -ge 1 ]' _ "$home/state/.supervision-host.log" \
+      || fail "fresh-start-log: the cancelled day was never logged"
+    sleep 2
+  done
+  [ "$(grep -c '	fresh-start	cancelled$' "$home/state/.supervision-host.log")" = 1 ] \
+    || fail "fresh-start-log: a cancelled day was logged on every tick"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  stop_home_processes "$home"
+  pass "host: a fresh-start verdict that repeats on every tick is logged once"
 }
 
 test_park_boundary_ends_the_park_before_the_hook_timeout() {
@@ -672,6 +700,7 @@ fm_test_run \
   test_idle_engine_conversation_is_compacted_once_across_hosts \
   test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted \
   test_compaction_abandoned_at_the_park_boundary_is_not_marked_done \
+  test_repeated_fresh_start_verdict_is_logged_once \
   test_park_boundary_ends_the_park_before_the_hook_timeout \
   test_park_boundary_holds_under_back_to_back_closes \
   test_park_boundary_rechecked_just_before_the_engine_turn \

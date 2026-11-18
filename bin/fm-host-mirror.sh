@@ -244,6 +244,27 @@ case "$1" in
       . "$SCRIPT_DIR/fm-hook-host-lib.sh"
       # Cursor loads the tracked Claude settings too; its own entries mirror it.
       fm_hook_payload_is_foreign_host "$PAYLOAD" && exit 0
+      # The daily fresh start's turn boundaries (bin/fm-fresh-start-lib.sh
+      # owns them): a prompt after a waiting save cancels that day's clear,
+      # the save turn's own Stop marks it finished, and a prompt that would
+      # land just before a committed /clear is refused with its reason, which
+      # is the hook's only output; a refused prompt is never mirrored.
+      if [ -f "$CONFIG/daily-fresh-start" ]; then
+        EVENT=$(printf '%s' "$PAYLOAD" | jq -r '(.hook_event_name // "") | tostring' 2>/dev/null || true)
+        case "$EVENT" in
+          UserPromptSubmit | Stop)
+            if writer_in_scope; then
+              # shellcheck source=bin/fm-fresh-start-lib.sh
+              . "$SCRIPT_DIR/fm-fresh-start-lib.sh"
+              FRESH_START_RC=0
+              FRESH_START_OUT=$(fm_fresh_start_hook "$STATE" "$EVENT" "$PAYLOAD") || FRESH_START_RC=$?
+              if [ "$FRESH_START_RC" = 3 ] && [ -n "$FRESH_START_OUT" ]; then
+                printf '%s\n' "$FRESH_START_OUT"
+                exit 0
+              fi
+            fi ;;
+        esac
+      fi
     fi
     # One line per field: event, tag, id; the text follows as the remainder.
     PARSED=$(printf '%s' "$PAYLOAD" | jq -r '

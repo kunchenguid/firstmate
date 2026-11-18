@@ -1588,6 +1588,9 @@ kimi model profile is accepted^{"rules":[{"when":"kimi work","use":{"harness":"k
 unsupported kimi effort is flagged^{"rules":[{"when":"kimi work","use":{"harness":"kimi","model":"kimi-code/k3","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: kimi:high
 cursor model profile is accepted^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high"}}]}^empty^
 unsupported cursor effort is flagged^{"rules":[{"when":"cursor work","use":{"harness":"cursor","model":"cursor-grok-4.5-high","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
+profile context_ceiling count and off are accepted^{"rules":[{"when":"long refactor","use":{"harness":"claude","context_ceiling":400000}}],"default":{"harness":"codex","context_ceiling":"off"}}^empty^
+string profile context_ceiling is flagged^{"rules":[{"when":"long refactor","use":{"harness":"claude","context_ceiling":"250k"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile context_ceiling must be "off" or a whole number of tokens from 20000 through 10000000
+too-small default context_ceiling is flagged^{"default":{"harness":"codex","context_ceiling":12}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - profile context_ceiling must be "off" or a whole number of tokens from 20000 through 10000000
 array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
 top-level shared_quota true is accepted^{"shared_quota":true,"rules":[{"when":"big feature","use":{"harness":"claude"}}]}^empty^
 top-level shared_quota false is accepted^{"shared_quota":false,"rules":[{"when":"big feature","use":{"harness":"claude"}}]}^empty^

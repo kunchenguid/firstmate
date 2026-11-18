@@ -6,7 +6,7 @@
 # PREFIX-STABILITY CONTRACT (this header is the one owner). The branch's
 # provider prompt cache only pays off while the request prefix stays
 # byte-identical, so this generator must be a pure function of this repo's
-# tracked files (plus the one home include described below): fixed rules text
+# tracked files (plus the two home inputs described below): fixed rules text
 # plus the verbatim tracked policy skills. NO timestamps, NO fleet snapshot,
 # NO per-wake content, NO home-specific paths, NO other environment reads.
 # Fleet state and events reach the branch as the wake message at the TAIL of
@@ -23,7 +23,7 @@
 # version". tests/fm-branch-supervision.test.sh holds this to byte-identical
 # output across runs, environments, and fleet states.
 #
-# The one sanctioned home input is the optional local config/branch-prompt-
+# One sanctioned home input is the optional local config/branch-prompt-
 # include.md under the active home (FM_CONFIG_OVERRIDE, else $FM_HOME/config),
 # mirroring config/brief-include.md in bin/fm-brief.sh: its text is appended
 # verbatim as the last section, "# Home prompt additions", which defers to
@@ -35,6 +35,11 @@
 # loads none of the home's own instructions, so this file is how a home gives
 # the branch a home-specific rule.
 #
+# The other home input is whether config/outcome-batch exists: only then does
+# the prompt carry the one line that teaches the engine to mark an outcome
+# batchable (bin/fm-outcome-batch-lib.sh), so a home without the setting gets
+# the prompt it had before outcome batching existed.
+#
 # Usage: fm-branch-prompt.sh   (stdout is the complete system prompt)
 set -eu
 
@@ -42,7 +47,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_TRACKED_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Read before anything is emitted, so an unusable file never yields a partial prompt.
-INCLUDE_FILE="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_TRACKED_ROOT}}/config}/branch-prompt-include.md"
+CONFIG_DIR="${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_TRACKED_ROOT}}/config}"
+INCLUDE_FILE="$CONFIG_DIR/branch-prompt-include.md"
 INCLUDE_BODY=
 if [ -e "$INCLUDE_FILE" ] || [ -L "$INCLUDE_FILE" ]; then
   { [ -f "$INCLUDE_FILE" ] && INCLUDE_BODY=$(cat "$INCLUDE_FILE" 2>/dev/null); } || {
@@ -123,6 +129,13 @@ Keep an unchanged fleet review silent as instructed above.
 When genuinely in doubt, choose captain: a spurious escalation costs a glance, a swallowed one costs trust.
 Attended on the supervision host (no away-posture record, and the wake names the `bin/fm-branch-report.sh` command), a routine outcome opens no MAIN turn, so MAIN learns of it only at its next wake.
 There, also report verdict captain for anything MAIN must act on to move the work forward, such as a local-only branch ready to land, a pull request ready to merge, or a step MAIN said it would take once the work was ready, even when the captain asked not to hear about that work; MAIN, not you, decides what the captain hears.
+PROMPT
+if [ -f "$CONFIG_DIR/outcome-batch" ]; then
+  cat <<'PROMPT'
+There, add `--batchable true` to a captain outcome only when it reports a finished result that asks nothing of MAIN or the captain, so it may wait a few minutes to arrive with others; never for a question, choice, decision, blocker, failure, sign-in, review, merge, landing, or anything MAIN must act on, and when in doubt leave it off.
+PROMPT
+fi
+cat <<'PROMPT'
 Report that captain outcome once per unchanged situation: an earlier routine outcome that mentioned it does not count, and an earlier captain outcome for the same unchanged situation does.
 Write summaries in the captain's outcome language - the project, the fix, the PR, the worker, the blocker - never internal mechanics like wake kinds, status prefixes, worktrees, or state file names.
 

@@ -11,7 +11,8 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), [daily fresh start](#daily-fresh-start-configdaily-fresh-start), [outcome batching](#outcome-batching-configoutcome-batch), and [Calm preference](#calm-preference-configcalm) |
+| Conversation size of launched workers | [Context ceiling](#context-ceiling-configcontext-ceiling) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
@@ -474,6 +475,83 @@ A compacted primary still picks up pending wakes and decisions from disk, becaus
 
 This feature does not set `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` or any other autocompact setting.
 `bin/fm-warm-compact-lib.sh` owns the guards, with coverage in [`tests/fm-warm-compact.test.sh`](../tests/fm-warm-compact.test.sh) and the opt-in live guard [`tests/fm-warm-compact-herdr-live-e2e.test.sh`](../tests/fm-warm-compact-herdr-live-e2e.test.sh).
+
+## Context ceiling (config/context-ceiling)
+
+Create the home-local `config/context-ceiling` file to have every worker, scout, and secondmate this home launches summarized by its own tool at a set conversation size instead of at the tool's maximum.
+Every model call re-reads the whole conversation so far, so late calls in a long session cost several times the early ones; summarizing earlier roughly halves what those calls re-read, at the price of some detail.
+
+The feature is off when the file is absent, and every launch and task record then stays unchanged.
+The file may be empty or hold these lines, each optional:
+
+- `worker=<tokens|off>` is the ceiling for ship and scout launches (default 250000).
+- `secondmate=<tokens|off>` is the ceiling for secondmate launches (default 250000).
+- `advise-calls=<n|off>` and `advise-tokens=<tokens|off>` are the session sizes past which a steer prints advice to start a fresh worker instead (defaults 300 calls and 200000 tokens).
+
+A token value is a whole number from 20000 through 10000000, and `off` keeps the tool's own default.
+Blank lines and lines that start with `#` are ignored.
+Any other line, a repeated key, or an unusable value makes the file unreadable, and every spawn then refuses with the reason rather than guessing the size that was meant.
+The main session is never launched by Firstmate and is not affected.
+The file is inherited by secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract, so a secondmate's own workers use the same ceiling.
+
+A kind of task can ask for a different size through a [crew dispatch profile](#crew-dispatch-profiles-configcrew-dispatchjson)'s `context_ceiling`, which reaches the spawn as `--context-ceiling`; `off` there is how a task that needs a very large window asks for one.
+A relaunch keeps the value the task recorded at its spawn as `context_ceiling=`, so one task never changes size mid-flight.
+
+A ceiling is applied only to a tool whose per-launch setting was verified live: Claude Code receives it as `autoCompactWindow` in its launch's own `--settings`, and Codex as a `model_auto_compact_token_limit` override.
+Every other tool, a raw launch command, and the T3 Code backend record the value with `context_ceiling_applied=no`, print one notice, and keep their own default.
+The fresh-worker advice is printed by `bin/fm-send.sh` after the steer is durably recorded; it never blocks, delays, or changes the steer.
+[`bin/fm-context-ceiling-lib.sh`](../bin/fm-context-ceiling-lib.sh) owns the grammar, precedence, and covered tools, and [`bin/fm-session-size-lib.sh`](../bin/fm-session-size-lib.sh) owns how a session's size is read.
+Coverage lives in [`tests/fm-context-ceiling.test.sh`](../tests/fm-context-ceiling.test.sh), [`tests/fm-send-fresh-worker-advice.test.sh`](../tests/fm-send-fresh-worker-advice.test.sh), and the live guards [`tests/fm-context-ceiling-live.test.sh`](../tests/fm-context-ceiling-live.test.sh) and [`tests/fm-context-ceiling-codex-live.test.sh`](../tests/fm-context-ceiling-codex-live.test.sh).
+
+## Daily fresh start (config/daily-fresh-start)
+
+Create the home-local `config/daily-fresh-start` file to have a Claude primary start a fresh conversation once a day at a quiet hour.
+Durable records, not conversation memory, are authoritative, so a fresh conversation that reads only the startup digest replaces one that re-reads hundreds of thousands of tokens on every call.
+
+The feature is off when the file is absent, and the file is not inherited.
+It acts only on a home that runs the [supervision host](#supervision-host-configsupervision-host) beside a Claude primary, because the host's park is the primary's idle time.
+The file may be empty or hold these lines, each optional:
+
+- `hour=<0-23>` is the local hour the quiet window opens (default 4).
+- `window-hours=<1-12>` is how long the window stays open (default 3).
+- `min-context-tokens=<n>` is the conversation size below which no fresh start is due (default 100000).
+
+Blank lines and lines that start with `#` are ignored, and an unusable value keeps its default.
+
+Inside the window the host first submits `/stow daily-fresh-start <nonce>`, with a new random nonce for that attempt.
+The stow skill runs [`bin/fm-fresh-start.sh`](../bin/fm-fresh-start.sh) `attest <nonce>` as its last action only when its own completion receipt declares the session safe to reset.
+Inside a window that runs past midnight, the whole window counts as the day it opened, so a save that ends after midnight is still that day's save.
+Once the save turn ends, which the primary's own Stop hook records, the host submits `/clear` and one short resume prompt only when that attestation names this attempt, the primary is still the session the save was typed into, and that session's newest prompt is still the `/stow`, so nothing said after the save is dropped.
+Those checks and the waiting rules below are read once more right before `/clear` is typed, under a lock the primary's prompt-submit hook shares, and the clear is then recorded as committed.
+Any new message submitted after the save and before that commit cancels that day's clear at once, through the prompt-submit hook.
+Only the first turn end after the save marks it finished; any later turn end in that session before the clear, such as a supervision hand-back that woke the primary without a typed message, skips the day, so a reply to the captain is never wiped.
+A message for the same session that meets the commit would run and then be wiped by `/clear`, so it is refused instead: Claude Code shows the reason and keeps the text in the input box to send again into the fresh conversation, and a commit refuses nothing once it is 30 seconds old.
+The startup digest then re-enters through the session-start hook, and the resume turn re-arms supervision.
+A save that never attests, because it failed, was interrupted, or was not reset-safe, never clears: the day is skipped when the window closes, and a save the session moved past is skipped at once.
+
+Each step waits only for what lives in the conversation alone and clears within minutes: an away or quiet record, a queued wake, a pending supervision handoff or secondmate reply, an unread captain outcome or inbox note, and a question firstmate asked the captain in chat that is still unanswered.
+That last one is known from a record, never from reading the conversation: firstmate runs [`bin/fm-chat-question.sh`](../bin/fm-chat-question.sh) `open <key> <summary>` in the turn it asks a question that has no other durable record, and `close <key>` in the turn the captain answers.
+Firstmate keeps that record only while `config/daily-fresh-start` exists.
+Durable records that survive a restart and are printed again at session start do not hold it: backlog items held for the captain, open decisions and blockers in worker status logs, and captain outcomes already presented but not yet acknowledged.
+Each step also waits whenever one of its inputs cannot be read, including a path that is only a link, dangling or not, a path of the wrong kind, and a wake queue holding anything but whole, well-formed rows, such as a partly written append; nothing is typed unless the agent reads idle and its composer provably empty.
+If two days and one window pass without a fresh start, the host queues one note for firstmate to tell the captain, naming the most recent reason, and sends no more until a fresh start runs again; a conversation still below `min-context-tokens` counts as run, because none was due, while one whose size cannot be read does not, and turning the setting off resets the count.
+[`bin/fm-fresh-start-lib.sh`](../bin/fm-fresh-start-lib.sh) owns the gate and the steps, with coverage in [`tests/fm-fresh-start.test.sh`](../tests/fm-fresh-start.test.sh).
+
+## Outcome batching (config/outcome-batch)
+
+Create the home-local `config/outcome-batch` file to have routine captain outcomes from the [supervision host](#supervision-host-configsupervision-host)'s engine reach the main session together instead of one wake each.
+The file may be empty or hold `window-seconds=<60-3600>`, the longest a routine outcome waits (default 600).
+
+The feature is off when the file is absent, and every captain outcome then wakes main at once, as before.
+With it present, an attended engine turn whose captain outcomes the records prove routine is held: the outcomes stay unread in the outcome store, and main's next drain presents all of them, whatever wakes it.
+The parked host hands them to main once the oldest has waited the window, without starting a model, and also as soon as the setting is removed or the outcome store cannot be read; away, they wait for the captain's return as every captain outcome does.
+
+An outcome is held only when the engine marked it batchable as it reported it (`bin/fm-branch-report.sh --batchable true`, recorded in the outcome store), its explicit claim that the outcome is a finished result asking nothing of anyone; an outcome without that mark always goes at once, whatever its wording.
+The engine's prompt (`bin/fm-branch-prompt.sh`) carries the rule for that mark only while the file exists, so a home without it gets the prompt it had before.
+A marked outcome must also pass two extra checks: its task's status log is readable, its newest line is `working`, `paused`, `note`, or `resolved`, and no decision or blocker is open in it; and its text mentions no blocker, failure, error, sign-in, credential, review, merge, pull request, link, decision, deletion, security, production, or alert and asks nothing.
+One outcome that is not proven routine sends its whole turn at once, and so does a turn of more than 20 captain outcomes, which is already a batch.
+A turn is held only after its release record (`state/.outcome-batch`) is written and read back, so a held outcome can never miss its release; anything else at that path sends the turn at once.
+[`bin/fm-outcome-batch-lib.sh`](../bin/fm-outcome-batch-lib.sh) owns the rule, with coverage in [`tests/fm-outcome-batch.test.sh`](../tests/fm-outcome-batch.test.sh) and [`tests/fm-outcome-batch-host.test.sh`](../tests/fm-outcome-batch-host.test.sh).
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
@@ -1990,7 +2068,7 @@ Firstmate cannot see which part of a worker's life uses the resource, so the num
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
 Firstmate chooses the best matching rule with judgment; shell scripts do not match the natural-language rules.
-Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Firstmate resolves the rule's profile object or array under `AGENTS.md` section 4 and `quota-array-dispatch`, then passes only concrete `--harness`, `--model`, `--effort`, and `--context-ceiling` flags to `fm-spawn.sh`.
 
 **Spawn requirements**
 
@@ -2014,7 +2092,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "quota_scope": "<optional quota-axi scope>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "context_ceiling": "<optional tokens or \"off\">", "provider": "<optional quota-axi provider>", "quota_scope": "<optional quota-axi scope>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -2034,6 +2112,7 @@ This section is the single owner of the canonical schema and its per-field seman
 | `use` and optional top-level `default` | Accept one profile object or a non-empty array of profile objects; the single-object form remains fully backward-compatible. |
 | Profile `harness` | Required in every profile. |
 | Profile `model` and `effort`; rule `why` | Optional. |
+| Profile `context_ceiling` | Optional; a whole number of tokens from 20000 through 10000000, or `"off"`, passed to the spawn as `--context-ceiling` (see [Context ceiling](#context-ceiling-configcontext-ceiling)). |
 | Top-level `preferred_provider` | Optional provider-family preference, applied after eligibility checks under `quota-array-dispatch`. |
 | Top-level `shared_quota` | Optional; see "Shared-quota opt-out" below. |
 
