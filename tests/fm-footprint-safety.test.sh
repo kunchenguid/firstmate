@@ -1277,30 +1277,20 @@ engine_gone() {
 
 # stopped_mid <step> <name>: runs a close whose engine is paused (SIGSTOP)
 # part way through <step> (freeze or remove), then stops the close with TERM
-# as a timed-out caller does; sets SM_PID to the paused engine's pid.
+# as a timed-out caller does; sets SM_PID to the paused engine's pid. Under
+# GNU timeout the engine is in its own process group, out of the signal's
+# reach, so only the close itself can stop it.
 stopped_mid() {  # <step> <name>
-  local step=$1 name=$2 s n real_python i pids
+  local step=$1 name=$2 s n i pids
   new_home "$name"
   s=$(scratch_for task-m1)
   mkdir -p "$s/a" "$s/d"
   i=1
   while [ "$i" -le 40 ]; do printf 'w\n' > "$s/a/f$i"; printf 'w\n' > "$s/d/f$i"; i=$((i + 1)); done
   SM_AREA=$s
-  real_python=$(command -v python3)
   if [ "$step" = freeze ]; then
-    # Pauses the freeze engine once its record holds five lines.
-    cat > "$FB/python3" <<HOOK
-#!/bin/bash
-rec=''; take=0
-for a in "\$@"; do [ "\$take" = 1 ] && { rec=\$a; break; }; [ "\$a" = freeze ] && take=1; done
-[ -n "\$rec" ] || exec "$real_python" "\$@"
-"$real_python" "\$@" & p=\$!
-until [ "\$(wc -l < "\$rec" 2>/dev/null | tr -d ' ')" -ge 5 ] 2>/dev/null || ! kill -0 "\$p" 2>/dev/null; do sleep 0.01; done
-kill -STOP "\$p" 2>/dev/null
-printf '%s\n' "\$p" > "$FB/engine.pid"
-wait "\$p"
-HOOK
-    chmod +x "$FB/python3"
+    # The engine stops itself (SIGSTOP) after five mode changes.
+    export FM_FOOTPRINT_TEST_SEAMS=1 FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER=5 FM_FOOTPRINT_TEST_PAUSED_FILE="$FB/engine.pid"
   else
     # Pauses the remove engine once it reaches the second directory.
     cat > "$FB/remove-hook" <<HOOK
@@ -1323,13 +1313,12 @@ HOOK
   # shellcheck disable=SC2086 # one pid per word
   kill -TERM $pids
   wait
-  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_REMOVE_HOOK
-  rm -f "$FB/python3"
+  unset FM_FOOTPRINT_TEST_SEAMS FM_FOOTPRINT_TEST_REMOVE_HOOK FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER FM_FOOTPRINT_TEST_PAUSED_FILE
 }
 
 test_a_close_stopped_mid_step_stops_its_engine_first() {
   local step alive n
-  for step in freeze remove; do
+  for step in remove freeze; do
     stopped_mid "$step" "mid-$step"
     alive=0
     engine_gone "$SM_PID" || alive=1

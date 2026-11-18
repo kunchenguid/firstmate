@@ -50,7 +50,9 @@ Test seams, honoured only while FM_FOOTPRINT_TEST_SEAMS=1:
 FM_FOOTPRINT_TEST_REMOVE_HOOK names a program run with the root and the
 relative directory each time remove has just made a directory writable, to
 interleave a change at exactly that point; FM_FOOTPRINT_TEST_FREEZE_KILL_AFTER
-makes the freeze kill itself after that many mode changes.
+makes the freeze kill itself after that many mode changes, and
+FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER makes it stop itself (SIGSTOP) after
+that many, first writing its pid to FM_FOOTPRINT_TEST_PAUSED_FILE.
 """
 
 from __future__ import annotations
@@ -169,6 +171,8 @@ class Freezer:
         self.changes = 0
         kill_after = os.environ.get("FM_FOOTPRINT_TEST_FREEZE_KILL_AFTER", "") if SEAMS else ""
         self.kill_after = int(kill_after) if kill_after.isdigit() else 0
+        stop_after = os.environ.get("FM_FOOTPRINT_TEST_FREEZE_STOP_AFTER", "") if SEAMS else ""
+        self.stop_after = int(stop_after) if stop_after.isdigit() else 0
 
     def record(self, cst: os.stat_result, mode: int) -> None:
         data = f"{cst.st_dev} {cst.st_ino} {mode:o}\n".encode()
@@ -187,6 +191,12 @@ class Freezer:
             self.changes += 1
             if self.kill_after and self.changes >= self.kill_after:
                 os.kill(os.getpid(), signal.SIGKILL)
+            if self.stop_after and self.changes == self.stop_after:
+                paused = os.environ.get("FM_FOOTPRINT_TEST_PAUSED_FILE", "")
+                if paused:
+                    with open(paused, "w", encoding="utf-8") as handle:
+                        handle.write(f"{os.getpid()}\n")
+                os.kill(os.getpid(), signal.SIGSTOP)
 
     def freeze_root(self, root: str, seen: list[tuple[int, int, int]]) -> None:
         """Freezes <root>, appending every directory and singly linked file
