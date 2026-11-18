@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Claude Stop-owned watcher auto-arm (asyncRewake hook).
+# Claude Stop/StopFailure-owned watcher auto-arm (asyncRewake hook).
 #
-# Registered in tracked .claude/settings.json as a Stop command hook with
-# "asyncRewake": true and an explicit multi-hour timeout. Claude Code fires it
-# in the background on EVERY Stop of a Claude primary session, with no
-# deduplication across firings. It owns routine tokenless watcher continuity
-# for Claude primaries (main home and marked secondmate homes):
+# Registered in tracked .claude/settings.json as a Stop command hook AND as a
+# StopFailure command hook, each with "asyncRewake": true and an explicit
+# multi-hour timeout. Claude Code fires it in the background on EVERY Stop of
+# a Claude primary session, and on EVERY StopFailure (the API-error turn end
+# that skips the entire Stop phase), with no deduplication across firings. The
+# StopFailure registration is what re-arms watcher continuity after an
+# error-ended turn: Claude 2.1.317 honors the same asyncRewake/exit-2 rewake
+# semantics on StopFailure as on Stop (docs/verification/supervision.md), so
+# the same script covers both turn ends. It owns routine tokenless watcher
+# continuity for Claude primaries (main home and marked secondmate homes):
 #
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
@@ -15,10 +20,11 @@
 #     ancestor, or a live lock was recorded under this same trusted Claude
 #     session id (which is what keeps a background session arming after its
 #     transient helper chain is recycled).
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#     When the shared fm_session_lock_pid_blocks_reclaim verdict refuses to
+#     reclaim the recorded owner, the hook stays inert; otherwise it delegates
+#     guarded recovery to bin/fm-lock.sh and then re-verifies ownership.
+#     A missing lock, a malformed record, or unresolved ancestry stays inert too,
+#     so a competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -27,9 +33,10 @@
 #   - Single-flight: Claude does not dedupe async hooks, so exactly one
 #     GENERATION owner arms per event epoch: the epoch ledger's monotonic
 #     sequence is the claim generation, every firing defers (exit 0) to a live
-#     open claim, and a stuck, dead, identity-mismatched, or finished claim is
-#     superseded by taking the next generation instead of being unlocked or
-#     revoked. No mutex is ever held across arming or output - the owner lock
+#     open claim, and a stuck, dead, identity-mismatched, or finished claim -
+#     or one an earlier Claude session took, as the Stop payload's session_id
+#     tells - is superseded by taking the next generation instead of being
+#     unlocked or revoked. No mutex is ever held across arming or output - the owner lock
 #     survives only as the micro-mutex serializing individual ledger writes -
 #     and a superseded owner goes completely silent: ownership is re-verified
 #     before every arm invocation, episode-state mutation, ledger write, and
@@ -40,12 +47,12 @@
 #     waits on inside this hook-owned process tree (never a fire-and-forget
 #     shell &); Claude owns the process group, so its timeout/session teardown
 #     kills arm and watcher together, and the hook TERMs the arm with itself.
-#     HUP, TERM, and INT are translated through the ordinary durable failure
-#     handoff instead of leaving the generation frozen at arming. Claude does
-#     not deliver the exit 2 of a hook it terminated at the configured timeout
+#     HUP, TERM, and INT follow the session-aware interruption contract in
+#     docs/turnend-guard.md. Claude does not deliver the exit 2 of a hook it
+#     terminated at the configured timeout
 #     as a rewake (measured on Claude Code 2.1.278 and 2.1.281,
 #     docs/verification/supervision.md), so a park that outlives that timeout
-#     records the failure durably without waking an idle primary; nothing here
+#     records the failure durably without waking an idle primary. Nothing
 #     shortens a quiet park, because no-change heartbeats are absorbed without
 #     closing the arm.
 #   - Handling successor: Pi, omp, and OpenCode start the next arm before they
@@ -90,8 +97,31 @@
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
 #     last-resort notice per failure episode; later consecutive failures still
-#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
-#     until the synchronous guard has consumed its attended fail-open.
+#     exit 2 with a one-line suppression reason to guarantee the next
+#     Stop-owned retry without repeating notice, until the episode's attended
+#     fail-open is consumed. Two writers own that attended alarm
+#     (state/.claude-autoarm-failure-alarmed) under the same owner-then-budget
+#     lock order: the synchronous guard's terminal_fail_open, and this hook's
+#     own terminal failure - the exhausted continuation is the one participant
+#     that knows no automatic continuation remains, so once this session's
+#     consumed block count is over the guard's budget it commits the alarm in
+#     the same owned critical section as its failed-suppressed write and
+#     delivers the one loud final rewake; later generations exit 0.
+#   - StopFailure storm bound: an error-ended turn can precede another error
+#     end when the API is still down, and no Stop phase runs to charge the
+#     guard's block budget, so every StopFailure-triggered exit-2
+#     continuation (actionable rewake, failure notice, suppressed failure
+#     retry, attended alarm, or interruption recovery) would otherwise chain
+#     error -> continuation -> error at full speed. Each one is therefore paced
+#     to one per FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN window (default 300s),
+#     recorded by state/.claude-autoarm-stopfailure-rewake at its committed
+#     write: a firing inside the window holds its open claim, waits out the
+#     remainder, and only then commits and delivers - unless AFK appeared or
+#     the supervision need vanished meanwhile, which ends it silently exactly
+#     as those gates do before the arm. Otherwise the continuation is
+#     delayed, never dropped, because after an error end it is the only thing
+#     that guarantees another hook firing; a newer generation that supersedes
+#     the waiting claim owns continuity instead.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and
@@ -119,10 +149,10 @@ usage() {
   cat <<'EOF'
 Usage: fm-claude-stop-autoarm.sh
 
-Claude Stop hook registered in .claude/settings.json; not for manual use.
-It reads the Stop payload on stdin and, in a primary home that needs
-supervision, arms the watcher or supervision host for this session.
-Exit 0 is silent; exit 2 carries a rewake banner on stderr.
+Claude Stop and StopFailure hook registered in .claude/settings.json; not
+for manual use. It reads the hook payload on stdin and, in a primary home
+that needs supervision, arms the watcher or supervision host for this
+session. Exit 0 is silent; exit 2 carries a rewake banner on stderr.
 EOF
 }
 
@@ -141,6 +171,23 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
+# Mtime of the last committed StopFailure-triggered exit-2 continuation; paces
+# chained error -> continuation -> error cycles (header "StopFailure storm
+# bound").
+STOPFAIL_REWAKE_MARKER="$STATE/.claude-autoarm-stopfailure-rewake"
+STOPFAIL_REWAKE_COOLDOWN=${FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN:-300}
+case "$STOPFAIL_REWAKE_COOLDOWN" in ''|*[!0-9]*) STOPFAIL_REWAKE_COOLDOWN=300 ;; esac
+STOPFAIL_REWAKE_COOLDOWN=$((10#$STOPFAIL_REWAKE_COOLDOWN))
+# Only this invocation's commit must survive an interruption as a final rewake.
+AUTOARM_COMMITTED_ALARM=0
+# The guard's attended-block budget (bin/fm-turnend-guard.sh --claude owns the
+# accounting): the auto-arm reads this session's consumed count when its own
+# terminal continuation failure is reached, to decide whether it must also
+# commit the episode's attended alarm itself.
+BUDGET_FILE="$STATE/.turnend-claude-blocks"
+BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
+BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
+case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -169,8 +216,11 @@ GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe, and its host
-# is inspected before anything else runs.
+# is inspected before anything else runs. The hook event name distinguishes a
+# StopFailure firing (the API-error turn end) from an ordinary Stop; an absent
+# or unreadable name behaves as Stop everywhere below.
 PAYLOAD=$(cat 2>/dev/null || true)
+HOOK_EVENT_NAME=$(printf '%s' "$PAYLOAD" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
 
 # Cursor loads the tracked Claude settings too. Cursor has no asyncRewake, so if
 # a future Cursor build starts firing the Claude-shaped Stop entry, this arm
@@ -199,9 +249,10 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 # --- identity: only the lock-owning session's hooks may arm ------------------
 # A prior session may have died after leaving its harness identity in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case; it
-# resolves a tagged identity too, so a dead Windows session is still recoverable
-# rather than being read as a malformed lock nobody may ever clear.
+# Use the shared fm_session_lock_pid_blocks_reclaim verdict to recognize only
+# that stale-owner case; it resolves a tagged identity too, so a dead Windows
+# session is still recoverable rather than being read as a malformed lock nobody
+# may ever clear.
 # Defer the mutating claim until after the unchanged AFK and need gates, so an
 # idle or away home remains byte-for-byte inert. Missing or malformed locks are
 # uncertainty rather than stale-owner evidence and remain inert.
@@ -209,7 +260,7 @@ RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   fm_session_pid_valid "$LOCK_PID" || exit 0
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
+  fm_session_lock_pid_blocks_reclaim "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
 
@@ -232,6 +283,9 @@ if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
 fi
 
 # --- single-flight generation claim --------------------------------------------
+SESSION_PID=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
+SESSION_IDENTITY=$(fm_session_pid_identity "$SESSION_PID" 2>/dev/null || true)
+SESSION_ID=$(fm_session_lock_recorded_session_id "$STATE" 2>/dev/null || true)
 # Claude runs one background process per firing with no dedupe. Exactly one
 # generation owner arms and translates per event epoch: every firing defers to
 # a live open claim, and a stuck, dead, identity-mismatched, or finished claim
@@ -243,15 +297,27 @@ fi
 # pre-generation build (or the guard's own terminal-check), which the legacy
 # shim defers to while genuinely deciding and reclaims once when proven
 # abandoned.
-fm_autoarm_claim_open "$STATE" "$GRACE" && exit 0
-fm_autoarm_claim_next "$STATE" "$GRACE"
+# The payload's session_id names the Claude session this firing belongs to,
+# which is the session Claude delivers its exit-2 rewake to, so a claim an
+# earlier session took stops deferring this one (fm_autoarm_claim_open). No
+# payload, no jq, or an id the ledger cannot carry means no session, which
+# keeps the claim's previous behavior.
+HOOK_SESSION=
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  HOOK_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // empty | strings' 2>/dev/null || true)
+fi
+case "$HOOK_SESSION" in
+  *[!A-Za-z0-9._-]*) HOOK_SESSION= ;;
+esac
+fm_autoarm_claim_open "$STATE" "$GRACE" "$HOOK_SESSION" && exit 0
+fm_autoarm_claim_next "$STATE" "$GRACE" "$HOOK_SESSION"
 CLAIM_RC=$?
 if [ "$CLAIM_RC" -ne 0 ]; then
   [ "$CLAIM_RC" -eq 2 ] && exit 0
   ROLE=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
   [ -n "$ROLE" ] || exit 0
   fm_autoarm_release_abandoned "$STATE" "$GRACE" || exit 0
-  fm_autoarm_claim_next "$STATE" "$GRACE" || exit 0
+  fm_autoarm_claim_next "$STATE" "$GRACE" "$HOOK_SESSION" || exit 0
 fi
 MY_GEN=$FM_AUTOARM_MY_GEN
 [ -n "$MY_GEN" ] || exit 0
@@ -263,8 +329,9 @@ MY_GEN=$FM_AUTOARM_MY_GEN
 # the same hold. Failure means refused or unverifiable: the caller goes silent
 # (cleanup, exit 0) - the harness discards the collected stderr on exit 0, so
 # even an already-printed banner is never delivered by a losing generation.
-autoarm_commit() {  # <outcome> [marker-file]
-  local outcome=$1 marker=${2:-} session_pid recovery
+autoarm_commit() {  # <outcome> [marker-file] [interrupted-session-identity]
+  local outcome=$1 marker=${2:-} marker_identity=${3:-} session_pid recovery
+  stopfailure_pace
   if [ "$outcome" = rewake ]; then
     fm_session_lock_owned_by_self "$STATE" || return 2
     session_pid=$(sed -n '1p' "$STATE/.lock" 2>/dev/null || true)
@@ -273,18 +340,174 @@ autoarm_commit() {  # <outcome> [marker-file]
       pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
       *) return 2 ;;
     esac
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery"
-  elif [ -n "$marker" ]; then
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery" || return
   else
-    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome"
+    fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" '' '' "$marker_identity" "$SESSION_ID" || return
   fi
+  stopfailure_paced
 }
 
 # Best-effort ownership-checked record for exit-0 paths, where supersession
 # changes nothing about the action taken.
 autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
+}
+
+# Before a StopFailure-triggered commit that delivers an exit-2 continuation,
+# wait out whatever remains of the previous one's cooldown, and record the
+# committed one so the next is paced in turn (header "StopFailure storm
+# bound"). A Stop firing is never paced. The wait is interruptible so the
+# signal traps still run promptly, and a firing that waited goes silent when
+# AFK appeared or the supervision need vanished meanwhile.
+stopfailure_pace() {
+  local m remaining
+  [ "$HOOK_EVENT_NAME" = StopFailure ] || return 0
+  m=$(fm_sup_stat_mtime "$STOPFAIL_REWAKE_MARKER" 2>/dev/null || true)
+  [ -n "$m" ] || return 0
+  remaining=$(( m + STOPFAIL_REWAKE_COOLDOWN - $(date +%s) ))
+  [ "$remaining" -gt 0 ] || return 0
+  sleep "$remaining" &
+  wait "$!" 2>/dev/null || true
+  if [ -e "$STATE/.afk" ]; then
+    autoarm_record afk
+  elif ! need_supervision; then
+    autoarm_record clean
+  else
+    return 0
+  fi
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+}
+
+stopfailure_paced() {
+  [ "$HOOK_EVENT_NAME" = StopFailure ] || return 0
+  : > "$STOPFAIL_REWAKE_MARKER" 2>/dev/null || true
+}
+
+# Commit this generation's terminal failed-suppressed outcome together with
+# the failure episode's attended alarm, when the episode has already burned
+# this session's whole attended block budget. The exhausted continuation is
+# the one participant that knows no automatic continuation remains, so the
+# auto-arm is the second writer of .claude-autoarm-failure-alarmed beside
+# bin/fm-turnend-guard.sh --claude's terminal_fail_open.
+#
+# The decision and the commit share one critical section under the documented
+# lock order - owner lock, then budget lock, the same order terminal_fail_open
+# uses. Holding the budget lock across the marker write excludes
+# fm_failure_episode_reset, so an alarm can never be orphaned into a reset
+# episode, and holding the owner lock makes the ledger write and the alarm
+# create one atomic section (_fm_autoarm_write_owned_locked). The open-claim
+# exclusion that keeps the guard's alarm from firing mid-generation is already
+# satisfied: this generation's own claim is the open one, and its terminal
+# failure is the proof the continuation is gone.
+#
+# Returns 0 when the alarm was committed, 2 when a verified healthy watcher
+# appeared inside the hold (the caller resets and closes clean instead), and
+# 1 on any other refusal or uncertainty.
+autoarm_commit_attended_alarm() {
+  local session_id budget_session budget_count rc=1 i=0
+  stopfailure_pace
+  fm_lock_try_acquire "$OWNER_LOCK" || return 1
+  while ! fm_lock_try_acquire "$BUDGET_LOCK"; do
+    if [ "$i" -ge 20 ]; then
+      fm_lock_release "$OWNER_LOCK"
+      return 1
+    fi
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if fm_autoarm_ledger_read "$STATE" \
+    && [ "$FM_AUTOARM_GEN" = "$MY_GEN" ] \
+    && [ "$FM_AUTOARM_OWNER" = "${BASHPID:-$$}" ] \
+    && [ -e "$FAILURE_NOTICE" ] \
+    && [ ! -e "$FAILURE_ALARM" ] \
+    && [ ! -e "$STATE/.afk" ]; then
+    if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
+      rc=2
+    else
+      session_id=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+      budget_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
+      budget_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
+      case "$budget_count" in ''|*[!0-9]*) budget_count=0 ;; esac
+      if [ "$budget_session" = "$session_id" ] \
+        && [ "$budget_count" -gt "$BLOCK_BUDGET" ] \
+        && _fm_autoarm_write_owned_locked "$STATE" "$MY_GEN" failed-suppressed "$FAILURE_ALARM"; then
+        AUTOARM_COMMITTED_ALARM=1
+        stopfailure_paced
+        rc=0
+      fi
+    fi
+  fi
+  fm_lock_release "$BUDGET_LOCK"
+  fm_lock_release "$OWNER_LOCK"
+  return "$rc"
+}
+
+autoarm_alarm_banner() {
+  local need_desc
+  if [ "${FM_SUP_IN_FLIGHT:-0}" -gt 0 ]; then
+    need_desc="$FM_SUP_IN_FLIGHT task(s) in flight"
+  elif [ "${FM_SUP_SOURCES:-0}" -gt 0 ]; then
+    need_desc="$FM_SUP_SOURCES process-event source(s) registered"
+  elif [ "${FM_SUP_CHECKS:-0}" -gt 0 ]; then
+    need_desc="$FM_SUP_CHECKS registered custom check(s)"
+  else
+    need_desc="X-mode relay polling active"
+  fi
+  {
+    printf 'FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s - the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no live watcher or automatic continuation exists, and this session block budget is exhausted.\n' "$need_desc"
+    printf 'Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision; do not launch a manual background arm from this notice.\n'
+  } >&2
+}
+
+# The one terminal exhaustion decision every failed-suppressed continuation
+# goes through - the ordinary exhausted failure, a lost supervision-host
+# hand-back, an interruption, and a refused healthy-watcher reset alike - so
+# none of them can commit another retry once the episode's attended alarm is
+# due (bin/fm-turnend-guard.sh --claude steps aside for every open claim, so a
+# path that skipped this decision could burn the block budget forever with no
+# participant alarming). In order: commit the attended alarm with the one loud
+# final rewake; close clean when a verified healthy watcher lets the episode
+# reset; otherwise commit failed-suppressed. <cause> says why this continuation
+# is suppressed, and the appended clause states the outcome the commit actually
+# decided: an already-alarmed episode schedules no Stop-owned retry (exit 0),
+# anything else keeps it alive (exit 2). Text already on stderr, such as the
+# host's actionable wake lines, is delivered with whichever rewake wins.
+autoarm_exit_suppressed() {  # <cause> [interrupted-session-identity]
+  local cause=$1 marker_identity=${2:-} rc
+  if [ -n "$marker_identity" ] && ! fm_autoarm_session_matches "$STATE" "$marker_identity" "$SESSION_ID"; then
+    autoarm_record session-ended
+    [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  autoarm_commit_attended_alarm
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    autoarm_alarm_banner
+    [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 2
+  fi
+  if [ "$rc" -eq 2 ]; then
+    fm_autoarm_reset_owned "$STATE" "$MY_GEN" >/dev/null 2>&1
+    rc=$?
+    [ "$rc" -ne 0 ] || autoarm_record clean
+    if [ "$rc" -ne 1 ]; then
+      [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+      exit 0
+    fi
+    cause='firstmate watcher auto-arm could not clear the resolved failure episode - a verified healthy watcher is running, but the episode reset was refused'
+  fi
+  if ! autoarm_commit failed-suppressed '' "$marker_identity"; then
+    [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  if [ -e "$FAILURE_ALARM" ]; then
+    printf '%s; the attended failure alarm is already committed for this episode, so this suppressed continuation repeats no operator notice and schedules no Stop-owned retry.\n' "$cause" >&2
+    exit 0
+  fi
+  printf '%s; no operator notice repeats in this episode, and this suppressed continuation keeps the Stop-owned retry alive.\n' "$cause" >&2
+  exit 2
 }
 
 # Claude terminates the complete async-hook process tree when the configured
@@ -294,6 +517,7 @@ autoarm_record() {  # <outcome>
 # failure protocol instead: the winning generation records a terminal outcome,
 # creates the episode marker, and exits 2 so Claude delivers a recovery turn -
 # except after Claude's own timeout kill, whose exit 2 is dropped (header).
+# Without a matching session, the hook closes silently as session-ended.
 # A superseded generation remains silent, and an episode whose attended
 # fail-open was already consumed must not restart automatic continuation.
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
@@ -305,18 +529,26 @@ handle_autoarm_signal() {
     wait "$ARM_PID" 2>/dev/null || true
   fi
   [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  if ! fm_autoarm_session_matches "$STATE" "$SESSION_IDENTITY" "$SESSION_ID"; then
+    autoarm_record session-ended
+    exit 0
+  fi
+  if [ "$AUTOARM_COMMITTED_ALARM" -eq 1 ]; then
+    autoarm_alarm_banner
+    exit 2
+  fi
   if [ -e "$FAILURE_ALARM" ]; then
+    printf 'firstmate watcher auto-arm interrupted by %s after the attended alarm - the failure episode is already alarmed, so this suppressed continuation emits no further rewake.\n' "$signal" >&2
     autoarm_record failed-suppressed
     exit 0
   fi
   if [ ! -e "$FAILURE_NOTICE" ]; then
     printf 'firstmate watcher auto-arm INTERRUPTED by %s - the Stop-owned automatic supervision mechanism did not reach a terminal watcher outcome.\n' "$signal" >&2
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n' >&2
-    autoarm_commit failed "$FAILURE_NOTICE" && exit 2
+    autoarm_commit failed "$FAILURE_NOTICE" "$SESSION_IDENTITY" && exit 2
     exit 0
   fi
-  autoarm_commit failed-suppressed && exit 2
-  exit 0
+  autoarm_exit_suppressed "firstmate watcher auto-arm interrupted by $signal - the failure episode notice was already consumed" "$SESSION_IDENTITY"
 }
 
 trap 'handle_autoarm_signal HUP' HUP
@@ -360,12 +592,13 @@ run_arm() {  # <output file, or empty for none>
 # successor receives the closed arm's pid as FM_WATCH_PREDECESSOR_ARM_PID; it
 # must outlive this hook's exit, so it is detached three ways: nohup, stdio
 # away from the hook's pipes, and its own process group. Its one status line
-# is awaited within the arm's own confirmation budget plus slack. Sets
+# is awaited within its own short successor budget plus slack - deliberately
+# not the arm's fresh-child backstop, which may run far longer. Sets
 # SUCCESSOR_FAILURE to the banner line for an unconfirmed successor.
 SUCCESSOR_FAILURE=
 start_handling_successor() {  # <closed-arm-pid>
   local out pid deadline budget line monitor_was_on=0
-  budget=${FM_ARM_CONFIRM_TIMEOUT:-30}
+  budget=${FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT:-30}
   case "$budget" in ''|*[!0-9]*) budget=30 ;; esac
   if ! out=$(mktemp "$STATE/.claude-autoarm-successor.XXXXXX"); then
     SUCCESSOR_FAILURE='The handling successor did not confirm a live watcher (its output file could not be created); this handling turn runs uncovered until the next turn end re-arms.'
@@ -492,18 +725,13 @@ if [ "$HEALTHY" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
-  if autoarm_commit failed-suppressed; then
-    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    [ -e "$FAILURE_ALARM" ] && exit 0
-    exit 2
-  fi
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 0
+  autoarm_exit_suppressed 'firstmate watcher auto-arm could not clear the resolved failure episode - a verified healthy watcher is running, but the episode reset was refused'
 fi
 
-# After the synchronous guard has consumed the episode's attended fail-open,
+# After either alarm writer has consumed the episode's attended fail-open,
 # do not create another exit-2 continuation that could defeat it.
 if [ -e "$FAILURE_ALARM" ]; then
+  printf 'firstmate watcher auto-arm suppressed - the attended failure alarm is already committed for this episode, so this suppressed continuation emits no further rewake.\n' >&2
   autoarm_record failed-suppressed
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
@@ -542,14 +770,10 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     && fm_recovery_marker_snapshot "$STATE/.watcher-down" \
     && [[ "$FM_RECOVERY_MARKER_TOKEN" == pending:handling:* || "$FM_RECOVERY_MARKER_TOKEN" == announced:handling:* ]] \
     && ! fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
-    LOST_HANDBACK_COMMITTED=0
-    if [ ! -e "$FAILURE_NOTICE" ]; then
-      printf 'firstmate watcher auto-arm FAILED - the supervision host returned an actionable wake, but its rewake could not be committed.\n' >&2
-      autoarm_commit failed "$FAILURE_NOTICE" && LOST_HANDBACK_COMMITTED=1
-    else
-      autoarm_commit failed-suppressed && LOST_HANDBACK_COMMITTED=1
-    fi
-    if [ "$LOST_HANDBACK_COMMITTED" -eq 1 ]; then
+    [ ! -e "$FAILURE_NOTICE" ] \
+      || autoarm_exit_suppressed 'firstmate watcher auto-arm hand-back still uncommitted - the supervision host returned an actionable wake, but its rewake could not be committed, and the failure episode notice was already consumed'
+    printf 'firstmate watcher auto-arm FAILED - the supervision host returned an actionable wake, but its rewake could not be committed.\n' >&2
+    if autoarm_commit failed "$FAILURE_NOTICE"; then
       [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
       exit 2
     fi
@@ -558,11 +782,9 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   exit 0
 fi
 
-# Notify only once for this continuous failure episode; every later invocation
-# still exits 2 so Claude must continue into another Stop-owned retry without
-# creating a repeated operator notice or manual-arm loop. The notice marker
-# commits in the same owned critical section as the winning failed write, so a
-# losing generation can neither consume nor deliver it.
+# The notice marker commits in the same owned critical section as the winning
+# failed write, so a losing generation can neither consume nor deliver it.
+# Later failures use autoarm_exit_suppressed's exhaustion decision below.
 if [ ! -e "$FAILURE_NOTICE" ]; then
   if ! fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
@@ -581,9 +803,9 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
-if autoarm_commit failed-suppressed; then
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 2
-fi
-[ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-exit 0
+# Every later failure in the episode goes through the shared exhaustion
+# decision, which commits the attended alarm once this session's block budget
+# is burned (bin/fm-turnend-guard.sh --claude's terminal_fail_open is the other
+# alarm writer; docs/turnend-guard.md names both and the owner-then-budget lock
+# order they share).
+autoarm_exit_suppressed 'firstmate watcher auto-arm still down - the automatic supervision mechanism remains broken in the recorded failure episode, whose notice was already consumed'
