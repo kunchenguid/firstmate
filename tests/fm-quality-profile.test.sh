@@ -115,10 +115,47 @@ test_verifier_setting_reads_back() {
   pass "fm-quality-profile: a configured verifier reads back"
 }
 
-test_verifier_never_resolves_to_claude() {
+test_verifier_claude_with_named_model_reads_back() {
+  local config
+  config=$(new_config verifier-claude-sonnet)
+  printf 'claude sonnet\n' > "$config/verifier-harness"
+  run_reader "$config" verifier
+  expect_code 0 "$RC" "claude with a named model must read cleanly (stderr: $ERR)"
+  assert_equals "$(printf 'harness=claude\nmodel=sonnet\neffort=')" "$OUT" \
+    "claude with a named model must print that harness and model"
+
+  config=$(new_config verifier-claude-opus-high)
+  printf 'claude opus high\n' > "$config/verifier-harness"
+  run_reader "$config" verifier
+  expect_code 0 "$RC" "claude with a model and effort must read cleanly (stderr: $ERR)"
+  assert_equals "$(printf 'harness=claude\nmodel=opus\neffort=high')" "$OUT" \
+    "claude with a model and effort must print all three"
+
+  config=$(new_config verifier-pi-claude)
+  printf 'pi anthropic/claude-sonnet-5-5\n' > "$config/verifier-harness"
+  run_reader "$config" verifier
+  expect_code 0 "$RC" "a multi-provider harness with a named Claude model must read cleanly (stderr: $ERR)"
+  assert_equals "$(printf 'harness=pi\nmodel=anthropic/claude-sonnet-5-5\neffort=')" "$OUT" \
+    "a multi-provider harness must keep its named Claude model"
+  pass "fm-quality-profile: a claude verifier with a named model reads back"
+}
+
+test_verifier_claude_without_model_refuses() {
+  local config
+  config=$(new_config verifier-claude-bare)
+  printf 'claude\n' > "$config/verifier-harness"
+  run_reader "$config" verifier
+  expect_code 2 "$RC" "claude with no model must refuse"
+  assert_equals "" "$OUT" "a refused claude setting must print nothing to spawn on"
+  assert_contains "$ERR" "verifier-harness" "the refusal must name the setting file"
+  assert_contains "$ERR" "claude" "the refusal must name the claude adapter"
+  assert_contains "$ERR" "model" "the refusal must say that a model is required"
+  pass "fm-quality-profile: a claude verifier with no model refuses"
+}
+
+test_verifier_refuses_unverified_or_unnamed_model() {
   local config line
-  for line in 'claude' 'claude claude-opus-5-5' 'pi' 'opencode' 'pi anthropic/claude-sonnet-5-5' \
-    'opencode anthropic/opus' 'cursor sonnet-5.5' 'omp Haiku' 'codex claude-fable-5-2' 'nosuch' 'nosuch gpt-5.6'; do
+  for line in 'pi' 'opencode' 'cursor' 'omp' 'nosuch' 'nosuch gpt-5.6' 'codex gpt-5.6 high extra'; do
     config=$(new_config "verifier-refuse-$(printf '%s' "$line" | tr -c 'a-zA-Z0-9' '-')")
     printf '%s\n' "$line" > "$config/verifier-harness"
     run_reader "$config" verifier
@@ -130,7 +167,42 @@ test_verifier_never_resolves_to_claude() {
   : > "$config/verifier-harness"
   run_reader "$config" verifier
   expect_code 2 "$RC" "a present but empty verifier setting must refuse rather than guess"
-  pass "fm-quality-profile: the verifier never resolves to a Claude model or an unverified adapter"
+  pass "fm-quality-profile: an unverified adapter or a multi-provider harness with no model refuses"
+}
+
+# The reader resolves only what the setting names. Run it with a PATH that has
+# neither the codex nor the claude command, so the configured runtime is not
+# usable on this host, and check that it never turns to claude by itself.
+test_unusable_runtime_never_selects_claude() {
+  local config stub tool line expected
+  stub="$TMP_ROOT/no-runtime-bin"
+  mkdir -p "$stub"
+  for tool in bash cat sed grep tr dirname awk; do
+    ln -sf "$(command -v "$tool")" "$stub/$tool"
+  done
+  PATH="$stub" command -v codex >/dev/null 2>&1 && fail "the stub PATH still finds codex"
+  PATH="$stub" command -v claude >/dev/null 2>&1 && fail "the stub PATH still finds claude"
+
+  for line in '' 'codex gpt-5.6' 'grok' 'claude' 'nosuch gpt-5.6'; do
+    config=$(new_config "verifier-unusable-$(printf 'x%s' "$line" | tr -c 'a-zA-Z0-9' '-')")
+    [ -z "$line" ] || printf '%s\n' "$line" > "$config/verifier-harness"
+    OUT=$(PATH="$stub" FM_CONFIG_OVERRIDE="$config" "$stub/bash" "$READER" verifier 2>"$TMP_ROOT/stderr"); RC=$?
+    ERR=$(cat "$TMP_ROOT/stderr")
+    assert_not_contains "$OUT" "harness=claude" "setting '$line' with no usable runtime must not resolve to claude"
+    case "$line" in
+      '') expected=$(printf 'harness=codex\nmodel=\neffort=') ;;
+      'codex gpt-5.6') expected=$(printf 'harness=codex\nmodel=gpt-5.6\neffort=') ;;
+      grok) expected=$(printf 'harness=grok\nmodel=\neffort=') ;;
+      *) expected="" ;;
+    esac
+    if [ -n "$expected" ]; then
+      expect_code 0 "$RC" "setting '$line' must still resolve to the named runtime (stderr: $ERR)"
+    else
+      expect_code 2 "$RC" "setting '$line' must refuse rather than fall back"
+    fi
+    assert_equals "$expected" "$OUT" "setting '$line' must resolve only to what it names"
+  done
+  pass "fm-quality-profile: an unusable verifier runtime never resolves to claude on its own"
 }
 
 # The risk class is a contract: it is stated in full exactly once. A second
@@ -170,6 +242,9 @@ test_known_values_read_back
 test_unknown_value_refuses
 test_verifier_default_is_codex
 test_verifier_setting_reads_back
-test_verifier_never_resolves_to_claude
+test_verifier_claude_with_named_model_reads_back
+test_verifier_claude_without_model_refuses
+test_verifier_refuses_unverified_or_unnamed_model
+test_unusable_runtime_never_selects_claude
 test_risk_class_has_one_owner
 test_help_prints_usage

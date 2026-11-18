@@ -21,12 +21,12 @@
 #
 # config/verifier-harness: one line "<harness> [<model>] [<effort>]", parsed
 # like config/secondmate-harness. An absent file resolves to the documented
-# default, codex with its own model and effort defaults. The verifier must run
-# on a model family other than Claude, so the read refuses (exit 2, nothing on
-# stdout) when the harness is not a verified adapter, when it is claude, when
-# the model names a Claude family, or when the harness can run models from
+# default, codex with its own model and effort defaults. The read refuses
+# (exit 2, nothing on stdout) when the harness is not a verified adapter, when
+# it is claude and no model is named, or when the harness can run models from
 # several providers and no model is named. Only codex, grok, kimi, and gemini
-# reach one non-Claude provider by default and may omit the model.
+# reach one provider by default and may omit the model. The read prints only
+# what the file names; it never checks or replaces an unusable runtime.
 #
 # The config directory is FM_CONFIG_OVERRIDE when set, otherwise
 # "$FM_HOME/config", with FM_HOME defaulting to the tracked code root, the same
@@ -103,16 +103,12 @@ read_verifier() {
   [ -z "$extra" ] || refuse "$path holds more than '<harness> [<model>] [<effort>]'"
   fm_control_harness_supported "$harness" \
     || refuse "$path names '$harness', which is not a verified adapter"
-  [ "$harness" != claude ] \
-    || refuse "$path names claude; the verifier must run on a model family other than Claude"
-  case "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')" in
-    *claude*|*anthropic*|*opus*|*sonnet*|*haiku*|*fable*)
-      refuse "$path names model '$model', a Claude model; the verifier must run on a model family other than Claude" ;;
-  esac
   case "$harness" in
     codex|grok|kimi|gemini) ;;
+    claude) [ -n "$model" ] \
+      || refuse "$path names claude with no model; name the verifier's model after it, for example 'claude sonnet'" ;;
     *) [ -n "$model" ] \
-      || refuse "$path names '$harness', which can run Claude models; name a non-Claude model after it" ;;
+      || refuse "$path names '$harness', which can run models from several providers; name the verifier's model after it" ;;
   esac
   printf 'harness=%s\nmodel=%s\neffort=%s\n' "$harness" "$model" "$effort"
 }

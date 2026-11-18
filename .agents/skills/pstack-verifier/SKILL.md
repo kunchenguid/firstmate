@@ -13,7 +13,7 @@ Under the `default` profile, do not load it, and do none of the steps below.
 [`docs/configuration.md`](../../../docs/configuration.md) "Quality profile" owns both settings, and `bin/fm-quality-profile.sh` owns their parsing.
 
 The captain authorized one independent verifier scout for each ship in the risk class below.
-The verifier runs on a model family other than Claude, so the check does not share the ship worker's blind spots.
+The verifier is a separate session on the runtime that `config/verifier-harness` names; [`docs/configuration.md`](../../../docs/configuration.md) "Verifier runtime" owns that choice and its trade-off.
 It is not a review: it does not judge style, design, or scope, and it does not add a review round.
 It can block the merge ask only with a failing run or a doc line the PR made wrong.
 
@@ -44,7 +44,7 @@ Do these steps before the merge ask, and after the ship's own delivery path fini
    When it refuses, tell the captain the setting error and continue without the verifier.
 2. Check that this runtime is usable: the login is present and `quota-axi` shows quota for its provider.
    When it is not usable, tell the captain that the PR has no independent verifier and why, and continue without it.
-   Never start the verifier on Claude or on any other runtime than the one the setting names.
+   Never start the verifier on any runtime other than the one the setting names, and never switch to Claude or to another runtime by yourself.
 3. Scaffold one scout with `bin/fm-brief.sh <ship-id>-verify <repo> --scout`.
    In its captain's intent, put the ship's captain's intent and the PR URL.
    In its Firstmate spec, tell the scout to:

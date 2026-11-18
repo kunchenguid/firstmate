@@ -1032,9 +1032,10 @@ The verifier step, its risk class, and how its result is used are owned by the a
 
 The optional local, gitignored `config/verifier-harness` names the runtime for the verifier scout as one line, `<harness> [<model>] [<effort>]`.
 When the file is absent, the verifier runs on `codex` with its own model and effort defaults.
-The verifier must run on a model family other than Claude, so `bin/fm-quality-profile.sh verifier` refuses an unverified adapter, the `claude` adapter, and a model name that names a Claude family.
-It also refuses a harness that can run models from several providers when no model is named; only `codex`, `grok`, `kimi`, and `gemini` can omit the model.
-When the setting refuses or the runtime is not usable, firstmate reports that and continues without the verifier; it never uses a Claude model in its place.
+The `claude` adapter is accepted when the line also names a model, for example `claude sonnet` or `claude opus high`.
+`bin/fm-quality-profile.sh verifier` refuses an unverified adapter, the `claude` adapter with no model, and a harness that can run models from several providers when no model is named; only `codex`, `grok`, `kimi`, and `gemini` can omit the model.
+A Claude verifier is a fresh session that never saw the ship's work, but it can share the ship worker's blind spots; naming a model other than the ship worker's model reduces that, and nothing enforces it.
+When the setting refuses or the runtime is not usable, firstmate reports that and continues without the verifier; it never switches to Claude or to any other runtime by itself.
 
 Both files are local to each home and are not part of secondmate inherited configuration.
 `bin/fm-quality-profile.sh`'s header owns how both files are parsed.
