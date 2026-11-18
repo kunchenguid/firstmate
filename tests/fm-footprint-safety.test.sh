@@ -1260,7 +1260,7 @@ SH
 }
 
 # start_in <dir> <socket> <program> [args]: starts <program> with its working
-# directory <dir>, waits until <socket> exists (or 5 s), and prints its pid.
+# directory <dir>, waits until <socket> exists (or 5 s), and sets SI_PID.
 start_in() {  # <dir> <socket> <program> [args...]
   local dir=$1 sock=$2 n=0 pid
   shift 2
@@ -1268,19 +1268,21 @@ start_in() {  # <dir> <socket> <program> [args...]
   pid=$!
   while [ -n "$sock" ] && [ ! -S "$sock" ] && [ "$n" -lt 100 ]; do sleep .05; n=$((n + 1)); done
   [ -n "$sock" ] || sleep .3
-  printf '%s\n' "$pid"
+  kill -0 "$pid" 2>/dev/null || fail "$1 must be running in $dir"
+  SI_PID=$pid
 }
 
 test_a_key_helper_started_in_an_area_does_not_keep_it() {
   local s out agent other pids='' outside p
   agent=$(command -v ssh-agent) || { printf 'ok - # SKIP no ssh-agent\n'; return 0; }
   new_home helper
-  outside="$TMP_ROOT/helper/outside"
+  # Socket paths must stay short (104 bytes on macOS).
+  outside="$SHORT/helper-out"
   mkdir -p "$outside"
   # Its only tie is the working directory it started in: the area goes.
   s=$(scratch_for task-k1)
   printf 'cache\n' > "$s/cache"
-  p=$(start_in "$s" "$outside/sock1" "$agent" -D -a "$outside/sock1")
+  start_in "$s" "$outside/sock1" "$agent" -D -a "$outside/sock1"; p=$SI_PID
   pids="$pids $p"
   out=$(fp task-close task-k1 "$s")
   assert_contains "$out" "scratch removed" "an ssh-agent whose only tie is its working directory must not keep the area: $out"
@@ -1288,7 +1290,7 @@ test_a_key_helper_started_in_an_area_does_not_keep_it() {
   # Its socket is inside the area: the area stays.
   s=$(scratch_for task-k2)
   printf 'cache\n' > "$s/cache"
-  p=$(start_in / "$s/agent.sock" "$agent" -D -a "$s/agent.sock")
+  start_in / "$s/agent.sock" "$agent" -D -a "$s/agent.sock"; p=$SI_PID
   pids="$pids $p"
   out=$(fp task-close task-k2 "$s")
   assert_present "$s/cache" "an ssh-agent with its socket inside must keep the area: $out"
@@ -1296,7 +1298,7 @@ test_a_key_helper_started_in_an_area_does_not_keep_it() {
   # A different program with its working directory there: the area stays.
   s=$(scratch_for task-k3)
   printf 'cache\n' > "$s/cache"
-  p=$(start_in "$s" '' sleep 300)
+  start_in "$s" '' sleep 300; p=$SI_PID
   pids="$pids $p"
   out=$(fp task-close task-k3 "$s")
   assert_present "$s/cache" "another program working there must keep the area: $out"
@@ -1306,7 +1308,7 @@ test_a_key_helper_started_in_an_area_does_not_keep_it() {
     # inspected either, and is no key helper: the area stays and it is named.
     other="$FB/other-agent"
     cp "$agent" "$other"
-    p=$(start_in "$s" "$outside/sock3" "$other" -D -a "$outside/sock3")
+    start_in "$s" "$outside/sock3" "$other" -D -a "$outside/sock3"; p=$SI_PID
     pids="$pids $p"
     out=$(fp task-close task-k3 "$s")
     assert_present "$s/cache" "a program that cannot be inspected must keep the area: $out"
