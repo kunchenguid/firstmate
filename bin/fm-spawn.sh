@@ -430,7 +430,9 @@
 #   REX_SESSION REX_BLOCK REX_SERVER REX_BIN_DIR TERN_IDENTITY TERN_PANE
 #   TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOCKET HC_SESSION
 #   HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above, plus the
+#   marker FM_TASK_ID that ship and scout panes receive above and their
+#   scratch exports FM_TASK_SCRATCH FM_DOCKER_LABEL COMPOSE_PROJECT_NAME
+#   (bin/fm-footprint-lib.sh), plus the
 #   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
 #   pins to 1 with a literal assignment so it survives the cleared environment
 #   even on a host that never had it set.
@@ -990,6 +992,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
+# shellcheck source=bin/fm-footprint-lib.sh
+. "$SCRIPT_DIR/fm-footprint-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1722,6 +1726,8 @@ SPAWN_SLOT_CLAIMED=0
 SPAWN_FRESH_ENDPOINT_OPENED=0
 SPAWN_FRESH_WIRING_PENDING=0
 SPAWN_TASK_TMP_CREATED=0
+TASK_SCRATCH=
+SPAWN_SCRATCH_ENV=()
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1849,6 +1855,7 @@ spawn_abort_cleanup() {
             [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
             [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
             echo "tasktmp=${TASK_TMP:-}"
+            [ -z "${TASK_SCRATCH:-}" ] || echo "scratch=$TASK_SCRATCH"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
             echo "backend=orca"
@@ -6278,6 +6285,38 @@ else
 fi
 mkdir -p "$TASK_TMP/gotmp"
 
+# Per-task scratch area and Docker label set for a ship or scout. Unlike the
+# temp root above it lives outside /tmp (RAM on some hosts) and outside data/,
+# and teardown removes it with the task's labelled Docker material only after
+# every landed-work check passes. bin/fm-footprint-lib.sh owns the layout,
+# config/footprint, the exported names, and which worker tools also get a
+# redirected TMPDIR; a malformed config or an unsafe existing area refuses
+# here, before any launch. A relaunch keeps the task's area and generation; a
+# fresh spawn sets an earlier area for the id aside and gets a new one. An
+# area a failed spawn leaves behind has no task record, so the daily footprint
+# pass (on by default) removes it after its grace period.
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  SPAWN_SCRATCH_MODE=fresh
+  [ "$RELAUNCH" != 1 ] || SPAWN_SCRATCH_MODE=relaunch
+  if ! SPAWN_SCRATCH_OUT=$(fm_footprint_task_env "$CONFIG" "$FM_HOME" "$ID" "$HARNESS" "$SPAWN_SCRATCH_MODE"); then
+    echo "error: could not prepare the task scratch area for $ID; refusing to launch" >&2
+    exit 1
+  fi
+  while IFS= read -r SPAWN_SCRATCH_LINE; do
+    case "$SPAWN_SCRATCH_LINE" in
+      '') ;;
+      '#'*) echo "note: ${SPAWN_SCRATCH_LINE#\# }" >&2 ;;
+      FM_TASK_SCRATCH=*)
+        TASK_SCRATCH=${SPAWN_SCRATCH_LINE#*=}
+        SPAWN_SCRATCH_ENV+=("$SPAWN_SCRATCH_LINE")
+        ;;
+      *) SPAWN_SCRATCH_ENV+=("$SPAWN_SCRATCH_LINE") ;;
+    esac
+  done <<EOF
+$SPAWN_SCRATCH_OUT
+EOF
+fi
+
 # Per-harness turn-end hook where enabled: a file that touches
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
@@ -7326,7 +7365,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp scratch base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7349,6 +7388,7 @@ preserve_relaunch_meta() {
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
   echo "tasktmp=$TASK_TMP"
+  [ -z "$TASK_SCRATCH" ] || echo "scratch=$TASK_SCRATCH"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
   # Read by bin/fm-dod-lib.sh's ready-report gate; absent on every other forge.
@@ -7895,7 +7935,7 @@ if [ "$BACKEND" = t3code ]; then
     T3CODE_ENV+=("LAVISH_AXI_HOST=$LAVISH_AXI_HOST")
   fi
   if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-    T3CODE_ENV+=("FM_TASK_ID=$ID" "FM_HOME=$FM_HOME")
+    T3CODE_ENV+=("FM_TASK_ID=$ID" "FM_HOME=$FM_HOME" "${SPAWN_SCRATCH_ENV[@]+"${SPAWN_SCRATCH_ENV[@]}"}")
   fi
   if [ -n "$SPAWN_TRACEPARENT" ] && spawn_record_traceparent; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")
@@ -7936,6 +7976,15 @@ fi
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  # The task scratch area, Docker label set, and any redirected temp dir from
+  # bin/fm-footprint-lib.sh, in one line through the same pre-launch channel.
+  if [ "${#SPAWN_SCRATCH_ENV[@]}" -gt 0 ]; then
+    SPAWN_SCRATCH_EXPORT="export"
+    for SPAWN_SCRATCH_LINE in "${SPAWN_SCRATCH_ENV[@]}"; do
+      SPAWN_SCRATCH_EXPORT="$SPAWN_SCRATCH_EXPORT ${SPAWN_SCRATCH_LINE%%=*}=$(shell_quote "${SPAWN_SCRATCH_LINE#*=}")"
+    done
+    spawn_send_text_line "$T" "$SPAWN_SCRATCH_EXPORT"
+  fi
 fi
 # Send through the exact pane channel that already ships GOTMPDIR, so every pane
 # backend and harness - ship, scout, and secondmate - gets it before launch. Skipped
@@ -7972,6 +8021,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TERN_IDENTITY TERN_PANE TERN_PANE_SOCKET TERN_WINDOW_KEY TERN_WINDOW_SOCKET \
     HC_SESSION HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE \
     FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
+    FM_TASK_SCRATCH FM_DOCKER_LABEL COMPOSE_PROJECT_NAME \
     $LAUNCH_ENV_FORWARD_NAMES; do
     if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
       case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in

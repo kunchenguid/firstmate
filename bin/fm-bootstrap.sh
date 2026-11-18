@@ -1823,6 +1823,13 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     "$SCRIPT_DIR/fm-contributions.sh" arm --if-owned >/dev/null \
       || echo "MISSING: contribution observation could not be armed; coverage is unconfirmed"
   fi
+  # The footprint daily pass is on by default; arm honours daily-pass off in
+  # config/footprint by disarming instead.
+  if local_phase && [ -d "$STATE" ] && [ -x "$SCRIPT_DIR/fm-footprint.sh" ]; then
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_DATA_OVERRIDE=$DATA FM_CONFIG_OVERRIDE=$CONFIG \
+      "$SCRIPT_DIR/fm-footprint.sh" arm >/dev/null \
+      || echo "MISSING: the daily footprint pass could not be armed; orphaned task scratch is not cleaned"
+  fi
   if local_phase && [ -e "$CONFIG/pr-health-monitor" ] && command -v jq >/dev/null 2>&1 \
     && [ -d "$DATA" ] && [ -x "$SCRIPT_DIR/fm-pr-health.sh" ]; then
     "$SCRIPT_DIR/fm-pr-health.sh" arm >/dev/null \

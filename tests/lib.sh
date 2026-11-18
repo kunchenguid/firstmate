@@ -453,6 +453,22 @@ trap 'fm_test_cleanup; exit 143' TERM
 trap 'fm_test_cleanup; exit 129' HUP
 trap 'fm_test_cleanup; exit 131' QUIT
 
+# Every ship or scout spawn creates a task scratch area (bin/fm-footprint-lib.sh).
+# When no runner chose a root, keep it in a short, cleaned test directory rather
+# than the user's real cache.
+if [ -z "${FM_SCRATCH_ROOT_OVERRIDE:-}" ]; then
+  FM_SCRATCH_ROOT_OVERRIDE=$(mktemp -d /tmp/fmscr.XXXXXX) &&
+    FM_SCRATCH_ROOT_OVERRIDE=$(cd -P -- "$FM_SCRATCH_ROOT_OVERRIDE" && pwd -P) &&
+    FM_TEST_CLEANUP_DIRS+=("$FM_SCRATCH_ROOT_OVERRIDE") &&
+    export FM_SCRATCH_ROOT_OVERRIDE
+fi
+# Close-time cleanup and the footprint report talk to Docker; no test may reach a
+# live daemon on the host, so Docker is absent unless a test names a stand-in.
+export FM_FOOTPRINT_DOCKER=
+# Removals wait out a grace window (removal-grace-seconds, default 5 s); a
+# suite that does not test that window skips the wait.
+export FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE=${FM_FOOTPRINT_REMOVAL_GRACE_OVERRIDE-0}
+
 TREEHOUSE_ROOT=$(fm_test_tmproot fm-treehouse-pool)
 export TREEHOUSE_ROOT
 

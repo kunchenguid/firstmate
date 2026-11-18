@@ -15,6 +15,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
+| Disk, Docker, temp, caches, and cleanup of finished tasks | [Footprint](#footprint-configfootprint) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -960,6 +961,95 @@ Publishing is best-effort and never changes what the watcher does.
 `bin/fm-capacity.sh --admit` checks the same verdict: it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
 Only with `admit-spawns` does `bin/fm-spawn.sh` ask it, as `--spawn-gate`, before a fresh ship or scout: a refusal defers the spawn with exit 75 and leaves the task queued, and a malformed file that names `admit-spawns`, or a file that exists but cannot be read, refuses spawns rather than guessing; without that key no spawn reads the verdict, and nothing in the environment skips it.
 The script's header owns the report line, the published document's fields, the verdict, the auto budget's rules and thresholds, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks; `bin/fm-lane-vitals-lib.sh` owns how each vital is measured.
+
+## Footprint (config/footprint)
+
+Every ship and scout task gets a private scratch area outside `data/` and outside `/tmp`, and cleanup removes it, with everything the task labelled in Docker, once the task's work has landed.
+`bin/fm-footprint.sh report` shows this machine's footprint in one page without calling a model: disk by kind, Docker, temp, shared caches against the cap, leftover processes, and allowance used per lane from the worker tools' own transcripts, on macOS, Linux, and Linux under WSL.
+
+The optional local, gitignored `config/footprint` file holds this machine's choices, one key and its value per line, with `#` starting a comment.
+It is not inherited by secondmate homes, so each machine sets its own.
+With the file absent every default below applies, and no cache is ever trimmed.
+Close-time cleanup, temp redirection, Docker labels, and the daily pass each have an off key below; the scratch area itself is always created for a ship or scout; the cache cap stays off until `cache-cap-gb` is set; old-folder removal never runs on its own, only through `old-tasks --apply` with a preview id.
+An unknown key, a repeated key, or a malformed value is an error naming the line: spawn refuses before launch, and cleanup removes nothing rather than guessing.
+
+```text
+scratch-root /mnt/big/fm-scratch   # default: ~/Library/Caches/firstmate/scratch on macOS, ${XDG_CACHE_HOME:-~/.cache}/firstmate/scratch elsewhere
+task-cleanup on                    # remove a closed task's scratch area and labelled Docker material (default on); off also stops the daily pass removing any scratch area
+task-tmpdir on                     # point TMPDIR, TMP, and TEMP into the scratch area for a verified worker tool (default on)
+docker-labels on                   # export FM_DOCKER_LABEL and COMPOSE_PROJECT_NAME (default on)
+daily-pass on                      # arm the daily orphan pass at startup (default on); off disarms it
+cache-cap-gb 50                    # shared download-cache cap for this machine; absent means report only
+orphan-grace-hours 24              # age before the daily pass removes a scratch area whose task has no record
+old-task-days 30                   # age before a finished task folder's rebuildable entries are offered
+keep-warn-mb 200                   # a closed task whose kept folder is larger is flagged, never trimmed
+removal-grace-seconds 5            # how long a frozen, set-aside directory waits before its final check and removal (1 to 600)
+```
+
+`scratch-root` must be absolute, at most 64 bytes, and outside this home's `data/` and `projects/`, because temp paths under it must stay within the 104-byte Unix socket limit on macOS.
+A task's area is `<scratch-root>/<home-key>/<task-id>/`, where the home key separates homes on one machine that reuse a task id, and spawn records it as `scratch=` in the task record.
+Spawn writes the home's physical path into `<home-key>/.fm-home` when it creates that directory; every removal requires it, so a key directory that is a link, lies elsewhere, has no `.fm-home`, or names another home is never trusted.
+Spawn also writes the task's generation, 16 random hex digits, into `<area>/.fm-generation` when it creates the area; a relaunch keeps the area and its generation.
+A fresh spawn that finds an earlier area for its id (one that survived its task's close, for example because it held a repository or `task-cleanup` was off) never reuses it: spawn renames it to `<home-key>/.fm-kept-<task-id>.<n>`, removing nothing, names it in a note, and creates a new area with a new generation; the daily pass then judges the kept area like any other orphaned area.
+
+Spawn exports, for a ship or scout:
+
+| Name | Value |
+| --- | --- |
+| `FM_TASK_SCRATCH` | the task's scratch area; the worker instructions put every rebuildable thing there |
+| `FM_DOCKER_LABEL` | `firstmate.task=<home-key>/<task-id>/<generation>`, the one `--label` flag a worker passes to `docker run`, `create`, `build`, `volume create`, and `network create` |
+| `COMPOSE_PROJECT_NAME` | `fm-<home-key>-<task-id lowercased, "." as "_">-<generation>`, so compose names and labels the task's containers, networks, volumes, and built images by itself; the random generation, not the task id, makes it unique, so task ids that lowercase alike, or a later task reusing an id, never share a project |
+| `TMPDIR`, `TMP`, `TEMP` | the area's `tmp/`, only for a worker tool verified live with a redirected temp directory (Claude Code and Codex; [runtime-backends verification](verification/runtime-backends.md)) and only while that path is at most 90 bytes; every other tool keeps its inherited temp and spawn names it as not covered |
+
+Current macOS `mktemp(1)` ignores `TMPDIR`, so only temp files made through `TMPDIR`-aware runtimes (Node, Python, Go, browsers launched by test tools) move into the area there.
+
+At cleanup, only after every landed-work check has passed, teardown ends processes whose working directory is inside the task's copy, temp root, or scratch area (the scratch area only once it is proven to be this home's own area for the task), then `bin/fm-footprint.sh task-close` removes the containers, networks, volumes, and images carrying exactly the task generation's label or compose project, then the scratch area, and appends one line to `data/footprint-ledger.tsv`.
+Docker goes first, so a task container still writing into the area through a bind mount is stopped before the area is checked.
+A refused cleanup removes nothing.
+
+Every removal refuses what it cannot prove disposable, so fewer cases are cleaned rather than any case risked:
+
+- A tree holding version-controlled work (a `.git`, `.hg`, `.svn`, `.jj`, `.bzr`, `.pijul`, `_darcs`, `.sl`, `_FOSSIL_`, or `.fslckout` entry, or any entry named `HEAD`, as in a bare repository) is never removed, published or not, because no cheap check covers every commit, stash, reflog entry, ignored file, and linked worktree. This is the policy that ships: a fully published clone inside an area also keeps the area until someone removes the clone.
+  The landed-work checks prove the task's own copy, not a repository the worker made inside its scratch area, so such an area is kept whole and named; once that repository is moved or removed, the daily pass removes the area.
+- A tree holding a name with a control character or a backslash, or one that cannot be read in full, is never removed.
+- A directory is renamed aside (by the daily pass and old-folder apply under the task's spawn lock; task close runs while teardown still holds the task's record) and that copy is checked again before removal; a copy that now fails the check is put back.
+- Whether a set-aside copy may go is decided from its own contents at the moment of removal, never from no process seeming to use it. The copy is frozen (every write bit removed, so no ordinary process can create, rename, or open anything in it for writing), flushed to disk, and snapshotted (type, permissions, device, inode, size, modification and change times, and link count of every entry); after `removal-grace-seconds` it is checked for version-controlled work again and snapshotted again. A copy may go only when a positive record says every one of these steps verified it: any difference, any failed step, a record that could not be written (a full temporary directory, for example), or a missing snapshot puts it back with its permissions restored.
+- Freezing, snapshots, and removal never follow a link: each entry is opened relative to its already opened parent and checked to be the object just listed (`bin/fm-footprint-fs.py`, run with `python3`; without `python3` nothing is removed). A file with a name outside the copy as well, such as one hard-linked from a pnpm or uv package store, is never frozen or written, because its permissions and data are shared with that name; its name inside the copy is unlinked only while its device, inode, type, size, modification time and link count still match the snapshot, so the shared data stays with its other names, and the whole copy is kept when that check fails before removal starts. Copies removed together count the names each has already unlinked, so several copies sharing a store file all go. A file whose every name is inside the copy is frozen like any other, and one that gains a name outside after the freeze gets its recorded permissions back as its name inside goes, so a name outside is never left read-only.
+- A process check runs inside that window and can only add reasons to keep: a copy a process of this user still works in, holds a file open in, or has mapped into memory, or every copy when the processes cannot be listed in full, is put back. No process is ever ended to free space.
+- The removal deletes exactly the entries the verified snapshot lists, at once after the check: each directory gets its write bit back only when its own entries go, and each entry is checked against its snapshotted device, inode, type, size, times, and links before it is unlinked by name inside its parent. Anything that changed, was replaced, or appeared afterwards is not removed, nor is any folder above it, and the run reports the copy as partly removed, never as removed.
+- A removal stopped by a signal (as a timed-out caller sends) first stops and waits for its removal engine, then gives every copy it froze its permissions back and puts it back under its name; an engine still starting at that moment does nothing. Whether an engine or run is still going is read from `/proc` on Linux and from `ps` elsewhere, so a Linux host without `ps` in `/bin` or `/usr/bin` (NixOS, Guix) is covered too. The freeze writes each permission to `state/footprint-stopped/` before changing it, so when a removal is killed outright, or its engine dies part way, the next close, old-folder apply or daily pass gives each copy it left its permissions back once neither that run nor its engine is running; a copy left set aside stays there and is reported. A record whose permissions could not all be restored is kept for a later run; a restore changes only the write bits the freeze took, so an object whose other permission bits differ is left alone. A check the removal engine did not finish is reported as such.
+- A set-aside folder (`.fm-closing-*`, `.fm-reclaim-*`) left by an interrupted removal is reported, never removed again on the strength of its name.
+- Docker objects are selected only by the generation read from an area proven to be the task's; without one, nothing in Docker is removed.
+
+Docker absent is skipped, Docker is never pruned, and unlabelled Docker material is only reported.
+When Docker does not answer, a listing fails, or some objects remain, the task and its generation are queued in `state/footprint-docker-retry`; the daily pass retries each entry under the task's spawn lock while no task record exists, and only for that generation.
+The queue has its own short lock, and the daily pass removes only the entries it finished from the queue as it is then, so a task closing during the pass keeps its entry.
+Shared caches are never touched at task cleanup.
+
+The daily pass is on by default: startup (`bin/fm-bootstrap.sh`) runs `bin/fm-footprint.sh arm`, which registers it through the watcher's existing check mechanism, and with `daily-pass off` arm disarms it instead and the check starts nothing.
+The pass runs whenever this home's watcher runs; its registration alone never makes a home need a watcher.
+The check starts the pass as a detached run and returns at once, because one check may run for at most `FM_CHECK_TIMEOUT`, and a later check reports the finished run.
+While `task-cleanup` is off the pass removes no scratch area at all and only counts the ones it leaves, so a kept area stays kept.
+Otherwise the pass removes this home's scratch areas whose task has no record, including areas a fresh spawn kept aside, once they are older than `orphan-grace-hours` and that hold nothing it may not remove, each under that task's spawn lock with the record rechecked, retries queued Docker cleanups, and with `cache-cap-gb` set trims the shared cache with the oldest modification time first, only through that tool's own command, until the total is under the cap.
+It reports one line only when something needs a person (kept areas, including areas a running process still uses, set-aside folders left by an interrupted removal, pending Docker cleanups, caches still over the cap, a failed trim), and only when that finding changes.
+
+`bin/fm-footprint.sh old-tasks` previews rebuildable directories inside finished task folders older than `old-task-days`; records, reports, decisions, the backlog, evidence files, and anything inside a repository are never offered.
+A rebuildable name only makes a candidate: a directory holding version-controlled work or a record is never offered, nor is anything in a folder holding a name with a control character or a backslash.
+Removal is a captain decision: `old-tasks --apply <preview-id>` removes exactly the previewed list and refuses, removing nothing, when the list or the identity or contents of anything in it changed since the preview, including while it was being set aside, or when a running process still uses an entry.
+
+Limits worth knowing:
+
+- Cache order uses the newest modification time of a cache directory and its direct entries; reading a cached item need not change it, so the order approximates least recently used.
+- Scratch removal and Docker removal are independent best-effort steps, not one transaction; a partial removal is recorded and named, not undone.
+- A process that already held a file in the area open for writing, or mapped it for writing, before the freeze, that the process check cannot see (another user, such as root, or a container writing through a bind mount), and that writes only after the second snapshot, can lose that write; the grace window, not the process check, is the protection against such a writer, and a process of another user can also undo the freeze.
+- A file shared by hard link with a name outside the copy is not frozen, so a process can still write to it while the copy is checked; such a write lands in the shared data, which the outside name keeps.
+- Between an entry's identity check and its unlink there is a window of two system calls in which an atomic save over the same name could still be removed; POSIX has no unlink by identity, so this cannot be closed fully, only kept that narrow.
+- A running `ssh-agent` or `gpg-agent` (exact program names, read in the same listing that decides) outlives the task that started it, so its working directory alone does not keep an area; anything it holds open inside still does. On Linux both refuse to have their open files read, so the only open files of theirs the check can see are their sockets, by the path they were bound at (from `/proc/net/unix`), and any socket bound inside an area keeps it. Any other process of this user that cannot be inspected makes the process listing incomplete, so cleanup removes nothing while it runs; task close and the daily finding name it.
+- On a case-insensitive filesystem, as on macOS by default, two task ids that differ only in case name one task record and one area, so they are one task to Firstmate.
+- Removal stays on one filesystem and never follows links; a copy with another filesystem mounted inside it is kept. That is a traversal limit, not the ownership proof, which is the key directory's identity.
+- The home key comes from the home's physical path alone, so separate machines sharing one remote Docker context with the same home path and task id are outside its isolation.
+
+The script's header owns each command's exact rules, the known caches and their trim commands, the rebuildable directory names, the ledger columns, and the report's JSON shape; `bin/fm-footprint-lib.sh` owns the scratch layout, the exported names, and the verified tool list.
 
 ## PR-ready line after green (config/ready-after-green)
 

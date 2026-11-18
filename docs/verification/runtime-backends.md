@@ -714,6 +714,32 @@ The token-free live guard refreshes the per-version evidence and fails naming th
 bin/fm-test-run.sh tests/fm-claude-tool-exclude-live.test.sh
 ```
 
+## Redirected task temp directory
+
+Spawn points `TMPDIR`, `TMP`, and `TEMP` at a ship or scout task's scratch area only for the worker tools listed in `bin/fm-footprint-lib.sh`; [Footprint](../configuration.md#footprint-configfootprint) owns the contract and this record owns the measurement.
+Verified on 2026-11-16 on macOS 27.0.1 (Darwin 27.0.0), each tool launched non-interactively with the three variables pointing at a fresh `/tmp/fmtl.*/tmp` directory and asked to run `f="$TMPDIR/fm-live-probe.$$"; : > "$f"; echo "$f"` with its shell tool:
+
+| Tool | Version | Exit | Probe file | Own temp entries in the redirected directory |
+| --- | --- | --- | --- | --- |
+| Claude Code (`claude -p ... --dangerously-skip-permissions`) | 2.1.325 | 0 | inside the redirected directory | none |
+| Codex (`codex exec --dangerously-bypass-approvals-and-sandbox`) | 0.169.0 | 0 | inside the redirected directory | `.tmp*` files and `hook_outputs` |
+
+The same check passed on 2026-11-16 under Linux in WSL2 (kernel 6.18.58.1, bash 5.3.9):
+
+| Tool | Version | Exit | Probe file | Own temp entries in the redirected directory |
+| --- | --- | --- | --- | --- |
+| Claude Code | 2.1.325 | 0 | inside the redirected directory | `claude-1000` |
+| Codex | 0.163.0 | 0 | inside the redirected directory | none |
+
+Finding that shapes the probe: on this macOS release `mktemp(1)` ignores `TMPDIR` and still writes under the per-user `/var/folders/.../T/`, while Python's `tempfile` and Node's `os.tmpdir()` follow it, so the probe writes through `$TMPDIR` directly.
+Every other worker tool is not covered until it passes the same check, and keeps its inherited temp directory.
+
+The opt-in, prompt-submitting live guard refreshes the per-version evidence and fails naming the tool and version:
+
+```sh
+FM_FOOTPRINT_TMPDIR_LIVE=1 bin/fm-test-run.sh tests/fm-footprint-tmpdir-live.test.sh
+```
+
 ## Secondmate busy contract
 
 Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 0.86.1, and Grok 1.0.40.

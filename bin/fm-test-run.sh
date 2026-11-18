@@ -200,7 +200,7 @@ CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
-PORTABLE_SERIAL_SHARDS=11
+PORTABLE_SERIAL_SHARDS=12
 
 # Conservative balance hint for a portable-serial script with no measurement.
 # Rounded above the current CI mean, including the capability-skipped scripts.
@@ -392,7 +392,7 @@ family_for_basename() {
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
-    fm-claude-tool-exclude-live.test.sh)
+    fm-claude-tool-exclude-live.test.sh|fm-footprint-tmpdir-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
     fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
@@ -405,7 +405,7 @@ family_for_basename() {
     fm-git-strip-ai-trailers.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
-    fm-spawn-compact-adviser-disable-remote.test.sh|\
+    fm-spawn-compact-adviser-disable-remote.test.sh|fm-footprint-spawn.test.sh|\
     fm-project-capacity.test.sh|fm-lane-capacity-integration.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -452,7 +452,7 @@ family_for_basename() {
     fm-claude-account-quota.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
-    fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
+    fm-extension-binding.test.sh|fm-footprint.test.sh|fm-footprint-safety.test.sh|fm-footprint-scale.test.sh|fm-gitignore-config.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
     fm-procevent-extension-errors.test.sh|fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
@@ -808,6 +808,11 @@ tests/fm-extension-binding.test.sh 11105
 tests/fm-fleet-ledger.test.sh 19980
 tests/fm-fleet-snapshot-view.test.sh 23334
 tests/fm-fleet-sync.test.sh 40541
+tests/fm-footprint-safety.test.sh 18355
+tests/fm-footprint-scale.test.sh 100000
+tests/fm-footprint-spawn.test.sh 17936
+tests/fm-footprint-tmpdir-live.test.sh 149
+tests/fm-footprint.test.sh 16025
 tests/fm-forge-detect.test.sh 193
 tests/fm-fork-free-helpers.test.sh 746
 tests/fm-gate-refuse.test.sh 9953
@@ -1679,6 +1684,15 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-capacity-auto.test.sh"
       printf '%s\n' "__script__:fm-project-capacity.test.sh"
       printf '%s\n' "__script__:fm-lane-capacity-integration.test.sh"
+      ;;
+    bin/fm-footprint.sh|bin/fm-footprint-lib.sh|bin/fm-footprint-fs.py)
+      printf '%s\n' "__script__:fm-footprint.test.sh"
+      printf '%s\n' "__script__:fm-footprint-safety.test.sh"
+      printf '%s\n' "__script__:fm-footprint-scale.test.sh"
+      printf '%s\n' "__script__:fm-footprint-spawn.test.sh"
+      printf '%s\n' "__script__:fm-teardown.test.sh"
+      printf '%s\n' "__script__:fm-gotmp.test.sh"
+      printf '%s\n' "__script__:fm-footprint-tmpdir-live.test.sh"
       ;;
     bin/fm-lane-vitals-lib.sh)
       printf '%s\n' "__script__:fm-lane-vitals.test.sh"
@@ -2560,6 +2574,9 @@ if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
 fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
+# Task scratch areas the suite's spawns create land under this run's own temp
+# root, never in the machine's real cache (bin/fm-footprint-lib.sh).
+export FM_SCRATCH_ROOT_OVERRIDE="$RUN_TMP/scratch"
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"

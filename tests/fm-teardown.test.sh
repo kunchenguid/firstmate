@@ -5431,6 +5431,132 @@ test_leaked_tasktmp_process_is_reaped() {
   pass "a leaked descendant process rooted under the task's per-task tasktmp is reaped by teardown too"
 }
 
+# Close-time footprint cleanup (bin/fm-footprint.sh task-close) runs through
+# the real teardown. footprint_case seeds the task's scratch area through the
+# library under a short scratch root, a process living in it, and a recording
+# docker whose only object carries the task's label.
+footprint_case() {  # <case-dir>
+  local case_dir=$1 root
+  root=$(mktemp -d /tmp/fmtd.XXXXXX)
+  root=$(cd -P "$root" && pwd -P)
+  FM_TEST_CLEANUP_DIRS+=("$root")
+  FOOTPRINT_ROOT=$root
+  FOOTPRINT_ENV=$(FM_SCRATCH_ROOT_OVERRIDE=$root HOME="$case_dir" bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-footprint-lib.sh"; fm_footprint_task_env "$2" "$1" task-x1 codex' _ "$ROOT" "$case_dir/config")
+  FOOTPRINT_SCRATCH=$(printf '%s\n' "$FOOTPRINT_ENV" | sed -n 's/^FM_TASK_SCRATCH=//p')
+  FOOTPRINT_LABEL=$(printf '%s\n' "$FOOTPRINT_ENV" | sed -n 's/^FM_DOCKER_LABEL=//p')
+  [ -d "$FOOTPRINT_SCRATCH/tmp" ] || fail "footprint: the scratch area was not created"
+  head -c 100000 /dev/zero > "$FOOTPRINT_SCRATCH/tmp/profile.bin"
+  printf '%s\n' "scratch=$FOOTPRINT_SCRATCH" >> "$case_dir/state/task-x1.meta"
+  [ -n "$FOOTPRINT_LABEL" ] || fail "footprint: the task's Docker label was not exported"
+  printf 'container\tc1\t%s\n' "$FOOTPRINT_LABEL" > "$case_dir/fakebin/docker.objects"
+  cat > "$case_dir/fakebin/docker" <<'SH'
+#!/usr/bin/env bash
+dir=$(dirname "$0")
+printf '%s\n' "$*" >> "$dir/docker.log"
+filter=
+for a in "$@"; do case "$a" in label=*) filter=${a#label=} ;; esac; done
+case "$1 ${2:-}" in
+  "info "*) echo 29.0.0 ;;
+  "ps "*) awk -F '\t' -v f="$filter" '$1 == "container" && $3 == f { print $2 }' "$dir/docker.objects" ;;
+  "rm "*) : > "$dir/docker.objects" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/docker"
+}
+
+test_footprint_cleanup_after_landed_teardown() {
+  local case_dir rc=0 pid
+  case_dir=$(make_case footprint-landed)
+  write_meta "$case_dir" no-mistakes ship
+  footprint_case "$case_dir"
+  land_shippable_commit "$case_dir"
+  ( cd "$FOOTPRINT_SCRATCH" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT FM_FOOTPRINT_DOCKER="$case_dir/fakebin/docker" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "footprint-landed: teardown should succeed: $(cat "$case_dir/stderr")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "footprint-landed: a process living in the scratch area survived teardown"
+  fi
+  assert_absent "$FOOTPRINT_SCRATCH" "footprint-landed: the scratch area must be removed"
+  assert_equals "" "$(cat "$case_dir/fakebin/docker.objects")" "footprint-landed: the labelled container must be removed"
+  assert_grep "footprint: task-x1 scratch removed" "$case_dir/stderr" "footprint-landed: teardown must report the cleanup"
+  assert_grep "Docker: 1 labelled object(s) removed" "$case_dir/stderr" "footprint-landed: the Docker removal must be reported"
+  [ "$(awk -F '\t' '{print $2, $6, $7, $8}' "$case_dir/data/footprint-ledger.tsv")" = "task-x1 1 removed removed" ] \
+    || fail "footprint-landed: the ledger must record the close: $(cat "$case_dir/data/footprint-ledger.tsv" 2>/dev/null)"
+  pass "a landed teardown removes the task's scratch area, its processes, and its labelled Docker material"
+}
+
+test_footprint_refused_teardown_removes_nothing() {
+  local case_dir rc=0
+  case_dir=$(make_case footprint-refused)
+  write_meta "$case_dir" no-mistakes ship
+  footprint_case "$case_dir"
+  land_shippable_commit "$case_dir"
+  printf '%s\n' "unsaved" > "$case_dir/wt/unsaved.txt"
+  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT FM_FOOTPRINT_DOCKER="$case_dir/fakebin/docker" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "footprint-refused: a dirty worktree must refuse"
+  assert_grep REFUSED "$case_dir/stderr" "footprint-refused: no REFUSED line"
+  assert_present "$FOOTPRINT_SCRATCH/tmp/profile.bin" "footprint-refused: a refused cleanup must keep the scratch area"
+  assert_equals "container	c1	$FOOTPRINT_LABEL" \
+    "$(cat "$case_dir/fakebin/docker.objects")" "footprint-refused: a refused cleanup must keep the labelled Docker material"
+  assert_absent "$case_dir/fakebin/docker.log" "footprint-refused: a refused cleanup must not even ask Docker"
+  assert_absent "$case_dir/data/footprint-ledger.tsv" "footprint-refused: a refused cleanup must not record a close"
+  pass "a refused teardown removes no scratch, no Docker material, and records nothing"
+}
+
+# The landed-work checks prove the task's own copy, not a repository the
+# worker made inside its scratch area, so one there keeps the whole area even
+# after an otherwise clean, landed teardown.
+test_footprint_unlanded_scratch_checkout_survives_landed_teardown() {
+  local case_dir rc=0 nested
+  case_dir=$(make_case footprint-scratch-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  footprint_case "$case_dir"
+  land_shippable_commit "$case_dir"
+  nested="$FOOTPRINT_SCRATCH/extra-checkout"
+  mkdir -p "$nested"
+  git -C "$nested" init -q
+  printf 'unique unpublished change\n' > "$nested/unique.txt"
+  git -C "$nested" add unique.txt
+  git -C "$nested" -c user.email=test@example.invalid -c user.name=test commit -qm 'unpublished extra checkout'
+  FM_SCRATCH_ROOT_OVERRIDE=$FOOTPRINT_ROOT FM_FOOTPRINT_DOCKER="$case_dir/fakebin/docker" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "footprint-scratch-unlanded: the landed teardown itself should succeed: $(cat "$case_dir/stderr")"
+  assert_present "$nested/unique.txt" "footprint-scratch-unlanded: the unpublished checkout must survive"
+  assert_present "$FOOTPRINT_SCRATCH/tmp/profile.bin" "footprint-scratch-unlanded: the whole area must be kept"
+  assert_grep "kept whole" "$case_dir/stderr" "footprint-scratch-unlanded: teardown must say the area was kept"
+  pass "a repository inside the scratch area keeps the whole area through a landed teardown"
+}
+
+# A recorded scratch path that is not this home's area for the task is never
+# trusted, so no process living there is ended and nothing there is removed.
+test_footprint_foreign_scratch_path_keeps_its_processes() {
+  local case_dir rc=0 foreign pid
+  case_dir=$(make_case footprint-foreign-scratch)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  foreign="$case_dir/other-task-scratch"
+  mkdir -p "$foreign"
+  printf 'other task data\n' > "$foreign/data"
+  printf 'scratch=%s\n' "$foreign" >> "$case_dir/state/task-x1.meta"
+  ( cd "$foreign" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  FM_FOOTPRINT_DOCKER='' run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "footprint-foreign-scratch: teardown should succeed: $(cat "$case_dir/stderr")"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "footprint-foreign-scratch: a process in a scratch path the task does not own was ended"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$foreign/data" "footprint-foreign-scratch: the foreign directory must survive"
+  assert_grep "is not this home's area for the task; left it in place" "$case_dir/stderr" "footprint-foreign-scratch: cleanup must refuse the path"
+  pass "a recorded scratch path the task does not own keeps its processes and its files"
+}
+
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
   case_dir=$(make_case lsof-absent-process-group-reap)
@@ -6721,6 +6847,10 @@ test_another_branchs_parked_run_is_never_touched
 test_own_autonomous_run_is_left_alone
 test_leaked_worktree_process_is_reaped
 test_leaked_tasktmp_process_is_reaped
+test_footprint_cleanup_after_landed_teardown
+test_footprint_refused_teardown_removes_nothing
+test_footprint_unlanded_scratch_checkout_survives_landed_teardown
+test_footprint_foreign_scratch_path_keeps_its_processes
 test_lsof_absent_reaps_tmux_process_group
 test_lsof_error_refuses_before_removal
 test_reused_pid_identity_is_not_force_killed
