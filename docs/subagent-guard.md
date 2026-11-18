@@ -45,7 +45,7 @@ A tool is delegation-shaped when its normalized lowercase name contains one of t
 ```text
 agent  subagent  task  workflow  cron  schedul  worktree
 delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
-createsession  sendsessionmessage
+createsession  sendsessionmessage  withcopilot  assigncopilot
 ```
 
 Three exclusions keep the shape test from producing false positives.
@@ -53,7 +53,8 @@ Three exclusions keep the shape test from producing false positives.
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
   Copilot names an MCP tool `<server>-<tool>` instead, and that form has no exemption: a GitHub MCP tool is classified by its name like any other tool, so one whose name carries a stem, such as a workflow-dispatching tool, is denied.
-  A GitHub MCP tool whose name carries no stem passes the shape test whatever it does; the guard cannot know a third-party server's tool list, so that gap is accepted.
+  The `withcopilot` and `assigncopilot` stems catch the built-in GitHub MCP server's tools that hand work to GitHub's Copilot coding agent, such as `create_pull_request_with_copilot` and `assign_copilot_to_issue`, because that remote work is as untracked as a local subagent.
+  Any other GitHub MCP tool whose name carries no stem passes the shape test whatever it does; the guard cannot know a third-party server's tool list, so that gap is accepted.
 - `OBSERVE_ONLY_TOOLS`: the exact names `taskoutput`, `taskstop`, `taskget`, `tasklist`, `cronlist`, `bashoutput`, `killshell`, `manage_subagents` (`managesubagents`), `manage_task` (`managetask`), and Copilot's `read_agent` (`readagent`), `list_agents` (`listagents`), and the GitHub MCP server's read-only `github-mcp-server-get_copilot_task_status` are allowed.
   These observe or stop work that already exists rather than creating it, and denying them at this layer could strand already-running work with no way to inspect or end it.
   A Claude primary's optional local deny list may still remove them from the schema.

@@ -150,12 +150,11 @@ test_guard_classifies_copilot_github_tools_by_stem() {
   local tool
   expect_allow "verified read-only Copilot task status tool" "github-mcp-server-get_copilot_task_status"
   for tool in github-mcp-server-run_workflow github-mcp-server-list_workflows github-mcp-server-dispatch_workflow \
-              not-github-mcp-server-run_workflow githubiq-create_task; do
+              not-github-mcp-server-run_workflow githubiq-create_task \
+              github-mcp-server-create_pull_request_with_copilot github-mcp-server-assign_copilot_to_issue; do
     expect_deny "Copilot GitHub tool with a delegation stem" "$tool"
   done
-  for tool in github-mcp-server-get_file_contents github-mcp-server-create_pull_request_with_copilot; do
-    expect_allow "Copilot GitHub tool with no delegation stem" "$tool"
-  done
+  expect_allow "Copilot GitHub tool with no delegation stem" "github-mcp-server-get_file_contents"
   pass "Copilot GitHub tools are classified by name, with only the verified read-only task status tool exempt"
 }
 

@@ -253,7 +253,9 @@ fm_copilot_wake_lock_dir() {  # <state-dir>
 FM_COPILOT_ABORT_EVENT='{"type":"abort"'
 
 fm_copilot_abort_count() {  # <events.jsonl> -> number of abort events
-  grep -c "^$FM_COPILOT_ABORT_EVENT" "$1" 2>/dev/null || true
+  local n
+  n=$(grep -c "^$FM_COPILOT_ABORT_EVENT" "$1" 2>/dev/null) || true
+  printf '%s\n' "${n:-0}"
 }
 
 # 0 iff the `copilot --version` text names a release inside the verified range;
