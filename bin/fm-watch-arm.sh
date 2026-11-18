@@ -95,7 +95,9 @@
 # Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
 # an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
 # Any other watcher, or one that outlives the stop,
-# is attached to exactly as a plain arm attaches.
+# is attached to exactly as a plain arm attaches. When the watcher that outlived
+# the stop later ends by that TERM without delivering a reason, the same
+# restoration applies and this arm owns a fresh cycle instead of closing empty.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
@@ -531,6 +533,12 @@ attach_and_wait() {
       fail_arm_ground_gone
       return 1
     fi
+    # A take-over whose stop outlived its bound (take_over_cycle) finishes
+    # here once that watcher ends by the take-over's TERM without a reason.
+    if [ -n "$TAKE_OVER_LATE_PID" ] && [ "$attached_pid" = "$TAKE_OVER_LATE_PID" ] \
+      && ! cycle_delivered_reason && take_over_settle "$attached_pid"; then
+      return 4
+    fi
     if close_unobserved_cycle; then
       cycle_log_append unknown unknown attached-delivered-wake none
       return 0
@@ -661,9 +669,13 @@ fi
 # to exit (header, --take-over). Returns 3 after printing the reason that cycle
 # delivered before the stop landed, 0 once it stopped without delivering, and
 # 1 when it was not stopped (its handover state was unreadable, or it outlived
-# the stop), which leaves it to the plain attach below.
+# the stop), which leaves it to the plain attach below. A watcher that outlived
+# the stop is recorded in TAKE_OVER_LATE_PID so that attach can still settle
+# the take-over when the held TERM lands: a watcher can hold a stop for a whole
+# blocking command substitution (bash 3.2), far past this bound.
+TAKE_OVER_LATE_PID=
 take_over_cycle() {  # <watcher-pid> <identity>
-  local pid=$1 i owner_signal
+  local pid=$1 i
   cycle_begin "$pid" attached "$2"
   fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
   if attached_holder_live "$pid"; then
@@ -675,6 +687,7 @@ take_over_cycle() {  # <watcher-pid> <identity>
     i=$((i + 1))
   done
   if fm_pid_alive "$pid"; then
+    TAKE_OVER_LATE_PID=$pid
     return 1
   fi
   if cycle_delivered_reason; then
@@ -682,6 +695,16 @@ take_over_cycle() {  # <watcher-pid> <identity>
     printf '%s\n' "$DELIVERED_REASON"
     return 3
   fi
+  take_over_settle "$pid" || cycle_log_append unknown unknown taken-over-unconfirmed-stop none
+  return 0
+}
+
+# Settle a take-over whose stopped watcher delivered no reason. Succeeds, after
+# restoring the snapshot take_over_cycle took (docs/watcher-continuity.md
+# "Generation reuse") and ledgering the cycle as taken over, only when the
+# taken-over arm's row records the watcher ending by TERM.
+take_over_settle() {  # <watcher-pid>
+  local pid=$1 i owner_signal
   # Only the owner can wait on this watcher and distinguish our TERM from a
   # self-exit that raced the stop. Give its post-wait ledger append a short bound.
   i=0
@@ -695,14 +718,10 @@ take_over_cycle() {  # <watcher-pid> <identity>
     sleep 0.02
     i=$((i + 1))
   done
-  if [ "$owner_signal" = TERM ]; then
-    fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
-      "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
-    cycle_log_append unknown unknown taken-over none
-  else
-    cycle_log_append unknown unknown taken-over-unconfirmed-stop none
-  fi
-  return 0
+  [ "$owner_signal" = TERM ] || return 1
+  fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
+    "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
+  cycle_log_append unknown unknown taken-over none
 }
 
 TAKEN_OVER=0
@@ -727,7 +746,9 @@ if [ "$mode" = arm ] && healthy_watcher; then
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
   report_attached
   attach_and_wait "$HEALTHY_PID"
-  exit $?
+  rc=$?
+  [ "$rc" -eq 4 ] || exit "$rc"
+  TAKEN_OVER=1
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
