@@ -162,6 +162,11 @@ case "${1:-} ${2:-}" in
     ;;
   "pr view")
     case " $* " in
+      *state,headRefOid,isInMergeQueue*)
+        printf '{"state":"%s","headRefOid":"%s","isInMergeQueue":%s}\n' \
+          "${FM_TEST_GH_STATE:-OPEN}" "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" "${FM_TEST_GH_QUEUED:-false}"
+        exit 0
+        ;;
       *statusCheckRollup*)
         checks='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'
         checks=${FM_TEST_GH_CHECKS-$checks}
@@ -895,6 +900,50 @@ queue_arm_wake_rows() {  # <state>
     "$1/.wake-queue" 2>/dev/null
 }
 
+test_periodic_pr_recovery() {
+  local dir state url head old scenario out
+  url=https://github.com/o/r/pull/99
+  head=$(printf '%040d' 91)
+  old=$(printf '%040d' 90)
+  for scenario in missing stale green red uncovered missing-check queued yolo-off; do
+    dir=$(make_case "reconcile-$scenario")
+    state="$dir/home/state"
+    write_task_meta "$dir"
+    printf 'yolo=%s\n' "$([ "$scenario" = yolo-off ] && echo off || echo on)" >> "$state/task-a.meta"
+    if [ "$scenario" = missing ]; then
+      printf 'done [at=100]: PR %s checks green\n' "$url" > "$state/task-a.status"
+    else
+      printf 'pr=%s\npr_head=%s\n' "$url" "$([ "$scenario" = stale ] && echo "$old" || echo "$head")" >> "$state/task-a.meta"
+    fi
+    write_arm_nm_coverage "$dir" "$head"
+    [ "$scenario" != uncovered ] || write_arm_nm_coverage "$dir" "$old"
+    reconcile_case() {
+      local checks='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]' rules='[]'
+      [ "$scenario" != red ] || checks='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]'
+      [ "$scenario" != missing-check ] || rules='[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"never-reported"}]}}]'
+      FM_TEST_GH_HEAD="$head" FM_TEST_GH_CHECKS="$checks" FM_TEST_GH_REQUIRED_RULES="$rules" \
+        FM_TEST_GH_QUEUED="$([ "$scenario" = queued ] && echo true || echo false)" NM_HOME="$dir/nm" \
+        PR_CHECK="$ROOT/bin/fm-pr-reconcile.sh" run_check_entry "$dir" task-a
+    }
+    out=$(reconcile_case) || fail "reconciliation failed: $scenario"
+    case "$scenario" in
+      missing|stale|green)
+        grep -qx "pr_head=$head" "$state/task-a.meta" || fail "$scenario did not register the live head"
+        assert_grep "pr merge 99 --repo o/r --match-head-commit $head --squash" "$dir/gh.log" "$scenario never used the guarded merge path"
+        ;;
+      red|uncovered|missing-check)
+        [ -n "$out" ] || fail "$scenario was silently blocked"
+        assert_no_grep 'pr merge' "$dir/gh.log" "$scenario merged"
+        [ -z "$(reconcile_case)" ] || fail "$scenario repeated its unchanged reason"
+        ;;
+      queued|yolo-off)
+        assert_no_grep 'pr merge' "$dir/gh.log" "$scenario merged"
+        ;;
+    esac
+  done
+  pass "periodic PR recovery registers missing URLs and moved heads, merges green unqueued heads, and reports guarded refusals once"
+}
+
 test_registration_arms_the_merge_queue_at_green() {
   local dir state url head rc
   dir=$(make_case queue-arm-registration)
@@ -991,10 +1040,10 @@ test_coverage_refusal_retries_after_review_covers_current_head() {
   coverage_retry_cycle
   assert_no_grep 'pr merge' "$dir/gh.log" "coverage retry armed a pushed head on stale review"
   write_arm_nm_coverage "$dir" "$head"
-  printf 'yolo=off\n' >> "$state/task-a.meta"
+  perl -pi -e 's/^yolo=.*/yolo=off/' "$state/task-a.meta"
   coverage_retry_cycle
   assert_no_grep 'pr merge' "$dir/gh.log" "coverage retry bypassed revoked yolo authority"
-  printf 'yolo=on\n' >> "$state/task-a.meta"
+  perl -pi -e 's/^yolo=.*/yolo=on/' "$state/task-a.meta"
   [ -e "$state/task-a.queue-pending" ] || fail "check refusal lost coverage retry intent"
 
   # No registration or supervisor merge turn follows: only the sweep runs.
@@ -2258,6 +2307,9 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  for artifact in pr-reconcile queue-stop queue-waiting; do
+    printf 'recovery\n' > "$dir/home/state/task-a.$artifact"
+  done
   fm_queue_pending_write "$dir/home/state" task-a https://github.com/o/r/pull/99 \
     || fail "could not seed pending coverage retry"
   cat > "$fakebin/tmux" <<'SH'
@@ -2275,6 +2327,9 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
   [ ! -e "$dir/home/state/task-a.queue-pending" ] || fail "teardown left pending merge intent"
+  for artifact in pr-reconcile queue-stop queue-waiting; do
+    [ ! -e "$dir/home/state/task-a.$artifact" ] || fail "teardown left $artifact"
+  done
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -2304,7 +2359,7 @@ SH
   assert_poll_absent "$dir/home/state" task-a
   [ ! -e "$dir/home/state/task-a.meta" ] || fail "receipt-aware teardown left task metadata"
 
-  for artifact in check.sh pr-poll queue-pending; do
+  for artifact in check.sh pr-poll queue-pending pr-reconcile queue-stop queue-waiting; do
     dir=$(make_case "teardown-final-directory-${artifact//./-}")
     fakebin="$dir/fakebin"
     fm_write_meta "$dir/home/state/task-a.meta" \
@@ -4488,6 +4543,7 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+test_periodic_pr_recovery
 test_parser_matrix
 test_ado_merge_refuses_unpinned_auto_complete
 test_ado_poll_conflict_and_postmerge_verdicts

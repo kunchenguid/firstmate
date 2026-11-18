@@ -3505,6 +3505,38 @@ test_github_queue_ignores_a_run_on_another_branch_or_none() {
   pass "fm-pr-merge leaves alone a no-mistakes run that is not on the queued branch"
 }
 
+test_github_periodic_green_queue_recovery() {
+  local case_dir scenario rc
+  for scenario in green stale red; do
+    case_dir=$(make_arm_case "periodic-queue-$scenario")
+    write_queue_read "$case_dir" 1 OPEN false false ''
+    write_queue_read "$case_dir" 2 OPEN false true AWAITING_CHECKS
+    [ "$scenario" != stale ] || write_nm_run_coverage "$case_dir" stale
+    [ "$scenario" != red ] || write_github_red_json "$case_dir" "$QUEUE_HEAD" ci
+    rc=0
+    NM_HOME="$case_dir/nm" run_queue_merge "$case_dir" --queue-sweep || rc=$?
+    if [ "$scenario" = green ]; then
+      [ "$rc" -eq 0 ] || fail "periodic queue recovery refused green: $(cat "$case_dir/stderr")"
+      assert_grep 'enqueue api graphql' "$case_dir/events.log" "periodic sweep did not use the existing queue route"
+      [ -f "$case_dir/state/task-x1.queue-arm" ] || fail "periodic enqueue lost its arm observer"
+      assert_no_grep 'is merged' "$case_dir/stdout" "periodic sweep claimed queued means merged"
+    else
+      [ "$rc" -ne 0 ] || fail "periodic sweep accepted $scenario"
+      assert_nothing_enqueued_or_merged "$case_dir" "$scenario"
+    fi
+  done
+  case_dir=$(make_arm_case periodic-stalled-arm)
+  printf 'pr=%s\npr_head=%s\n' "$QUEUE_URL" "$QUEUE_HEAD" >> "$case_dir/state/task-x1.meta"
+  printf 'head=%s\narmed=1700000000\nreenqueues=0\nbaseline=-\n' "$QUEUE_HEAD" > "$case_dir/state/task-x1.queue-arm"
+  chmod 600 "$case_dir/state/task-x1.queue-arm"
+  write_queue_read "$case_dir" 1 OPEN false false ''
+  write_queue_read "$case_dir" 2 OPEN false true AWAITING_CHECKS
+  NM_HOME="$case_dir/nm" run_requeue_mode "$case_dir" || fail "stalled green arm recovery failed"
+  assert_grep 'enqueue api graphql' "$case_dir/events.log" "stalled green arm remained outside the queue"
+  assert_grep 'reenqueues=0' "$case_dir/state/task-x1.queue-arm" "stall recovery spent the failed-check ejection retry"
+  pass "periodic green recovery enqueues through the guarded queue route, retains landing observation and recovers a stalled arm"
+}
+
 test_github_queue_at_green_arms_enqueues() {
   local case_dir rc
   case_dir=$(make_arm_case queue-arm-green)
@@ -5607,6 +5639,7 @@ test_away_auto_enqueue_shapes_without_a_proven_method_are_refused
 test_github_queue_ends_the_ci_monitor_before_enqueueing
 test_github_queue_refuses_while_a_pipeline_could_still_push
 test_github_queue_ignores_a_run_on_another_branch_or_none
+test_github_periodic_green_queue_recovery
 test_github_queue_at_green_arms_enqueues
 test_github_queue_at_green_failed_check_refuses
 test_github_queue_at_green_no_queue_rule_no_arm

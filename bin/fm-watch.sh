@@ -5099,20 +5099,18 @@ EOF
       touch "$STATE/.last-check"
       wake "$reason"
     done
-    # Coverage refusals persist only retry intent, never authority. Retry the
-    # same arm mode (including live-head coverage and all forge/authority
-    # guards), not a second merge path. An accepted arm consumes the intent;
-    # its bounded requeue/disarm state machine owns all later outcomes.
-    for queue_pending in "$STATE"/*.queue-pending; do
-      [ -e "$queue_pending" ] || [ -L "$queue_pending" ] || continue
-      id=$(basename "$queue_pending" .queue-pending)
-      url=$(fm_meta_get "$STATE/$id.meta" pr)
-      if ! fm_pr_task_id_valid "$id" || ! fm_queue_pending_matches "$queue_pending" "$url" \
-        || [ -e "$STATE/$id.queue-arm" ]; then
-        rm -f "$queue_pending"
-        continue
-      fi
-      run_check_capture "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" --queue-at-green || exit 1
+    # Recover missing registrations and moved heads on the existing slow PR
+    # cadence, independently of done-wake delivery or a supervisor turn.
+    for pr_meta in "$STATE"/*.meta; do
+      [ -f "$pr_meta" ] && [ ! -L "$pr_meta" ] || continue
+      id=$(basename "$pr_meta" .meta)
+      fm_pr_task_id_valid "$id" || continue
+      run_check_capture "$SCRIPT_DIR/fm-pr-reconcile.sh" "$id" || exit 1
+      out=${FM_CHECK_RESULT%%$'\n'*}
+      [ -n "$out" ] || continue
+      reason="check: $id $out"
+      fm_wake_append check "pr-reconcile-$id" "$reason" || exit 1
+      wake "$reason"
     done
     # Queue-at-green arms written by fm-pr-merge.sh's --queue-at-green mode
     # outlive the registration turn, so like deploy watches they are swept
@@ -5139,12 +5137,33 @@ EOF
         triage_log "queue arm for $id retired quietly: the task records no pr="
         continue
       fi
+      queue_arm_head=$(fm_meta_get "$STATE/$id.meta" pr_head)
+      if fm_queue_arm_read "$queue_arm"; then queue_arm_head=$FM_QUEUE_ARM_HEAD; fi
       run_check_capture "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" --queue-requeue || exit 1
       out=${FM_CHECK_RESULT%%$'\n'*}
       case "$out" in
+        'queue arm waiting: '*)
+          queue_waiting="$STATE/$id.queue-waiting"
+          fm_pr_regular_destination_or_absent "$queue_waiting" || continue
+          [ ! -f "$queue_waiting" ] || [ "$(< "$queue_waiting")" != "$out" ] || continue
+          queue_waiting_tmp=$(mktemp "$STATE/.queue-waiting.XXXXXX") || exit 1
+          printf '%s\n' "$out" > "$queue_waiting_tmp"
+          chmod 600 "$queue_waiting_tmp"
+          mv -f -- "$queue_waiting_tmp" "$queue_waiting"
+          ;;
         'queue arm disarmed: '*|'queue arm blocked: '*) ;;
         *) continue ;;
       esac
+      # A terminal queue decision must not be undone by generic recovery.
+      # Moving the head invalidates this stop and requires fresh coverage.
+      queue_stop="$STATE/$id.queue-stop"
+      if [[ "$out" != *' moved from head '* ]] && [[ "$out" != 'queue arm waiting: '* ]] \
+        && fm_pr_regular_destination_or_absent "$queue_stop"; then
+        queue_stop_tmp=$(mktemp "$STATE/.queue-stop.XXXXXX") || exit 1
+        printf '%s\n%s\n' "$url" "$queue_arm_head" > "$queue_stop_tmp"
+        chmod 600 "$queue_stop_tmp"
+        mv -f -- "$queue_stop_tmp" "$queue_stop"
+      fi
       reason="check: $id $out"
       fm_wake_append check "queue-arm-$id-$url" "$reason" || exit 1
       touch "$STATE/.last-check"

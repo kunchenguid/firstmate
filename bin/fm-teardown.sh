@@ -1611,7 +1611,8 @@ validate_pr_poll_cleanup() {
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
-    "$state_dir/$id.queue-arm" "$state_dir/$id.queue-pending"; do
+    "$state_dir/$id.queue-arm" "$state_dir/$id.queue-pending" \
+    "$state_dir/$id.pr-reconcile" "$state_dir/$id.queue-stop" "$state_dir/$id.queue-waiting"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     has_artifact=1
   done
@@ -1621,7 +1622,8 @@ validate_pr_poll_cleanup() {
   for artifact in "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
-    "$state_dir/$id.queue-arm" "$state_dir/$id.queue-pending"; do
+    "$state_dir/$id.queue-arm" "$state_dir/$id.queue-pending" \
+    "$state_dir/$id.pr-reconcile" "$state_dir/$id.queue-stop" "$state_dir/$id.queue-waiting"; do
     [ -e "$artifact" ] || [ -L "$artifact" ] || continue
     if [ ! -f "$artifact" ] || [ -L "$artifact" ] \
       || [ "$(fm_pr_file_device "$artifact")" != "$state_device" ] \
@@ -1649,7 +1651,8 @@ remove_pr_poll_artifacts() {
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" \
-    "$state_dir/$id.queue-arm" "$state_dir/$id.queue-pending" "$state_dir/$id.ado-conflict" || return 1
+    "$state_dir/$id.queue-arm" "$state_dir/$id.queue-pending" "$state_dir/$id.ado-conflict" \
+    "$state_dir/$id.pr-reconcile" "$state_dir/$id.queue-stop" "$state_dir/$id.queue-waiting" || return 1
 }
 
 pr_number_from_target() {

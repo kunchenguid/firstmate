@@ -260,6 +260,9 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
+# --queue-sweep is the periodic unattended green-PR recovery path: GitHub
+# only, yolo required, no overrides, all ordinary live merge guards plus the
+# arm's exact-head review coverage. It uses the ordinary queue/direct route.
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
@@ -359,7 +362,7 @@ shift 2
 # GitHub, the only forge here with a merge queue to address.
 MODE=merge
 case "${1:-}" in
-  --queue-at-green|--queue-requeue)
+  --queue-at-green|--queue-requeue|--queue-sweep)
     if [ "$#" -ne 1 ]; then
       echo "error: $1 takes no further arguments" >&2
       exit 2
@@ -371,6 +374,7 @@ case "${1:-}" in
     MODE=${1#--queue-}
     ;;
 esac
+if [ "$MODE" = sweep ]; then shift; fi
 ATTENDED_OVERRIDE=false
 ALLOW_NO_PIPELINE=false
 ALLOW_RED=()
@@ -641,7 +645,7 @@ merge_control_cleanup() {
 }
 trap merge_control_cleanup EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
-if [ "$MODE" = requeue ] || [ "$MODE" = at-green ]; then
+if [ "$MODE" = requeue ] || [ "$MODE" = at-green ] || [ "$MODE" = sweep ]; then
   # The requeue sweep runs under the watcher's check timeout, so its control
   # lock wait is bounded: when a merge turn or a poll owns the task, the sweep
   # exits silent and the next sweep retries. The arm is opportunistic in the
@@ -2284,6 +2288,20 @@ github_merge_through_queue() {
   FM_PR_GITHUB_MERGE_ACCEPTED=true
   persist_accepted_merge_authority || exit 1
   [ "$FM_PR_AWAY_POSTURE" != true ] || record_away_queue_enqueue || exit 1
+  if [ "$MODE" = sweep ]; then
+    # The periodic check cannot wait for queue builds inside its timeout.
+    # Prove acceptance and leave the same arm/landing observers in charge.
+    if ! github_queue_read || [ "$FM_PR_QUEUE_HEAD" != "$FM_PR_MERGE_HEAD" ] \
+      || { [ "$FM_PR_QUEUE_QUEUED" != true ] && [ "$FM_PR_QUEUE_MERGED" != true ]; }; then
+      printf 'error: queue acceptance for %s could not be confirmed; the merge poll remains armed\n' "$URL" >&2
+      exit 1
+    fi
+    if [ "$FM_PR_QUEUE_QUEUED" = true ]; then
+      fm_queue_arm_write "$STATE" "$ID" "$FM_PR_MERGE_HEAD" "$(date +%s)" 0 "${baseline_removed_at:--}" || exit 1
+    fi
+    rm -f "$STATE/$ID.queue-pending"
+    exit 0
+  fi
   fm_afk_contract_lock_release || true
   fm_lock_release "$MERGE_CONTROL_LOCK" || true
   MERGE_CONTROL_LOCK=
@@ -2564,7 +2582,7 @@ github_arm_queue_at_green() {
 # cannot confirm it) disarms and reports instead.
 github_queue_requeue_once() {
   local arm_path="$STATE/$ID.queue-arm"
-  local ejected_removed_at
+  local ejected_removed_at stalled=false reenqueues=1 probe_output probe_rc
   if ! fm_queue_arm_read "$arm_path"; then
     rm -f "$arm_path"
     printf 'queue arm blocked: the queue-arm record for %s is unreadable; firstmate decides whether to arm it again\n' \
@@ -2599,17 +2617,40 @@ github_queue_requeue_once() {
   if [ "$FM_PR_QUEUE_QUEUED" = true ]; then
     return 0
   fi
-  if [ "$FM_PR_QUEUE_REMOVED_AT" = "$FM_QUEUE_ARM_BASELINE" ]; then
-    return 0
+  if [ "${FM_PR_QUEUE_REMOVED_AT:--}" = "$FM_QUEUE_ARM_BASELINE" ]; then
+    # A proved arm can still stall outside the queue. After one normal slow
+    # poll interval, recover only a fully green, covered head through the
+    # same guarded merge route, not an unconditional enqueue.
+    if [ "$(( $(date +%s) - FM_QUEUE_ARM_ARMED ))" -lt 300 ] \
+      || [ "$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)" != on ]; then
+      return 0
+    fi
+    probe_output=$(mktemp "$STATE/.queue-probe.XXXXXX") || return 0
+    probe_rc=0
+    github_verify_mergeable 2> "$probe_output" || probe_rc=$?
+    if [ "$probe_rc" -ne 0 ]; then
+      printf 'queue arm waiting: %s: %s\n' "$URL" "$(tail -1 "$probe_output")"
+      rm -f "$probe_output"
+      return 0
+    fi
+    rm -f "$probe_output"
+    if ! github_arm_review_coverage "$FM_PR_MERGE_HEAD"; then
+      printf 'queue arm waiting: %s: review coverage is %s; read and review the changed delta before enqueueing\n' \
+        "$URL" "$FM_PR_ARM_COVERAGE"
+      return 0
+    fi
+    [ "$FM_PR_MERGE_HEAD" = "$FM_QUEUE_ARM_HEAD" ] || return 0
+    stalled=true
+    reenqueues=$FM_QUEUE_ARM_REENQUEUES
   fi
-  if [ "$FM_PR_QUEUE_REMOVED_REASON" != failed_checks ]; then
+  if [ "$stalled" = false ] && [ "$FM_PR_QUEUE_REMOVED_REASON" != failed_checks ]; then
     fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
       "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
     printf 'queue arm disarmed: %s left the merge queue (GitHub reason: %s), which this arm does not retry; firstmate decides\n' \
       "$URL" "${FM_PR_QUEUE_REMOVED_REASON:-<no reason reported>}"
     return 0
   fi
-  if [ "$FM_QUEUE_ARM_REENQUEUES" = 1 ]; then
+  if [ "$stalled" = false ] && [ "$FM_QUEUE_ARM_REENQUEUES" = 1 ]; then
     fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
       "$FM_QUEUE_ARM_REENQUEUES" "$FM_QUEUE_ARM_BASELINE"
     printf 'queue arm blocked: %s left the merge queue a second time after failed checks at head %s; firstmate decides the next step\n' \
@@ -2677,7 +2718,7 @@ github_queue_requeue_once() {
     return 0
   fi
   if ! fm_queue_arm_write "$STATE" "$ID" "$FM_QUEUE_ARM_HEAD" \
-    "$FM_QUEUE_ARM_ARMED" 1 "${ejected_removed_at:--}"; then
+    "$FM_QUEUE_ARM_ARMED" "$reenqueues" "${ejected_removed_at:--}"; then
     gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" --disable-auto >/dev/null 2>&1 || true
     fm_afk_contract_lock_release || true
     fm_queue_arm_retire "$arm_path" "$FM_QUEUE_ARM_HEAD" "$FM_QUEUE_ARM_ARMED" \
@@ -2749,7 +2790,7 @@ fi
 # each merge, so nothing is armed and the merge-turn path is unchanged. A
 # missing or unreadable yolo= is off. (The arm mode reads no --allow-red or
 # --allow-missing: an arm runs unattended.)
-if [ "$MODE" = at-green ] \
+if { [ "$MODE" = at-green ] || [ "$MODE" = sweep ]; } \
   && [ "$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)" != on ]; then
   printf 'queue arm: %s was not armed: the task is not in the yolo posture, so a captain approves each merge\n' \
     "$URL" >&2
@@ -2803,6 +2844,14 @@ case "$PROVIDER" in
       if [ "$mergeable_status" -eq 3 ]; then
         printf 'error: mergeability for %s is still being computed by GitHub; retry shortly\n' "$URL" >&2
       fi
+      exit 1
+    fi
+    # An unattended sweep has no supervisor's review turn to rely on.
+    # Keep the arm's exact-head coverage rule: stale means the delta still
+    # needs review, never permission to enqueue the replacement head.
+    if [ "$MODE" = sweep ] && ! github_arm_review_coverage "$FM_PR_MERGE_HEAD"; then
+      printf 'error: review coverage for head %s is %s, not covered; read and review the changed delta before retrying %s\n' \
+        "$FM_PR_MERGE_HEAD" "$FM_PR_ARM_COVERAGE" "$URL" >&2
       exit 1
     fi
     # The away record is locked first, so this last presence and authority read
