@@ -324,7 +324,9 @@ try {
   assert(fs.existsSync(path.join(state, "ownership-probes")), "real native ownership probe failed: " + child.err);
   const probed = fs.readFileSync(path.join(state, "ownership-probes"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(probed.map((probe) => probe.executable), codexExecutables, "every real Codex executable was probed: " + child.err);
-  assert.equal(fs.readFileSync(path.join(state, ".lock"), "utf8").trim(), String(child.pid));
+  const owner = probed[0].owner;
+  assert(probed.every((probe) => probe.owner === owner), "every real Codex executable resolves to the same Pi engine owner");
+  assert.equal(fs.readFileSync(path.join(state, ".lock"), "utf8").trim(), String(owner));
   assert(
     log().some(
       (e) =>
