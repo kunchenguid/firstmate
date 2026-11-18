@@ -10,8 +10,10 @@
 #   standing posture as context, not as this task's answer, so a spawn never looks
 #   the mode up. A ship spawn additionally reads the brief's recorded
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
-#   instructions and the recorded task delivery cannot drift apart; a brief
-#   scaffolded before that line existed warns once and launches on the flag.
+#   instructions and the recorded task delivery cannot drift apart. A brief
+#   scaffolded before that line existed warns once; a legacy no-mistakes brief
+#   is then refused because it lacks the required evidence declarations, while
+#   modes without those declarations still launch on the explicit flag.
 #   The project's forge IS read from data/projects.md, because it is the
 #   captain's confirmed project fact rather than a per-task choice: a spawn
 #   refuses a brief whose `forge=` disagrees with the registered binding in

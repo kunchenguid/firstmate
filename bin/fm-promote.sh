@@ -21,8 +21,9 @@
 # read outside fenced blocks and indented examples so a quoted `Captain:` sample
 # never passes the provenance gate as the ask (bin/fm-dod-lib.sh).
 # A scout records no delivery posture, so promotion is where this task's delivery
-# contract is decided: --mode, --yolo, and the ship branch resolved from
-# --branch-prefix are written into the meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
+# contract is decided: --mode, --yolo, the no-mistakes evidence limits, and the
+# ship branch resolved from --branch-prefix are written into the meta alongside
+# the kind= flip. Firstmate resolves them at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks that posture
 # up. The registry IS read for one thing only: the project's forge binding, which

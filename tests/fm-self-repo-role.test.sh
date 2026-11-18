@@ -578,7 +578,7 @@ write_ship_brief() {  # <home> <id> [<contract-extras>]
   mkdir -p "$home/data/$id"
   {
     printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the role gate.\n\n## Firstmate spec\nVerify the boundary.\n\n# Definition of done\n'
-    printf 'Delivery contract: mode=no-mistakes%s\nShip branch: fm/%s\n' "$extras" "$id"
+    printf 'Delivery contract: mode=no-mistakes evidence-text=unknown evidence-media=unknown evidence-audience=unknown%s\nShip branch: fm/%s\n' "$extras" "$id"
   } > "$home/data/$id/brief.md"
 }
 
