@@ -3688,7 +3688,7 @@ This verifies the primary-session park, not a worker busy-state classifier or a 
 
 ## Context ceiling and supervision-engine start size
 
-Refreshed by `tests/fm-context-ceiling-live.test.sh` (token-free, default-on), `FM_LIVE_CONTEXT_CEILING_CODEX=1 tests/fm-context-ceiling-codex-live.test.sh` (two short prompts), and `tests/fm-supervision-engine-start-size-live.test.sh` (token-free, default-on).
+Refreshed by `tests/fm-context-ceiling-live.test.sh` (token-free, default-on), `FM_LIVE_CONTEXT_CEILING_CODEX=1 tests/fm-context-ceiling-codex-live.test.sh` (two short prompts), `tests/fm-supervision-engine-start-size-live.test.sh` (token-free, default-on), and `tests/fm-fresh-start-block-live.test.sh` (token-free, default-on).
 Each takes its arguments from what the real `bin/fm-spawn.sh` or `bin/fm-supervision-engine-lib.sh` emits, never from flags written into the test.
 
 | Date | Tool and version | Result |
@@ -3698,6 +3698,7 @@ Each takes its arguments from what the real `bin/fm-spawn.sh` or `bin/fm-supervi
 | 2026-11-16 | Pi 1.5.2, Gemini CLI 0.67.0, Antigravity 1.5.9 | Installed and not covered: no per-launch ceiling was verified, so each records the value with `context_ceiling_applied=no` and keeps its default. |
 | 2026-11-16 | Claude Code 2.1.325, supervision engine on sonnet | `/context` through the engine's own launch path estimates 16.2k tokens (13.8k system prompt, 2.3k tools). One real engine turn's first call read 17,097 tokens (2 fresh, 17,095 cache write). The guard's budget is 18,000; the design target of 15,000 is not met. |
 | 2026-11-16 | Claude Code 2.1.325, macOS | A skill invoked as `/<skill> daily-fresh-start <nonce>` in `claude -p` is recorded in the session transcript as a `user` line whose string content carries `<command-name>/<skill></command-name>` and `<command-args>daily-fresh-start <nonce></command-args>`, followed by the skill text as an `isMeta` user line; the daily fresh start's newest-prompt check reads that shape. |
+| 2026-11-18 | Claude Code 2.1.325, macOS | A `UserPromptSubmit` hook that prints the daily fresh start's block decision (`{"decision":"block","reason":...}`, exit 0) refuses the prompt: print mode returns the reason as its result with no model turn and no tokens, and an interactive session shows "UserPromptSubmit operation blocked by hook" with the reason, puts the text back in the input box, and records only a system warning line in the session transcript. |
 
 ## hc
 

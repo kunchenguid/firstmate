@@ -521,7 +521,9 @@ Blank lines and lines that start with `#` are ignored, and an unusable value kee
 Inside the window the host first submits `/stow daily-fresh-start <nonce>`, with a new random nonce for that attempt.
 The stow skill runs [`bin/fm-fresh-start.sh`](../bin/fm-fresh-start.sh) `attest <nonce>` as its last action only when its own completion receipt declares the session safe to reset.
 Once the save turn ends, which the primary's own Stop hook records, the host submits `/clear` and one short resume prompt only when that attestation names this attempt, the primary is still the session the save was typed into, and that session's newest prompt is still the `/stow`, so nothing said after the save is dropped.
-Those checks and the waiting rules below are read once more right before `/clear` is typed, and any new message submitted after the save cancels that day's clear at once, through the primary's prompt-submit hook.
+Those checks and the waiting rules below are read once more right before `/clear` is typed, under a lock the primary's prompt-submit hook shares, and the clear is then recorded as committed.
+Any new message submitted after the save and before that commit cancels that day's clear at once, through the prompt-submit hook.
+A message for the same session that meets the commit would run and then be wiped by `/clear`, so it is refused instead: Claude Code shows the reason and keeps the text in the input box to send again into the fresh conversation, and a commit refuses nothing once it is 30 seconds old.
 The startup digest then re-enters through the session-start hook, and the resume turn re-arms supervision.
 A save that never attests, because it failed, was interrupted, or was not reset-safe, never clears: the day is skipped when the window closes, and a save the session moved past is skipped at once.
 

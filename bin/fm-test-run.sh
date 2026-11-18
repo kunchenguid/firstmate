@@ -394,6 +394,7 @@ family_for_basename() {
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh|\
     fm-claude-tool-exclude-live.test.sh|\
     fm-context-ceiling-live.test.sh|fm-context-ceiling-codex-live.test.sh|\
+    fm-fresh-start-block-live.test.sh|\
     fm-supervision-engine-start-size-live.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -817,7 +818,8 @@ tests/fm-fleet-snapshot-view.test.sh 23334
 tests/fm-fleet-sync.test.sh 40541
 tests/fm-forge-detect.test.sh 193
 tests/fm-fork-free-helpers.test.sh 746
-tests/fm-fresh-start.test.sh 30000
+tests/fm-fresh-start-block-live.test.sh 6000
+tests/fm-fresh-start.test.sh 50000
 tests/fm-gate-refuse.test.sh 9953
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
@@ -1699,6 +1701,7 @@ families_for_changed_path() {
       ;;
     bin/fm-fresh-start-lib.sh|bin/fm-fresh-start.sh|bin/fm-chat-question.sh)
       printf '%s\n' "__script__:fm-fresh-start.test.sh"
+      printf '%s\n' "__script__:fm-fresh-start-block-live.test.sh"
       printf '%s\n' "__script__:fm-warm-compact.test.sh"
       ;;
     bin/fm-branch-prompt.sh)
