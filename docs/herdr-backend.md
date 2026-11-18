@@ -579,6 +579,16 @@ An older client warns once per protocol and the feature stays inactive.
 
 `bin/fm-herdr-groups.sh` owns the commands, including `plan` to preview groups and statuses without touching Herdr and `clear` to remove this home's tags and the agents view after turning the feature off.
 
+### Role labels
+
+Firstmate reports a pane-only `fm_role` token with value `firstmate`, `secondmate`, or `worker`, independently of project-group opt-in.
+Spawn publishes it immediately and the watcher repairs missing or changed tokens on subsequent cycles.
+The supervisor endpoint uses the existing backend/target discovery; a secondmate home is labelled `secondmate`, and ship/scout tasks are labelled `worker`.
+The separate `firstmate:role` metadata source changes neither agent state nor transcript text, statuslines, pane borders, Claude settings, or Herdr's base palette.
+Role labels require Herdr 0.9.1 with protocol 22 or newer; unsupported protocols skip metadata writes with a clear warning.
+To display them, add the styled `$fm_role` token to Herdr's agent rows as below; Firstmate does not modify Herdr configuration automatically.
+`bin/fm-herdr-groups.sh sync-roles` refreshes labels manually without enabling project groups.
+
 ### Sidebar rows
 
 Herdr shows custom tokens only where its own configuration names them.
@@ -594,12 +604,14 @@ rows = [
 
 [ui.sidebar.agents]
 rows = [
-  ["state_icon", { token = "$fm_group", bold = true }, "$fm_state", "$fm_task"],
+  ["state_icon", { token = "$fm_role", bold = true }, { token = "$fm_group", bold = true }, "$fm_state", "$fm_task"],
 ]
 ```
 
 Run `herdr server reload-config` afterwards to apply them.
-Colors can be added with Herdr's inline token styles.
+The role token uses Herdr's inline bold styling while inheriting the existing theme colors.
+Project-group clearing does not remove role labels.
+`tests/fm-herdr-groups.test.sh` covers role output, repair, unsupported-protocol skips, and the suggested rows.
 
 ### Placement inside the group
 

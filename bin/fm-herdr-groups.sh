@@ -5,10 +5,10 @@
 # docs/herdr-backend.md "Project groups" owns the public contract (setting,
 # rule syntax, tokens, status order, limits). This header owns the mechanics.
 #
-# Off by default. Every producer guards its call with one file test on the
-# home's config/herdr-project-groups, so while that file is absent this script
-# is never run. It re-reads the setting so a direct invocation of an absent or
-# "off" setting does nothing except `clear` and `sidebar-config`.
+# Project groups are off by default. Group producers guard their calls with a
+# test on config/herdr-project-groups; role producers run independently.
+# It re-reads the setting so a direct invocation of an absent or
+# "off" setting does nothing except `clear`, `sidebar-config`, and `sync-roles`.
 #
 # Producers:
 #   bin/fm-watch.sh   sync, once per poll cycle
@@ -19,6 +19,10 @@
 #   fm-herdr-groups.sh plan [<task>]
 #   fm-herdr-groups.sh sync [<task>]
 #   fm-herdr-groups.sh clear
+#   fm-herdr-groups.sh sync-roles [<task>]
+#     Independently of project groups, repair fm_role on recorded Herdr tasks
+#     and the discovered Herdr supervisor pane (secondmate home marker wins).
+#     Uses source firstmate:role; never changes agent state or the agents view.
 #   fm-herdr-groups.sh order-key <task> <project-path>
 #   fm-herdr-groups.sh sidebar-config [--apply <herdr-config.toml>]
 #
@@ -64,6 +68,7 @@ FM_HERDR_GROUPS_SOURCE="firstmate"
 # agent.view.set, workspace.report_metadata, and pane.report_metadata with
 # token readback in workspace and pane lists are verified on protocol 22
 # (Herdr 0.9.5, wire schema from Herdr 0.9.3); no earlier protocol is verified.
+# Pane role tokens and inline bold sidebar rows also work on Herdr 0.9.1.
 FM_HERDR_GROUPS_MIN_PROTOCOL=22
 FM_HERDR_GROUPS_UNSUPPORTED_PREFIX=".herdr-groups-unsupported-"
 FM_HERDR_GROUPS_UNMATCHED_RANK=999
@@ -72,7 +77,7 @@ FM_HERDR_GROUPS_PANE_TOKENS="fm_group fm_state fm_task fm_sort"
 FM_HERDR_GROUPS_WORKSPACE_TOKENS="fm_group fm_state fm_group_order"
 
 usage() {
-  echo "usage: fm-herdr-groups.sh plan [<task>] | sync [<task>] | clear | order-key <task> <project-path> | sidebar-config [--apply <herdr-config.toml>]" >&2
+  echo "usage: fm-herdr-groups.sh plan [<task>] | sync [<task>] | sync-roles [<task>] | clear | order-key <task> <project-path> | sidebar-config [--apply <herdr-config.toml>]" >&2
   exit 2
 }
 
@@ -235,7 +240,7 @@ meta_value() { # <meta> <key>
 # task, kind, project, session, workspace, pane.
 TASKS=()
 collect_tasks() { # [<task>]
-  local only=${1:-} meta id kind project session workspace pane
+  local only=${1:-} include_roles=${2:-} meta id kind project session workspace pane
   TASKS=()
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
   for meta in "$STATE"/*.meta; do
@@ -246,7 +251,11 @@ collect_tasks() { # [<task>]
     [ -z "$only" ] || [ "$id" = "$only" ] || continue
     [ "$(meta_value "$meta" backend)" = herdr ] || continue
     kind=$(meta_value "$meta" kind)
-    case "${kind:-ship}" in ship|scout) ;; *) continue ;; esac
+    case "${kind:-ship}" in
+      ship|scout) ;;
+      secondmate) [ "$include_roles" = roles ] || continue ;;
+      *) continue ;;
+    esac
     project=$(meta_value "$meta" project)
     session=$(meta_value "$meta" herdr_session)
     workspace=$(meta_value "$meta" herdr_workspace_id)
@@ -316,7 +325,7 @@ session_supported() {
   [ "$protocol" -ge "$FM_HERDR_GROUPS_MIN_PROTOCOL" ] && return 0
   marker="$STATE/$FM_HERDR_GROUPS_UNSUPPORTED_PREFIX$protocol"
   if [ ! -e "$marker" ]; then
-    warn "Herdr protocol $protocol is below the verified protocol $FM_HERDR_GROUPS_MIN_PROTOCOL (Herdr 0.9.5); tags and the agents view stay off until Herdr is upgraded"
+    warn "Herdr protocol $protocol is below the verified protocol $FM_HERDR_GROUPS_MIN_PROTOCOL (role labels: Herdr 0.9.1; project groups: Herdr 0.9.5); tags, role labels and the agents view stay off until Herdr is upgraded"
     : > "$marker" 2>/dev/null || true
   fi
   return 1
@@ -422,6 +431,52 @@ EOF
   return "$rc"
 }
 
+# Role tokens are pane-only: a flat workspace can hold several different roles.
+cmd_sync_roles() {
+  local record target session pane workspace role kind panes live rc=0
+  local -a roles=()
+  collect_tasks "${1:-}" roles
+  for record in ${TASKS[@]+"${TASKS[@]}"}; do
+    IFS=$'\t' read -r _ kind _ session workspace pane <<EOF
+$record
+EOF
+    role=worker
+    [ "$kind" != secondmate ] || role=secondmate
+    roles+=("$session"$'\t'"$pane"$'\t'"$role"$'\t'"$workspace")
+  done
+  # shellcheck source=bin/fm-supervisor-target-lib.sh
+  . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
+  if [ "$(discover_supervisor_backend)" = herdr ]; then
+    target=$(discover_supervisor_target) || target=
+    if [ -n "$target" ] && [ "$target" != "${target#*:}" ]; then
+      role=firstmate
+      [ ! -e "$FM_HOME/.fm-secondmate-home" ] || role=secondmate
+      roles+=("${target%%:*}"$'\t'"${target#*:}"$'\t'"$role")
+    fi
+  fi
+  [ "${#roles[@]}" -gt 0 ] || return 0
+  load_backend || return 1
+  for session in $(printf '%s\n' "${roles[@]}" | cut -f1 | awk '!seen[$0]++'); do
+    session_supported "$session" || continue
+    panes=$(fm_backend_herdr_cli "$session" pane list 2>/dev/null) || { rc=1; continue; }
+    for record in "${roles[@]}"; do
+      IFS=$'\t' read -r P_SESSION pane role workspace <<EOF
+$record
+EOF
+      [ "$P_SESSION" = "$session" ] || continue
+      live=$(printf '%s' "$panes" | jq -r --arg p "$pane" --arg w "$workspace" '
+        [.result.panes[]? | select(.pane_id == $p and ($w == "" or .workspace_id == $w))]
+        | if length == 1 then (.[0].tokens.fm_role // "missing") else empty end') || live=
+      [ -n "$live" ] && [ "$live" != "$role" ] || continue
+      fm_backend_herdr_cli "$session" pane report-metadata "$pane" \
+        --source firstmate:role --token "fm_role=$role" >/dev/null 2>&1 || {
+        warn "could not label pane $pane as $role"; rc=1
+      }
+    done
+  done
+  return "$rc"
+}
+
 cmd_clear() {
   local record session name rc=0
   local -a pane_args=() ws_args=()
@@ -470,7 +525,7 @@ rows = [
 
 [ui.sidebar.agents]
 rows = [
-  ["state_icon", { token = "$fm_group", bold = true }, "$fm_state", "$fm_task"],
+  ["state_icon", { token = "$fm_role", bold = true }, { token = "$fm_group", bold = true }, "$fm_state", "$fm_task"],
 ]
 EOF
 }
@@ -505,7 +560,7 @@ cmd_sidebar_config() {
 
 cmd=${1:-}
 case "$cmd" in
-  plan|sync)
+  plan|sync|sync-roles)
     [ "$#" -le 2 ] || usage
     [ "$#" -lt 2 ] || task_ok "$2" || usage
     ;;
@@ -519,6 +574,10 @@ case "$cmd" in
   sidebar-config)
     shift
     cmd_sidebar_config "$@"
+    exit
+    ;;
+  sync-roles)
+    cmd_sync_roles "${2:-}"
     exit
     ;;
   clear)

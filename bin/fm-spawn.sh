@@ -846,6 +846,8 @@ SPAWN_ORIG_ARGS=("$@")
 shopt -u patsub_replacement 2>/dev/null || true
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# HERDR_PANE_ID becomes the task's pane below; role discovery needs its launcher.
+ROLE_LAUNCHER_HERDR_PANE_ID=${HERDR_PANE_ID:-}
 
 usage() {
   # The whole leading comment block, ending at the first line that is not a
@@ -9056,6 +9058,8 @@ SPAWN_ACCOUNT=
 [ -z "$SPAWN_SEAT" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT seat=$SPAWN_SEAT"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+# Label the recorded task and its supervisor without changing harness output.
+[ "$BACKEND" != herdr ] || HERDR_PANE_ID=$ROLE_LAUNCHER_HERDR_PANE_ID FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync-roles "$ID" || true
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
 [ ! -e "$CONFIG/herdr-project-groups" ] || [ "$BACKEND" != herdr ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync "$ID" || true

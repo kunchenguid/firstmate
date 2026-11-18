@@ -92,6 +92,39 @@ reports() {  # <kind pane|workspace>: logged report-metadata calls, readable
   grep -a "^herdr"$'\x1f'"$1"$'\x1f'"report-metadata" "$FAKE_HERDR_LOG" | tr '\037' ' ' || true
 }
 
+test_role_tokens_without_project_groups() {
+  local out
+  new_home roles
+  add_task work ship /p/project w2
+  add_task scout scout /p/project w3
+  add_task mate secondmate /p/project w4
+  add_task stale ship /p/project w5
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p1","workspace_id":"w1"},{"pane_id":"w2:p2","workspace_id":"w2"},{"pane_id":"w3:p2","workspace_id":"w3"},{"pane_id":"w4:p2","workspace_id":"w4"},{"pane_id":"w5:p2","workspace_id":"wrong"}]}}' > "$FAKE_DIR/panes.json"
+  out=$(FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=s1:w1:p1 groups sync-roles 2>&1) || fail "role sync failed: $out"
+  assert_contains "$(reports pane)" 'w1:p1 --source firstmate:role --token fm_role=firstmate' "supervisor role"
+  assert_contains "$(reports pane)" 'w2:p2 --source firstmate:role --token fm_role=worker' "ship role"
+  assert_contains "$(reports pane)" 'w3:p2 --source firstmate:role --token fm_role=worker' "scout role"
+  assert_contains "$(reports pane)" 'w4:p2 --source firstmate:role --token fm_role=secondmate' "secondmate role"
+  assert_not_contains "$(reports pane)" 'w5:p2' "stale workspace binding skipped"
+  assert_equals "" "$(reports workspace)$(cat "$FAKE_VIEW_LOG")" "no workspace tag or agents view change"
+  : > "$FAKE_HERDR_LOG"
+  touch "$HOME_DIR/.fm-secondmate-home"
+  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=s1:w1:p1 groups sync-roles work || fail "secondmate home sync"
+  assert_contains "$(reports pane)" 'w1:p1 --source firstmate:role --token fm_role=secondmate' "secondmate supervisor"
+  : > "$FAKE_HERDR_LOG"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","workspace_id":"w2","tokens":{"fm_role":"worker"}}]}}' > "$FAKE_DIR/panes.json"
+  FM_SUPERVISOR_BACKEND=tmux groups sync-roles work || fail "idempotent sync"
+  assert_equals "" "$(reports pane)" "unchanged token not re-reported"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","workspace_id":"w2","tokens":{"fm_role":"secondmate"}}]}}' > "$FAKE_DIR/panes.json"
+  FM_SUPERVISOR_BACKEND=tmux groups sync-roles work || fail "role repair"
+  assert_contains "$(reports pane)" 'fm_role=worker' "incorrect role repaired"
+  : > "$FAKE_HERDR_LOG"
+  out=$(FAKE_HERDR_PROTOCOL=21 FM_SUPERVISOR_BACKEND=tmux groups sync-roles 2>&1) || fail "old protocol sync"
+  assert_contains "$out" 'role labels' "old protocol gives clear note"
+  assert_equals "" "$(reports pane)" "old protocol does not publish invisible tags"
+  pass "roles: all three roles, no group opt-in, exact binding, repair and protocol skip"
+}
+
 test_absent_or_off_setting_does_nothing() {
   local out
   new_home off
@@ -306,6 +339,7 @@ test_sidebar_config_apply_backs_up_and_refuses_twice() {
   printf '[ui]\nagent_panel_sort = "spaces"\n' > "$cfg"
   out=$(groups sidebar-config 2>&1) || fail "sidebar-config print failed: $out"
   assert_contains "$out" '[ui.sidebar.agents]' "printed rows"
+  assert_contains "$out" "{ token = \"\$fm_role\", bold = true }" "role uses inline styling"
   assert_equals "" "$(cat "$FAKE_HERDR_LOG")" "printing the rows calls no Herdr command"
   out=$(groups sidebar-config --apply "$cfg" 2>&1) || fail "sidebar-config apply failed: $out"
   backups=$(find "$FAKE_DIR" -maxdepth 1 -name 'config.toml.bak-*')
@@ -383,6 +417,8 @@ test_watcher_poll_tags_tasks() {
   case "$out" in *"checkpoint:"*|*"signal:"*|*"stale:"*) ;; *) fail "watcher checkpoint did not run: $out" ;; esac
   assert_contains "$(reports pane)" "pane report-metadata w2:p2 --source firstmate --token fm_group=storefront" \
     "the watcher poll tagged the task pane"
+  assert_contains "$(reports pane)" 'w2:p2 --source firstmate:role --token fm_role=worker' \
+    "the watcher poll repaired the role token"
   assert_contains "$(cat "$FAKE_VIEW_LOG")" "set" "the watcher poll set the agents view"
   pass "watcher: one poll cycle reconciles the project-group tags"
 }
@@ -394,6 +430,7 @@ test_rules_order_groups_and_prefer_task_over_repo_over_catch_all
 test_all_invalid_rules_leave_empty_rule_group_and_still_plan
 test_sync_reports_only_differences_and_sets_the_view
 test_sync_skips_an_unverified_protocol_with_one_warning
+test_role_tokens_without_project_groups
 test_clear_removes_tokens_and_the_view_even_when_off
 test_sidebar_config_apply_backs_up_and_refuses_twice
 test_agent_view_helper_sends_only_the_whitelisted_requests

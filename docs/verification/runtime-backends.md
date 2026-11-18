@@ -1621,6 +1621,27 @@ The whole real-Herdr lane's latest active verification uses both Herdr 0.7.4 pro
 Protocol 17 keeps every protocol-16 feature gate satisfied; the event and workspace-move floors remain 16.
 Default-on presentation projection has its own floor at Herdr 0.8.0, protocol 19, verified below.
 
+### Pane role tokens
+
+Verified 2026-11-18 on Linux x86_64 with Herdr client/server 0.9.1, protocol 22.
+The installed release accepts inline `{ token = "$fm_role", bold = true }` agent rows and renders `firstmate`, `secondmate`, and `worker` in bold with the existing rose-pine colors.
+No newer Herdr installation is required for role labels.
+The commands, run in a guarded named lab with those rows configured, were:
+
+```sh
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" config check
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane report-metadata "$pane" --source firstmate:role --token "fm_role=$role"
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane list
+"$HERDR_LAB_HELPER" viewer start "$HERDR_LAB_SESSION"
+```
+
+Observed: `config: ok`, pane readback `"tokens":{"fm_role":"firstmate"}` (and the other two roles), and attached-viewer ANSI output `ESC[0;1;38;2;110;106;134;49msecondmate`.
+The `1` SGR modifier proves bold rendering, while the foreground remains the inherited sidebar color.
+`tests/fm-herdr-groups.test.sh` is the portable refresh command through `bin/fm-test-run.sh`; repeat the guarded viewer check after a Herdr sidebar-format change.
+Role publication is harness-independent and backend-gated: Claude, Pi, and other harnesses receive the same display-only metadata, while non-Herdr endpoints receive no role writes.
+
+### Core protocol probes
+
 Core read-only probes:
 
 ```sh
