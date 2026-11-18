@@ -28,16 +28,15 @@ hc stamps `HC_TERMINAL_ID` into every process an hc terminal starts, including a
 
 ## Task shape and metadata
 
-Each task is one hc terminal running the user's login shell in the project directory, started with `--outlive-parent --no-notify` so it keeps running when Firstmate's own terminal ends and hc never types notes into Firstmate's composer.
-When Firstmate itself runs in a live hc terminal of the task's session, the task terminal is created as that terminal's child, so Herdr.app groups the crew as sub-agents of the Firstmate that launched it; otherwise it starts with `--no-parent`.
-Firstmate's terminal counts only when `HC_TERMINAL_ID` answers live in that session and its shell is an ancestor of the spawning process, so an inherited or stale id never adopts an unrelated terminal.
+Each task is one hc terminal running the user's login shell in the project directory, started by default with `--no-parent --outlive-parent --no-notify` so it is independent of whichever hc terminal Firstmate itself runs in.
+
 The terminal carries these labels:
 
 | Label | Value | Purpose |
 | --- | --- | --- |
 | `firstmate.task` | `fm-<id>` | Task identity checked before input or close. |
 | `firstmate.home` | `<hometag>` from `bin/fm-backend-hometag-lib.sh` | Keeps two homes with the same task id apart. |
-| `herdr.space` | `FM_HC_SPACE` when set, else the space of Firstmate's own hc terminal, else `fm-<hometag>` | Groups a home's tasks in one Herdr.app space, beside Firstmate when it runs in one. |
+| `herdr.space` | `FM_HC_SPACE` when set, else Firstmate's own hc terminal's space under the opt-in below, else `fm-<hometag>` | Groups a home's tasks in one Herdr.app space. |
 | `herdr.tab` | `<hometag>-fm-<id>` | One Herdr.app tab per task. |
 
 ```text
@@ -51,12 +50,20 @@ hc_terminal=<address>
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
 An input, capture, or close that carries the task label refuses a terminal whose `firstmate.task` or `firstmate.home` label does not match, and a close without a label still refuses a terminal that lacks this home's labels.
 
+### Opt-in: task terminals beside Firstmate
+
+Set `FM_HC_BESIDE_FIRSTMATE=1` in the environment Firstmate spawns from to open each task terminal beside the Firstmate that launched it in Herdr.app.
+With it set, when Firstmate itself runs in a live hc terminal of the task's session, the task terminal is created as that terminal's child and, unless `FM_HC_SPACE` is set, in that terminal's `herdr.space`, so the app groups the crew as sub-agents of that Firstmate.
+Firstmate's terminal counts only when `HC_TERMINAL_ID` answers live in that session and its shell is an ancestor of the spawning process, so an inherited or stale id never adopts an unrelated terminal and the task falls back to the default placement.
+`--outlive-parent` keeps the crew running when Firstmate's terminal ends, and `--no-notify` keeps hc from typing notes into Firstmate's composer.
+Unset or any value other than `1` keeps the default placement.
+
 ## Operations
 
 | Operation | hc command |
 | --- | --- |
 | Container ensure | `hc server status` |
-| Create task | `hc run --bg --parent <firstmate-terminal>` or `--no-parent`, then `--outlive-parent --no-notify --cwd <project> --label ...` |
+| Create task | `hc run --bg --no-parent` (or `--parent <firstmate-terminal>` under the opt-in) `--outlive-parent --no-notify --cwd <project> --label ...` |
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |

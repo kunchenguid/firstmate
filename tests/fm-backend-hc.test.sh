@@ -58,12 +58,12 @@ setup_case() {  # <name> -> sets D, FB, HOMEDIR
 }
 
 # hc_shell <script>: run <script> in bash with the adapter sourced against the
-# stub, with no inherited HC_TERMINAL_ID (a case sets its own). HOMETAG is
-# exported so the script can build matching labels.
+# stub, with no inherited HC_TERMINAL_ID or FM_HC_BESIDE_FIRSTMATE (a case sets
+# its own). HOMETAG is exported so the script can build matching labels.
 hc_shell() {  # <script>
   FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
     HC_SESSION=fmtest bash -c '
-      unset HC_TERMINAL_ID
+      unset HC_TERMINAL_ID FM_HC_BESIDE_FIRSTMATE
       . "'"$FM_TEST_ROOT"'/bin/fm-backend.sh"
       fm_backend_source hc || { echo "source failed" >&2; exit 90; }
       HOMETAG=$(fm_backend_hometag)
@@ -273,6 +273,33 @@ run_args() {  # -> the logged `hc run` line
   grep $'\x1frun\x1f' "$D/log"
 }
 
+test_create_task_beside_firstmate_is_opt_in() {
+  local tag out value
+  setup_case optin-off
+  tag=$(hometag_of)
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  # A live caller terminal that is an ancestor, exactly as the opt-in case
+  # below adopts it; without FM_HC_BESIDE_FIRSTMATE=1 it must not be consulted.
+  write_caller "$D" t1 "$$" space-fm
+  for value in unset 0 yes; do
+    : > "$D/log"
+    if [ "$value" = unset ]; then
+      hc_shell 'HC_TERMINAL_ID=t1 fm_backend_hc_create_task fmtest fm-off-unset /proj' >/dev/null || fail "create_task failed with the opt-in unset"
+    else
+      hc_shell "FM_HC_BESIDE_FIRSTMATE=$value HC_TERMINAL_ID=t1 fm_backend_hc_create_task fmtest fm-off-$value /proj" >/dev/null || fail "create_task failed with FM_HC_BESIDE_FIRSTMATE=$value"
+    fi
+    out=$(run_args)
+    assert_contains "$out" --no-parent "opt-in $value: the task must start with no parent"
+    assert_not_contains "$out" --parent$'\x1f' "opt-in $value: the task must not adopt Firstmate's terminal"
+    assert_contains "$out" "herdr.space=fm-$tag" "opt-in $value: the task must stay in the home's space"
+    assert_not_contains "$(cat "$D/log")" $'\x1fget\x1f' "opt-in $value: the caller terminal must not be looked up"
+  done
+  : > "$D/log"
+  hc_shell 'FM_HC_BESIDE_FIRSTMATE=1 HC_TERMINAL_ID=t1 fm_backend_hc_create_task fmtest fm-on /proj' >/dev/null || fail "create_task failed with the opt-in on"
+  assert_contains "$(run_args)" $'\x1f--parent\x1ft1\x1f' "the same caller is adopted once FM_HC_BESIDE_FIRSTMATE=1"
+  pass "hc: placement beside Firstmate is off unless FM_HC_BESIDE_FIRSTMATE=1"
+}
+
 test_create_task_inside_firstmates_terminal_joins_its_space_as_child() {
   local tag out sleeper
   setup_case caller
@@ -281,7 +308,7 @@ test_create_task_inside_firstmates_terminal_joins_its_space_as_child() {
   # This test process is an ancestor of the adapter's shell, as Firstmate's
   # terminal shell is of a real spawn.
   write_caller "$D" t1 "$$" space-fm
-  hc_shell 'HC_TERMINAL_ID=t1 fm_backend_hc_create_task fmtest fm-a1 /proj' >/dev/null || fail "create_task failed inside a caller terminal"
+  hc_shell 'FM_HC_BESIDE_FIRSTMATE=1 HC_TERMINAL_ID=t1 fm_backend_hc_create_task fmtest fm-a1 /proj' >/dev/null || fail "create_task failed inside a caller terminal"
   out=$(run_args)
   assert_contains "$out" $'\x1f--parent\x1ft1\x1f' "the task must be the caller terminal's child"
   assert_not_contains "$out" --no-parent "a child must not also ask for no parent"
@@ -290,14 +317,14 @@ test_create_task_inside_firstmates_terminal_joins_its_space_as_child() {
   done
 
   : > "$D/log"
-  hc_shell 'HC_TERMINAL_ID=t1 FM_HC_SPACE=chosen fm_backend_hc_create_task fmtest fm-a2 /proj' >/dev/null || fail "create_task failed with FM_HC_SPACE"
+  hc_shell 'FM_HC_BESIDE_FIRSTMATE=1 HC_TERMINAL_ID=t1 FM_HC_SPACE=chosen fm_backend_hc_create_task fmtest fm-a2 /proj' >/dev/null || fail "create_task failed with FM_HC_SPACE"
   out=$(run_args)
   assert_contains "$out" $'\x1f--parent\x1ft1\x1f' "an explicit space keeps the caller as parent"
   assert_contains "$out" "herdr.space=chosen" "FM_HC_SPACE wins over the caller's space"
 
   : > "$D/log"
   write_caller "$D" t2 "$$" ""
-  hc_shell 'HC_TERMINAL_ID=t2 fm_backend_hc_create_task fmtest fm-a3 /proj' >/dev/null || fail "create_task failed under an unplaced caller"
+  hc_shell 'FM_HC_BESIDE_FIRSTMATE=1 HC_TERMINAL_ID=t2 fm_backend_hc_create_task fmtest fm-a3 /proj' >/dev/null || fail "create_task failed under an unplaced caller"
   out=$(run_args)
   assert_contains "$out" $'\x1f--parent\x1ft2\x1f' "an unplaced caller is still the parent"
   assert_contains "$out" "herdr.space=fm-$tag" "an unplaced caller falls back to the home's space"
@@ -310,7 +337,7 @@ test_create_task_inside_firstmates_terminal_joins_its_space_as_child() {
   write_caller "$D" t3 "$sleeper" space-other
   for id in t3 t8; do
     : > "$D/log"
-    hc_shell "HC_TERMINAL_ID=$id fm_backend_hc_create_task fmtest fm-b-$id /proj" >/dev/null || fail "create_task failed with HC_TERMINAL_ID=$id"
+    hc_shell "FM_HC_BESIDE_FIRSTMATE=1 HC_TERMINAL_ID=$id fm_backend_hc_create_task fmtest fm-b-$id /proj" >/dev/null || fail "create_task failed with HC_TERMINAL_ID=$id"
     out=$(run_args)
     assert_contains "$out" --no-parent "HC_TERMINAL_ID=$id must not adopt a parent"
     assert_not_contains "$out" --parent$'\x1f' "HC_TERMINAL_ID=$id must not adopt a parent"
@@ -319,12 +346,13 @@ test_create_task_inside_firstmates_terminal_joins_its_space_as_child() {
   done
   kill "$sleeper" 2>/dev/null || true
   wait "$sleeper" 2>/dev/null || true
-  pass "hc: inside Firstmate's own hc terminal a task joins its space as a child; a non-ancestor or unknown id is ignored"
+  pass "hc: with the opt-in, inside Firstmate's own hc terminal a task joins its space as a child; a non-ancestor or unknown id is ignored"
 }
 
 fm_test_run \
   test_hc_is_spawn_capable_and_never_autodetected \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
+  test_create_task_beside_firstmate_is_opt_in \
   test_create_task_inside_firstmates_terminal_joins_its_space_as_child \
   test_control_interrupt_delivers_the_harness_keys \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \

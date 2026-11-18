@@ -33,16 +33,18 @@
 # Visibility in Herdr.app: the app shows a terminal that carries
 # herdr.space=<id> and herdr.tab=<id> labels, and an unknown id becomes a new
 # space or tab. create_task sets herdr.tab=<scoped label>, one tab per task,
-# and herdr.space to FM_HC_SPACE when set, else the space of the hc terminal
-# Firstmate itself runs in, else fm-<hometag>. Naming the space needs the app
-# window and is not done.
+# and herdr.space to FM_HC_SPACE when set, else fm-<hometag>, so a home's tasks
+# group in one space with one tab each. Naming the space needs the app window
+# and is not done.
 #
-# Placement beside Firstmate: when Firstmate runs inside a live hc terminal of
-# the task's session (fm_backend_hc_caller_terminal), each task terminal is
-# created as that terminal's child, so the app groups the crew under the
-# Firstmate that launched it. --outlive-parent keeps a task running when
-# Firstmate's terminal ends, and --no-notify keeps hc from typing notes into
-# Firstmate's composer. Otherwise the task starts with --no-parent.
+# Placement beside Firstmate is opt-in: with FM_HC_BESIDE_FIRSTMATE=1, when
+# Firstmate runs inside a live hc terminal of the task's session
+# (fm_backend_hc_caller_terminal), each task terminal is created as that
+# terminal's child and, unless FM_HC_SPACE is set, in that terminal's
+# herdr.space, so the app groups the crew under the Firstmate that launched it.
+# Any other value, or no caller terminal, keeps the default above with
+# --no-parent. --outlive-parent keeps a task running when Firstmate's terminal
+# ends, and --no-notify keeps hc from typing notes into any parent.
 #
 # Measured limits on hc 0.1.13 (docs/hc-backend.md "Limits"):
 #   - `hc send` always presses Enter after pasting. There is no paste without
@@ -198,9 +200,10 @@ EOF
 
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for
 # <window-label>, refusing a live duplicate in this home. Prints the address.
-# Placement follows the header: a child of Firstmate's own hc terminal when
-# fm_backend_hc_caller_terminal finds one, else --no-parent; --outlive-parent
-# and --no-notify apply either way.
+# Placement follows the header: --no-parent by default; with
+# FM_HC_BESIDE_FIRSTMATE=1, a child of Firstmate's own hc terminal when
+# fm_backend_hc_caller_terminal finds one. --outlive-parent and --no-notify
+# apply either way.
 fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   local session=$1 label=$2 cwd=$3 home scoped dup out address caller caller_space space
   local -a parent=(--no-parent)
@@ -213,7 +216,8 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
     return 1
   fi
   space=${FM_HC_SPACE:-}
-  caller=$(fm_backend_hc_caller_terminal "$session")
+  caller=
+  [ "${FM_HC_BESIDE_FIRSTMATE:-}" != 1 ] || caller=$(fm_backend_hc_caller_terminal "$session")
   if [ -n "$caller" ]; then
     parent=(--parent "${caller%%$'\t'*}")
     caller_space=${caller#*$'\t'}
