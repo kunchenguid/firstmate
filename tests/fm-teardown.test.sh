@@ -934,6 +934,29 @@ test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup() {
   pass "teardown leaves a merge cleanup request for the detached cleanup that owns it"
 }
 
+# A sandboxed worker's relay spool and helper (state/<id>.sbx, bin/fm-sandbox-lib.sh)
+# are runtime state for the retired endpoint: teardown removes the whole directory.
+test_teardown_removes_the_sandbox_relay_directory() {
+  local case_dir rc wt_head
+  case_dir=$(make_case sandbox-relay-dir)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  mkdir -p "$case_dir/state/task-x1.sbx/events"
+  printf '%s' '{"state":"idle","event":"agent-end"}' > "$case_dir/state/task-x1.sbx/events/0001.json"
+  printf '#!/bin/sh\n' > "$case_dir/state/task-x1.sbx/relay-helper"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "sandbox-relay-dir: teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.sbx" "teardown must remove the sandbox relay directory"
+  pass "teardown removes state/<id>.sbx, the sandboxed worker's relay spool and helper"
+}
+
 # Send the task branch's commits to <target> on origin from a separate clone, so
 # the task copy's tracking refs do not show them. Args: case_dir target
 land_task_commits_from_other_clone() {
@@ -6599,6 +6622,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
+test_teardown_removes_the_sandbox_relay_directory
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits

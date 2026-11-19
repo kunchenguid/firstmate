@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--sandbox <profile|off>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--dispatch-override <reason>] [--hermes-profile <name>] [--account <entry>] [--sandbox <profile|off>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -64,7 +64,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>] [--sandbox off]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -408,6 +408,30 @@
 #   prevents equal task ids in different Firstmate homes from sharing a file.
 #   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
 #   task teardown removes only the current home's launch namespace.
+# Worker sandbox (config/sandbox, bin/fm-sandbox-lib.sh):
+#   docs/configuration.md "Worker sandbox (config/sandbox)" owns the grammar and
+#   the enforce levels. --sandbox <profile> wraps this one ship or scout worker
+#   in that wrapper profile whatever the config maps; --sandbox off waives a
+#   mapped profile for one spawn unless config/sandbox says enforce=strict. A
+#   secondmate is never sandboxed and refuses the flag. The wrapper
+#   (<wrapper> --profile <name> <binds> --host-helper <helper> -- <agent>)
+#   prefixes ONLY the agent segment, at the one seam after placeholder
+#   substitution, so the OSC reporter, the FM_TASK_INBOX export, and the
+#   launch-env-allowlist layer stay outside it and compose unchanged. Only the
+#   omp harness template is wrapped: a profile that resolves for another
+#   harness, a raw launch command, backend=t3code, or a wrapper that does not
+#   accept the profile refuses BEFORE any endpoint, worktree, or record exists,
+#   and never launches the worker raw. The task binds (spawn_sandbox_wrap) name
+#   only the task's own status, turn-ended, steering inbox, data directory,
+#   read-only hooks, busy extension and the code root's bin/,
+#   .agents/ and .omp/, its private temp root, and the busy relay
+#   spool state/<id>.sbx/events; never state/, the code root itself, or
+#   FM_HOME. The omp busy extension drops edge files into that spool and
+#   bin/fm-sandbox-relay.sh, started by the wrapper as --host-helper, applies
+#   them through bin/fm-busy-event.sh. The chosen profile is recorded as
+#   sandbox=<profile> (or sandbox=off for a waiver) in state/<id>.meta, a
+#   relaunch re-wraps with that recorded profile, and teardown removes
+#   state/<id>.sbx/.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every supported command-line launch (ship, scout, secondmate, raw
@@ -817,6 +841,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-sandbox-lib.sh
+. "$SCRIPT_DIR/fm-sandbox-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
   exit 1
 fi
@@ -1023,6 +1049,8 @@ UPSTREAM_CONSENT_SET=0
 TRACEPARENT_SET=0
 ACCOUNT_ARG=
 ACCOUNT_SET=0
+SANDBOX_ARG=
+SANDBOX_SET=0
 RELAUNCH=0
 # Opt-in only: exact-resume presentation-order lock waits instead of refusing.
 # Absent/unset keeps upstream refuse-on-contention. See header.
@@ -1086,6 +1114,10 @@ for a in "$@"; do
     account)
       ACCOUNT_ARG=$a
       ACCOUNT_SET=1
+      ;;
+    sandbox)
+      SANDBOX_ARG=$a
+      SANDBOX_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -1165,6 +1197,11 @@ for a in "$@"; do
     ACCOUNT_ARG=${a#--account=}
     ACCOUNT_SET=1
     ;;
+  --sandbox) want_value=sandbox ;;
+  --sandbox=*)
+    SANDBOX_ARG=${a#--sandbox=}
+    SANDBOX_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
@@ -1216,10 +1253,18 @@ fi
   echo "error: --account requires a non-empty value" >&2
   exit 1
 }
+[ "$SANDBOX_SET" -eq 0 ] || [ -n "$SANDBOX_ARG" ] || {
+  echo "error: --sandbox requires a non-empty value: a wrapper profile name, or off" >&2
+  exit 1
+}
 # A secondmate, local or remote, launches on its own per-mate pin, so --account
 # is refused here, before the remote route could ignore it.
 [ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
   echo "error: --account applies to ships and scouts; secondmate ${POS[0]:-} launches on its own config/secondmate-accounts/<id>/claude-account pin" >&2
+  exit 1
+}
+[ "$SANDBOX_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
+  echo "error: --sandbox applies to ship and scout spawns; a secondmate holds fleet state and never runs sandboxed" >&2
   exit 1
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -2183,6 +2228,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   [ "$ACCOUNT_SET" -eq 0 ] || shared_args+=(--account "$ACCOUNT_ARG")
+  [ "$SANDBOX_SET" -eq 0 ] || shared_args+=(--sandbox "$SANDBOX_ARG")
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -3989,6 +4035,36 @@ rovo_config_override_flag() {
   printf -- '--config-override %s ' "$(shell_quote "$config_json")"
 }
 
+# task_channel_dirs: the ONE owner of which directories a worker reads or writes
+# outside its worktree, printed as "<role><TAB><path>" lines and created first
+# (the state channel dirs otherwise appear lazily with their first record). Roles:
+# operational-inbox (the launch record, read), inbox (steers, read and handled/
+# acknowledged), data (the task's brief and report directory), skills (the code
+# root's .agents/skills). A secondmate's only channel is its steering inbox.
+# claude_add_dirs_flag grants them to Claude and spawn_sandbox_wrap binds the
+# inbox and data ones into the worker sandbox, so neither keeps a second copy of
+# the list. The sandbox never binds operational-inbox: it holds every task's
+# launch records, and the only sandboxed harness (omp) takes its brief inline.
+task_channel_dirs() {  # <kind> <state-dir> <data-dir> <code-root> <task-id>
+  local kind=$1 state_dir=$2 data_dir=$3 code_root=$4 id=$5
+  local state_real data_real root_real
+  state_real=$(cd "$state_dir" && pwd -P) || return 1
+  case "$kind" in
+  secondmate)
+    mkdir -p "$state_real/$id.inbox/handled" || return 1
+    printf 'inbox\t%s\n' "$state_real/$id.inbox"
+    ;;
+  *)
+    data_real=$(cd "$data_dir" && pwd -P) || return 1
+    root_real=$(cd "$code_root" && pwd -P) || return 1
+    [ -d "$root_real/.agents/skills" ] || return 1
+    mkdir -p "$state_real/operational-inbox" "$state_real/$id.inbox/handled" "$data_real/$id" || return 1
+    printf 'operational-inbox\t%s\ninbox\t%s\ndata\t%s\nskills\t%s\n' \
+      "$state_real/operational-inbox" "$state_real/$id.inbox" "$data_real/$id" "$root_real/.agents/skills"
+    ;;
+  esac
+}
+
 # Claude Code path-checks the Read/Glob/Grep file tools (and an Edit's
 # mandatory prior Read) against its working directories: the pane cwd plus
 # every --add-dir. Since 2.1.257 the first outside read in --permission-mode
@@ -4012,27 +4088,158 @@ rovo_config_override_flag() {
 # later outside the grant. The grant never covers the whole state/ (watcher
 # internals live there) or anything wider.
 claude_add_dirs_flag() {  # <kind> <state-dir> <data-dir> <code-root> <task-id>
-  local kind=$1 state_dir=$2 data_dir=$3 code_root=$4 id=$5
-  local state_real data_real root_real out='' d
-  local dirs=()
-  state_real=$(cd "$state_dir" && pwd -P) || return 1
-  case "$kind" in
-  secondmate)
-    mkdir -p "$state_real/$id.inbox/handled" || return 1
-    dirs=("$state_real/$id.inbox")
-    ;;
-  *)
-    data_real=$(cd "$data_dir" && pwd -P) || return 1
-    root_real=$(cd "$code_root" && pwd -P) || return 1
-    [ -d "$root_real/.agents/skills" ] || return 1
-    mkdir -p "$state_real/operational-inbox" "$state_real/$id.inbox/handled" "$data_real/$id" || return 1
-    dirs=("$state_real/operational-inbox" "$state_real/$id.inbox" "$data_real/$id" "$root_real/.agents/skills")
-    ;;
-  esac
-  for d in "${dirs[@]}"; do
+  local out='' dirs role d
+  dirs=$(task_channel_dirs "$@") || return 1
+  while IFS=$'\t' read -r role d; do
+    [ -n "$d" ] || continue
     out="$out--add-dir $(shell_quote "$d") "
-  done
+  done <<EOF
+$dirs
+EOF
   printf '%s' "$out"
+}
+
+# Worker sandbox seam (bin/fm-sandbox-lib.sh owns the config/sandbox grammar and
+# resolution; docs/configuration.md "Worker sandbox (config/sandbox)" is the
+# operator reference). spawn_sandbox_resolve runs once per spawn or relaunch,
+# before any endpoint, worktree, or record exists, and sets SANDBOX_PROFILE (the
+# profile that wraps this launch, empty for none), SANDBOX_RECORD (the sandbox=
+# value written to the task record: the profile, or `off` for a waiver), and
+# SANDBOX_BIN (the wrapper). A profile that applies is ALWAYS enforced: an
+# unusable wrapper, profile, backend, or harness refuses the spawn and never
+# launches the worker raw.
+SANDBOX_PROFILE=
+SANDBOX_RECORD=
+SANDBOX_BIN=
+SANDBOX_HELPER=
+spawn_sandbox_resolve() {
+  local profile='' recorded='' why
+  if [ "$KIND" = secondmate ]; then
+    [ "$SANDBOX_SET" -eq 0 ] || {
+      echo "error: --sandbox applies to ship and scout spawns; a secondmate holds fleet state and never runs sandboxed" >&2
+      return 1
+    }
+    return 0
+  fi
+  # A relaunch reads config/sandbox only when it needs it: for a recorded
+  # profile (the wrapper is named there), a recorded waiver (enforce=strict
+  # refuses it), or an explicit flag, so a broken file never strands a task
+  # recorded without a sandbox.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    recorded=$(fm_meta_get "$RELAUNCH_META" sandbox)
+    if [ "$SANDBOX_SET" -eq 1 ] && [ "$SANDBOX_ARG" != off ]; then
+      echo "error: --relaunch keeps the task's recorded sandbox; only --sandbox off may change it" >&2
+      return 1
+    fi
+  fi
+  if [ "$RELAUNCH" -eq 0 ] || [ "$SANDBOX_SET" -eq 1 ] || [ -n "$recorded" ]; then
+    fm_sandbox_config_load "$CONFIG" || return 1
+  fi
+  if [ "$SANDBOX_SET" -eq 1 ] && [ "$SANDBOX_ARG" = off ]; then
+    if [ "$FM_SANDBOX_PRESENT" -eq 1 ] && [ "$FM_SANDBOX_ENFORCE" = strict ]; then
+      echo "error: config/sandbox enforce=strict refuses --sandbox off; set enforce=on to allow a per-spawn waiver" >&2
+      return 1
+    fi
+    if [ "$RELAUNCH" -eq 1 ]; then
+      [ -z "$recorded" ] || SANDBOX_RECORD=off
+    elif [ "$FM_SANDBOX_PRESENT" -eq 1 ] && [ "$FM_SANDBOX_ENFORCE" != off ]; then
+      SANDBOX_RECORD=off
+    fi
+    return 0
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    case "$recorded" in
+    '') return 0 ;;
+    off)
+      if [ "$FM_SANDBOX_PRESENT" -eq 1 ] && [ "$FM_SANDBOX_ENFORCE" = strict ]; then
+        echo "error: config/sandbox enforce=strict refuses relaunching $ID under its recorded sandbox=off waiver; tear the task down and spawn it again so the project's mapped profile applies, or set enforce=on in config/sandbox to keep the waiver" >&2
+        return 1
+      fi
+      SANDBOX_RECORD=off
+      return 0
+      ;;
+    esac
+    profile=$recorded
+  elif [ "$SANDBOX_SET" -eq 1 ]; then
+    profile=$SANDBOX_ARG
+    fm_sandbox_profile_valid "$profile" || {
+      echo "error: --sandbox names an invalid profile '$profile' (a wrapper profile name, or off)" >&2
+      return 1
+    }
+  elif [ "$FM_SANDBOX_PRESENT" -eq 1 ] && [ "$FM_SANDBOX_ENFORCE" != off ]; then
+    profile=$(fm_sandbox_lookup "$KIND" "$(basename "$PROJ_ABS")")
+    if [ -z "$profile" ] && [ "$FM_SANDBOX_ENFORCE" = strict ]; then
+      echo "error: config/sandbox enforce=strict maps no profile for $KIND spawns of $(basename "$PROJ_ABS"); add project:$(basename "$PROJ_ABS")=<profile> or a default= line" >&2
+      return 1
+    fi
+  fi
+  [ -n "$profile" ] || return 0
+  if [ "$BACKEND" = t3code ]; then
+    echo "error: sandbox profile $profile cannot wrap a backend=t3code worker because T3 starts the agent itself; choose another backend, or --sandbox off where config/sandbox enforce=on allows it" >&2
+    return 1
+  fi
+  if [ "$RAW_LAUNCH" -ne 0 ]; then
+    echo "error: sandbox profile $profile cannot wrap a raw launch command; launch a harness template (omp), or --sandbox off where config/sandbox enforce=on allows it" >&2
+    return 1
+  fi
+  if [ "$HARNESS" != omp ]; then
+    echo "error: sandbox profile $profile wraps only the omp harness (its busy relay is omp-specific), not $HARNESS; spawn on omp, or --sandbox off where config/sandbox enforce=on allows it" >&2
+    return 1
+  fi
+  SANDBOX_BIN=$(fm_sandbox_wrapper_ready "$profile" "$PROJ_ABS" 2>&1) || {
+    why=$SANDBOX_BIN
+    SANDBOX_BIN=
+    echo "error: sandbox profile $profile cannot be applied: $why; fix the wrapper named in config/sandbox, or --sandbox off where config/sandbox enforce=on allows it, and the worker was not launched" >&2
+    return 1
+  }
+  SANDBOX_PROFILE=$profile
+  SANDBOX_RECORD=$profile
+}
+
+# spawn_sandbox_wrap: prefix $LAUNCH (the agent segment) with the wrapper and this
+# task's binds. Everything the worker may touch outside its worktree is named
+# here and nowhere else: its own status and turn-ended files, its steering inbox,
+# its data directory, the read-only hooks, busy extension and
+# the code root's bin/, .agents/ and .omp/ (never the root
+# itself, which is FM_HOME when FM_HOME is unset), its private temp root, and
+# the relay spool. The read-only code binds come first so a wrapper that applies
+# binds in order never shadows a writable task bind. Never state/ and never
+# FM_HOME: a writable state/ would let a worker rewrite other workers' inboxes and
+# extensions, which run unsandboxed (the reason the busy edge goes through
+# bin/fm-sandbox-relay.sh instead). Names that may be unset in the pane expand
+# at launch (`${NAME+--env} ${NAME+NAME}`, two words: zsh does not word-split a
+# single unquoted expansion), so an unset one is never named.
+spawn_sandbox_wrap() {
+  local root_real dirs role path word prefix
+  local binds=()
+  root_real=$(cd "$FM_ROOT" && pwd -P) || return 1
+  dirs=$(task_channel_dirs "$KIND" "$STATE" "$DATA" "$FM_ROOT" "$ID") || {
+    echo "error: could not resolve the task-channel directories for $ID's sandbox binds" >&2
+    return 1
+  }
+  binds=(--profile "$SANDBOX_PROFILE" --worktree "$WT")
+  for path in bin .agents .omp; do
+    [ ! -e "$root_real/$path" ] || binds+=(--ro "$root_real/$path")
+  done
+  binds+=(--rw-create "$STATE_REAL/$ID.status" --rw-create "$TURNEND")
+  while IFS=$'\t' read -r role path; do
+    case "$role" in
+    inbox | data) binds+=(--rw "$path") ;;
+    esac
+  done <<EOF
+$dirs
+EOF
+  [ "$GIT_HOOKS_INSTALLED" != 1 ] || binds+=(--ro "$GIT_HOOKS_DIR")
+  binds+=(--ro "$STATE_REAL/$ID.omp-ext.ts" --rw "$TASK_TMP"
+    --rw "$(fm_sandbox_events_dir "$STATE_REAL" "$ID")"
+    --env COMPACT_ADVISER_DISABLE --env FM_TASK_INBOX --host-helper "$SANDBOX_HELPER")
+  prefix=$(shell_quote "$SANDBOX_BIN")
+  for word in "${binds[@]}"; do
+    prefix="$prefix $(shell_quote "$word")"
+  done
+  # shellcheck disable=SC2016 # expanded by the pane shell at launch, by design
+  prefix="$prefix"' ${FM_TASK_ID+--env} ${FM_TASK_ID+FM_TASK_ID} ${GOTMPDIR+--env} ${GOTMPDIR+GOTMPDIR} ${TRACEPARENT+--env} ${TRACEPARENT+TRACEPARENT} ${LAVISH_AXI_HOST+--env} ${LAVISH_AXI_HOST+LAVISH_AXI_HOST} ${LAVISH_AXI_PORT+--env} ${LAVISH_AXI_PORT+LAVISH_AXI_PORT}'
+  LAUNCH="$prefix -- $LAUNCH"
 }
 
 resolved_existing_dir() {
@@ -4238,6 +4445,9 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   echo "error: spawn refused: project $PROJ_ABS has no commit yet (unborn HEAD), so there is nothing to branch a worktree from; make one commit in the project, for example 'git -C $PROJ_ABS commit --allow-empty -m \"chore: initial commit\"', then spawn again" >&2
   exit 1
 fi
+# Worker sandbox resolution (spawn_sandbox_resolve above): refuses here, before
+# capacity admission, any endpoint, worktree, record, or backlog move exists.
+spawn_sandbox_resolve || exit 1
 # Project capacity admission (bin/fm-project-capacity-lib.sh owns the
 # declaration, what holds a place, and why this is race-safe). A fresh worker
 # for a project whose declared capacity is already held is deferred here, before
@@ -7029,6 +7239,44 @@ EOF
     # has no trust gate, yet its cwd-only extension auto-discovery would load a
     # worktree-resident copy a SECOND time next to the explicit -e (verified,
     # omp 18.1.11). Lives in state/, cleaned by teardown.
+    # A sandboxed worker (SANDBOX_PROFILE) has no writable state/, so its
+    # extension drops one JSON edge file into the relay spool instead of running
+    # fm-busy-event.sh; bin/fm-sandbox-relay.sh applies it on the host. Only the
+    # transport differs: the event names, the gen binding, and the turn-end
+    # touch (a direct --rw-create bind) are the same.
+    if [ -n "$SANDBOX_PROFILE" ]; then
+      [ -n "$BUSY_GEN" ] || {
+        echo "error: the sandbox relay needs the armed busy gen for $ID" >&2
+        exit 1
+      }
+      SANDBOX_HELPER=$(fm_sandbox_prepare_task "$STATE_REAL" "$ID" "$BUSY_GEN" "$FM_ROOT") || exit 1
+      SANDBOX_EVENTS=$(fm_sandbox_events_dir "$STATE_REAL" "$ID")
+      IFS= read -r -d '' omp_busy_transport <<EOT || true
+import { renameSync, writeFileSync } from "node:fs";
+let edgeSeq = 0;
+const busyEvent = (state: string, event: string) => {
+  try {
+    const name = String(Date.now()).padStart(13, "0") + "-" + process.pid + "-" + String(edgeSeq++).padStart(6, "0");
+    writeFileSync("$SANDBOX_EVENTS/." + name + ".tmp", JSON.stringify({ state, event }));
+    renameSync("$SANDBOX_EVENTS/." + name + ".tmp", "$SANDBOX_EVENTS/" + name + ".json");
+  } catch {}
+  return Promise.resolve();
+};
+EOT
+    else
+      IFS= read -r -d '' omp_busy_transport <<EOT || true
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "apply", "$STATE_REAL", "$ID", state,
+      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+EOT
+    fi
+    # read -d '' keeps the heredoc's final newline; drop it so the default
+    # extension stays byte-identical to the one written before this seam existed.
+    omp_busy_transport=${omp_busy_transport%$'\n'}
     cat >"$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification for omp (Oh My
 // Pi); written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -7045,13 +7293,7 @@ EOF
 // never current-state truth.
 import { execFile } from "node:child_process";
 const notifyTurnEnd = $busy_notify_turnend;
-const busyEvent = (state: string, event: string) =>
-  new Promise<void>((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
-      "apply", "$STATE_REAL", "$ID", state,
-      "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
-    ], () => resolve());
-  });
+$omp_busy_transport
 export default function (pi: any) {
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_end", (event: any) => {
@@ -7326,7 +7568,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile sandbox busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7369,6 +7611,10 @@ preserve_relaunch_meta() {
   # The per-secondmate omp profile pin, only when one applies, so every other
   # task record stays byte-identical.
   [ -z "$OMP_PROFILE_PIN" ] || echo "omp_profile=$OMP_PROFILE_PIN"
+  # The worker sandbox profile (config/sandbox), or `off` when it was waived for
+  # this task, so a relaunch re-wraps identically; written only when the seam
+  # applied or was waived, so an unsandboxed task record stays byte-identical.
+  [ -z "$SANDBOX_RECORD" ] || echo "sandbox=$SANDBOX_RECORD"
   [ "$HARNESS" != hermes ] || { echo "hermes_profile=$HERMES_PROFILE"; echo "hermes_home=$HERMES_PROFILE_HOME"; }
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
@@ -7681,6 +7927,15 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__CLAUDEADDDIRS__/$CLAUDE_ADD_DIRS}
   ;;
 esac
+# Worker sandbox seam (docs/configuration.md "Worker sandbox (config/sandbox)"):
+# the ONE place the agent segment is wrapped. It runs after every placeholder is
+# substituted and before the OSC reporter, the FM_TASK_INBOX export, and the
+# launch-env layer, so those stay outside the sandbox exactly as today. The
+# `$(...)` brief expansion inside $LAUNCH is still evaluated by the pane shell
+# before agent-sandbox starts, so the encoded launch brief needs no bind.
+if [ -n "$SANDBOX_PROFILE" ]; then
+  spawn_sandbox_wrap || exit 1
+fi
 case "$HARNESS" in
 claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro | hermes)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
@@ -8310,6 +8565,7 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT" ] || SPAWN_ACCOUNT=" account=$WORKER_ACCOUNT_DECLARED"
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 [ -z "$OMP_PROFILE_PIN" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT omp_profile=$OMP_PROFILE_PIN"
+[ -z "$SANDBOX_RECORD" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT sandbox=$SANDBOX_RECORD"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
