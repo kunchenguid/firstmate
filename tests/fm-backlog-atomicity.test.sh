@@ -1085,7 +1085,7 @@ SH
 # A relaunch restarts an agent for work already In flight, so a captain hold on
 # the row must not block it, and must survive it byte for byte.
 test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
-  local case_dir id out before after
+  local case_dir id out before after endpoint source_line enter_line
   id=atomic-relaunch-held-b17
   case_dir=$(make_home relaunch-held "$id")
   add_item "$case_dir" "$id"
@@ -1094,14 +1094,18 @@ test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
     --file "$(backlog_of "$case_dir")" >/dev/null
   [ "$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")" 2>/dev/null | sed -n 's/^  held: *//p' | head -1)" = yes ] \
     || fail "fixture did not hold the row"
+  endpoint=$(sed -n 's/^window=//p' "$(home_of "$case_dir")/state/$id.meta" | head -1)
   make_agent_free_pane "$case_dir"
   before=$(cat "$(backlog_of "$case_dir")")
 
   out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) \
     || fail "relaunch of a held In-flight row was refused: $out"
   assert_contains "$out" "spawned $id" "relaunch did not report success"
-  grep -Eq -- "^send-keys -t [^ ]*$id[^ ]* -l .*claude" "$case_dir/fakebin/send-keys.log" 2>/dev/null \
-    || fail "relaunch sent no claude launch command to the task's endpoint"
+  [ -n "$endpoint" ] || fail "fixture recorded no endpoint for $id"
+  source_line=$(grep -n -F -- "send-keys -t $endpoint -l . " "$case_dir/fakebin/send-keys.log" | grep -F "launch." | head -1 | cut -d: -f1)
+  enter_line=$(grep -n -x -F -- "send-keys -t $endpoint Enter" "$case_dir/fakebin/send-keys.log" | tail -1 | cut -d: -f1)
+  { [ -n "$source_line" ] && [ -n "$enter_line" ] && [ "$source_line" -lt "$enter_line" ]; } \
+    || fail "relaunch did not source its launch file then press Enter at endpoint $endpoint"
   after=$(cat "$(backlog_of "$case_dir")")
   [ "$before" = "$after" ] || fail "relaunch changed the held backlog row"
   pass "relaunch of a held In-flight row succeeds and keeps the hold unchanged"
