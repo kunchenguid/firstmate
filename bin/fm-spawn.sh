@@ -7490,7 +7490,7 @@ spawn_report_preserved_state() {
   fi
   if [ "$RELAUNCH" -eq 1 ] && [ "$FM_BACKLOG_ROW_STATE" = "in_flight yes no" ] &&
     [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
-    SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight, with its captain hold untouched"
+    SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight"
     return 0
   fi
   # The commit reported success, but the row does not read back In flight:

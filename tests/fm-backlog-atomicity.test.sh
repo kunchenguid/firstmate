@@ -1076,6 +1076,7 @@ make_agent_free_pane() {  # <case-dir>
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\$*" in *pane_current_command*) printf 'zsh\n'; exit 0 ;; esac
+[ "\${1:-}" != send-keys ] || printf '%s\n' "\$*" >> "$fakebin/send-keys.log"
 exec "$fakebin/tmux.real" "\$@"
 SH
   chmod +x "$fakebin/tmux"
@@ -1099,6 +1100,8 @@ test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
   out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) \
     || fail "relaunch of a held In-flight row was refused: $out"
   assert_contains "$out" "spawned $id" "relaunch did not report success"
+  grep -Eq -- "^send-keys -t [^ ]*$id[^ ]* -l .*claude" "$case_dir/fakebin/send-keys.log" 2>/dev/null \
+    || fail "relaunch sent no claude launch command to the task's endpoint"
   after=$(cat "$(backlog_of "$case_dir")")
   [ "$before" = "$after" ] || fail "relaunch changed the held backlog row"
   pass "relaunch of a held In-flight row succeeds and keeps the hold unchanged"
@@ -1115,6 +1118,7 @@ test_relaunch_still_refuses_a_parked_in_flight_row() {
   make_agent_free_pane "$case_dir"
   out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) || rc=$?
   [ "$rc" -ne 0 ] || fail "relaunch accepted a parked In-flight row"
+  [ ! -s "$case_dir/fakebin/send-keys.log" ] || fail "refused relaunch still sent keys to the endpoint"
   assert_contains "$out" "not dispatchable in state in_flight yes no" \
     "parked relaunch refusal did not name the actual state"
   pass "relaunch still refuses a parked In-flight row"
@@ -1133,6 +1137,7 @@ test_relaunch_still_refuses_a_blocked_in_flight_row() {
   make_agent_free_pane "$case_dir"
   out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) || rc=$?
   [ "$rc" -ne 0 ] || fail "relaunch accepted a blocked In-flight row"
+  [ ! -s "$case_dir/fakebin/send-keys.log" ] || fail "refused relaunch still sent keys to the endpoint"
   assert_contains "$out" "not dispatchable in state in_flight no yes" \
     "blocked relaunch refusal did not name the actual state"
   pass "relaunch still refuses a blocked In-flight row"
