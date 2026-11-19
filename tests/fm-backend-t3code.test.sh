@@ -1527,7 +1527,7 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   touch "$state/.last-watcher-beat"
   FM_T3_PROJ="$proj" t3_world_set 'w.projects[0].workspaceRoot = process.env.FM_T3_PROJ'
   fb=$(make_treehouse_fakebin "$CASE_DIR")
-  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$fb:$PATH" FM_T3_TREEHOUSE_LOG="$LOG" FM_T3_TREEHOUSE_WT="$wt" \
+  out=$( T3CODE_THREAD_ID=thread-live HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$fb:$PATH" FM_T3_TREEHOUSE_LOG="$LOG" FM_T3_TREEHOUSE_WT="$wt" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$CONFIG" \
     FM_PROJECTS_OVERRIDE="$CASE_DIR/unused-projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --model claude-sonnet-5 --effort high --backend t3code 2>&1 )
@@ -1550,6 +1550,8 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   [ "$(t3_request "$create" 'r.arguments.workspaceStrategy.worktreePath')" = "$wt" ] || fail "the launch must point at the leased worktree"
   [ "$(t3_request "$create" 'r.arguments.workspaceStrategy.branch')" = "fm/$id" ] || fail "the launch must carry the slot's branch"
   [ "$(t3_request "$create" 'r.arguments.title')" = "fm-$id" ] || fail "the launch title should be the window alias"
+  [ "$(t3_request "$create" 'r.arguments.delegatedFrom')" = '{"environmentId":"env-fake-1","threadId":"thread-live","title":"thread-live"}' ] \
+    || fail "a task launched inside T3 must link to the captain's thread"
   [ "$(t3_request "$create" 'r.arguments.runtimeMode')" = full-access ] || fail "the launch must run full-access"
   [ "$(t3_request "$create" 'r.arguments.modelSelection')" = '{"instanceId":"claudeAgent","model":"claude-sonnet-5","options":[{"id":"effort","value":"high"}]}' ] \
     || fail "the launch must carry --model/--effort as the model selection"
@@ -1737,7 +1739,7 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   mkdir -p "$home/.claude"
   printf '{"permissions":{"allow":["Bash(ls:*)"]},"env":{"CAPTAIN_VAR":"keep","LAVISH_AXI_HOST":"stale","FM_T3CODE_ENV_KEYS":"LAVISH_AXI_HOST"}}\n' \
     > "$home/.claude/settings.local.json"
-  out=$(spawn_t3_secondmate "$id" "$home" claude claude-sonnet-5)
+  out=$(T3CODE_THREAD_ID=thread-live spawn_t3_secondmate "$id" "$home" claude claude-sonnet-5)
   expect_code 0 $? "fm-spawn.sh --backend t3code --secondmate should succeed against the fake T3 server"$'\n'"$out"
   [ "$(t3_dispatch_types)" = "t3_project_create t3_thread_launch t3_thread_send" ] \
     || fail "a secondmate spawn must create the home's project, then launch the thread, then send the charter, got '$(t3_dispatch_types)'"
@@ -1750,6 +1752,8 @@ test_spawn_secondmate_runs_thread_in_home_with_env() {
   [ "$(t3_request "$create" 'r.arguments.projectId')" = "$project" ] || fail "the thread must be launched on the home's project"
   [ "$(t3_request "$create" 'r.arguments.workspaceStrategy')" = '{"type":"root","branch":"sm/home"}' ] || fail "a secondmate thread runs at the home's root on its current branch, got '$(t3_request "$create" 'r.arguments.workspaceStrategy')'"
   [ "$(t3_request "$create" 'r.arguments.title')" = "fm-$id" ] || fail "the launch title should be the window alias"
+  [ "$(t3_request "$create" 'r.arguments.delegatedFrom')" = undefined ] \
+    || fail "a secondmate launched inside T3 must not inherit a parent link"
   [ "$(t3_request "$create" 'r.arguments.modelSelection')" = '{"instanceId":"claudeAgent","model":"claude-sonnet-5"}' ] || fail "the launch must carry the secondmate's model selection"
   turn=$(t3_log_line_of 'r.tool === "t3_thread_send"')
   [ "$(t3_request "$turn" 'r.arguments.threadId')" = "$thread" ] || fail "the charter must go to the launched thread"
