@@ -32,6 +32,56 @@ max_width() {
   jq -R -s 'split("\n") | map(length) | max'
 }
 
+# fleet_card: the fleet card text of one task id.
+fleet_card() {
+  panel | awk -v id="$1" '$1 == "▌" id { on = 1 } /^$/ { on = 0 } on { print }'
+}
+
+test_a_scout_with_a_report_and_no_newer_work_shows_report_ready() {
+  local card out
+  card=$(fleet_card arc-history-errors)
+  assert_contains "$card" "REPORT READY" "the fleet card shows report ready"
+  out=$(panel --task arc-history-errors)
+  assert_contains "$out" "REPORT READY" "the worker panel shows report ready"
+  pass "a scout with a report and no newer work shows report ready"
+}
+
+test_a_scout_in_a_second_round_shows_working_not_report_ready() {
+  local card out
+  card=$(fleet_card arc-round2-scout)
+  assert_contains "$card" "WORKING" "the fleet card shows working"
+  assert_not_contains "$card" "REPORT READY" "the fleet card is not report ready"
+  assert_contains "$card" "2/8" "the fleet card shows the current step of the new plan"
+  assert_contains "$card" "Open the page" "the fleet card names the current step"
+  out=$(panel --task arc-round2-scout)
+  assert_contains "$out" "WORKING" "the worker panel shows working"
+  assert_not_contains "$out" "REPORT READY" "the worker panel is not report ready"
+  pass "a scout in a second round shows working, not report ready"
+}
+
+test_a_second_round_plan_list_marks_only_earlier_steps_done() {
+  local out
+  out=$(panel --task arc-round2-scout)
+  assert_contains "$out" "PLAN" "the plan section shows"
+  assert_contains "$out" "2/8" "the plan counts the new plan"
+  assert_equals 1 "$(printf '%s\n' "$out" | grep -c '✓ [0-9]')" "one step is done"
+  assert_contains "$out" "✓ 1 Start the app" "step 1 is done"
+  assert_contains "$out" "▶ 2 Open the page" "step 2 is current"
+  assert_contains "$out" "· 3 Sign in" "step 3 has not started"
+  assert_contains "$out" "· 8 Write round 2" "step 8 has not started"
+  pass "a second round plan list marks only earlier steps done"
+}
+
+test_a_second_round_step_times_come_from_the_new_plan_only() {
+  local out
+  out=$(panel --task arc-round2-scout)
+  # step 1 ran 900s -> 300s ago (10m); step 2 has run 300s (5m).
+  assert_contains "$(printf '%s\n' "$out" | grep '✓ 1 Start the app')" "10m" "step 1 time is from the new plan"
+  assert_contains "$(printf '%s\n' "$out" | grep '▶ 2 Open the page')" "5m" "step 2 time runs until now"
+  assert_equals "" "$(printf '%s\n' "$out" | grep '· 3 Sign in' | grep -E '[0-9]+[ms]$')" "an unstarted step has no time"
+  pass "a second round's step times come from the new plan only"
+}
+
 test_card_order_puts_a_decision_first() {
   local out first
   out=$(panel) || fail "the fleet panel did not render"
@@ -43,7 +93,7 @@ test_card_order_puts_a_decision_first() {
 test_card_order_follows_the_groups() {
   local got
   got=$(panel | card_ids | tr '\n' ' ')
-  assert_equals "arc-tokens-wave2 arc-5083-history arc-memo-dedupe arc-history-errors arc-5601-role-access arc-5595-styles arc-5673-toolbar-spacing arc-5677-editor-toolbar arc-5680-upload-limit " \
+  assert_equals "arc-tokens-wave2 arc-5083-history arc-memo-dedupe arc-history-errors arc-5601-role-access arc-5595-styles arc-round2-scout arc-5673-toolbar-spacing arc-5677-editor-toolbar arc-5680-upload-limit " \
     "$got" "cards go needs you, no reply, ready, verifying and checking, working, starting; the oldest first inside a group"
   pass "card order follows the groups, oldest first inside a group"
 }
@@ -388,6 +438,10 @@ test_a_failed_fleet_panel_does_not_stop_session_start() {
   pass "a failed fleet panel does not stop session start"
 }
 
+test_a_scout_with_a_report_and_no_newer_work_shows_report_ready
+test_a_scout_in_a_second_round_shows_working_not_report_ready
+test_a_second_round_plan_list_marks_only_earlier_steps_done
+test_a_second_round_step_times_come_from_the_new_plan_only
 test_card_order_puts_a_decision_first
 test_card_order_follows_the_groups
 test_the_verifier_folds_into_its_ship_card

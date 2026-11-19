@@ -136,13 +136,20 @@ def vresult($t; $x; $v):
 
 # --- phase ---------------------------------------------------------------------
 def noreply($t): ($t.endpoint.exists == false) and ((done($t)) | not);
+# A scout's report is the latest word until newer work starts: a non-done status
+# line after the last done line, a plan recorded after it, or a live busy state.
+def newer_work($t; $x):
+  (last_of($x; ["done"]).at) as $d
+  | ($t.current_state.state == "working")
+    or ($d != null and ((evs($x) | any(.state != "done" and .at != null and .at > $d))
+                        or (($t.step.plan_recorded_at // 0) > $d)));
 def phase($t; $x; $v):
   if needs($t) then "needs"
   elif $t.current_state.state == "failed" then "failed"
   elif $t.current_state.state == "blocked" then "blocked"
   elif $t.kind == "ship" and vlive($v) and (noreply($t) | not) then "verifying"
   elif $t.kind == "ship" and done($t) then "ready"
-  elif $t.kind == "scout" and (done($t) or $t.paths.report.present == true) then "report"
+  elif $t.kind == "scout" and (done($t) or ($t.paths.report.present == true and (newer_work($t; $x) | not))) then "report"
   elif noreply($t) then "noreply"
   elif $t.current_state.source == "run-step" then "checking"
   elif $t.step != null or (evs($x) | length) > 0 then "working"
@@ -410,8 +417,16 @@ def worker($root; $t):
   | [$head[], ($secs[] | select(length > 0) | (hr, .[]))]
   | map([[$c + " k", "▌"], ["", " "]] + .);
 
+# A new plan replaces the old one: the earlier plan's step starts are not part
+# of it, and a step start that predates the new plan is not its current step.
+def own_plan_step:
+  if . == null or .plan_recorded_at == null then .
+  else .plan_recorded_at as $pa
+  | .history |= map(select(.started_at >= $pa))
+  | if .current != null and .current.started_at < $pa then .current = null else . end end;
 def render:
-  if $task == "" then fleet
+  .snap.tasks |= (if . == null then . else map(if .step != null then .step |= own_plan_step else . end) end)
+  | if $task == "" then fleet
   else . as $root
   | ([$root.snap.tasks[]? | select(.id == $task)] | first) as $t
   | if $t == null then [[["d", fit("No worker \($task) in this home."; $W)]], [["d", fit("Its tab closes with it."; $W)]]]

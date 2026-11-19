@@ -122,6 +122,18 @@ TOON
   step $id 1250 --scenario pass 'undo keeps one memo'
   # report ready.
   status arc-history-errors 600 "done" 'report saved'
+  # report ready, then a second round: the scout saved a report, then recorded a
+  # new 8-step plan, is on step 2, and says round 2 started.
+  id=arc-round2-scout
+  step $id 6000 --plan 'Read the code' 'Find the cause' 'Write the report'
+  step $id 6000 1 3 'Read the code'
+  step $id 5000 2 3 'Find the cause'
+  step $id 4000 3 3 'Write the report'
+  status $id 3500 "done" 'report saved'
+  status $id 1000 working 'round 2 validation started'
+  step $id 1000 --plan 'Start the app' 'Open the page' 'Sign in' 'Check the list' 'Check the form' 'Check errors' 'Compare rounds' 'Write round 2'
+  step $id 900 1 8 'Start the app'
+  step $id 300 2 8 'Open the page'
   # no reply.
   id=arc-5083-history
   step $id 7200 --plan 'Read the history code' 'Write the fix'
@@ -162,6 +174,7 @@ TOON
   add "$(task arc-memo-dedupe ship 20100 "done" status-log 'checks green: PR ready for review' true '.backlog.title = "Memo dedupe" | .pr.url = "https://github.com/acme/arc/pull/5622" | .backlog.body_lines = ["verifier: data"]')"
   add "$(task arc-memo-dedupe-verify scout 1950 "done" status-log '' true '.mode = "local-only" | .branch = null')"
   add "$(task arc-history-errors scout 4000 "done" status-log '' true '.backlog.title = "Why history errors" | .paths.report.present = true | .hints.open_decisions = [{key: "a", verb: "decide", summary: "Keep the old API?"}, {key: "b", verb: "decide", summary: "Drop the cache?"}]')"
+  add "$(task arc-round2-scout scout 6100 working pane '' true '.backlog.title = "Round 2 check" | .paths.report.present = true | .paths.status_log.last_event = {state: "working", age_seconds: 1000}')"
   add "$(task arc-5083-history ship 7300 working pane '' false '.backlog.title = "History list fix" | .paths.status_log.last_event = {state: "working", age_seconds: 5400}')"
   jq -n --argjson tasks "$tasks" '{tasks: $tasks, backlog: {records: [
     {state: "queued", captain_actionable: false}, {state: "queued", captain_actionable: false},
