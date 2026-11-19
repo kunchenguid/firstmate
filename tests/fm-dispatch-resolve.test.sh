@@ -1324,4 +1324,70 @@ rm -f "$HOME_DIR/config/dispatch-never-send"
 pass 'Jev receives a bounded, sanitised task history and the no-escalation rule sentence'
 cp "$TMP_ROOT/rules-before-ladder" "$RULES"
 if [ -e "$TMP_ROOT/accounts-before-ladder" ]; then mv "$TMP_ROOT/accounts-before-ladder" "$HOME_DIR/config/accounts.json"; fi
+# A second mate cannot pass --account: its launcher names the Claude store it
+# will run on, and only the account owning that store matches the receipt.
+cp "$RULES" "$TMP_ROOT/rules-before-store"
+cp "$QUOTA" "$TMP_ROOT/quota-before-store"
+if [ -e "$HOME_DIR/config/accounts.json" ]; then mv "$HOME_DIR/config/accounts.json" "$TMP_ROOT/accounts-before-store"; fi
+STORE_USER="$TMP_ROOT/store-user"
+STORE_A="$TMP_ROOT/store-a"
+STORE_B="$TMP_ROOT/store-b"
+mkdir -p "$STORE_USER/.claude" "$STORE_A" "$STORE_B" "$TMP_ROOT/store-codex"
+ln -s "$STORE_A" "$TMP_ROOT/store-a-alias"
+jq -n --arg a "$STORE_A" --arg b "$STORE_B" --arg x "$TMP_ROOT/store-codex" \
+  '{crossAccount:{enabled:true},accounts:{"seat-a":{claude:$a},"seat-b":{claude:$b},"seat-home":{claude:"~/.claude"},"seat-codex":{claude:$a,codex:$x}}}' \
+  > "$HOME_DIR/config/accounts.json"
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Seat a","use":{"harness":"claude","model":"sonnet","account":"seat-a","reasoning_class":1}},{"when":"Home seat","use":{"harness":"claude","model":"sonnet","account":"seat-home","reasoning_class":1}},{"when":"Codex seat","use":{"harness":"codex","model":"gpt-5","account":"seat-codex","reasoning_class":1}}],"default":{"harness":"claude","model":"sonnet","account":"seat-b","reasoning_class":1}}
+JSON
+jq '.providers += [.providers[0] | .provider = "codex"]' "$TMP_ROOT/quota-before-store" > "$QUOTA"
+store_route() {  # <rule id>: leave a fresh receipt for that row's only profile
+  write_response "$1" 0.95 "$(jq -cn --arg r "$1" '{rule_1:0,rule_2:0,rule_3:0,default:0} | .[$r] = 1')" "$1_1"
+  HOME="$STORE_USER" run "$BRIEF" --task store-mate
+  expect_code 0 "$code" "the $1 route resolves: $out"
+}
+mate_gate() { run gate --brief "$BRIEF" --task store-mate --harness claude --model sonnet "$@"; }
+store_route rule_1
+mate_gate --secondmate-claude-store "$STORE_A"
+expect_code 0 "$code" "the account owning the second mate's store matches: $out"
+assert_contains "$out" 'admits --harness claude --model sonnet --account seat-a for store-mate (preview)' 'the pass names the resolved account'
+mate_gate --secondmate-claude-store "$TMP_ROOT/store-a-alias"
+expect_code 0 "$code" "a symlinked alias is the same store: $out"
+mate_gate --secondmate-claude-store "$STORE_B"
+expect_code 3 "$code" "another account's store is refused: $out"
+assert_contains "$out" "profile.account is 'seat-a' on the receipt but the launch passes 'default' (this second mate runs on Claude store $STORE_B, which account 'seat-a' does not own)" 'the refusal names the store'
+HOME="$STORE_USER" mate_gate --secondmate-claude-store default
+expect_code 3 "$code" "the ordinary store is not another account's store: $out"
+mate_gate
+expect_code 3 "$code" "a launch naming no store keeps the literal comparison: $out"
+assert_contains "$out" "profile.account is 'seat-a' on the receipt but the launch passes 'default'." 'the literal refusal is unchanged'
+assert_not_contains "$out" 'does not own' 'the literal refusal says nothing about a store'
+mate_gate --account seat-b --secondmate-claude-store "$STORE_A"
+expect_code 3 "$code" "an explicit account is never replaced by the store's owner: $out"
+assert_contains "$out" "the launch passes 'seat-b'" 'the explicit account stays the compared value'
+cp "$HOME_DIR/config/accounts.json" "$TMP_ROOT/accounts-enabled"
+jq '.crossAccount.enabled = false' "$TMP_ROOT/accounts-enabled" > "$HOME_DIR/config/accounts.json"
+mate_gate --secondmate-claude-store "$STORE_A"
+expect_code 3 "$code" "a registry with routing off authorizes no account: $out"
+cp "$TMP_ROOT/accounts-enabled" "$HOME_DIR/config/accounts.json"
+mate_gate --secondmate-claude-store "$STORE_A" --consume
+expect_code 0 "$code" "the matching launch consumes its receipt: $out"
+mate_gate --secondmate-claude-store "$STORE_A" --consume
+expect_code 3 "$code" "a store match does not reuse a spent receipt: $out"
+assert_contains "$out" 'already consumed' 'the spent receipt is named'
+store_route rule_2
+HOME="$STORE_USER" mate_gate --secondmate-claude-store default
+expect_code 0 "$code" "the ordinary store is the account registered at ~/.claude: $out"
+assert_contains "$out" '--account seat-home' 'the ordinary store resolves to its account'
+HOME="$STORE_USER" mate_gate --secondmate-claude-store "$STORE_USER/.claude"
+expect_code 0 "$code" "the explicit ~/.claude path is that same store: $out"
+store_route rule_3
+run gate --brief "$BRIEF" --task store-mate --harness codex --model gpt-5 --secondmate-claude-store "$STORE_A"
+expect_code 3 "$code" "a Claude store says nothing about a Codex launch: $out"
+assert_not_contains "$out" 'does not own' 'a Codex launch is compared literally'
+cp "$TMP_ROOT/rules-before-store" "$RULES"
+cp "$TMP_ROOT/quota-before-store" "$QUOTA"
+rm "$HOME_DIR/config/accounts.json"
+if [ -e "$TMP_ROOT/accounts-before-store" ]; then mv "$TMP_ROOT/accounts-before-store" "$HOME_DIR/config/accounts.json"; fi
+pass 'the gate matches a second mate to a receipt account only through that account'"'"'s Claude store'
 echo '# all fm-dispatch-resolve tests passed'

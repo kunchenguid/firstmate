@@ -2637,6 +2637,7 @@ A captain receipt is admitted only when it names an answered pick request whose 
 - The newest receipt whose brief hash matches the task's brief must be unspent and at most 900 seconds old; `FM_DISPATCH_RECEIPT_MAX_AGE` can shorten that window and cannot lengthen it.
 - The receipt's row must be unchanged in the current table and still hold the receipt's profile, so editing a row makes its outstanding receipts stale.
 - The harness, model, effort, and account being launched must equal the receipt's profile field by field.
+- A local Claude secondmate cannot name an account, so it matches a receipt's account only when `config/accounts.json` gives that account the Claude store the secondmate will run on.
 - A receipt that names a task admits only that task, and each launch consumes its receipt.
 - A raw launch command cannot be matched to a table profile and is refused while routing rows exist.
 - A relaunch or a secondmate respawn that keeps the task's recorded profile makes no new routing decision and needs no receipt.

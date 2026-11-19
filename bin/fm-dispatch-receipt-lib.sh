@@ -63,7 +63,12 @@
 #     row's candidates, its source is jev (with request id) or captain (with a
 #     captainPick naming an answered pick request whose option is this profile
 #     and row, and override set whenever that option was not eligible), and
-#     its profile equals the launch field by field.
+#     its profile equals the launch field by field. A local Claude second mate
+#     cannot pass --account, so its launcher names the Claude store it will run
+#     on (--secondmate-claude-store; "default" is the unset CLAUDE_CONFIG_DIR,
+#     read as ~/.claude) and the receipt's account is the launch's account only
+#     when config/accounts.json gives that account the same store. Every other
+#     launch compares the account literally.
 #   Raw launch commands cannot match table profiles and are refused.
 #   Every refusal names the missing or mismatching receipt field and the
 #   command that produces a receipt. Exit 0 pass, 3 refusal, 2 usage.
@@ -541,14 +546,25 @@ fm_dr_cmd_refund() {  # --token <token>: undo only the consume that wrote this t
   done
 }
 
+# fm_dr_account_owns_claude_store <account> <store>: whether the registry gives
+# <account> this Claude store, compared after symlink resolution. An unknown
+# account, one with no Claude store, or an unusable registry owns nothing.
+fm_dr_account_owns_claude_store() {
+  local account=$1 store=$2 stores=()
+  [ "$store" != default ] || store="${HOME:?HOME must be set}/.claude"
+  mapfile -t stores < <(fm_account_stores "$CONFIG/accounts.json" "$account")
+  [ "${#stores[@]}" -eq 3 ] && [ "${stores[0]}" != "$FM_ACCOUNT_NO_STORE" ] || return 1
+  [ "$(fm_account_canonical_store "${stores[0]}")" = "$(fm_account_canonical_store "$store")" ]
+}
+
 fm_dr_cmd_gate() {
   local brief='' task='' harness='' model='' effort='' account='' raw=0 consume=0 meta='' consume_token=''
-  local resolved_model='' resolved_effort='' resolved_set=0 arg
+  local resolved_model='' resolved_effort='' resolved_set=0 secondmate_store='' arg
   while [ $# -gt 0 ]; do
     arg=$1
     shift
     case "$arg" in
-      --brief | --task | --harness | --model | --effort | --account | --recorded-meta | --resolved-model | --resolved-effort | --consume-token)
+      --brief | --task | --harness | --model | --effort | --account | --recorded-meta | --resolved-model | --resolved-effort | --consume-token | --secondmate-claude-store)
         [ $# -gt 0 ] || fm_dr_die "$arg needs a value" ;;
     esac
     case "$arg" in
@@ -564,6 +580,7 @@ fm_dr_cmd_gate() {
       --recorded-meta) meta=$1; shift ;;
       --resolved-model) resolved_model=$1; resolved_set=1; shift ;;
       --resolved-effort) resolved_effort=$1; resolved_set=1; shift ;;
+      --secondmate-claude-store) secondmate_store=$1; shift ;;
       *) fm_dr_die "unknown gate argument: $arg" ;;
     esac
   done
@@ -674,16 +691,29 @@ fm_dr_cmd_gate() {
     esac
   fi
 
-  local field want got drop
+  # A second mate's account is the one that owns the Claude store it runs on.
+  local receipt_account store_note=''
+  receipt_account=$(jq -r '.profile.account // ""' "$receipt")
+  if [ "$harness" = claude ] && [ -z "$account" ] && [ -n "$secondmate_store" ] && [ -n "$receipt_account" ]; then
+    if fm_dr_account_owns_claude_store "$receipt_account" "$secondmate_store"; then
+      launch=$(fm_dr_profile_json "$harness" "$model" "$effort" "$receipt_account")
+    else
+      store_note=" (this second mate runs on Claude store $secondmate_store, which account '$receipt_account' does not own)"
+    fi
+  fi
+
+  local field want got drop note
   for field in harness model effort account; do
     want=$(jq -r --arg f "$field" '.profile[$f] // ""' "$receipt")
     got=$(jq -r --arg f "$field" '.[$f] // ""' <<<"$launch")
     [ "$want" = "$got" ] && continue
+    note=''
     case "$field" in
       model | effort) drop="; pass --$field default to drop a carried-over value" ;;
+      account) drop=''; note=$store_note ;;
       *) drop='' ;;
     esac
-    fm_dr_refuse "the launch of $task does not equal receipt $name: profile.$field is '${want:-default}' on the receipt but the launch passes '${got:-default}'. Launch the receipt's profile ($(fm_dr_profile_text "$(jq -c '.profile' "$receipt")")$drop), or route this profile properly: $hint"
+    fm_dr_refuse "the launch of $task does not equal receipt $name: profile.$field is '${want:-default}' on the receipt but the launch passes '${got:-default}'$note. Launch the receipt's profile ($(fm_dr_profile_text "$(jq -c '.profile' "$receipt")")$drop), or route this profile properly: $hint"
   done
 
   if [ "$consume" -eq 1 ]; then

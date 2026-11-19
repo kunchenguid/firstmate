@@ -5010,6 +5010,9 @@ DISPATCH_GATE_ARGS=(--task "$ID" --brief "${SOURCE_BRIEF:-$BRIEF}" --harness "$H
 [ -z "$DISPATCH_REQ_EFFORT" ] || DISPATCH_GATE_ARGS+=(--effort "$DISPATCH_REQ_EFFORT")
 [ -z "$ACCOUNT_ARG" ] || DISPATCH_GATE_ARGS+=(--account "$ACCOUNT_ARG")
 [ "$RAW_LAUNCH" -eq 0 ] || DISPATCH_GATE_ARGS+=(--raw)
+if [ "$KIND" = secondmate ] && [ "$HARNESS" = claude ]; then
+  DISPATCH_GATE_ARGS+=(--secondmate-claude-store "$SPAWN_CLAUDE_STORE")
+fi
 if [ "$RELAUNCH" -eq 1 ] || { [ "$KIND" = secondmate ] && [ -f "$STATE/$ID.meta" ]; }; then
   DISPATCH_GATE_ARGS+=(--recorded-meta "$STATE/$ID.meta" --resolved-model "${MODEL:-default}" --resolved-effort "${EFFORT:-default}")
 fi

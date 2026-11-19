@@ -1420,6 +1420,9 @@ do_relaunch() {
   [ "$TARGET_MODEL" = default ] || dispatch_gate_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || dispatch_gate_args+=(--effort "$TARGET_EFFORT")
   [ -z "$dispatch_gate_account" ] || dispatch_gate_args+=(--account "$dispatch_gate_account")
+  if [ "$KIND" = secondmate ] && [ "$TARGET_HARNESS" = claude ]; then
+    dispatch_gate_args+=(--secondmate-claude-store "$relaunch_claude_store")
+  fi
   if ! dispatch_gate_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
     "$SCRIPT_DIR/fm-dispatch-resolve.sh" gate "${dispatch_gate_args[@]}"); then

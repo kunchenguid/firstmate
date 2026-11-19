@@ -2513,6 +2513,68 @@ test_dispatch_receipt_admits_scout_and_secondmate_from_the_table() {
   pass "dispatch receipt gate admits a scout and a secondmate routed from the table, and a same-profile secondmate respawn"
 }
 
+# A second mate cannot take --account, so a receipt naming an account can only
+# match it through the Claude store the launch really runs on. A worker can name
+# its account, so it keeps the literal comparison even on that same store.
+test_dispatch_receipt_compares_a_secondmate_by_its_claude_store() {
+  local rec mate ship sm out status store other_store
+  local FM_TEST_CLAUDE_CONFIG_DIR
+  mate=receipt-store-mate-z28
+  ship=receipt-store-ship-z29
+  rec=$(make_spawn_case receipt-store claude "$ship")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/store-home" "$CASE_DIR/store-other"
+  store=$(cd "$CASE_DIR/store-home" && pwd -P)
+  other_store=$(cd "$CASE_DIR/store-other" && pwd -P)
+  FM_TEST_CLAUDE_CONFIG_DIR=$store
+  jq -n --arg home "$store" --arg other "$other_store" \
+    '{crossAccount:{enabled:true},accounts:{"seat-home":{claude:$home},"seat-other":{claude:$other}}}' \
+    > "$HOME_DIR/config/accounts.json"
+  printf '%s\n' '{"rules":[{"when":"the home seat","use":{"harness":"claude","model":"sonnet","effort":"high","account":"seat-home"}},{"when":"another seat","use":{"harness":"claude","model":"sonnet","effort":"high","account":"seat-other"}}],"default":{"harness":"claude","model":"sonnet","effort":"high","account":"seat-home"}}' \
+    > "$HOME_DIR/config/crew-dispatch.json"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$mate"
+
+  # A receipt for an account on a different store stays refused.
+  fm_test_dispatch_choose "$HOME_DIR" "$mate" "$sm/data/charter.md" rule_2 claude sonnet high seat-other \
+    || fail "could not record the other seat's routed choice"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$mate" "$sm" --secondmate --harness claude --model sonnet --effort high)
+  status=$?
+  expect_code 1 "$status" "a secondmate on another account's store must be refused"$'\n'"$out"
+  assert_contains "$out" "profile.account is 'seat-other' on the receipt but the launch passes 'default'" \
+    "the refusal must name the mismatching account"
+  assert_contains "$out" "runs on Claude store $store, which account 'seat-other' does not own" \
+    "the refusal must name the store the secondmate really runs on"
+  assert_absent "$HOME_DIR/state/$mate.meta" "a refused secondmate launch must record no meta"
+
+  # The account that owns the launch's own store is the launch's account.
+  fm_test_dispatch_choose "$HOME_DIR" "$mate" "$sm/data/charter.md" rule_1 claude sonnet high seat-home \
+    || fail "could not record the home seat's routed choice"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$mate" "$sm" --secondmate --harness claude --model sonnet --effort high)
+  status=$?
+  expect_code 0 "$status" "a secondmate on the receipt account's store must launch"$'\n'"$out"
+  assert_contains "$out" "admits --harness claude --model sonnet --effort high --account seat-home for $mate; receipt consumed" \
+    "the secondmate launch must report the account its store resolved to"
+  assert_contains "$(cat "$LAUNCH_LOG")" "CLAUDE_CONFIG_DIR='$store'" "the secondmate must launch on its home store"
+  assert_equals '' "$(sed -n 's/^account=//p' "$HOME_DIR/state/$mate.meta")" "a secondmate must not record a worker account"
+
+  # A worker on that same store still has to name the receipt's account.
+  fm_test_dispatch_choose "$HOME_DIR" "$ship" "$HOME_DIR/data/$ship/brief.md" rule_1 claude sonnet high seat-home \
+    || fail "could not record the worker's routed choice"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship" "$PROJ_DIR" --harness claude --model sonnet --effort high)
+  status=$?
+  expect_code 1 "$status" "a worker that omits the receipt's account must stay refused"$'\n'"$out"
+  assert_contains "$out" "profile.account is 'seat-home' on the receipt but the launch passes 'default'" \
+    "the worker refusal must stay the literal account mismatch"
+  assert_not_contains "$out" "does not own" "the worker refusal must not reason about a store"
+  assert_absent "$HOME_DIR/state/$ship.meta" "a refused worker launch must record no meta"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ship" "$PROJ_DIR" --harness claude --model sonnet --effort high --account seat-home)
+  status=$?
+  expect_code 0 "$status" "a worker naming the receipt's account must launch"$'\n'"$out"
+  assert_equals seat-home "$(sed -n 's/^account=//p' "$HOME_DIR/state/$ship.meta")" "the worker must record its named account"
+  pass "dispatch receipt gate matches a secondmate by its Claude store, refuses another account's store, and keeps workers literal"
+}
+
 test_dispatch_receipt_raw_command_needs_a_captain_override() {
   local rec id out status
   id=receipt-raw-z28
@@ -3308,6 +3370,7 @@ test_dispatch_receipt_refuses_a_hand_picked_spawn
 test_dispatch_receipt_binds_one_brief_and_one_launch
 test_failed_start_refunds_the_receipt_only_before_launch
 test_dispatch_receipt_admits_scout_and_secondmate_from_the_table
+test_dispatch_receipt_compares_a_secondmate_by_its_claude_store
 test_dispatch_receipt_raw_command_needs_a_captain_override
 
 echo "# all fm-spawn-dispatch-profile tests passed"

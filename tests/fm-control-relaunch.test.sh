@@ -1492,6 +1492,61 @@ test_secondmate_relaunch_refuses_a_stale_pin_before_stopping_it() {
   pass "fm-control relaunch: a stale second-mate pin refuses before the agent is stopped"
 }
 
+test_secondmate_relaunch_matches_a_receipt_by_its_claude_store() {
+  local dir home store other out rc
+  dir=$(new_case smreceiptstore sm10)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm10" "$dir/store-home" "$dir/store-other"
+  store=$(cd "$dir/store-home" && pwd -P)
+  other=$(cd "$dir/store-other" && pwd -P)
+  printf 'claude sonnet low\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm10/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm10\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm10"
+    echo "endpoint_task_id=sm10"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=opus"
+    echo "effort=high"
+    echo "home=$dir/smhome"
+    echo "claude_config_dir=$store"
+  } > "$home/state/sm10.meta"
+  printf 'fm-home-identity-v1\nherdr_session=default\nclaude_config_dir=%s\n' "$store" | tee "$home/data/home-identity" > "$dir/smhome/data/home-identity"
+  printf -- '- sm10 - Local mate. (home: %s; scope: test; projects: none; added 2026-11-01)\n' "$dir/smhome" > "$home/data/secondmates.md"
+  printf '%s\n' "fm-sm10" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  jq -n --arg home "$store" --arg other "$other" \
+    '{crossAccount:{enabled:true},accounts:{"seat-home":{claude:$home},"seat-other":{claude:$other}}}' \
+    > "$home/config/accounts.json"
+  printf '%s\n' '{"rules":[{"when":"the home seat","use":{"harness":"claude","model":"sonnet","effort":"low","account":"seat-home"}},{"when":"another seat","use":{"harness":"claude","model":"sonnet","effort":"low","account":"seat-other"}}],"default":{"harness":"claude","model":"sonnet","effort":"low","account":"seat-home"}}' \
+    > "$home/config/crew-dispatch.json"
+
+  fm_test_dispatch_choose "$home" sm10 "$home/data/sm10/brief.md" rule_2 claude sonnet low seat-other \
+    || fail "could not record the other seat's routed choice"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$store" run_control "$dir" sm10 relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "a second mate must not relaunch on another account's receipt"$'\n'"$out"
+  assert_contains "$out" "runs on Claude store $store, which account 'seat-other' does not own" \
+    "the refusal must name the store the second mate runs on"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing to the pane"
+
+  fm_test_dispatch_choose "$home" sm10 "$home/data/sm10/brief.md" rule_1 claude sonnet low seat-home \
+    || fail "could not record the home seat's routed choice"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$store" run_control "$dir" sm10 relaunch); rc=$?
+  expect_code 0 "$rc" "a second mate must relaunch on its own account's receipt"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$store'" \
+    "the relaunch must stay on the second mate's store"
+  [ "$(meta_field "$dir" sm10 model)" = sonnet ] || fail "the routed model should be recorded"
+  pass "fm-control relaunch: a second mate matches a receipt's account through its Claude store"
+}
+
 test_secondmate_relaunch_after_rebind_launches_on_the_new_store() {
   local dir home old new out rc
   dir=$(new_case smrebind sm9)
@@ -3633,6 +3688,7 @@ test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_refuses_a_stale_pin_before_stopping_it
+test_secondmate_relaunch_matches_a_receipt_by_its_claude_store
 test_secondmate_relaunch_after_rebind_launches_on_the_new_store
 test_secondmate_claude_relaunch_keeps_local_settings
 test_secondmate_relaunch_lands_on_the_per_mate_pin
