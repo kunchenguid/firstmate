@@ -5,7 +5,11 @@
 #
 # The caller must already own this Firstmate home's session lock. This script is
 # home-local and considers only the current named Herdr session and ordinary
-# state/*.herdr-presentation journals in the effective FM_HOME. Each candidate
+# state/*.herdr-presentation journals in the effective FM_HOME. Discovery first
+# shortlists titles from journal filenames whose task metadata is absent; it
+# never reparses every journal for every live workspace. This is only a negative
+# filter: all matching journals (including those with metadata) are read fresh
+# for uniqueness and binding, including during locked revalidation. Each candidate
 # is additionally serialized by the existing state/.spawn-<task>.lock and the
 # shared named-session Herdr presentation lock, in that order.
 #
@@ -67,8 +71,14 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     [ -f "$journal" ] && [ ! -L "$journal" ] || continue
-    id=$(basename "$journal" "$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX")
+    id=${journal##*/}
+    id=${id%"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"}
     fm_task_id_creation_valid "$id" || continue
+    # A filename can only exclude an unrelated label, never authorize cleanup.
+    # Keep the canonical label owner, including its fm- alias, and validate the
+    # journal's real token and full binding below for EVERY matching filename.
+    expected=$(fm_backend_herdr_projection_workspace_label "$id" "${title##*' · p:'}")
+    [ "$expected" = "$title" ] || continue
     fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || continue
     if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
       journal_home=$(fm_backend_herdr_projection_home_identity \
@@ -293,15 +303,22 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
 }
 
 fm_herdr_session_cleanup() {
-  local session home_real list candidates workspace title journal found=0
+  local session home_real list candidates workspace title journal id prefix token
+  local -a prefixes=()
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
+  # Build a cheap discovery shortlist once, not a full journal parse for each
+  # workspace. Existing metadata (even a dangling symlink) excludes retirement.
+  # A concurrent removal can wait for the next sweep; a concurrent addition is
+  # still refused by cleanup_one and its locked, immediate revalidation.
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
-    if [ -f "$journal" ] && [ ! -L "$journal" ]; then
-      found=1
-      break
-    fi
+    [ -f "$journal" ] && [ ! -L "$journal" ] || continue
+    id=${journal##*/}
+    id=${id%"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"}
+    fm_task_id_creation_valid "$id" || continue
+    [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || continue
+    prefixes+=("$(fm_backend_herdr_projection_workspace_label "$id" '')")
   done
-  [ "$found" -eq 1 ] || return 0
+  [ "${#prefixes[@]}" -gt 0 ] || return 0
   command -v herdr >/dev/null 2>&1 \
     && command -v jq >/dev/null 2>&1 || return 0
   home_real=$(fm_herdr_cleanup_home_identity) || {
@@ -326,7 +343,14 @@ fm_herdr_session_cleanup() {
   }
   while IFS=$'\t' read -r workspace title; do
     [ -n "$workspace" ] && [ -n "$title" ] || continue
-    fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real"
+    token=$(fm_herdr_cleanup_title_token "$title") || continue
+    for prefix in "${prefixes[@]}"; do
+      [ "${title%"$token"}" = "$prefix" ] || continue
+      # The shortlist is not ownership evidence and is never reused by the
+      # uniqueness checks: an alias or a new duplicate must still refuse.
+      fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real"
+      break
+    done
   done <<< "$candidates"
   return 0
 }

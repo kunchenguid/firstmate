@@ -407,7 +407,7 @@ Locked session start has one narrower cleanup for a restored projected child tha
 It runs only when the current home has at least one ordinary presentation journal, and it considers only that home.
 A primary never recursively sweeps a secondmate home.
 
-Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
+Discovery shortlists metadata-absent journal filenames before matching the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a filename, title or token alone is never mutation authority.
 A candidate must meet all of these conditions:
 
 - The title must contain exactly one token occurrence across the named-session snapshot.

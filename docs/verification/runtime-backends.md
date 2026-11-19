@@ -2062,14 +2062,25 @@ The flag applies to a fresh ship or scout spawn, and the multi-task path forward
 It has no effect on `--relaunch` and `--secondmate`, because those paths take no exact-resume presentation-order lock.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
-The restored-shell session-start cleanup ran on 2026-07-24 against Herdr 0.7.5 protocol 17:
+The restored-shell session-start cleanup ran on 2026-11-19 on Linux x86_64 against Herdr 0.9.1 protocol 22, with a private `TMPDIR` and the guarded helper selected through `HERDR_LAB_HELPER`:
 
 ```sh
-HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-herdr-session-cleanup-e2e.test.sh
+bash bin/fm-test-run.sh tests/fm-herdr-session-cleanup.test.sh tests/fm-herdr-session-cleanup-e2e.test.sh
 ```
 
-Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
+Observed output:
+
+```text
+ok - 64 retained tasks and 78 journals finish discovery in 0s without lifecycle work
+ok - real named lab cleanup with 64 retained tasks and 78 journals completes in 2s
+ok - real named lab cleanup closes only the exact stale pane and preserves exact focus
+ok - real named lab cleanup is idempotent and leaves the default fleet session to the teardown tripwire
+evidence: herdr=0.9.1 protocol=22 default-session-tripwire=armed
+```
+
+Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while all 64 retained task workspaces, the exact non-target focus and the fleet tripwire remained unchanged, and a repeat run was a no-op.
+The suites enforce a 30-second cleanup bound for this 78-journal shape, not a bound on arbitrary fleet sizes or on the whole session-start digest.
+The portable contract also covers a live alias colliding with a stale journal and metadata, duplicate-journal and exact-binding changes after discovery under the task lock.
 
 ### Workspace-removal focus safety
 

@@ -2,6 +2,7 @@
 # Real restored-shell E2E for home-local session-start Herdr projection cleanup.
 # Every CLI operation is routed through one guarded named non-default lab, and
 # lab teardown verifies that the default fleet session is byte-identical.
+# Includes 64 retained tasks and 78 journals to guard secondmate startup cost.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,7 +16,6 @@ command -v jq >/dev/null 2>&1 || { echo 'skip: jq not found'; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo 'skip: python3 not found'; exit 0; }
 [ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
 
-REAL_HERDR=$(command -v herdr)
 HERDR_ORIGINAL_PATH=$PATH
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-session-cleanup-e2e.XXXXXX")
 FAKEBIN="$TMP_ROOT/fakebin"
@@ -25,7 +25,7 @@ touch "$HOME_DIR/config/herdr-presentation-spaces"
 printf '%s\n' herdr > "$HOME_DIR/config/backend"
 
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-session-start-stale-projection-cleanup-r1)
-export HERDR_LAB_HELPER HERDR_LAB_SESSION REAL_HERDR HERDR_ORIGINAL_PATH
+export HERDR_LAB_HELPER HERDR_LAB_SESSION HERDR_ORIGINAL_PATH
 cleanup() {
   local status=$?
   env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" || status=1
@@ -40,7 +40,7 @@ trap cleanup EXIT
 # other caller-supplied session, and delegates the command to helper run.
 cat > "$FAKEBIN/herdr" <<'SH'
 #!/usr/bin/env bash
-set -u
+set -uo pipefail
 args=("$@")
 last=$((${#args[@]} - 1))
 flag=$((last - 1))
@@ -54,7 +54,8 @@ for arg in "$@"; do
   case "$arg" in --session|--session=*) exit 9 ;; esac
 done
 if [ "${1:-}" = --version ]; then
-  exec env PATH="$HERDR_ORIGINAL_PATH" "$REAL_HERDR" "$@" --session "$HERDR_LAB_SESSION"
+  env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" status --json | jq -r '.client.version'
+  exit "$?"
 fi
 exec env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"
 SH
@@ -119,9 +120,43 @@ done
 [ "$attempt" -lt 50 ] || fail 'restored child did not converge to the exact childless idle-shell process-group shape'
 pass 'real named lab reproduced the exact restored one-tab one-pane childless no-agent shell shape'
 
+# This home's retained tasks are ineligible for cleanup, but used to make
+# startup reparse every journal once per workspace before discovering that.
+# Thirteen unmatched journals plus these 64 and the stale target make 78.
+for ((i=1; i<=77; i++)); do
+  retained_id="retained-$i"
+  retained_token=$(printf '%022d' "$i")
+  retained_title="└ $retained_id · p:$retained_token"
+  retained_ws=absent; retained_tab=absent; retained_pane=absent
+  if [ "$i" -le 64 ]; then
+    item=$(lab workspace create --cwd "$ROOT" --label "$retained_title" --no-focus) || fail 'could not create retained task fixture'
+    retained_ws=$(printf '%s' "$item" | jq -r '.result.workspace.workspace_id')
+    retained_tab=$(printf '%s' "$item" | jq -r '.result.tab.tab_id')
+    retained_pane=$(printf '%s' "$item" | jq -r '.result.root_pane.pane_id')
+    printf 'kind=ship\nbackend=herdr\nwindow=%s\n' "$retained_pane" > "$HOME_DIR/state/$retained_id.meta"
+  fi
+  {
+    printf 'version=2\ntask_id=%s\nprojection_id=%s\nhome=%s\nsession=%s\n' "$retained_id" "$retained_token" "$HOME_DIR" "$HERDR_LAB_SESSION"
+    printf 'workspace_id=%s\ntab_id=%s\npane_id=%s\n' "$retained_ws" "$retained_tab" "$retained_pane"
+    printf 'parent_workspace_id=%s\nparent_label=captain-anchor\nworkspace_label=%s\ntask_label=fm-%s\n' \
+      "$(printf '%s' "$ANCHOR" | jq -r '.result.workspace.workspace_id')" "$retained_title" "$retained_id"
+  } > "$HOME_DIR/state/$retained_id.herdr-presentation"
+done
+retained_workspaces() {
+  lab workspace list | jq --arg stale "$WS" '[.result.workspaces[] | select(.workspace_id != $stale)
+    | {workspace_id,label:.label,active_tab_id,focused}]'
+}
+RETAINED_BEFORE=$(retained_workspaces) || fail 'could not read retained fleet'
+scale_start=$SECONDS
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \
   || fail 'session-start cleanup command failed'
+scale_elapsed=$((SECONDS - scale_start))
+[ "$scale_elapsed" -lt 30 ] || fail "cleanup with retained fleet took ${scale_elapsed}s (bound 30s)"
+[ "$(retained_workspaces)" = "$RETAINED_BEFORE" ] || fail 'retained workspaces changed during cleanup'
+[ "$(find "$HOME_DIR/state" -name '*.meta' | wc -l | tr -d ' ')" = 64 ] || fail 'retained task metadata changed during cleanup'
+[ "$(find "$HOME_DIR/state" -name '*.herdr-presentation' | wc -l | tr -d ' ')" = 77 ] || fail 'cleanup did not preserve exactly the retained journals'
+pass "real named lab cleanup with 64 retained tasks and 78 journals completes in ${scale_elapsed}s"
 AFTER_FOCUS=$(focus_snapshot) || fail 'could not capture exact post-cleanup focus'
 [ "$AFTER_FOCUS" = "$BEFORE_FOCUS" ] || fail 'exact workspace/tab focus changed during cleanup'
 if lab pane get "$PANE" >/dev/null 2>&1; then

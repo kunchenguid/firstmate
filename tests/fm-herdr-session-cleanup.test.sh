@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Focused safety tests for bin/fm-herdr-session-cleanup.sh.
 # Covers one exact cleanup, every title/journal/topology/agent/process refusal,
-# locked revalidation races, focus refusal, read errors, and repeat idempotence.
+# locked revalidation races, focus refusal, read errors, repeat idempotence,
+# and discovery cost with a large retained fleet.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -71,7 +72,13 @@ fm_backend_herdr_session() { printf test; }
 fm_backend_herdr_presentation_session_lock_path() { printf '%s/presentation.lock' "$TMP_ROOT"; }
 fm_lock_try_acquire() {
   printf '%s\n' "$1" >> "$LOCK_LOG"
-  mkdir "$1" 2>/dev/null
+  mkdir "$1" 2>/dev/null || return 1
+  if [ "$1" = "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ]; then
+    [ ! -e "$FIXTURE_DIR/race-meta" ] || : > "$FM_STATE_OVERRIDE/$ID.meta"
+    [ ! -e "$FIXTURE_DIR/race-journal" ] || write_v1 fm-task
+    [ ! -e "$FIXTURE_DIR/race-binding" ] || write_v2 "$FM_HOME" w9 "$TAB" "$PANE"
+  fi
+  return 0
 }
 fm_lock_release() { rm -rf -- "$1"; }
 fm_backend_herdr_pane_idle_shell_pid() { [ ! -e "$FIXTURE_DIR/process-unsafe" ] && printf '67\n'; }
@@ -89,6 +96,10 @@ fixture_workspace_json() {
 
 fixture_workspaces() {
   local title tabs panes
+  if [ -f "$FIXTURE_DIR/workspaces.json" ]; then
+    cat "$FIXTURE_DIR/workspaces.json"
+    return 0
+  fi
   title=$(cat "$FIXTURE_DIR/title")
   tabs=$(cat "$FIXTURE_DIR/tabs")
   panes=$(cat "$FIXTURE_DIR/panes")
@@ -260,6 +271,11 @@ reset_fixture; : > "$FIXTURE_DIR/duplicate-token"; assert_preserved "duplicate t
 reset_fixture; printf '%s\n' "└ task · p:$TOKEN p:$TOKEN" > "$FIXTURE_DIR/title"; assert_preserved "duplicate title token"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "zero journal match"
 reset_fixture; write_v1 fm-task; assert_preserved "multiple journal matches"
+reset_fixture; write_v1 fm-task; : > "$FM_STATE_OVERRIDE/fm-task.meta"; assert_preserved "live alias still counts toward journal uniqueness"
+reset_fixture; ln -s "$TMP_ROOT/absent-meta" "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "dangling metadata symlink"
+reset_fixture; : > "$FIXTURE_DIR/race-meta"; assert_preserved "metadata added after discovery"
+reset_fixture; : > "$FIXTURE_DIR/race-journal"; assert_preserved "duplicate journal added under the task lock"
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"; : > "$FIXTURE_DIR/race-binding"; assert_preserved "journal binding replaced under the task lock"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; write_cross_home_v2; assert_preserved "cross-home journal"
 reset_fixture; write_v2 "$FM_HOME" w9 "$TAB" "$PANE"; assert_preserved "v2 workspace binding mismatch"
 reset_fixture; write_v2 "$FM_HOME" "$WS" w9:t1 "$PANE"; assert_preserved "v2 tab binding mismatch"
@@ -281,6 +297,42 @@ reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreada
 reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+
+# The title shortlist must not become positive ownership evidence: the fm-
+# alias is still accepted when it is the only valid journal for that title.
+reset_fixture
+rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+write_v1 fm-task
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/fm-task.herdr-presentation" ] || fail "unique alias was not retired"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "unique alias did not close exactly once"
+pass "canonical concise-label aliases remain eligible for exact cleanup"
+
+# Representative secondmate shape: 64 retained tasks, 78 v2 journals. The
+# remaining journals have no workspace. None warrants locks or full ownership
+# work; a startup must not pay 64 x 78 expensive journal validations for them.
+reset_fixture
+rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+for ((i=1; i<=78; i++)); do
+  bulk_id="retained-$i"
+  bulk_token=$(printf '%022d' "$i")
+  {
+    printf 'version=2\ntask_id=%s\nprojection_id=%s\nhome=%s\nsession=test\n' "$bulk_id" "$bulk_token" "$FM_HOME"
+    printf 'workspace_id=b%s\ntab_id=b%s:t1\npane_id=b%s:p1\n' "$i" "$i" "$i"
+    printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=└ %s · p:%s\ntask_label=fm-%s\n' "$bulk_id" "$bulk_token" "$bulk_id"
+  } > "$FM_STATE_OVERRIDE/$bulk_id.herdr-presentation"
+  [ "$i" -gt 64 ] || : > "$FM_STATE_OVERRIDE/$bulk_id.meta"
+done
+jq -n '[range(1;65) as $i | ($i | tostring) as $s
+  | {workspace_id:("b" + $s),label:("└ retained-" + $s + " · p:" + (("0000000000000000000000" + $s)[-22:]))}]' \
+  > "$FIXTURE_DIR/workspaces.json"
+scale_start=$SECONDS
+fm_herdr_session_cleanup >/dev/null 2>&1
+scale_elapsed=$((SECONDS - scale_start))
+[ "$scale_elapsed" -lt 30 ] || fail "retained-fleet discovery took ${scale_elapsed}s (bound 30s)"
+[ ! -s "$LOCK_LOG" ] && [ ! -s "$CLOSE_LOG" ] || fail "retained-fleet discovery attempted lifecycle work"
+[ "$(find "$FM_STATE_OVERRIDE" -name '*.herdr-presentation' | wc -l | tr -d ' ')" = 78 ] || fail "retained fleet lost a journal"
+pass "64 retained tasks and 78 journals finish discovery in ${scale_elapsed}s without lifecycle work"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
