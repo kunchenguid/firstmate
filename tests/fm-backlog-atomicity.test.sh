@@ -1076,7 +1076,16 @@ make_agent_free_pane() {  # <case-dir>
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\$*" in *pane_current_command*) printf 'zsh\n'; exit 0 ;; esac
-[ "\${1:-}" != send-keys ] || printf '%s\n' "\$*" >> "$fakebin/send-keys.log"
+if [ "\${1:-}" = send-keys ]; then
+  printf '%s\n' "\$*" >> "$fakebin/send-keys.log"
+  if [ "\${4:-}" = -l ] && [ "\${5:0:2}" = ". " ]; then
+    launch_path=\${5#. }
+    launch_path=\${launch_path#\'}
+    launch_path=\${launch_path%\'}
+    if [ -r "\$launch_path" ]; then launch_state=readable; else launch_state=missing; fi
+    printf '%s %s\n' "\$launch_state" "\$launch_path" >> "$fakebin/launch-files.log"
+  fi
+fi
 exec "$fakebin/tmux.real" "\$@"
 SH
   chmod +x "$fakebin/tmux"
@@ -1107,6 +1116,8 @@ test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
   [ -n "$new_gen" ] && [ "$new_gen" != "$old_gen" ] || fail "relaunch did not publish a new spawn generation"
   source_line=$(grep -n -F -- "send-keys -t $endpoint -l . " "$case_dir/fakebin/send-keys.log" | grep -F "launch.$new_gen.sh" | head -1 | cut -d: -f1)
   enter_line=$(grep -n -x -F -- "send-keys -t $endpoint Enter" "$case_dir/fakebin/send-keys.log" | tail -1 | cut -d: -f1)
+  grep -Eq -- "^readable /.*/launch\\.$new_gen\\.sh$" "$case_dir/fakebin/launch-files.log" 2>/dev/null \
+    || fail "relaunch submitted no readable staged launch file for generation $new_gen"
   { [ -n "$source_line" ] && [ -n "$enter_line" ] && [ "$source_line" -lt "$enter_line" ]; } \
     || fail "relaunch did not source its launch file then press Enter at endpoint $endpoint"
   after=$(cat "$(backlog_of "$case_dir")")
