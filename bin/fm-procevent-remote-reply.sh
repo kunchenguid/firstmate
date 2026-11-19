@@ -7,6 +7,7 @@
 #   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
 #   fm-procevent-remote-reply.sh terminal <result-file>
+#   fm-procevent-remote-reply.sh silent <result-file>
 #   fm-procevent-remote-reply.sh self-announcing
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
 #   fm-procevent-remote-reply.sh relisten
@@ -40,6 +41,12 @@
 # completely quiet. Only a capture autohandle could NOT
 # fully apply is published as a `check` wake for the manual handler, and
 # running `handle` on that wake is idempotent.
+#
+# `silent` retires a delta only when another sequence of the same source has a
+# receipt for its exact bytes. A handler stopped before its receipt can leave
+# such an orphan behind, and `handle` cannot ingest it after the cursor moves
+# past it. Its own receipt never counts: that capture may still owe its
+# acknowledgement and re-arm. Retirement removes every receipt.
 #
 # This channel is a status-stream MIRROR, not a correlated-reply channel. A local
 # secondmate appends its whole status stream straight into the parent's
@@ -758,6 +765,32 @@ cmd_autohandle() {
   return "$rc"
 }
 
+cmd_silent() {
+  local result=${1:-} base sid seq id hash receipt other
+  [ -f "$result" ] && [ ! -L "$result" ] || return 1
+  base=${result##*/}
+  base=${base%.result}
+  sid=${base%.*}
+  seq=${base##*.}
+  case "$sid" in remote-reply-?*) id=${sid#remote-reply-} ;; *) return 1 ;; esac
+  validate_id "$id"
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$(classify_result "$result")" = delta ] || return 1
+  hash=$(sha256_file "$result") || return 1
+  while IFS= read -r receipt; do
+    other=${receipt#"$CURSOR_DIR/$id."}
+    other=${other%.ingested}
+    # A dotted mate id can share this prefix, but its suffix is not a sequence.
+    case "$other" in ''|*[!0-9]*) continue ;; esac
+    [ "$other" = "$seq" ] || return 0
+  done < <(
+    # A long-lived mate keeps one receipt per capture, too many for one glob.
+    find "$CURSOR_DIR" -maxdepth 1 -type f -name "$id.*.ingested" \
+      -exec grep -lxF -- "result_sha256=$hash" {} + 2>/dev/null
+  )
+  return 1
+}
+
 cmd_handle() {
   local id=${1:-} lock
   validate_id "$id"
@@ -873,6 +906,7 @@ case "${1:-}" in
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
   terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
+  silent) shift; [ "$#" -eq 1 ] || usage; cmd_silent "$1" ;;
   self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
   relisten) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;

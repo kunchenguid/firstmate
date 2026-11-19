@@ -874,6 +874,85 @@ assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" $'repl
   "cursor-loss recapture reopened the resolved decision"
 pass "source-line identity survives commit failure and cursor-loss recapture"
 
+# An orphan: a capture whose receipt failed after its line mirrored, then a
+# second capture of the same bytes from the unmoved cursor that ingests normally.
+# Once the cursor moves on, `handle` refuses the orphan, so only the adapter's
+# silence verdict can stop each reconcile from announcing it again.
+wake_rows() { # <sequence>
+  grep -c "procevent remote-reply $SID $1\$" "$PARENT/state/.wake-queue" 2>/dev/null || true
+}
+stop_reply_listener || fail "the reply listener did not stop before the orphan capture"
+printf 'done [corr=3333333333333333]: orphaned reply\n' >> "$REMOTE/state/parent-replies.status"
+ORPHAN_GEN=$((GEN + 1))
+DUP_GEN=$((GEN + 2))
+ORPHAN_RESULT="$PARENT/state/procevent-inbox/$SID.$ORPHAN_GEN.result"
+DUP_RESULT="$PARENT/state/procevent-inbox/$SID.$DUP_GEN.result"
+PATH="$RECEIPT_FAIL_BIN:$PATH" remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" \
+  >/dev/null 2>&1 || true
+assert_present "$ORPHAN_RESULT" "the orphan delta was not captured"
+assert_absent "$PARENT/state/remote-replies/ios.$ORPHAN_GEN.ingested" \
+  "the orphan fixture wrote its ingestion receipt"
+remote_env "$ADAPTER" arm ios >/dev/null || fail "the source could not be re-armed at the unmoved cursor"
+await_reply_result "$DUP_RESULT" || fail "the second capture of the orphan's bytes was not applied"
+stop_reply_listener || fail "the reply listener did not stop after the duplicate capture"
+cmp -s "$ORPHAN_RESULT" "$DUP_RESULT" || fail "the two captures of one delta are not byte-identical"
+[ "$(grep -cF 'orphaned reply' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "the orphaned reply was not mirrored exactly once"
+GEN=$DUP_GEN
+mirror_lines 'working: a newer reply moves the cursor past the orphan'
+stop_reply_listener || fail "the reply listener did not stop after advancing the cursor"
+if remote_env "$ADAPTER" handle ios "$ORPHAN_GEN" "$ORPHAN_RESULT" > "$TMP_ROOT/orphan-handle.out" 2>&1; then
+  fail "the orphan fixture did not move past the original capture"
+fi
+assert_grep 'result does not continue the current cursor' "$TMP_ROOT/orphan-handle.out" \
+  "the orphan handler failed for a reason other than cursor advancement"
+orphan_rows_before=$(wake_rows "$ORPHAN_GEN")
+for _ in 1 2; do
+  reconcile_out=$(remote_env "$ROOT/bin/fm-procevent.sh" reconcile)
+  assert_contains "$reconcile_out" 'published=0' "reconcile announced a capture another sequence already ingested"
+  assert_present "${ORPHAN_RESULT%.result}.handled" "the orphaned capture was not retired"
+  [ "$(wake_rows "$ORPHAN_GEN")" -eq "$orphan_rows_before" ] \
+    || fail "reconcile appended a wake row for the orphaned capture"
+done
+pass "a capture whose bytes another sequence ingested is retired without a wake"
+
+# The capture's own receipt never silences it: an ingested capture that still
+# owes its acknowledgement and re-arm stays announced so `handle` can finish.
+stop_reply_listener || fail "the reply listener did not stop before the unacknowledged duplicate"
+rm -f "${DUP_RESULT%.result}.handled"
+dup_rows_before=$(wake_rows "$DUP_GEN")
+reconcile_out=$(remote_env "$ROOT/bin/fm-procevent.sh" reconcile)
+assert_contains "$reconcile_out" 'published=1' "an ingested capture without its acknowledgement was silenced"
+[ "$(wake_rows "$DUP_GEN")" -eq "$((dup_rows_before + 1))" ] \
+  || fail "the unacknowledged ingested capture did not get a wake row"
+remote_env "$ADAPTER" handle ios "$DUP_GEN" "$DUP_RESULT" >/dev/null \
+  || fail "the unacknowledged ingested capture could not be handled"
+pass "an ingested capture stays announced until its own handling completes"
+
+SILENT_HOME="$TMP_ROOT/silent-home"
+mkdir -p "$SILENT_HOME/state/remote-replies"
+SILENT_RESULT="$SILENT_HOME/$SID.1.result"
+cp "$ORPHAN_RESULT" "$SILENT_RESULT"
+silent_receipt="$SILENT_HOME/state/remote-replies/ios.2.ingested"
+printf 'result_sha256=%s\n' "$(sha256_file "$SILENT_RESULT")" > "$silent_receipt"
+FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT" \
+  || fail "a matching receipt from another sequence did not silence the delta"
+mv "$silent_receipt" "$SILENT_HOME/state/remote-replies/ios.2.3.ingested"
+if FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT"; then
+  fail "a receipt from a different mate with a shared name prefix silenced the delta"
+fi
+mv "$SILENT_HOME/state/remote-replies/ios.2.3.ingested" "$silent_receipt"
+printf 'changed bytes\n' >> "$SILENT_RESULT"
+if FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT"; then
+  fail "a receipt for different bytes silenced the delta"
+fi
+sed 's/^status=delta$/status=continuity-broken/' "$ORPHAN_RESULT" > "$SILENT_RESULT"
+printf 'result_sha256=%s\n' "$(sha256_file "$SILENT_RESULT")" > "$silent_receipt"
+if FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT"; then
+  fail "a matching receipt silenced a continuity break"
+fi
+pass "silence requires identical delta bytes receipted by the exact same mate"
+
 # A remote mate cannot squat the decision keys this parent's pending-reply
 # library owns. The guard is deliberately NOT in this adapter: rejecting a line
 # here would be batch-fatal and could wedge the whole stream, and it would
