@@ -87,6 +87,25 @@ follow poll
 [ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = 5 ] || fail 'requested changes not reported'
 pass 'checks and review transitions preserve forge words and suppress unchanged reads'
 
+jq '.statusCheckRollup += [{name:"lint",status:"COMPLETED",conclusion:"FAILURE",startedAt:"2026-11-19T00:00:00Z"}]' "$FM_FOLLOW_FIXTURE" > "$TMP_ROOT/next"
+mv "$TMP_ROOT/next" "$FM_FOLLOW_FIXTURE"
+follow poll
+[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = 6 ] || fail 'a second check that newly fails on the same commit was not reported'
+jq -s -e '.[5].summary | contains("lint: FAILURE")' "$home/state/branch-outcomes.jsonl" >/dev/null || fail 'newly failing check is not named'
+fixture OPEN bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb FAILURE CHANGES_REQUESTED
+follow poll
+[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = 6 ] || fail 'a partial check recovery repeated the still-failing check'
+jq -e '.follows[0].observation.checks | map(.name) == ["test"]' "$home/data/pr-follows.json" >/dev/null || fail 'partial recovery did not advance the baseline'
+fixture OPEN dddddddddddddddddddddddddddddddddddddddd SUCCESS CHANGES_REQUESTED
+follow poll
+[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = 6 ] || fail 'a push repeated an unchanged requested-changes review'
+fixture OPEN dddddddddddddddddddddddddddddddddddddddd SUCCESS APPROVED
+follow poll
+fixture OPEN dddddddddddddddddddddddddddddddddddddddd SUCCESS CHANGES_REQUESTED
+follow poll
+[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = 7 ] || fail 'a new requested-changes review after approval was lost'
+pass 'only a newly failing check name or a changed review value adds a line'
+
 before=$(cksum < "$home/data/pr-follows.json")
 printf 'not json\n' > "$FM_FOLLOW_FIXTURE"
 follow poll
@@ -169,6 +188,23 @@ follow poll
 [ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = "$((count + 2))" ] || fail 'recovery lost or duplicated the later observation'
 jq -s -e '.[-1].summary | contains("ccccccc")' "$home/state/branch-outcomes.jsonl" >/dev/null || fail 'recovery did not report the new commit'
 pass 'interruption after append cannot make a later observation reuse a different event key'
+
+second=https://github.com/example/project/pull/4
+fixture OPEN
+follow add "$second" --requested 'Follow the slow forge too' >/dev/null
+fixture MERGED
+real_gh="$TMP_ROOT/tools/gh.real"
+mv "$TMP_ROOT/tools/gh" "$real_gh"
+printf '#!/usr/bin/env bash\nsleep 4\nexec %q "$@"\n' "$real_gh" > "$TMP_ROOT/tools/gh"
+chmod +x "$TMP_ROOT/tools/gh"
+count=$(jq -s length "$home/state/branch-outcomes.jsonl")
+[ -z "$(FM_CHECK_TIMEOUT=13 follow poll)" ] || fail 'a pass that ran out of time printed a model wake'
+[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = "$((count + 1))" ] || fail 'a pass past its time budget started another forge read'
+[ -z "$(FM_CHECK_TIMEOUT=13 follow poll)" ] || fail 'the resumed pass printed a model wake'
+[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = "$((count + 2))" ] || fail 'the next pass did not resume at the follow it skipped'
+jq -s -e --arg a "$url" --arg b "$second" '[.[-2:][].summary] | any(contains($a)) and any(contains($b))' "$home/state/branch-outcomes.jsonl" >/dev/null || fail 'the two passes did not cover both follows'
+mv "$real_gh" "$TMP_ROOT/tools/gh"
+pass 'a slow pass stops quietly below the watcher timeout and the next pass resumes'
 
 if follow add "$url" > "$TMP_ROOT/out" 2>&1; then fail 'enrollment without request accepted'; fi
 if follow add 'https://github.com/example/project/pull/1;touch-bad' --requested 'Follow this' > "$TMP_ROOT/out" 2>&1; then fail 'unsafe URL accepted'; fi

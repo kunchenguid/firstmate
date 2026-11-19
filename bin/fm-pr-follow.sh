@@ -18,10 +18,12 @@
 # Mutations serialize under state/.pr-follows.lock and replace the file atomically.
 # The observer is fm-pr-poll.sh --snapshot. arm registers one ordinary check with
 # the existing watcher, never a separate process or poll loop. Each read has a
-# five-second limit; the ordinary check's outer timeout bounds the whole pass.
+# five-second limit. A pass starts no read within ten seconds of the watcher's
+# check timeout (FM_CHECK_TIMEOUT, default 30); the next pass resumes after cursor.
 #
-# A changed merged/closed state, failing checks (including a new head), or
-# requested changes appends a notice to the existing branch outcome store.
+# A changed merged/closed state, a check name that newly fails (or any failing
+# check on a new head), or a review value that changes to requested changes
+# appends a notice to the existing branch outcome store.
 # Forge state/conclusion words and URL are preserved, control characters are
 # removed. Notice keys include the generation, revision, and exact observation
 # before the baseline advances. Retries reuse the line; a changed observation
@@ -177,6 +179,7 @@ case "$cmd" in
       save_store
     fi
     while IFS= read -r url; do
+      [ "$SECONDS" -lt "$((${FM_CHECK_TIMEOUT:-30} - 10))" ] || break
       if [ "$(printf '%s' "$RECORD" | jq -r '.cursor // ""')" != "$url" ]; then
         RECORD=$(printf '%s' "$RECORD" | jq -c --arg url "$url" '.cursor=$url')
         save_store
@@ -189,9 +192,9 @@ case "$cmd" in
         | if (.state | IN("MERGED","merged","CLOSED","closed")) then
             if .state != $p.state then "\(.state): \($url)" else empty end
           else
-            (if (.checks | length) > 0 and (.head != $p.head or .checks != $p.checks) then
+            (if (.checks | length) > 0 and (.head != $p.head or ([.checks[].name] - [$p.checks[].name] | length) > 0) then
               "Checks \([.checks[] | .name + ": " + .status] | join(", ")) on \(.head[:7]): \($url)" else empty end),
-            (if (.review | IN("CHANGES_REQUESTED","requested_changes")) and (.review != $p.review or .head != $p.head) then
+            (if (.review | IN("CHANGES_REQUESTED","requested_changes")) and .review != $p.review then
               "Review \(.review): \($url)" else empty end)
           end
         | gsub("[\u0000-\u001f\u007f-\u009f]"; " ")')
