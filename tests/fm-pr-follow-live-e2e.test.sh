@@ -77,9 +77,12 @@ for harness in pi pi-signed claude; do
   export FM_FOLLOW_FIXTURE="$home/forge.json"
   export PATH="$TMP_ROOT/tools:$PATH"
   if [ "$harness" = claude ]; then
+    # Claude Code writes tsconfig.json and types into a --plugin-dir, which would
+    # dirty the checkout and fail the mod-shape test; load a private copy.
+    cp -R "$ROOT/.claude/mods/firstmate-calm" "$home/calm"
     session=$(node -e 'console.log(require("node:crypto").randomUUID())')
     printf '%s\n' "$session" > "$home/state/.lock-session"
-    command="exec env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CONFIG_DIR CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --session-id '$session' --setting-sources project --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --plugin-dir '$ROOT/.claude/mods/firstmate-calm' --debug-file '$home/debug.log'"
+    command="exec env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CONFIG_DIR CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --session-id '$session' --setting-sources project --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --plugin-dir '$home/calm' --debug-file '$home/debug.log'"
   else
     command="exec env PI_CODING_AGENT_DIR='$home/agent' $harness --offline --no-extensions --no-mcp --no-skills --no-prompt-templates --no-context-files --no-themes --session-dir '$home/sessions' -e '$TMP_ROOT/fixture.ts' -e '$ROOT/.pi/extensions/fm-branch-supervision.ts'"
   fi
