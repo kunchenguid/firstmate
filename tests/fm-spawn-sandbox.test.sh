@@ -169,7 +169,6 @@ test_mapped_project_is_wrapped_at_the_seam() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "'$FAKEBIN_DIR/worker-sandbox' '--profile' 'strict' '--worktree' '$WT_DIR'" "the wrapper must lead with the profile and worktree"
   assert_contains "$launch" "'--rw-create' '$s/$id.status' '--rw-create' '$s/$id.turn-ended'" "status and turn-ended must be created-and-writable file binds"
-  assert_contains "$launch" "'--ro' '$s/operational-inbox'" "the launch record must be read-only"
   assert_contains "$launch" "'--rw' '$s/$id.inbox'" "the steering inbox must be writable"
   assert_contains "$launch" "'--rw' '$HOME_DIR/data/$id'" "the task data directory must be writable"
   assert_contains "$launch" "'--ro' '$s/$id.omp-ext.ts'" "the busy extension must be read-only"
@@ -263,6 +262,33 @@ EOF
 $binds
 EOF
   pass "fm-spawn: with FM_HOME at the code root the wrapper never sees the home, state/, data/, config/ or projects/"
+}
+
+# Another task's launch brief sits in the shared state/operational-inbox for
+# days; no bind the wrapper receives may contain it.
+test_other_tasks_launch_record_is_never_bound() {
+  local id=sbx-peer-a1 out status doorbell record binds flag p
+  read_case "$(make_case peer "$id")"
+  doorbell=$(printf 'secret brief of another task\n' |
+    FM_STATE_OVERRIDE="$STATE_DIR" "$ROOT/bin/fm-operational-input.sh" record launch-brief) ||
+    fail "could not publish the other task's launch record"
+  record=${doorbell#*"read '"}
+  record=${record%%"'"*}
+  assert_present "$record" "the other task's launch record must exist before the spawn"
+  write_sandbox_config 'project:project=strict'
+  out=$(run_spawn "$id" "$PROJ_DIR" --scout --harness omp)
+  status=$?
+  expect_code 0 "$status" "a mapped spawn should succeed: $out"
+  binds=$(wrapper_binds "$(cat "$LAUNCH_LOG")") || fail "the wrapper prefix failed to run"
+  assert_contains "$binds" "--rw $STATE_DIR/$id.inbox" "the task's own steering inbox must still be bound"
+  while read -r flag p; do
+    case "$record" in
+      "$p" | "$p"/*) fail "the wrapper was handed $p ($flag), which exposes another task's launch record $record" ;;
+    esac
+  done <<EOF
+$binds
+EOF
+  pass "fm-spawn: the sandbox is never handed another task's launch record"
 }
 
 test_ship_kind_default_and_explicit_precedence() {
@@ -780,6 +806,7 @@ test_unsupported_shapes_refuse
 test_secondmate_is_never_sandboxed
 test_relaunch_rewraps_with_the_recorded_profile
 test_home_at_the_code_root_is_never_bound
+test_other_tasks_launch_record_is_never_bound
 test_sandboxed_extension_reports_through_the_relay
 test_default_launch_is_byte_identical
 test_optional_env_words_survive_zsh_and_bash
