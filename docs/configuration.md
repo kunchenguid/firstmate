@@ -10,6 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Isolating a worker's files, credentials, and network | [Worker sandbox](#worker-sandbox-configsandbox) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -2011,6 +2012,91 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## Worker sandbox (config/sandbox)
+
+The optional local, gitignored `config/sandbox` runs a ship or scout worker inside an operator-supplied sandbox wrapper, so it sees only its own worktree and task files instead of the owner's credentials, other workers' worktrees, and the fleet's `state/`.
+Absent, every worker launches exactly as before.
+Firstmate ships no sandbox: the wrapper and what a profile isolates belong to the operator, and this section owns when Firstmate applies a profile and what it passes the wrapper.
+The file is not inherited into secondmate homes, and a secondmate is never sandboxed.
+
+### Format
+
+One `key=value` per line, no spaces around `=`, blank lines and `#` comment lines ignored, each key at most once:
+
+| Line | Meaning |
+| --- | --- |
+| `wrapper=<command>` | The operator's wrapper, an absolute path or a bare name resolved on `PATH` when the spawn probes it; required for any profile to apply, so an explicit `--sandbox <profile>` without it refuses. |
+| `enforce=off\|on\|strict` | How binding the file is; `on` when the line is absent. |
+| `default=<profile>` | Profile for any ship or scout that no narrower line maps. |
+| `project:<name>=<profile>` | Profile for one registered project; `<name>` is the clone directory's basename. |
+| `kind:ship=<profile>`, `kind:scout=<profile>` | Profile for every ship or every scout. |
+
+A profile name is the wrapper's own, `[A-Za-z0-9][A-Za-z0-9._-]*`; the profile's content belongs to the wrapper and is never copied here.
+Resolution order is the explicit `--sandbox <profile>` flag, then `project:`, then `kind:`, then `default=`.
+A malformed file stops the spawn rather than launching unsandboxed.
+
+```text
+wrapper=/usr/local/bin/worker-sandbox
+enforce=on
+project:myproject=strict-net
+```
+
+| `enforce` | Mapped profile | Cannot be applied | `--sandbox off` | Unmapped ship or scout |
+| --- | --- | --- | --- | --- |
+| `off` | Inactive, a kill switch that keeps the lines on file | Not reached | Accepted, no effect | Launches plain |
+| `on` | Applied | Refuses the spawn | Waives it for that spawn and records `sandbox=off` | Launches plain |
+| `strict` | Applied | Refuses the spawn | Refused | Refused |
+
+An explicit `--sandbox <profile>` always applies and is always enforced, whatever `enforce` says.
+Rollback is `enforce=off`, deleting the file, or `--sandbox off` for one spawn under `enforce=on`; a running worker keeps the launch it has, so never relaunch a live worker just to adopt or drop a profile.
+
+### What is wrapped
+
+Only the agent command is wrapped, at one point after the launch template is filled in: `<wrapper> --profile <name> <binds> --host-helper <helper> -- <agent command>`.
+The pane-side status reporter, the `FM_TASK_INBOX` export, the compact-adviser switch, and the [launch environment allowlist](#worker-launch-environment-configlaunch-env-allowlist) stay outside it and compose unchanged; the encoded launch brief is expanded by the pane shell before the wrapper starts.
+The binds name only the task's own files, never `state/` or `FM_HOME`: its status and turn-ended files (created if missing), its steering inbox and data directory (writable), the launch record, git hooks, busy extension and Firstmate code root (read-only), its private `/tmp/fm-<id>` root, and the busy relay spool below.
+`bin/fm-spawn.sh` (`task_channel_dirs`) is the single owner of the channel directories, shared with the Claude `--add-dir` grant.
+
+A profile that resolves is always enforced: the spawn refuses, before any endpoint, worktree, or record exists, and never launches the worker raw, when
+
+- `config/sandbox` names no wrapper, the wrapper is not installed, or its `--dry-run` rejects the profile or `--host-helper`,
+- the harness is not `omp`, because the busy relay below is omp-specific,
+- the launch is a raw command, or
+- the backend is `t3code`, which starts the agent itself rather than in a pane Firstmate launches.
+
+`bin/fm-spawn.sh --help` owns the flags, and `bin/fm-sandbox-lib.sh` owns the grammar and the resolution.
+
+### Wrapper contract consumed
+
+`<wrapper> --profile NAME --worktree DIR [--rw|--rw-create|--ro PATH]... [--env NAME]... --host-helper EXECUTABLE [--dry-run] -- COMMAND...`
+
+`--host-helper` takes one executable path with no arguments and runs it on the host as a child of the wrapper, ending with the worker even when the launcher is killed.
+Firstmate generates `state/<id>.sbx/relay-helper` for it, so the contract holds whichever way the wrapper parses the value.
+
+### Busy relay
+
+The omp busy extension cannot run `bin/fm-busy-event.sh` inside the sandbox, because that needs a writable `state/`, which would let the worker rewrite other workers' inboxes and extensions.
+A sandboxed extension instead writes one small JSON file per turn edge into `state/<id>.sbx/events/`, the only writable path under `state/`, and `bin/fm-sandbox-relay.sh` applies it on the host through `bin/fm-busy-event.sh`.
+The busy gen is fixed on the helper's command line at spawn, never read from a file, so a worker from a superseded incarnation cannot move its replacement's record.
+The relay drops, counts in `state/<id>.sbx/relay.log`, and never applies an event that is malformed, over 512 bytes, not a regular file, beyond the per-second or per-pass cap, or refused by the writer.
+It ends with the wrapper, when teardown removes the spool, or when the task is re-armed.
+The helper's task id, state directory, and spool path are also fixed on its command line, so an event can only ever update this task's own busy record and never another task's records or inboxes.
+It authenticates the incarnation, not the claim: a worker can still misreport its own busy state.
+`bin/fm-sandbox-relay.sh --help` owns the event format and caps.
+
+### Record, relaunch, and teardown
+
+The spawn writes `sandbox=<profile>` to `state/<id>.meta`, or `sandbox=off` for a waiver.
+`--relaunch` re-wraps with the recorded profile and a fresh relay gen, takes the wrapper from the current `config/sandbox` (refusing when it is gone or unusable), refuses another profile, and accepts only `--sandbox off` (refused under `enforce=strict`).
+A task recorded without a sandbox relaunches plain.
+Teardown removes `state/<id>.sbx/`.
+
+### Limits
+
+The boundary is exactly as strong as the operator's wrapper, which Firstmate neither ships nor audits.
+It is independent of a harness's own permission or sandbox flags and of the other worker-posture options, so it composes with them by wrapping the same agent command they configure; it does not replace any of them.
+Regression coverage is [`tests/fm-spawn-sandbox.test.sh`](../tests/fm-spawn-sandbox.test.sh) and [`tests/fm-sandbox-relay.test.sh`](../tests/fm-sandbox-relay.test.sh), with the backend refusal in [`tests/fm-backend-t3code.test.sh`](../tests/fm-backend-t3code.test.sh).
 
 ## Project capacity (config/project-capacity)
 

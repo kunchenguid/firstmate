@@ -4260,9 +4260,11 @@ chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
 # beside its sessions root), so they are removed recursively with the inbox
 # and the git-hooks dir rather than the flat file list above.
 # state/<id>.cortex-plugin is the per-task Cortex Code plugin directory
-# (bin/fm-cortex-plugin.sh) carrying the busy-state hooks.
+# (bin/fm-cortex-plugin.sh) carrying the busy-state hooks. state/<id>.sbx is a
+# sandboxed worker's relay spool and helper (bin/fm-sandbox-lib.sh); the relay
+# ends on its own once the directory is gone.
 rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks" "$STATE/$ID.push-guard" \
-  "$STATE/$ID.cortex-plugin" "$STATE/$ID.hermes-hooks" \
+  "$STATE/$ID.cortex-plugin" "$STATE/$ID.hermes-hooks" "$STATE/$ID.sbx" \
   "$STATE/$ID.polytoken-config" \
   "$STATE/$ID.polytoken-sessions" "$STATE/$ID.polytoken-sessions-v1"
 # A presentation journal the close path left behind is orphaned once the

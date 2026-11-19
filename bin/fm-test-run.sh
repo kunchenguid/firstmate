@@ -417,6 +417,7 @@ family_for_basename() {
     fm-spawn-secondmate-pool.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
+    fm-spawn-sandbox.test.sh|\
     fm-project-capacity.test.sh|fm-lane-capacity-integration.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -459,6 +460,7 @@ family_for_basename() {
       ;;
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|fm-capacity.test.sh|fm-capacity-auto.test.sh|fm-lane-vitals.test.sh|\
+    fm-sandbox-relay.test.sh|\
     fm-classify-corr-token.test.sh|\
     fm-claude-account-quota.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
