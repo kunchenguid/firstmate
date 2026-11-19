@@ -21,6 +21,15 @@ fm_sup_stat_mtime() {
   fi
 }
 
+# fm_supervision_switched_off <state-dir>
+# Exit 0 (true) while the operator has switched this home's background
+# supervision off. bin/fm-supervision.sh alone writes and removes the marker,
+# and docs/turnend-guard.md "Supervision switched off" owns what every
+# supervision component does while it exists.
+fm_supervision_switched_off() {
+  [ -e "$1/.supervision-off" ]
+}
+
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
@@ -38,7 +47,9 @@ fm_sup_stat_mtime() {
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
-#                         or a registered custom check
+#                         or a registered custom check; always false while
+#                         supervision is switched off (FM_SUP_OFF)
+#   FM_SUP_OFF            true/false - fm_supervision_switched_off above
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -48,6 +59,7 @@ fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
+  FM_SUP_OFF=false
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
@@ -77,6 +89,11 @@ fm_supervision_status() {
     || [ "$FM_SUP_SOURCES" -gt 0 ] \
     || [ "$FM_SUP_CHECKS" -gt 0 ]; then
     FM_SUP_NEEDED=true
+  fi
+  if fm_supervision_switched_off "$state"; then
+    # shellcheck disable=SC2034 # Read by callers after sourcing.
+    FM_SUP_OFF=true
+    FM_SUP_NEEDED=false
   fi
 
   beat="$state/.last-watcher-beat"

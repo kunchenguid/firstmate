@@ -16,6 +16,9 @@
 # "supervision-host:" line other than the park boundary passes through as a
 # wake; the boundary alone is the ordinary quiet checkpoint. On a home that
 # does not run the host nothing below changes.
+# While supervision is switched off (bin/fm-supervision.sh) no checkpoint
+# runs: it prints "checkpoint: supervision is switched off for this home" and
+# exits 0 without starting a watcher or the host.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,6 +65,13 @@ case "$SECONDS_ARG" in
   ''|*[!0-9]*) echo "error: --seconds must be a positive integer" >&2; exit 2 ;;
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
+
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
+if fm_supervision_switched_off "$STATE"; then
+  echo "checkpoint: supervision is switched off for this home; no checkpoint runs until bin/fm-supervision.sh on"
+  exit 0
+fi
 
 # A checkpoint is neither an ordinary watcher start nor an Option B handling
 # successor. It keeps an announced recovery episode stable while preserving the

@@ -36,6 +36,11 @@
 # cycle only, for owners that start their own successor after every close
 # (OpenCode, omp).
 #
+# OFF SWITCH. While supervision is switched off (bin/fm-supervision.sh) the
+# host starts no cycle and stands down at once, at the start, at every close,
+# and before any successor ("supervision-host stood down: supervision is
+# switched off").
+#
 # THE LOOP. It owns watcher cycles through bin/fm-watch-arm.sh. The posture is
 # the away-posture record state/.afk-contract, read at every close and again
 # when a turn starts: only an away record is away, and no record or quiet
@@ -214,6 +219,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supervisor-target-lib.sh"
 # shellcheck source=bin/fm-warm-compact-lib.sh
 . "$SCRIPT_DIR/fm-warm-compact-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 FIRST_ARM_RESTART=0
 case "${1:-}" in
@@ -497,6 +504,9 @@ host_still_owner() {
 start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pid/output
   local predecessor=$1 out pid
   shift
+  # No cycle starts while supervision is switched off, the first, a successor,
+  # or one left for main alike (docs/turnend-guard.md "Supervision switched off").
+  fm_supervision_switched_off "$STATE" && stand_down "supervision is switched off"
   out=$(mktemp "$STATE/.supervision-host-arm.XXXXXX") || return 1
   # An arm left for main outlives this host, and Claude tears the hook's
   # process group down after the exit-2 rewake, so it gets a group of its own
@@ -1234,6 +1244,7 @@ attended_acceptor() {  # <first-reason-line>
 if ! host_still_owner; then
   stand_down "this session does not own supervision"
 fi
+fm_supervision_switched_off "$STATE" && stand_down "supervision is switched off"
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 143' TERM
@@ -1256,6 +1267,9 @@ ARM_OUT=$STARTED_ARM_OUT
 while :; do
   boundary_reached && boundary_exit
   await_close || boundary_exit
+  # Switching off stops the watcher; the host neither hands the close on nor
+  # starts a successor. Any wake that closed the cycle stays durable in the queue.
+  fm_supervision_switched_off "$STATE" && stand_down "supervision is switched off"
   REASON=$(printf '%s\n' "$ARM_TEXT" | grep -E '^(signal:|stale:|check:|heartbeat($|:))' || true)
 
   # The away daemon owns triage while its flag exists; the owner stands down.

@@ -27,17 +27,20 @@ READ_ONLY=0
 AFK=0
 AFK_MODE=away
 X_MODE=0
+SUPERVISION_OFF=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--supervision-off 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
 --afk-mode only matters when --afk 1 (present); it selects the away-mode vs
 quiet-mode (kunchenguid/firstmate#2356) wording, and defaults to away.
+--supervision-off 1 renders the operator's off switch (bin/fm-supervision.sh)
+as the current state, and the repair line then says to arm nothing.
 EOF
 }
 
@@ -76,6 +79,11 @@ while [ "$#" -gt 0 ]; do
     --x-mode)
       [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
       X_MODE=$(bool_value "$2")
+      shift 2
+      ;;
+    --supervision-off)
+      [ "$#" -gt 1 ] || { echo "error: --supervision-off requires 0 or 1" >&2; exit 2; }
+      SUPERVISION_OFF=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -201,6 +209,10 @@ repair_line() {
     printf '%s\n' 'Watcher repair belongs to the session holding the fleet lock; do not drain, arm, or repair from this read-only session.'
     return 0
   fi
+  if [ "$SUPERVISION_OFF" -eq 1 ]; then
+    printf '%s\n' 'Supervision is switched off for this home (bin/fm-supervision.sh); arm and repair nothing until bin/fm-supervision.sh on.'
+    return 0
+  fi
   if [ "$AFK" -eq 1 ]; then
     if [ "$AFK_MODE" = quiet ]; then
       printf '%s\n' 'Quiet mode owns watcher supervision; load /quiet and ensure the daemon is running instead of starting normal supervision directly.'
@@ -312,6 +324,9 @@ if [ "$READ_ONLY" -eq 1 ]; then
   printf '%s\n' '- Lock: read-only; do not drain, arm, spawn, steer, merge, or repair fleet state here.'
 else
   printf '%s\n' '- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.'
+fi
+if [ "$SUPERVISION_OFF" -eq 1 ]; then
+  printf '%s\n' '- Supervision: switched off by the operator (bin/fm-supervision.sh). Arm no watcher, start no away or quiet daemon, and do not repair supervision; workers keep writing status, so run bin/fm-wake-drain.sh when the operator writes. Only bin/fm-supervision.sh on turns it back on.'
 fi
 if [ "$AFK" -eq 1 ]; then
   if [ "$AFK_MODE" = quiet ]; then

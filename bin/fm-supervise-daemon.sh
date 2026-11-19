@@ -22,6 +22,8 @@
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
 # catch-up or when afk is re-entered.
+# While supervision is switched off (bin/fm-supervision.sh) the daemon does
+# not start, exits at its next loop pass, and types nothing into the pane.
 #
 # IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every
 # current daemon injection as the away-supervisor kind after the stable
@@ -203,6 +205,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # (bin/fm-afk-launch.sh) so the captain-pane resolution has exactly one owner.
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_DAEMON_DIR/fm-supervisor-target-lib.sh"
+
+# fm_supervision_switched_off: the operator's off switch (bin/fm-supervision.sh).
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$FM_DAEMON_DIR/fm-supervision-lib.sh"
 
 # The single owner of semantic busy state for recorded tasks
 # (fm_busy_classify).
@@ -1709,6 +1715,13 @@ inject_msg() {  # <message> [state] [exact] [request-id]
   INJECT_SENT_MSG=
   INJECT_SUBMIT_ATTEMPTED=0
   afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
+  # Switched off, nothing is ever typed into the supervisor pane, including the
+  # shutdown flush; the escalations stay derivable from the durable records.
+  if fm_supervision_switched_off "$state"; then
+    INJECT_LAST_FAILURE="deferred: supervision switched off"
+    log "inject $INJECT_LAST_FAILURE"
+    return 1
+  fi
   # (2) Single-line digest: collapse any embedded newlines so submission via
   # send-keys + Enter is unambiguous regardless of how the TUI composer treats
   # them. Then use the canonical typed envelope so downstream consumers retain
@@ -2087,6 +2100,10 @@ fm_super_main() {
   local CRASH_NORMAL_SLEEP=${FM_CRASH_NORMAL_SLEEP:-$CRASH_NORMAL_SLEEP_DEFAULT}
 
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
+  if fm_supervision_switched_off "$STATE"; then
+    echo "supervision is switched off for this home; the daemon does not start (bin/fm-supervision.sh on)" >&2
+    exit 0
+  fi
 
   # --- single instance (portable lock, no flock dependency) ------------------
   if ! fm_lock_try_acquire "$LOCK"; then
@@ -2244,6 +2261,11 @@ fm_super_main() {
 
   local rc reason
   while true; do
+    # --- off switch: stop polling and probing the supervisor pane entirely --
+    if fm_supervision_switched_off "$STATE"; then
+      log "supervision switched off; daemon exiting"
+      cleanup
+    fi
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back

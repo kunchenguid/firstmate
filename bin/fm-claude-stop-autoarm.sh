@@ -29,7 +29,9 @@
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
 #   - Need: arms only while the home needs supervision, as
-#     bin/fm-supervision-lib.sh defines it; an idle home exits 0.
+#     bin/fm-supervision-lib.sh defines it; an idle home exits 0, and so does
+#     a home whose supervision is switched off (bin/fm-supervision.sh), which
+#     is checked again when a cycle closes so switching off never re-arms.
 #   - Single-flight: Claude does not dedupe async hooks, so exactly one
 #     GENERATION owner arms per event epoch: the epoch ledger's monotonic
 #     sequence is the claim generation, every firing defers (exit 0) to a live
@@ -663,6 +665,14 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # every subsequent classification and handoff.
   if [ -e "$STATE/.afk" ]; then
     autoarm_record afk
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    exit 0
+  fi
+  # Switching supervision off ends this cycle (bin/fm-supervision.sh off stops
+  # the watcher); close silently instead of retrying a fresh arm or waking the
+  # model. Any wake that closed the cycle is already durable in the queue.
+  if fm_supervision_switched_off "$STATE"; then
+    autoarm_record clean
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi

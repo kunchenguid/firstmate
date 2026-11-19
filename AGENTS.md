@@ -267,6 +267,7 @@ Relay may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
 No turn ends blind while work is under way, including turns described as holding or waiting.
+The one exception is the off switch: when the captain wants the background loop stopped rather than quieted, run `bin/fm-supervision.sh off`; while it is off keep no cycle and start no daemon, read worker status when the captain writes, and only `bin/fm-supervision.sh on` restores supervision (`docs/turnend-guard.md` "Supervision switched off").
 
 - At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
 - Session start is the only exception because its one-shot digest already presented the queue while locked or deliberately left it untouched in lock-refused read-only mode.

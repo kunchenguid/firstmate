@@ -31,6 +31,7 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 | Claude | `.claude/settings.json` Stop/StopFailure `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) |
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
+While the operator has switched supervision off, no re-arm owner arms; [`turnend-guard.md`](turnend-guard.md#supervision-switched-off) owns that state.
 
 ### Pi, omp, and OpenCode adapters
 
