@@ -193,18 +193,13 @@ second=https://github.com/example/project/pull/4
 fixture OPEN
 follow add "$second" --requested 'Follow the slow forge too' >/dev/null
 fixture MERGED
-real_gh="$TMP_ROOT/tools/gh.real"
-mv "$TMP_ROOT/tools/gh" "$real_gh"
-printf '#!/usr/bin/env bash\nsleep 4\nexec %q "$@"\n' "$real_gh" > "$TMP_ROOT/tools/gh"
-chmod +x "$TMP_ROOT/tools/gh"
 count=$(jq -s length "$home/state/branch-outcomes.jsonl")
-[ -z "$(FM_CHECK_TIMEOUT=13 follow poll)" ] || fail 'a pass that ran out of time printed a model wake'
-[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = "$((count + 1))" ] || fail 'a pass past its time budget started another forge read'
-[ -z "$(FM_CHECK_TIMEOUT=13 follow poll)" ] || fail 'the resumed pass printed a model wake'
+[ -z "$(FM_CHECK_TIMEOUT=10 follow poll)" ] || fail 'a pass that ran out of time printed a model wake'
+[ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = "$((count + 1))" ] || fail 'a pass with no time to spare did not read exactly one follow'
+[ -z "$(FM_CHECK_TIMEOUT=soon follow poll 2>&1)" ] || fail 'a non-numeric check timeout broke the resumed pass'
 [ "$(jq -s length "$home/state/branch-outcomes.jsonl")" = "$((count + 2))" ] || fail 'the next pass did not resume at the follow it skipped'
 jq -s -e --arg a "$url" --arg b "$second" '[.[-2:][].summary] | any(contains($a)) and any(contains($b))' "$home/state/branch-outcomes.jsonl" >/dev/null || fail 'the two passes did not cover both follows'
-mv "$real_gh" "$TMP_ROOT/tools/gh"
-pass 'a slow pass stops quietly below the watcher timeout and the next pass resumes'
+pass 'a pass out of time stops quietly after one follow and the next pass resumes'
 
 if follow add "$url" > "$TMP_ROOT/out" 2>&1; then fail 'enrollment without request accepted'; fi
 if follow add 'https://github.com/example/project/pull/1;touch-bad' --requested 'Follow this' > "$TMP_ROOT/out" 2>&1; then fail 'unsafe URL accepted'; fi

@@ -18,8 +18,9 @@
 # Mutations serialize under state/.pr-follows.lock and replace the file atomically.
 # The observer is fm-pr-poll.sh --snapshot. arm registers one ordinary check with
 # the existing watcher, never a separate process or poll loop. Each read has a
-# five-second limit. A pass starts no read within ten seconds of the watcher's
-# check timeout (FM_CHECK_TIMEOUT, default 30); the next pass resumes after cursor.
+# five-second limit. A pass always reads one follow, then starts no further read
+# within ten seconds of the watcher's check timeout (FM_CHECK_TIMEOUT, default 30,
+# also used when it is not a positive number); the next pass resumes after cursor.
 #
 # A changed merged/closed state, a check name that newly fails (or any failing
 # check on a new head), or a review value that changes to requested changes
@@ -178,8 +179,13 @@ case "$cmd" in
       RECORD=$(printf '%s' "$RECORD" | jq -c '.surface_missing=false')
       save_store
     fi
+    timeout=${FM_CHECK_TIMEOUT:-30}
+    case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
+    [ "$timeout" -gt 0 ] || timeout=30
+    attempted=0
     while IFS= read -r url; do
-      [ "$SECONDS" -lt "$((${FM_CHECK_TIMEOUT:-30} - 10))" ] || break
+      [ "$attempted" = 0 ] || [ "$SECONDS" -lt "$((timeout - 10))" ] || break
+      attempted=1
       if [ "$(printf '%s' "$RECORD" | jq -r '.cursor // ""')" != "$url" ]; then
         RECORD=$(printf '%s' "$RECORD" | jq -c --arg url "$url" '.cursor=$url')
         save_store
