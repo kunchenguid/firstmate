@@ -2048,6 +2048,8 @@ project:myproject=strict-net
 | `on` | Applied | Refuses the spawn | Waives it for that spawn and records `sandbox=off` | Launches plain |
 | `strict` | Applied | Refuses the spawn | Refused | Refused |
 
+Under `enforce=strict` a `--relaunch` of a task recorded `sandbox=off` is refused as well, so a waiver granted under `enforce=on` does not outlive the move to `strict`: tear the task down and spawn it again so the mapped profile applies, or set `enforce=on` to keep the waiver.
+
 An explicit `--sandbox <profile>` always applies and is always enforced, whatever `enforce` says.
 Rollback is `enforce=off`, deleting the file, or `--sandbox off` for one spawn under `enforce=on`; a running worker keeps the launch it has, so never relaunch a live worker just to adopt or drop a profile.
 
@@ -2055,7 +2057,9 @@ Rollback is `enforce=off`, deleting the file, or `--sandbox off` for one spawn u
 
 Only the agent command is wrapped, at one point after the launch template is filled in: `<wrapper> --profile <name> <binds> --host-helper <helper> -- <agent command>`.
 The pane-side status reporter, the `FM_TASK_INBOX` export, the compact-adviser switch, and the [launch environment allowlist](#worker-launch-environment-configlaunch-env-allowlist) stay outside it and compose unchanged; the encoded launch brief is expanded by the pane shell before the wrapper starts.
-The binds name only the task's own files, never `state/` or `FM_HOME`: its status and turn-ended files (created if missing), its steering inbox and data directory (writable), the launch record, git hooks, busy extension and Firstmate code root (read-only), its private `/tmp/fm-<id>` root, and the busy relay spool below.
+The binds name only the task's own files, never `state/` or `FM_HOME`: its status and turn-ended files (created if missing), its steering inbox and data directory (writable), the launch record, git hooks, busy extension and the Firstmate code root's `bin/`, `.agents/`, `.omp/` and `.claude/mods/` (read-only), its private `/tmp/fm-<id>` root, and the busy relay spool below.
+The code root itself is never bound, because with `FM_HOME` unset it is `FM_HOME`, and the read-only code binds come before the writable task binds so a wrapper that applies binds in order never shadows one.
+The wrapper is also passed `--env` for `COMPACT_ADVISER_DISABLE`, `FM_TASK_INBOX`, and, when set in the pane, `FM_TASK_ID`, `GOTMPDIR`, `TRACEPARENT`, `LAVISH_AXI_HOST` and `LAVISH_AXI_PORT`.
 `bin/fm-spawn.sh` (`task_channel_dirs`) is the single owner of the channel directories, shared with the Claude `--add-dir` grant.
 
 A profile that resolves is always enforced: the spawn refuses, before any endpoint, worktree, or record exists, and never launches the worker raw, when
@@ -2089,7 +2093,8 @@ It authenticates the incarnation, not the claim: a worker can still misreport it
 
 The spawn writes `sandbox=<profile>` to `state/<id>.meta`, or `sandbox=off` for a waiver.
 `--relaunch` re-wraps with the recorded profile and a fresh relay gen, takes the wrapper from the current `config/sandbox` (refusing when it is gone or unusable), refuses another profile, and accepts only `--sandbox off` (refused under `enforce=strict`).
-A task recorded without a sandbox relaunches plain.
+A recorded `sandbox=off` relaunches plain under `enforce=off` or `on` and is refused under `enforce=strict`; it reads `config/sandbox`, so a malformed file refuses it too.
+A task recorded without a sandbox relaunches plain and never reads `config/sandbox`.
 Teardown removes `state/<id>.sbx/`.
 
 ### Limits

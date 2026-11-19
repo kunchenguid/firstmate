@@ -428,8 +428,9 @@
 #   accept the profile refuses BEFORE any endpoint, worktree, or record exists,
 #   and never launches the worker raw. The task binds (spawn_sandbox_wrap) name
 #   only the task's own status, turn-ended, steering inbox, data directory,
-#   read-only launch record, hooks, busy extension and code root, its private
-#   temp root, and the busy relay spool state/<id>.sbx/events; never state/ or
+#   read-only launch record, hooks, busy extension and the code root's bin/,
+#   .agents/, .omp/ and .claude/mods/, its private temp root, and the busy relay
+#   spool state/<id>.sbx/events; never state/, the code root itself, or
 #   FM_HOME. The omp busy extension drops edge files into that spool and
 #   bin/fm-sandbox-relay.sh, started by the wrapper as --host-helper, applies
 #   them through bin/fm-busy-event.sh. The chosen profile is recorded as
@@ -4129,8 +4130,9 @@ spawn_sandbox_resolve() {
     return 0
   fi
   # A relaunch reads config/sandbox only when it needs it: for a recorded
-  # profile (the wrapper is named there) or an explicit flag, so a broken file
-  # never strands a task that does not use the sandbox.
+  # profile (the wrapper is named there), a recorded waiver (enforce=strict
+  # refuses it), or an explicit flag, so a broken file never strands a task
+  # recorded without a sandbox.
   if [ "$RELAUNCH" -eq 1 ]; then
     recorded=$(fm_meta_get "$RELAUNCH_META" sandbox)
     if [ "$SANDBOX_SET" -eq 1 ] && [ "$SANDBOX_ARG" != off ]; then
@@ -4138,7 +4140,7 @@ spawn_sandbox_resolve() {
       return 1
     fi
   fi
-  if [ "$RELAUNCH" -eq 0 ] || [ "$SANDBOX_SET" -eq 1 ] || { [ -n "$recorded" ] && [ "$recorded" != off ]; }; then
+  if [ "$RELAUNCH" -eq 0 ] || [ "$SANDBOX_SET" -eq 1 ] || [ -n "$recorded" ]; then
     fm_sandbox_config_load "$CONFIG" || return 1
   fi
   if [ "$SANDBOX_SET" -eq 1 ] && [ "$SANDBOX_ARG" = off ]; then
@@ -4157,6 +4159,10 @@ spawn_sandbox_resolve() {
     case "$recorded" in
     '') return 0 ;;
     off)
+      if [ "$FM_SANDBOX_PRESENT" -eq 1 ] && [ "$FM_SANDBOX_ENFORCE" = strict ]; then
+        echo "error: config/sandbox enforce=strict refuses relaunching $ID under its recorded sandbox=off waiver; tear the task down and spawn it again so the project's mapped profile applies, or set enforce=on in config/sandbox to keep the waiver" >&2
+        return 1
+      fi
       SANDBOX_RECORD=off
       return 0
       ;;
@@ -4202,7 +4208,10 @@ spawn_sandbox_resolve() {
 # task's binds. Everything the worker may touch outside its worktree is named
 # here and nowhere else: its own status and turn-ended files, its steering inbox,
 # its data directory, the read-only launch record, hooks, busy extension and
-# code root, its private temp root, and the relay spool. Never state/ and never
+# the code root's bin/, .agents/, .omp/ and .claude/mods/ (never the root
+# itself, which is FM_HOME when FM_HOME is unset), its private temp root, and
+# the relay spool. The read-only code binds come first so a wrapper that applies
+# binds in order never shadows a writable task bind. Never state/ and never
 # FM_HOME: a writable state/ would let a worker rewrite other workers' inboxes and
 # extensions, which run unsandboxed (the reason the busy edge goes through
 # bin/fm-sandbox-relay.sh instead). Names that may be unset in the pane expand
@@ -4216,8 +4225,11 @@ spawn_sandbox_wrap() {
     echo "error: could not resolve the task-channel directories for $ID's sandbox binds" >&2
     return 1
   }
-  binds=(--profile "$SANDBOX_PROFILE" --worktree "$WT"
-    --rw-create "$STATE_REAL/$ID.status" --rw-create "$TURNEND")
+  binds=(--profile "$SANDBOX_PROFILE" --worktree "$WT")
+  for path in bin .agents .omp .claude/mods; do
+    [ ! -e "$root_real/$path" ] || binds+=(--ro "$root_real/$path")
+  done
+  binds+=(--rw-create "$STATE_REAL/$ID.status" --rw-create "$TURNEND")
   while IFS=$'\t' read -r role path; do
     case "$role" in
     operational-inbox) binds+=(--ro "$path") ;;
@@ -4227,15 +4239,15 @@ spawn_sandbox_wrap() {
 $dirs
 EOF
   [ "$GIT_HOOKS_INSTALLED" != 1 ] || binds+=(--ro "$GIT_HOOKS_DIR")
-  binds+=(--ro "$STATE_REAL/$ID.omp-ext.ts" --ro "$root_real" --rw "$TASK_TMP"
+  binds+=(--ro "$STATE_REAL/$ID.omp-ext.ts" --rw "$TASK_TMP"
     --rw "$(fm_sandbox_events_dir "$STATE_REAL" "$ID")"
-    --env COMPACT_ADVISER_DISABLE --host-helper "$SANDBOX_HELPER")
+    --env COMPACT_ADVISER_DISABLE --env FM_TASK_INBOX --host-helper "$SANDBOX_HELPER")
   prefix=$(shell_quote "$SANDBOX_BIN")
   for word in "${binds[@]}"; do
     prefix="$prefix $(shell_quote "$word")"
   done
   # shellcheck disable=SC2016 # expanded by the pane shell at launch, by design
-  prefix="$prefix"' ${GOTMPDIR+--env} ${GOTMPDIR+GOTMPDIR} ${TRACEPARENT+--env} ${TRACEPARENT+TRACEPARENT} ${LAVISH_AXI_HOST+--env} ${LAVISH_AXI_HOST+LAVISH_AXI_HOST}'
+  prefix="$prefix"' ${FM_TASK_ID+--env} ${FM_TASK_ID+FM_TASK_ID} ${GOTMPDIR+--env} ${GOTMPDIR+GOTMPDIR} ${TRACEPARENT+--env} ${TRACEPARENT+TRACEPARENT} ${LAVISH_AXI_HOST+--env} ${LAVISH_AXI_HOST+LAVISH_AXI_HOST} ${LAVISH_AXI_PORT+--env} ${LAVISH_AXI_PORT+LAVISH_AXI_PORT}'
   LAUNCH="$prefix -- $LAUNCH"
 }
 
