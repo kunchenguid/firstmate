@@ -1067,6 +1067,61 @@ SH
   pass "dispatch refuses held In-flight rows before relaunch"
 }
 
+# The recorded window stays present but its pane runs only a shell, which is the
+# positively agent-free endpoint a relaunch requires.
+make_agent_free_pane() {  # <case-dir>
+  local case_dir=$1 fakebin
+  fakebin="$case_dir/fakebin"
+  mv "$fakebin/tmux" "$fakebin/tmux.real"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in *pane_current_command*) printf 'zsh\n'; exit 0 ;; esac
+exec "$fakebin/tmux.real" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+# A relaunch restarts an agent for work already In flight, so a captain hold on
+# the row must not block it, and must survive it byte for byte.
+test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
+  local case_dir id out before after
+  id=atomic-relaunch-held-b17
+  case_dir=$(make_home relaunch-held "$id")
+  add_item "$case_dir" "$id"
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "initial spawn failed: $out"
+  tasks-axi hold "$id" --reason "captain merge call pending" --kind captain \
+    --file "$(backlog_of "$case_dir")" >/dev/null
+  [ "$(tasks-axi show "$id" --file "$(backlog_of "$case_dir")" 2>/dev/null | sed -n 's/^  held: *//p' | head -1)" = yes ] \
+    || fail "fixture did not hold the row"
+  make_agent_free_pane "$case_dir"
+  before=$(cat "$(backlog_of "$case_dir")")
+
+  out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) \
+    || fail "relaunch of a held In-flight row was refused: $out"
+  assert_contains "$out" "spawned $id" "relaunch did not report success"
+  after=$(cat "$(backlog_of "$case_dir")")
+  [ "$before" = "$after" ] || fail "relaunch changed the held backlog row"
+  pass "relaunch of a held In-flight row succeeds and keeps the hold unchanged"
+}
+
+test_relaunch_still_refuses_a_blocked_in_flight_row() {
+  local case_dir id out rc=0
+  id=atomic-relaunch-blocked-b17
+  case_dir=$(make_home relaunch-blocked "$id")
+  add_item "$case_dir" "$id"
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "initial spawn failed: $out"
+  add_item "$case_dir" atomic-relaunch-blocker-b17
+  tasks-axi block "$id" --by atomic-relaunch-blocker-b17 \
+    --file "$(backlog_of "$case_dir")" >/dev/null 2>&1 \
+    || { pass "skipped (tasks-axi has no block verb here)"; return 0; }
+  make_agent_free_pane "$case_dir"
+  out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) || rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunch accepted a blocked In-flight row"
+  assert_contains "$out" "not dispatchable in state in_flight no yes" \
+    "blocked relaunch refusal did not name the actual state"
+  pass "relaunch still refuses a blocked In-flight row"
+}
+
 test_dispatch_reads_the_row_from_the_backlog_root() {
   local case_dir id out
   id=atomic-dispatch-root-b2
@@ -3123,6 +3178,8 @@ test_dispatch_refuses_a_pending_authoritative_close
 test_dispatch_refuses_a_held_row_before_creating_resources
 test_dispatch_refuses_a_blocked_row_before_creating_resources
 test_dispatch_refuses_a_held_in_flight_row_before_relaunch
+test_relaunch_of_a_held_in_flight_row_keeps_the_hold
+test_relaunch_still_refuses_a_blocked_in_flight_row
 test_dispatch_reads_the_row_from_the_backlog_root
 test_recovery_uses_the_parent_of_a_trailing_slash_data_record
 test_completion_targets_a_nested_relative_data_directory

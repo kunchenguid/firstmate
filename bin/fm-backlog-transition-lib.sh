@@ -799,15 +799,20 @@ fm_backlog_meta_spawn_gen_optional() {  # <meta> <state>
   fm_backlog_meta_spawn_gen "$meta" "$state"
 }
 
-fm_backlog_row_dispatchable() {
+# A relaunch restarts an agent for work already In flight, so it also accepts an
+# In-flight row held for the captain (a ready PR waiting on a merge call). It
+# dispatches nothing new and never touches the hold; a fresh dispatch of a held
+# row stays refused, and a blocked row is refused either way.
+fm_backlog_row_dispatchable() {  # <row> [relaunch]
   case "$1" in
     in_flight\ no\ no|queued\ no\ no) return 0 ;;
+    in_flight\ yes\ no) [ "${2:-}" = relaunch ] ;;
     *) return 1 ;;
   esac
 }
 
-fm_backlog_dispatch_transition() {
-  local meta=$1 data=$2 id=$3 state=$4 row row_status
+fm_backlog_dispatch_transition() {  # <meta> <data> <id> <state> [relaunch]
+  local meta=$1 data=$2 id=$3 state=$4 mode=${5:-} row row_status
   fm_backlog_record_present "$meta" "task record" "$state" || return 1
   fm_backlog_row_probe "$data" "$id"
   row_status=$?
@@ -820,12 +825,12 @@ fm_backlog_dispatch_transition() {
     return "$row_status"
   fi
   row=$FM_BACKLOG_ROW_STATE
-  if ! fm_backlog_row_dispatchable "$row"; then
+  if ! fm_backlog_row_dispatchable "$row" "$mode"; then
     FM_BACKLOG_TRANSITION_ERROR="backlog item $id is not dispatchable in state $row"
     return 1
   fi
   case "$row" in
-    in_flight\ no\ no) return 0 ;;
+    in_flight\ no\ no|in_flight\ yes\ no) return 0 ;;
     queued\ no\ no) fm_backlog_start "$data" "$id" ;;
   esac
 }
