@@ -2136,10 +2136,16 @@ assert_attribution_policy() {  # <launch-command> <what>
   settings=$(printf '%s\n' "$launch" | sed -n "s/.*--settings '\([^']*\)'.*/\1/p")
   [ -n "$settings" ] || fail "$what launch names no --settings source to carry the policy"
   [ -f "$settings" ] || fail "$what launch points at a settings source that does not exist: $settings"
-  assert_grep '"attribution":' "$settings" "$what settings source carries no attribution policy"
-  assert_grep '"commit":""' "$settings" "$what settings source does not silence the commit trailer"
-  assert_grep '"pr":""' "$settings" "$what settings source does not silence the PR-body attribution"
-  assert_grep '"sessionUrl":false' "$settings" "$what settings source does not silence the session URL"
+  # Read the parsed values, never the bytes: a task worker's source is rewritten
+  # through jq when its tool guards are added, so its spacing is not a contract.
+  jq -e '.attribution | type == "object"' "$settings" >/dev/null 2>&1 \
+    || fail "$what settings source carries no attribution policy"
+  jq -e '.attribution.commit == ""' "$settings" >/dev/null 2>&1 \
+    || fail "$what settings source does not silence the commit trailer"
+  jq -e '.attribution.pr == ""' "$settings" >/dev/null 2>&1 \
+    || fail "$what settings source does not silence the PR-body attribution"
+  jq -e '.attribution.sessionUrl == false' "$settings" >/dev/null 2>&1 \
+    || fail "$what settings source does not silence the session URL"
 }
 
 assert_attribution_policy_absent() {  # <launch-command> <what>
