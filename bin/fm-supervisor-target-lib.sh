@@ -53,8 +53,8 @@ fm_supervisor_in_rex() {
 #      supported-backend check fail loudly instead of silently mis-targeting
 #      the tmux fallback.
 #   4d. The live T3 thread running in this home (discover_supervisor_t3code_thread)
-#      - T3 puts nothing into the agent's environment, so this is a cwd match
-#      over T3's live threads, consulted only when t3code is explicitly
+#      - Discovery matches cwd over T3's live threads rather than using agent
+#      environment variables, consulted only when t3code is explicitly
 #      selected and a T3 credential is configured.
 #   5. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
 #      session is named differently). Returns 1 so the caller can warn.

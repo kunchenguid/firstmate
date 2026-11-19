@@ -2827,7 +2827,7 @@ ok - t3code live: T3 0.0.46-nightly.20261010.2935 with 2.1.296 (Claude Code) (cl
 
 ### Stable 0.1.10
 
-T3 0.1.10 replaced `t3_thread_configuration` and the three `t3_pending_request_*` tools with `t3_thread_configure` and `t3_pending_request` (action `list`, `read`, or `respond`), keeping their arguments and replies, so the earlier gate refused every 0.1.10 server.
+The [capability gate](../t3code-backend.md#capability-gate) supports the tool generation offered by T3 0.1.10.
 On 2026-11-19 the sign-in and the live transport guard passed against `t3 v0.1.10` on Linux x64 once the gate accepted either generation:
 
 ```text

@@ -215,7 +215,7 @@ The poll loop, its wedge timer, and the `FM_BUSY_TURN_MAX_SECS` bound on a runni
 Secondmate threads stay off the splice, as on Herdr.
 In a home that also records Herdr or Rex workers, that backend keeps the push wait and the T3 workers stay on the poll loop, so adding a T3 task never slows Herdr or Rex escalation.
 
-Read and answer a worker's pending questions with [`bin/fm-t3-answer.sh`](../bin/fm-t3-answer.sh), which uses T3's `t3_pending_request_*` tools.
+Read and answer a worker's pending questions with [`bin/fm-t3-answer.sh`](../bin/fm-t3-answer.sh), which uses the pending-request tools selected by the [capability gate](#capability-gate).
 Those tools list and answer questions only; a permission approval is visible through `t3_thread_read`'s activity view as an `approval_request` item, which is how the wake identifies it, but no `/mcp` tool answers it, so it is surfaced as a count and answered only in T3 Code itself.
 
 <a id="away-mode"></a>
@@ -224,7 +224,7 @@ Those tools list and answer questions only; a permission approval is visible thr
 
 The away daemon can supervise a captain that runs inside a T3 thread.
 [`configuration.md`](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target) owns discovery precedence and the explicit-selection and credential prerequisites.
-T3 puts nothing about the thread into the agent's environment, so eligible discovery matches this home's real path to a live project's `workspaceRoot`, lists its threads with an active run through every `t3_thread_list` page, and selects the one unarchived thread with no worktree of its own.
+Supervisor discovery uses the home path rather than agent environment variables: eligible discovery matches this home's real path to a live project's `workspaceRoot`, lists its threads with an active run through every `t3_thread_list` page, and selects the one unarchived thread with no worktree of its own.
 A forked conversation counts; a delegated subagent does not.
 Multiple matching threads print an ambiguity diagnostic naming their ids and fall through to the legacy tmux fallback, as do no matches or an unreachable server.
 Resolve ambiguity by explicitly setting both `FM_SUPERVISOR_BACKEND=t3code` and `FM_SUPERVISOR_TARGET` to the intended thread id.

@@ -44,7 +44,7 @@
 //       [--worktree <abs-path>] [--branch <name>] [--message-file <file>]
 //     t3_thread_launch at runtimeMode full-access. With --worktree the
 //     workspace strategy is existing_worktree; without it, root (the project's
-//     own checkout). Reads the thread and its t3_thread_configuration back and
+//     own checkout). Reads the thread and its configuration back and
 //     archives and refuses it unless T3 bound exactly that workspace, full
 //     access, instance, model, and every requested option value; a refused
 //     thread that does not then read back archived with no active run exits
@@ -91,14 +91,14 @@
 //     different run). T3 ends the run asynchronously after the request.
 //   fm-t3-mcp.mjs requests --thread <id>
 //     The thread's pending runtime requests: questions (each user-input
-//     request id with its questions, from t3_pending_request_list/read) and
+//     request id with its questions, from pending-request list/read) and
 //     approvals, the count of pending requests those tools cannot see or
 //     answer (permission approvals, answered only in T3 Code itself). The
 //     signature names the question ids, the approval count, and the activity
 //     item id of each approval T3 shows among the thread's last 100 items.
 //   fm-t3-mcp.mjs respond --thread <id> --request <request-id> --answers-file <file>
-//     t3_pending_request_respond with the JSON object in <file>, keyed by
-//     question id. It cannot approve a permission request.
+//     Answers through the pending-request respond action with the JSON object
+//     in <file>, keyed by question id. It cannot approve a permission request.
 //   fm-t3-mcp.mjs watch --thread <id>... --timeout-ms <n> [--escalated <id>=<signature>]...
 //     The T3 event wait for the watcher. It first reads every thread: one
 //     whose pending requests changed from its --escalated signature reports
