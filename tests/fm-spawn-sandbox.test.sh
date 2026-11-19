@@ -473,7 +473,21 @@ test_secondmate_is_never_sandboxed() {
   status=$?
   expect_code 1 "$status" "--sandbox on a secondmate must refuse: $out"
   assert_contains "$out" "a secondmate holds fleet state and never runs sandboxed" "the refusal must say why"
-  pass "fm-spawn: a secondmate is never sandboxed, even under enforce=strict, and refuses --sandbox"
+  # A remote secondmate takes its own route before any local launch; the flag
+  # must be refused there too, before anything reaches the remote host.
+  id=sbx-sm-r1
+  printf -- '- %s - remote mate (host: remote-box; root: /srv/fm; home: /srv/fm-home; scope: x; projects: alpha; added 2026-11-01)\n' "$id" \
+    >> "$HOME_DIR/data/secondmates.md"
+  printf '#!/usr/bin/env bash\nprintf "SSH %%s\\n" "$*" >> "%s"\nexit 0\n' "$CASE_DIR/ssh.log" > "$FAKEBIN_DIR/ssh"
+  chmod +x "$FAKEBIN_DIR/ssh"
+  : > "$CASE_DIR/ssh.log"
+  out=$(run_spawn "$id" --secondmate --harness omp --sandbox strict)
+  status=$?
+  expect_code 1 "$status" "--sandbox on a remote secondmate must refuse: $out"
+  assert_contains "$out" "a secondmate holds fleet state and never runs sandboxed" "the remote refusal must say why: $out"
+  [ ! -s "$CASE_DIR/ssh.log" ] || fail "a refused remote secondmate spawn must reach no remote host: $(cat "$CASE_DIR/ssh.log")"
+  assert_absent "$STATE_DIR/$id.meta" "a refused remote secondmate spawn must publish no record"
+  pass "fm-spawn: a secondmate, local or remote, is never sandboxed, even under enforce=strict, and refuses --sandbox"
 }
 
 # --- 5. Relaunch ----------------------------------------------------------------
