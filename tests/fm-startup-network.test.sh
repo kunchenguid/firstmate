@@ -431,7 +431,7 @@ EOF
   assert_grep 'network=only detect_only=1' "$log" \
     "the worker ran mutating sweeps for a lock it no longer held"
   report=$(run_stage "$home" "$root" report)
-  assert_contains "$report" "NETWORK_CHECKS: the fleet lock was no longer held" \
+  assert_contains "$report" "NETWORK_CHECKS: the recorded fleet lock holder changed after these were requested" \
     "the downgrade to a read-only probe was not reported"
 
   # A detached start captures the lock itself and may run the mutating phase.

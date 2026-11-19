@@ -2516,8 +2516,8 @@ task_set_lock_path() {  # <state-dir>
 # The holder must stay ALIVE: fm_lock_try_acquire reclaims a lock whose owning
 # pid is gone, so a lock taken in a subshell that then exits would be stolen and
 # the contention under test would never happen.
-hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
-  local state=$1 lock holder i=0
+hold_task_set_lock() {  # <state-dir> [role] -> echoes "<holder-pid> <lock-path>"
+  local state=$1 role=${2:-} lock holder i=0
   lock=$(task_set_lock_path "$state") || return 1
   [ -n "$lock" ] || return 1
   # stdout/stderr are redirected so the long-lived holder does not inherit this
@@ -2528,6 +2528,7 @@ hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
     # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
+    [ -z "$role" ] || fm_lock_set_role "$lock" "$role" || exit 1
     sleep 30
   ) >/dev/null 2>&1 &
   # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
@@ -2541,6 +2542,17 @@ hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
     wait "$holder" 2>/dev/null || true
     return 1
   }
+  if [ -n "$role" ]; then
+    while [ "$(cat "$lock/role" 2>/dev/null || true)" != "$role" ] && [ "$i" -lt 100 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ "$(cat "$lock/role" 2>/dev/null || true)" = "$role" ] || {
+      kill "$holder" 2>/dev/null || true
+      wait "$holder" 2>/dev/null || true
+      return 1
+    }
+  fi
   printf '%s %s\n' "$holder" "$lock"
 }
 
@@ -2660,6 +2672,8 @@ SH
     || fail "could not resolve the established descendant task-set lock"
   [ -d "$subhome/state" ] || fail "forced teardown did not establish the absent state directory"
   [ -e "$lock" ] || fail "forced teardown did not own the descendant task-set lock during preflight"
+  [ "$(cat "$lock/role" 2>/dev/null || true)" = forced-teardown ] \
+    || fail "forced teardown did not identify itself as the task-set lock holder"
   kill -0 "$pid" 2>/dev/null || fail "forced teardown exited before task-set ownership was observed"
   : > "$release"
   if wait "$pid"; then
@@ -2680,7 +2694,7 @@ $rec
 EOF
   err="$TMP_ROOT/taskset-teardown.err"
   # Stand in for a fresh spawn that is mid-publication in the secondmate's home.
-  held=$(hold_task_set_lock "$subhome/state") \
+  held=$(hold_task_set_lock "$subhome/state" task-spawn) \
     || fail "could not stage a held task-set lock"
   holder=${held%% *}
   lock=${held#* }
@@ -2711,7 +2725,7 @@ $rec
 EOF
   err="$TMP_ROOT/taskset-spawn.err"
   # Stand in for a forced teardown that already enumerated this home's task set.
-  held=$(hold_task_set_lock "$subhome/state") \
+  held=$(hold_task_set_lock "$subhome/state" forced-teardown) \
     || fail "could not stage a held task-set lock"
   holder=${held%% *}
   lock=${held#* }
@@ -2723,13 +2737,36 @@ EOF
   [ ! -e "$subhome/state/newtask.meta" ] \
     || fail "a refused spawn still published a durable record"
   [ -e "$lock" ] || fail "a refused spawn removed the teardown's task-set lock"
-  grep -F "task set is locked" "$err" >/dev/null \
+  grep -F "task set is locked by a forced teardown" "$err" >/dev/null \
     || fail "the spawn refusal did not name the task-set contention: $(cat "$err")"
   [ ! -e "$subhome/state/.spawn-newtask.lock" ] \
     || fail "a refused spawn left its own task lock behind"
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
   pass "a fresh spawn refuses to publish while a forced teardown owns the task set"
+}
+
+test_fresh_spawn_names_another_spawn_as_task_set_holder() {
+  local home subhome err rec held holder
+  rec=$(seed_task_set_lock_home taskset-two-spawns)
+  IFS='|' read -r home subhome <<EOF
+$rec
+EOF
+  err="$TMP_ROOT/taskset-two-spawns.err"
+  held=$(hold_task_set_lock "$subhome/state" task-spawn) \
+    || fail "could not stage a fresh spawn holding the task-set lock"
+  holder=${held%% *}
+  if FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" newtask "$subhome/projects/alpha" --scout >/dev/null 2>"$err"; then
+    kill "$holder" 2>/dev/null || true
+    fail "a fresh spawn published while another spawn owned the task set"
+  fi
+  grep -F "task set is locked by another spawn" "$err" >/dev/null \
+    || fail "the refusal did not name the other spawn: $(cat "$err")"
+  [ ! -e "$subhome/state/newtask.meta" ] || fail "a refused spawn published a task"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  pass "a fresh spawn refusal identifies another spawn as the task-set holder"
 }
 
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned() {
@@ -3148,6 +3185,7 @@ test_force_teardown_refuses_symlinked_descendant_state
 test_force_teardown_locks_descendant_with_absent_state
 test_force_teardown_refuses_while_a_task_is_being_published
 test_fresh_spawn_refuses_while_a_forced_teardown_owns_the_task_set
+test_fresh_spawn_names_another_spawn_as_task_set_holder
 test_fresh_remote_secondmate_spawn_refuses_while_task_set_is_owned
 test_secondmate_force_teardown_refuses_child_active_home_descendant
 test_secondmate_force_teardown_refuses_child_repo_descendant

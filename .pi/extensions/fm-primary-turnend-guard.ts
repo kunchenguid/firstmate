@@ -37,6 +37,16 @@ function pidAlive(pid: string): boolean {
   }
 }
 
+// The session lock names a local pid or, on Windows, a tagged `win:<pid>`
+// (fm_session_pid_valid in bin/fm-session-lock-lib.sh owns that shape). Native
+// Node on Windows sees Windows pids directly, so a tagged holder is compared
+// and probed by its digits. Any other value is no usable identity, "".
+function lockHolderPid(lockPid: string): string {
+  const tagged = process.platform === "win32" ? /^win:([0-9]+)$/.exec(lockPid) : null;
+  const pid = tagged ? tagged[1] : lockPid;
+  return /^[0-9]+$/.test(pid) && pid !== "1" ? pid : "";
+}
+
 function lockOwnership(): LockOwnership {
   let lockPid = "";
   try {
@@ -44,18 +54,44 @@ function lockOwnership(): LockOwnership {
   } catch {
     return "missing";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
+  const holderPid = lockHolderPid(lockPid);
+  if (!holderPid) return "other";
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
+    if (pid === holderPid) return "owned";
     pid = parentPid(pid);
     if (!pid || pid === "1") break;
   }
-  return pidAlive(lockPid) ? "other" : "missing";
+  return pidAlive(holderPid) ? "other" : "missing";
+}
+
+// A Pi command started from inside the live session, such as the `pi --help`
+// capability probe in bin/fm-spawn.sh, auto-loads this extension too and passes
+// lockOwnership() through the same ancestor walk. Its pid dies at once, so the
+// marker must keep naming the live session above it (#5202). Pid equality with
+// the lock is not required because a wrapper such as pi-signed may hold the lock
+// while the extension host runs as its child.
+function markerNamesLiveAncestor(): boolean {
+  let markerPid = "";
+  try {
+    markerPid = readFileSync(marker, "utf8").split(/\r?\n/)[1] ?? "";
+  } catch {
+    return false;
+  }
+  if (!/^[0-9]+$/.test(markerPid) || markerPid === String(process.pid) || !pidAlive(markerPid)) {
+    return false;
+  }
+  let pid = String(process.pid);
+  for (let i = 0; i < 8; i += 1) {
+    pid = parentPid(pid);
+    if (!pid || pid === "1") return false;
+    if (pid === markerPid) return true;
+  }
+  return false;
 }
 
 function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
+  if (!existsSync(state) || lockOwnership() === "other" || markerNamesLiveAncestor()) return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 

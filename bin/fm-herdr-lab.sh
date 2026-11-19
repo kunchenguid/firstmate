@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Provision and operate an isolated Herdr lab session without risking the live
-# default session.
+# fleet session.
 #
 # Usage:
 #   fm-herdr-lab.sh name <label>
@@ -15,6 +15,17 @@
 # Session names must begin with "fm-lab-" and can never be "default".
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
+# A session whose <herdr config>/sessions/<session>/herdr-client.sock path
+# would exceed the 103-byte sun_path limit is refused by name, prepare and
+# provision.
+# The herdr config root is $XDG_CONFIG_HOME/herdr when XDG_CONFIG_HOME is set,
+# otherwise $HOME/.config/herdr, the same root herdr resolves.
+# The length is counted in bytes, not characters.
+# Provision keeps the lab server output in <session>.server.log in the state
+# directory, truncated on every provision and capped at 4096 bytes (later output
+# is discarded), and shown only as a bounded tail.
+# Provision also stops waiting as soon as the server process exits, and prints
+# the log tail when the session never reports running.
 # Every Herdr call made here carries --session <session>: trailing, or
 # immediately before the first -- delimiter so it stays a Herdr option instead
 # of becoming a passthrough argument such as an agent start argument.
@@ -25,8 +36,17 @@
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
 # destructive call.
-# Provision records the running default session as a fleet-state tripwire and
+# Provision records the running fleet session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
+# The fleet session is "default" unless FM_HERDR_LAB_FLEET_SESSION names the
+# custom session the live fleet runs in; that name must start with an ASCII
+# letter or digit, contain only ASCII letters, digits, underscores, or dashes,
+# and can never be an fm-lab- session.
+# Keep this setting unchanged from preparation/provisioning through teardown,
+# including in cleanup traps, so both snapshots protect the same fleet.
+# Every Herdr call made here clears HERDR_SOCKET_PATH, HERDR_PANE_ID,
+# HERDR_TAB_ID and HERDR_WORKSPACE_ID, which a worker pane inherits from the
+# live session.
 # The viewer command attaches or detaches one real foreground Herdr client on
 # an owned lab session over a fixed 40-row by 120-column pty;
 # bin/fm-herdr-lab-viewer.py owns the pty mechanics.
@@ -52,6 +72,22 @@ fm_herdr_lab_validate_name() { # <session>
   return 1
 }
 
+fm_herdr_lab_sun_path_limit=103
+
+fm_herdr_lab_config_dir() {
+  printf '%s/herdr' "${XDG_CONFIG_HOME:-${HOME:-}/.config}"
+}
+
+fm_herdr_lab_check_socket_path() { # <session>
+  local name=$1 path bytes
+  path="$(fm_herdr_lab_config_dir)/sessions/$name/herdr-client.sock"
+  bytes=$(printf '%s' "$path" | LC_ALL=C wc -c | tr -d ' ')
+  if [ "$bytes" -gt "$fm_herdr_lab_sun_path_limit" ]; then
+    fm_herdr_lab_error "session '$name' would bind a ${bytes}-byte socket path, over the $fm_herdr_lab_sun_path_limit-byte sun_path limit: $path"
+    return 1
+  fi
+}
+
 fm_herdr_lab_state_dir() {
   printf '%s' "${FM_HERDR_LAB_STATE_DIR:-${TMPDIR:-/tmp}/fm-herdr-lab-${UID}}"
 }
@@ -66,31 +102,51 @@ fm_herdr_lab_raw() { # <session> <herdr arguments...>
   local -a args=("$@")
   for ((i = 0; i < ${#args[@]}; i++)); do
     [ "${args[i]}" = -- ] || continue
-    HERDR_SESSION="$name" herdr "${args[@]:0:i}" --session "$name" "${args[@]:i}"
+    env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+      HERDR_SESSION="$name" herdr "${args[@]:0:i}" --session "$name" "${args[@]:i}"
     return
   done
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    HERDR_SESSION="$name" herdr "$@" --session "$name"
 }
 
 fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
+fm_herdr_lab_fleet_session() {
+  local fleet=${FM_HERDR_LAB_FLEET_SESSION:-default}
+  if [[ ! "$fleet" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || [[ "$fleet" == fm-lab-* ]]; then
+    fm_herdr_lab_error "FM_HERDR_LAB_FLEET_SESSION must name the live fleet session, never a lab session: $fleet"
+    return 1
+  fi
+  printf '%s' "$fleet"
+}
+
 fm_herdr_lab_fleet_state() { # <session>
-  local name=$1 sessions snapshot
+  local name=$1 fleet sessions snapshot
+  fleet=$(fm_herdr_lab_fleet_session) || return 1
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
     return 1
   }
-  snapshot=$(printf '%s' "$sessions" | jq -c '
-    [.sessions[]? | select(.default == true)]
-    | if length == 1 and .[0].name == "default" and .[0].running == true
-      then .[0] | {name, default, running, socket_path}
-      else empty
-      end
+  snapshot=$(printf '%s' "$sessions" | jq -c --arg fleet "$fleet" '
+    if $fleet == "default" then
+      [.sessions[]? | select(.default == true)]
+      | if length == 1 and .[0].name == "default" and .[0].running == true
+        then .[0] | {name, default, running, socket_path}
+        else empty
+        end
+    else
+      [.sessions[]? | select(.name == $fleet)]
+      | if length == 1 and .[0].default == false and .[0].running == true
+        then .[0] | {name, default, running, socket_path}
+        else empty
+        end
+    end
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
-    fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
+    fm_herdr_lab_error "fleet-state tripwire requires exactly one running $fleet session"
     return 1
   }
   printf '%s\n' "$snapshot"
@@ -99,6 +155,7 @@ fm_herdr_lab_fleet_state() { # <session>
 fm_herdr_lab_prepare() { # <session>
   local name=$1 sessions state_dir tripwire
   fm_herdr_lab_validate_name "$name" || return 1
+  fm_herdr_lab_check_socket_path "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
 
@@ -407,9 +464,23 @@ fm_herdr_lab_cancel_provision() { # <pid>
   wait "$pid" 2>/dev/null || true
 }
 
+fm_herdr_lab_server_log_cap=4096
+
+fm_herdr_lab_server_log_path() { # <session>
+  printf '%s/%s.server.log' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_server_log_tail() { # <log>
+  local log=$1
+  [ -s "$log" ] || return 0
+  fm_herdr_lab_error "server output (last 20 lines of $log):"
+  tail -n 20 "$log" | tail -c "$fm_herdr_lab_server_log_cap" | sed 's/^/fm-herdr-lab:   /' >&2
+}
+
 fm_herdr_lab_provision() { # <session>
-  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds
+  local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds server_log
   fm_herdr_lab_validate_name "$name" || return 1
+  fm_herdr_lab_check_socket_path "$name" || return 1
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
 
@@ -434,7 +505,10 @@ fm_herdr_lab_provision() { # <session>
   else
     fm_herdr_lab_prepare "$name" || return 1
   fi
-  fm_herdr_lab_raw "$name" server >/dev/null 2>&1 &
+  server_log=$(fm_herdr_lab_server_log_path "$name")
+  mkdir -p "$(dirname "$server_log")"
+  : > "$server_log"
+  fm_herdr_lab_raw "$name" server > >(exec >/dev/null 2>&1; head -c "$fm_herdr_lab_server_log_cap" > "$server_log"; cat) 2>&1 &
   server_pid=$!
   attempt=0
   max_attempts=300
@@ -448,25 +522,36 @@ fm_herdr_lab_provision() { # <session>
       }
       return 0
     fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      wait "$server_pid" 2>/dev/null || true
+      sleep 0.2
+      running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
+      [ "$running" = true ] && continue
+      fm_herdr_lab_error "lab server for '$name' exited before reporting running"
+      fm_herdr_lab_server_log_tail "$server_log"
+      return 1
+    fi
     sleep 0.2
     attempt=$((attempt + 1))
   done
   fm_herdr_lab_cancel_provision "$server_pid"
   fm_herdr_lab_error "lab session '$name' did not report running within $timeout_seconds seconds"
+  fm_herdr_lab_server_log_tail "$server_log"
   return 1
 }
 
 fm_herdr_lab_check_tripwire() { # <session>
-  local name=$1 tripwire before after
+  local name=$1 tripwire before after fleet
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing unverified teardown"
     return 1
   }
   before=$(cat "$tripwire")
+  fleet=$(fm_herdr_lab_fleet_session) || return 1
   after=$(fm_herdr_lab_fleet_state "$name") || return 1
   [ "$before" = "$after" ] || {
-    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: default session changed during lab work"
+    fm_herdr_lab_error "FLEET-STATE TRIPWIRE FAILED: $fleet session changed during lab work"
     fm_herdr_lab_error "before: $before"
     fm_herdr_lab_error "after:  $after"
     return 1
@@ -538,7 +623,10 @@ fm_herdr_lab_name() { # <label>
   label=${label:0:16}
   label=${label%-}
   [ -n "$label" ] || label=lab
-  printf 'fm-lab-%s-%s-%s\n' "$label" "$$" "$RANDOM"
+  local name
+  name=$(printf 'fm-lab-%s-%s-%s' "$label" "$$" "$RANDOM")
+  fm_herdr_lab_check_socket_path "$name" || return 1
+  printf '%s\n' "$name"
 }
 
 fm_herdr_lab_usage() {
