@@ -3405,6 +3405,27 @@ crew_ci_fixing_run() {  # <id> -> "<run-id> <pr-url>" on stdout
   printf '%s %s\n' "$run" "$pr"
 }
 
+# Print crew <id>'s single authoritative state word (working, parked, done,
+# blocked, paused, failed or unknown - bin/fm-crew-state.sh's own vocabulary),
+# or nothing when the verdict is unreadable. The optional <home-dir> redirects
+# the read to that home's state directory, so a parent watcher can scope a local
+# secondmate home's workers without a second spelling of the state contract; the
+# forge fallback is skipped like every periodic scan. One fm-crew-state.sh read
+# per call, with the usual caveat that it may make a bounded no-mistakes call.
+crew_state_word() {  # <id> [home-dir]
+  local id=$1 home=${2:-} line
+  [ -n "$id" ] || return 0
+  if [ -n "$home" ]; then
+    line=$(FM_CREW_STATE_NO_FORGE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  else
+    line=$(FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  fi
+  case "$line" in 'state: '*) ;; *) return 0 ;; esac
+  line=${line#state: }
+  printf '%s\n' "${line%% *}"
+}
+
 # 0 when a GitHub pull request is OPEN, not a draft, and every check the forge
 # reports on its current head is green (a check run COMPLETED as SUCCESS, NEUTRAL
 # or SKIPPED, or a status context in SUCCESS), with at least one check reported.
@@ -3429,6 +3450,162 @@ pr_forge_checks_green() {  # <pr-url>
         .status == "COMPLETED" and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED")
       else .state == "SUCCESS" end)
   ' >/dev/null 2>&1
+}
+
+# 0 when a GitHub pull request is OPEN and at least one check the forge reports
+# on its current head is red: a check run COMPLETED as FAILURE, TIMED_OUT or
+# CANCELLED, or a status context in FAILURE or ERROR. The red twin of
+# pr_forge_checks_green above, on the same single bounded `gh` read and the same
+# forge-owned current-head rollup, so a re-run check replaces the run it
+# superseded and no supersession rule is needed here either. A draft counts: a
+# red draft with nobody driving it is as unpicked as a red ready PR, and the
+# pickup ladder never licenses a merge the way the green twin does. Required-ness
+# is not separable from the rollup without a second protected-branch read, so
+# EVERY red check counts - wider than the required set, never narrower. Return
+# codes split what the caller must not conflate: 1 when the forge ANSWERED and
+# the PR is not red (green, pending, closed, merged - its episode is over), 2
+# when there is no answer to trust (another forge, a timed-out or failed read,
+# malformed json) - a shape the caller keeps silent, never a false alarm and
+# never a forgiven clock. Needs bin/fm-pr-lib.sh sourced, as bin/fm-watch.sh does.
+pr_forge_checks_red() {  # <pr-url>
+  local url=$1 json secs=${FM_FORGE_READ_SECS:-15} st
+  fm_pr_url_parse "$url" 2>/dev/null && [ "$FM_PR_PROVIDER" = github ] || return 2
+  case "$secs" in ''|0*|*[!0-9]*) secs=15 ;; esac
+  json=$(fm_pr_github_host_export "$FM_PR_HOST"; fm_run_timed "$secs" gh pr view "$url" --json state,statusCheckRollup 2>/dev/null) || return 2
+  [ -n "$json" ] || return 2
+  st=0
+  printf '%s' "$json" | jq -e '
+    type == "object" and .state == "OPEN"
+    and (.statusCheckRollup | type) == "array"
+    and any(.statusCheckRollup[];
+      if .__typename == "CheckRun" then
+        .status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+      else (.state == "FAILURE" or .state == "ERROR") end)
+  ' >/dev/null 2>&1 || st=$?
+  [ "$st" -eq 0 ] && return 0
+  # jq -e exits 1 when it answered "not red" and >1 when it could not read
+  # the answer; only an answer of not-red clears the PR.
+  [ "$st" -eq 1 ] || return 2
+  return 1
+}
+
+# --- red-PR pickup record ----------------------------------------------------
+# The durable pickup record for a red pull request (bin/fm-watch.sh's
+# red_pr_pickup_tick owns the ladder that demands it; docs/configuration.md
+# "Red-PR pickup SLA" owns the contract). One record file per PR under
+# <state>/.red-pr-pickup/<key>, written by the owning supervisor through
+# bin/fm-red-pr-pickup.sh, one `key=value` per line:
+#   pr=<url> owner=<named owner> step=<next step> eta=<when> updated=<epoch>
+# `eta` is free text a human schedules by; when it parses as a UTC ISO 8601
+# timestamp it also extends freshness to that deadline. `updated` is the epoch
+# of the last refresh. A parent home reads a local secondmate home's records
+# read-only from that home's own state directory; the mate remains the writer.
+
+# How long a pickup record stays fresh with no refresh and no future eta: the
+# recorded step is owned only while it is moving, so a record older than this is
+# stale and its PR re-enters the ladder (FM_RED_PR_RECORD_STALE_SECS overrides
+# with a positive integer of at most nine digits; any other value keeps this).
+# shellcheck disable=SC2034 # Read by fm-red-pr-pickup.sh's fresh check callers.
+FM_RED_PR_RECORD_STALE_SECS_DEFAULT=1800
+fm_red_pr_record_stale_secs() {
+  local value=${FM_RED_PR_RECORD_STALE_SECS:-}
+  case "$value" in ''|0*|*[!0-9]*) value=$FM_RED_PR_RECORD_STALE_SECS_DEFAULT ;; esac
+  [ "${#value}" -le 9 ] || value=$FM_RED_PR_RECORD_STALE_SECS_DEFAULT
+  printf '%s\n' "$value"
+}
+
+# The safe single-line key for a pull request URL: every byte outside
+# [A-Za-z0-9._-] maps to `_`, and a key that would exceed 200 characters keeps
+# its first 160 plus `-<cksum>`, so any URL maps to one filesystem-safe name
+# with the full URL kept inside the record file itself.
+fm_red_pr_key() {  # <pr-url>
+  local url=$1 key digest
+  [ -n "$url" ] || return 1
+  key=$(printf '%s' "$url" | LC_ALL=C tr -c 'A-Za-z0-9._-' '_') || return 1
+  [ "${#key}" -le 200 ] && { printf '%s\n' "$key"; return 0; }
+  digest=$(printf '%s' "$url" | cksum | cut -d' ' -f1) || return 1
+  printf '%s\n' "${key:0:160}-$digest"
+}
+
+# The record file's own field reader: the LAST `key=` value in the file, or
+# empty. Deliberately not fm_meta_get (bin/fm-backend.sh): that reader serves
+# task meta records with meta-file semantics, and this library's graph stays
+# free of the backend source so the away-mode daemon keeps its lean load.
+_fm_red_pr_field() {  # <record-file> <key>
+  local f=$1 key=$2 line value=''
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#*=} ;;
+    esac
+  done < "$f" 2>/dev/null || true
+  printf '%s' "$value"
+}
+
+# Print the pickup record for <pr-url> as its stored lines, or nothing when no
+# record exists. Read-only, so a parent home can call it on a secondmate home's
+# state directory.
+fm_red_pr_record_show() {  # <state-dir> <pr-url>
+  local dir=$1 url=$2 key f
+  key=$(fm_red_pr_key "$url") || return 1
+  f=$dir/.red-pr-pickup/$key
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  cat "$f"
+}
+
+# 0 iff a complete, fresh pickup record exists for <pr-url> under <state-dir>:
+# owner, step and eta all present, and either refreshed within the stale bound
+# or carrying a UTC ISO 8601 eta still in the future. A record with a missing
+# field, a past eta and no refresh, or an unreadable file is NOT ownership - the
+# ladder treats it exactly like a missing record, so an incomplete or abandoned
+# record can never silence a red PR. [now-epoch] lets the watcher's scan pass
+# its deterministic clock.
+fm_red_pr_record_fresh() {  # <state-dir> <pr-url> [now-epoch]
+  local dir=$1 url=$2 now=${3:-} key f owner step eta updated stale eta_epoch
+  key=$(fm_red_pr_key "$url") || return 1
+  f=$dir/.red-pr-pickup/$key
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  owner=$(_fm_red_pr_field "$f" owner)
+  step=$(_fm_red_pr_field "$f" step)
+  eta=$(_fm_red_pr_field "$f" eta)
+  updated=$(_fm_red_pr_field "$f" updated)
+  [ -n "$owner" ] && [ -n "$step" ] && [ -n "$eta" ] || return 1
+  [ -n "$now" ] || now=$(date +%s)
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  if eta_epoch=$(fm_utc_iso_to_epoch "$eta" 2>/dev/null) \
+    && [ "$eta_epoch" -gt "$now" ]; then
+    return 0
+  fi
+  stale=$(fm_red_pr_record_stale_secs)
+  case "$updated" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#updated}" -le 12 ] || return 1
+  [ "$now" -ge "$updated" ] && [ "$((now - updated))" -lt "$stale" ]
+}
+
+# Write (or refresh) the pickup record for <pr-url> under <state-dir>: the one
+# writer, used by bin/fm-red-pr-pickup.sh. owner, step and eta must each be a
+# non-empty single line with no tab or carriage return, so the record stays
+# line-addressable for every reader. The write is atomic (mktemp + mv inside
+# the record directory) and stamps updated=[now-epoch]. Returns 1 without
+# touching an existing record when an argument is invalid or the write fails.
+fm_red_pr_record_write() {  # <state-dir> <pr-url> <owner> <step> <eta> [now-epoch]
+  local dir=$1 url=$2 owner=$3 step=$4 eta=$5 now=${6:-} key f tmp
+  case "$url$owner$step$eta" in *[$'\t\r\n']*|'') return 1 ;; esac
+  [ -n "$url" ] && [ -n "$owner" ] && [ -n "$step" ] && [ -n "$eta" ] || return 1
+  key=$(fm_red_pr_key "$url") || return 1
+  f=$dir/.red-pr-pickup/$key
+  [ -n "$now" ] || now=$(date +%s)
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  mkdir -p "$dir/.red-pr-pickup" || return 1
+  tmp=$(mktemp "$dir/.red-pr-pickup/.record.XXXXXX") || return 1
+  if ! printf 'pr=%s\nowner=%s\nstep=%s\neta=%s\nupdated=%s\n' "$url" "$owner" "$step" "$eta" "$now" \
+    > "$tmp" || ! mv -f "$tmp" "$f"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  return 0
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

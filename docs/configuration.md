@@ -1178,6 +1178,23 @@ With the flag absent the watcher spends no current-state or forge read for it.
 The flag is primary-authoritative inherited config; push mid-session changes through `bin/fm-config-push.sh`.
 `bin/fm-watch.sh`'s `ci_fixing_green_tick` owns the scan and its repeats, which persist across watcher restarts, and `bin/fm-classify-lib.sh`'s `crew_ci_fixing_run` and `pr_forge_checks_green` own which verdicts and forge answers count.
 
+## Red-PR pickup SLA (red-pr-pickup)
+
+A pull request whose checks went red while a live lane owns it must never sit unowned: someone has to have a named owner, a next step and an ETA for it, or firstmate gets woken.
+The watcher's `red_pr_pickup_tick` runs this as deterministic scripts on the existing watcher and wake queue only - no standing agent - and a model is woken only when a deadline is missed.
+Every `FM_RED_PR_PICKUP_SCAN_SECS` seconds (default `300`) the scan takes every open, failed-check pull request a lane of this home owns: `pr=` in `state/<id>.meta` for main-home tasks whose `bin/fm-crew-state.sh` state word is `working`, `parked`, `blocked`, `failed` or `unknown` (drafts count as red; `done` and `paused` lanes are out of scope), plus every local secondmate home's own worker lanes through that home's state directory (a remote mate's host owns its scan).
+A red answer costs one bounded forge read per PR per scan (`FM_FORGE_READ_SECS`); a forge that answers not-red ends the episode, and an unreadable forge freezes it - no clock advance, no wake - so a transient `gh` outage neither floods nor forgives.
+
+The owning supervisor silences the alarm by writing one pickup record per PR under `<state>/.red-pr-pickup/<pr-key>` through `bin/fm-red-pr-pickup.sh record <pr-url> owner=<named owner> step='<next step>' eta='<eta>'` (the CLI also has `show <pr-url>` and `path <pr-url>`).
+A record is fresh while it was refreshed within `FM_RED_PR_RECORD_STALE_SECS` seconds (default `1800`) or its `eta` parses as a future UTC ISO 8601 timestamp; incomplete or abandoned records read as none, and a stale record re-walks the ladder from the supervisor level rather than jumping straight at the captain.
+
+While no fresh record exists the ladder walks the missing-record age from first red: at `FM_RED_PR_PICKUP_SECS` (default `300`) a `check: red pr pickup overdue: ...` wake to the owning supervisor with the exact pickup command to run, at `FM_RED_PR_PICKUP_MAIN_SECS` (default `600`) a second, firmer wake to main, and at `FM_RED_PR_PICKUP_CAPTAIN_SECS` (default `1200`) a CAPTAIN-FACING `check: red pr abandoned: ...` wake to surface the PR to the captain.
+Wakes ride the existing wake queue on exact per-PR keys (`red-pr-<pr-key>-l1|l2|l3`) so repeats are idempotent, and each level repeats only per `FM_PAUSE_RESURFACE_SECS` while the PR stays unowned.
+For a mate-owned PR the level-1 wake rings the secondmate through its task inbox instead (ring retries paced to `FM_PAUSE_RESURFACE_SECS`), level 2 wakes main naming `mate=<id>`, and the record is read from the mate's own home - the mate stays the writer, and main may record for it in that home.
+The episode ledger `state/.red-pr-pickups` (plus the `.red-pr-pickups-scan` throttle and `.red-pr-ring-<key>` markers) persists the first-red clock and escalation level across watcher restarts, so a restart resumes the walk instead of forgiving it.
+Main seconds below pickup seconds, or captain seconds below main, are lifted to the larger value.
+`bin/fm-watch.sh`'s `red_pr_pickup_tick` owns the ladder, `bin/fm-classify-lib.sh`'s `pr_forge_checks_red`, `crew_state_word` and the record helpers own which verdicts, homes and records count, and `bin/fm-red-pr-pickup.sh` owns the CLI firstmate runs to own a PR.
+
 ## Spawn base from the primary checkout (config/spawn-base-primary-checkout)
 
 The optional local, gitignored `config/spawn-base-primary-checkout` presence flag opts this home into a default-off base for fresh task worktrees on projects that land work locally.

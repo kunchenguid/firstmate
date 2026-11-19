@@ -137,6 +137,18 @@
 #                          reports the PR open with every check green: land it through bin/fm-pr-merge.sh, never
 #                          automatically; ci_fixing_green_tick owns the scan and
 #                          its repeats
+#   check: red pr pickup overdue: <task> <pr-url> red <age>s (threshold <n>s, crew <state>, no owner/step/eta record) - pickup: bin/fm-red-pr-pickup.sh record <pr-url> owner=<owner> step='<next step>' eta='<eta>'
+#   check: red pr unpicked after supervisor wake: [mate=<id> ]<pr-url> red <age>s (threshold <n>s)[, crew <state>] - no pickup record in the mate's home; steer the mate or record for it / no pickup record <n>s past first red; record it or steer the lane now
+#   check: red pr abandoned: [mate=<id> ]<pr-url> red <age>s (threshold <n>s)[, crew <state>] - CAPTAIN-FACING: no pickup record survived the supervisor and main wakes; surface this PR to the captain now
+#                          always-on red-PR pickup SLA (docs/configuration.md
+#                          "Red-PR pickup SLA"): an open red PR owned by a live
+#                          or parked lane (this home's tasks, or a local
+#                          secondmate home's workers) with no fresh
+#                          owner/step/eta record escalates supervisor (5m), main
+#                          (10m) then captain (20m, firstmate surfaces the
+#                          CAPTAIN-FACING text); a fresh or eta-covered record
+#                          silences it, a stale one re-walks the ladder;
+#                          red_pr_pickup_tick owns the scan and its repeats
 #   check: drive floor: <n> working < <floor> <age>s (threshold <n>s): idle: <task>=<state>[, ...]
 #                          opt-in config/drive-floor busy-lane backstop: fewer
 #                          than the configured floor of lanes actually working
@@ -3166,6 +3178,270 @@ EOF
   fm_wake_append check ci-fixing-green "$CI_FIXING_GREEN" || return 1
 }
 
+# Red-PR pickup SLA (docs/configuration.md "Red-PR pickup SLA"): every open red
+# pull request owned by a live or parked lane of this home - or reported by a
+# local secondmate home's workers - must carry a pickup record (a named owner,
+# a next step and an eta, written through bin/fm-red-pr-pickup.sh by the owning
+# supervisor: this home for its own tasks, the mate for its workers) within
+# FM_RED_PR_PICKUP_SECS of the first red sighting. The 2026-11 Miko PR 1208
+# deadlock - a worker parked behind a red gate, a reviewer waiting for coverage,
+# and no clock anywhere on the pair - is the defect: a red PR may never sit
+# waiting, whatever shape the wait takes. The scan is PR-centric, not
+# run-centric: state/<id>.meta pr= names the PR regardless of how the lane
+# validates, one crew-state read per candidate task scopes it (done and paused
+# lanes are out - finished work and declared waits own their own visibility;
+# working, parked, blocked, failed and unknown lanes are live or parked), and
+# one bounded forge read per in-scope PR decides red (pr_forge_checks_red,
+# bin/fm-classify-lib.sh). A gate-red PR - a check that stays red until some
+# record is committed - is owned only while its recorded step is moving, so a
+# fresh record silences the ladder and a stale one (no refresh past
+# FM_RED_PR_RECORD_STALE_SECS and no future UTC eta) re-enters it with a fresh
+# missing clock.
+# STATE/.red-pr-pickups keeps <pr-key> TAB <first-red> TAB <missing-since> TAB
+# <level> TAB <last-escalated> per PR; <missing-since> 0 is the owned sentinel
+# (a fresh record held at the last scan, so the walk resumes from level 1 when
+# ownership lapses). The ladder runs on the missing age:
+#   level 1 at FM_RED_PR_PICKUP_SECS (default 300) - wake the owning
+#     supervisor. A main-home task queues check wake red-pr-<key>-l1; a
+#     mate-owned PR is steered and rung once through this home's mate inbox
+#     (fm_task_inbox_write + fm_task_inbox_ring, marker STATE/.red-pr-ring-<key>,
+#     ring only when the mate pane is idle-ring-safe) carrying the exact record
+#     command, and the mate's own watcher runs the same tick for its workers.
+#   level 2 at FM_RED_PR_PICKUP_MAIN_SECS (default 600) - wake main: a check
+#     wake naming the mate whose ring went unanswered, or the escalated repeat
+#     for a main-home task whose record is still missing.
+#   level 3 at FM_RED_PR_PICKUP_CAPTAIN_SECS (default 1200) - a captain-facing
+#     check wake whose text carries the CAPTAIN-FACING marker, so the
+#     supervising firstmate surfaces it to the captain rather than absorbing it.
+# Each level fires once when reached and repeats at most once per
+# PAUSE_RESURFACE_SECS while it stays the reached level; a fresh record resets
+# the level, and its later staleness restarts the walk from level 1. A PR that
+# leaves scope - green, closed, merged, forge-unreadable (which stays silent,
+# never a false alarm), or its lane gone, done or paused - drops its row, so the
+# next episode starts fresh. Scans run at most once per
+# FM_RED_PR_PICKUP_SCAN_SECS (default 300); first red is the first SIGHTING, so
+# the true red age can lag by at most one scan interval.
+RED_PR_PICKUP_SCAN_SECS=${FM_RED_PR_PICKUP_SCAN_SECS:-}
+case "$RED_PR_PICKUP_SCAN_SECS" in ''|*[!0-9]*) RED_PR_PICKUP_SCAN_SECS=300 ;; esac
+RED_PR_PICKUP_SECS=${FM_RED_PR_PICKUP_SECS:-}
+case "$RED_PR_PICKUP_SECS" in ''|0*|*[!0-9]*) RED_PR_PICKUP_SECS=300 ;; esac
+RED_PR_PICKUP_MAIN_SECS=${FM_RED_PR_PICKUP_MAIN_SECS:-}
+case "$RED_PR_PICKUP_MAIN_SECS" in ''|0*|*[!0-9]*) RED_PR_PICKUP_MAIN_SECS=600 ;; esac
+RED_PR_PICKUP_CAPTAIN_SECS=${FM_RED_PR_PICKUP_CAPTAIN_SECS:-}
+case "$RED_PR_PICKUP_CAPTAIN_SECS" in ''|0*|*[!0-9]*) RED_PR_PICKUP_CAPTAIN_SECS=1200 ;; esac
+[ "$RED_PR_PICKUP_MAIN_SECS" -ge "$RED_PR_PICKUP_SECS" ] || RED_PR_PICKUP_MAIN_SECS=$RED_PR_PICKUP_SECS
+[ "$RED_PR_PICKUP_CAPTAIN_SECS" -ge "$RED_PR_PICKUP_MAIN_SECS" ] || RED_PR_PICKUP_CAPTAIN_SECS=$RED_PR_PICKUP_MAIN_SECS
+
+# Steer and ring the mate that owns a red PR with no pickup record. The steer
+# is the same from-firstmate fire-and-forget carrier fm-send uses, so the mate
+# reads it as a parent request expecting no reply; the record command inside is
+# the mate's own CLI in its own home. 0 iff the ring call returned 0.
+red_pr_ring_mate() {  # <mate-task> <window> <pr-url> <age-secs>
+  local task=$1 w=$2 pr=$3 age=$4 backend rec delivery_id text
+  backend=$(window_backend "$w")
+  delivery_id=$(LC_ALL=C od -An -v -tx1 -N 8 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  case "$delivery_id" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#delivery_id}" -eq 16 ] || return 1
+  text="${FM_FROMFIRST_MARK}delivery=${delivery_id} Red PR pickup overdue: $pr has been red ${age}s with no owner/step/eta record for its workers. Write one now: bin/fm-red-pr-pickup.sh record $pr owner=<owner> step='<next step>' eta='<eta>' - then drive that step."
+  rec=$(fm_task_inbox_write "$STATE" "$task" "$text" fire-and-forget) || return 1
+  fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
+}
+
+red_pr_pickup_tick() {  # [now-epoch], for deterministic clock callers
+  local now=${1:-} ledger="$STATE/.red-pr-pickups" scan="$STATE/.red-pr-pickups-scan"
+  local old='' rows='' due_keys='' tmp f meta task kind pr word home mate prkey
+  local first missing level last due='' reason lvl since_age ring_marker mate_w st
+  local old_key old_first old_missing old_level old_last
+  RED_PR_PICKUP=
+  [ -n "$now" ] || fm_epoch_seconds_to now
+  if [ -f "$scan" ]; then
+    last=$(cat "$scan" 2>/dev/null) || last=
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ "$now" -lt "$last" ] || [ "$((now - last))" -ge "$RED_PR_PICKUP_SCAN_SECS" ] || return 0
+  fi
+  printf '%s\n' "$now" > "$scan" || return 1
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ] || return 1
+    old=$(cat "$ledger") || return 1
+  fi
+  # Candidate PRs: this home's live-or-parked tasks with a meta pr=, plus every
+  # PR a local secondmate home's own tasks report (the mate's home dir is read
+  # from the mate lane's meta; remote mates own their scan on their host).
+  for f in "$STATE"/*.meta; do
+    [ -e "$f" ] || continue
+    task=${f##*/}; task=${task%.meta}
+    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    kind=$(fm_meta_get "$f" kind)
+    pr=$(fm_meta_get "$f" pr)
+    home=''
+    if [ "$kind" = secondmate ]; then
+      [ -n "$(fm_meta_get "$f" remote_host)" ] && continue
+      home=$(fm_meta_get "$f" home)
+      [ -n "$home" ] || continue
+      [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] || continue
+      [ "$(cat "$home/.fm-secondmate-home" 2>/dev/null || true)" = "$task" ] || continue
+      mate=$task
+      for meta in "$home"/state/*.meta; do
+        [ -e "$meta" ] || continue
+        task=${meta##*/}; task=${task%.meta}
+        case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+        [ "$(fm_meta_get "$meta" kind)" = secondmate ] && continue
+        pr=$(fm_meta_get "$meta" pr)
+        [ -n "$pr" ] || continue
+        prkey=$(fm_red_pr_key "$pr") || continue
+        case $'\n'"$due_keys" in *$'\n'"$prkey"$'\n'*) continue ;; esac
+        word=$(crew_state_word "$task" "$home")
+        case "$word" in working|parked|blocked|failed|unknown) ;; *) continue ;; esac
+        rows="$rows$prkey"$'\t'"$pr"$'\t'"$task"$'\t'"$word"$'\t'"$mate"$'\t'"$home"$'\n'
+        due_keys="$due_keys$prkey"$'\n'
+      done
+      continue
+    fi
+    [ -n "$pr" ] || continue
+    prkey=$(fm_red_pr_key "$pr") || continue
+    case $'\n'"$due_keys" in *$'\n'"$prkey"$'\n'*) continue ;; esac
+    word=$(crew_state_word "$task")
+    case "$word" in working|parked|blocked|failed|unknown) ;; *) continue ;; esac
+    rows="$rows$prkey"$'\t'"$pr"$'\t'"$task"$'\t'"$word"$'\t'""$'\t'"$home"$'\n'
+    due_keys="$due_keys$prkey"$'\n'
+  done
+  # One pass over the candidates: forge-red PRs carry their episode row. An
+  # answered not-red (green, pending, closed, merged) drops the row so the next
+  # episode starts fresh, exactly like the ci-fixing-green scan; an UNREADABLE
+  # forge keeps the existing row frozen - no clock advance, no wake - so a
+  # transient gh outage neither floods the captain nor forgives the SLA, and
+  # the next readable scan resumes the episode with its full first-red age.
+  # (word and a mate's task are never empty here and the possibly-empty
+  # fields ride last, so read's collapsing of repeated tabs cannot shift one.)
+  new_rows=''
+  while IFS=$'\t' read -r prkey pr task word mate home; do
+    [ -n "$prkey" ] || continue
+    first=$now missing=$now level=0 last=0 had_row=''
+    while IFS=$'\t' read -r old_key old_first old_missing old_level old_last; do
+      [ "$old_key" = "$prkey" ] || continue
+      case "$old_first:$old_level:$old_last" in *[!0-9:]*) continue ;; esac
+      [ "${#old_first}" -le 12 ] && [ "${#old_last}" -le 12 ] || continue
+      first=$((10#${old_first:-$now}))
+      case "$old_missing" in '') missing=$now ;; *[!0-9]*) missing=$now ;; *) missing=$((10#$old_missing)) ;; esac
+      [ "${#old_missing}" -le 12 ] || missing=$now
+      case "$old_level" in ''|*[!0-9]*) old_level=0 ;; esac
+      [ "${#old_level}" -le 3 ] || old_level=0
+      level=$((10#$old_level))
+      last=$((10#${old_last:-0}))
+      [ "${#last}" -le 12 ] || last=0
+      had_row=1
+      break
+    done <<EOF
+$old
+EOF
+    pr_forge_checks_red "$pr" && st=0 || st=$?
+    # 0 red, 1 answered not-red, 2 unreadable
+    if [ "$st" -eq 1 ]; then
+      continue
+    fi
+    if [ "$st" -ne 0 ]; then
+      if [ -n "$had_row" ]; then
+        new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\n'
+      fi
+      continue
+    fi
+    # A fresh record owns the PR and this scan records that with the owned
+    # sentinel missing=0; the ladder is not evaluated at all while owned. When
+    # ownership lapses - the record went stale, was rewritten incomplete, or
+    # was removed - the next scan restarts the missing clock from itself and
+    # the walk resumes from level 1, never an instant captain jump off a
+    # momentary lapse. A mate-owned PR reads its record in the mate's home;
+    # this home stays the writer's reader only.
+    recdir=$STATE
+    [ -z "$home" ] || recdir=$home/state
+    if fm_red_pr_record_fresh "$recdir" "$pr" "$now"; then
+      missing=0 level=0 last=0
+    elif [ "$missing" -eq 0 ]; then
+      missing=$now level=0 last=0
+    fi
+    if [ "$missing" -eq 0 ]; then
+      new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\n'
+      continue
+    fi
+    [ "$now" -ge "$missing" ] || missing=$now
+    since_age=$((now - missing))
+    lvl=0
+    [ "$since_age" -lt "$RED_PR_PICKUP_SECS" ] || lvl=1
+    [ "$since_age" -lt "$RED_PR_PICKUP_MAIN_SECS" ] || lvl=2
+    [ "$since_age" -lt "$RED_PR_PICKUP_CAPTAIN_SECS" ] || lvl=3
+    if [ "$lvl" -gt "$level" ] \
+      || { [ "$lvl" -eq "$level" ] && [ "$lvl" -gt 0 ] \
+        && { [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$PAUSE_RESURFACE_SECS" ]; } }; then
+      if [ -n "$home" ]; then
+        case "$lvl" in
+          1)
+            # Ring the owning mate once per episode, with retries paced to
+            # PAUSE_RESURFACE_SECS: the attempt marker timestamps the LAST
+            # try (successful or not), so a mate inside one long turn cannot
+            # collect a new inbox record every scan.
+            ring_marker="$STATE/.red-pr-ring-$prkey"
+            ring_last=0
+            if [ -e "$ring_marker" ]; then
+              ring_last=$(cat "$ring_marker" 2>/dev/null) || ring_last=
+              ring_last=${ring_last#l1-}
+              case "$ring_last" in ''|*[!0-9]*) ring_last=0 ;; esac
+              [ "${#ring_last}" -le 12 ] || ring_last=0
+            fi
+            if [ "$ring_last" -eq 0 ] || [ "$((now - ring_last))" -ge "$PAUSE_RESURFACE_SECS" ]; then
+              printf 'l1-%s\n' "$now" > "$ring_marker" || return 1
+              mate_w=$(fm_backend_target_of_meta "$STATE/$mate.meta" 2>/dev/null || true)
+              if [ -n "$mate_w" ] && secondmate_idle_ring_safe "$mate_w" \
+                && red_pr_ring_mate "$mate" "$mate_w" "$pr" "$since_age"; then
+                :
+              fi
+            fi
+            ;;
+          2)
+            reason="check: red pr unpicked after supervisor wake: mate=$mate (worker $task) $pr red $((now - first))s (threshold ${RED_PR_PICKUP_MAIN_SECS}s) - no pickup record in the mate's home; steer the mate or record for it: bin/fm-red-pr-pickup.sh record $pr owner=<owner> step='<next step>' eta='<eta>' (in the mate's home)"
+            fm_wake_append check "red-pr-$prkey-l2" "$reason" || return 1
+            due="${due:+$due; }$reason"
+            ;;
+          3)
+            reason="check: red pr abandoned: mate=$mate (worker $task) $pr red $((now - first))s (threshold ${RED_PR_PICKUP_CAPTAIN_SECS}s) - CAPTAIN-FACING: no pickup record survived the supervisor and main wakes; surface this PR to the captain now"
+            fm_wake_append check "red-pr-$prkey-l3" "$reason" || return 1
+            due="${due:+$due; }$reason"
+            ;;
+        esac
+      else
+        case "$lvl" in
+          1)
+            reason="check: red pr pickup overdue: $task $pr red $((now - first))s (threshold ${RED_PR_PICKUP_SECS}s, crew $word, no owner/step/eta record) - pickup: bin/fm-red-pr-pickup.sh record $pr owner=<owner> step='<next step>' eta='<eta>'"
+            fm_wake_append check "red-pr-$prkey-l1" "$reason" || return 1
+            due="${due:+$due; }$reason"
+            ;;
+          2)
+            reason="check: red pr unpicked after supervisor wake: $task $pr red $((now - first))s (threshold ${RED_PR_PICKUP_MAIN_SECS}s, crew $word) - no pickup record ${RED_PR_PICKUP_MAIN_SECS}s past first red; record it or steer the lane now"
+            fm_wake_append check "red-pr-$prkey-l2" "$reason" || return 1
+            due="${due:+$due; }$reason"
+            ;;
+          3)
+            reason="check: red pr abandoned: $task $pr red $((now - first))s (threshold ${RED_PR_PICKUP_CAPTAIN_SECS}s, crew $word) - CAPTAIN-FACING: no pickup record survived the supervisor and main wakes; surface this PR to the captain now"
+            fm_wake_append check "red-pr-$prkey-l3" "$reason" || return 1
+            due="${due:+$due; }$reason"
+            ;;
+        esac
+      fi
+      level=$lvl last=$now
+    fi
+    new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\n'
+  done <<EOF
+$rows
+EOF
+  tmp=$(mktemp "$STATE/.red-pr-pickups.XXXXXX") || return 1
+  if ! printf '%s' "$new_rows" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  [ -n "$due" ] || return 0
+  RED_PR_PICKUP=$due
+  return 0
+}
+
 # Drive-floor backstop (docs/configuration.md "Drive floor"): with the floor
 # configured, fewer than that many ACTUALLY WORKING lanes is a defect to
 # explain even when many lanes merely look busy. A lane counts as working only
@@ -4942,6 +5218,13 @@ while :; do
     exit 1
   }
   [ -z "$CI_FIXING_GREEN" ] || wake "$CI_FIXING_GREEN"
+
+  signal_preempt_check
+  red_pr_pickup_tick || {
+    echo 'watcher: red-pr-pickup check failed' >&2
+    exit 1
+  }
+  [ -z "$RED_PR_PICKUP" ] || wake "$RED_PR_PICKUP"
 
   signal_preempt_check
   drive_floor_tick || {
