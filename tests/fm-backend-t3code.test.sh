@@ -11,8 +11,6 @@ set -u
 # A fleet pane already carries GIT_CONFIG core.hooksPath. These cases set the
 # Git config they assert on themselves, so drop the inherited one before any git command.
 unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
-# A run from inside a T3 thread must not link the fake server's threads to it.
-unset T3CODE_THREAD_ID
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -1550,8 +1548,8 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   [ "$(t3_request "$create" 'r.arguments.workspaceStrategy.worktreePath')" = "$wt" ] || fail "the launch must point at the leased worktree"
   [ "$(t3_request "$create" 'r.arguments.workspaceStrategy.branch')" = "fm/$id" ] || fail "the launch must carry the slot's branch"
   [ "$(t3_request "$create" 'r.arguments.title')" = "fm-$id" ] || fail "the launch title should be the window alias"
-  [ "$(t3_request "$create" 'r.arguments.delegatedFrom')" = '{"environmentId":"env-fake-1","threadId":"thread-live","title":"thread-live"}' ] \
-    || fail "a task launched inside T3 must link to the captain's thread"
+  [ "$(t3_request "$create" 'r.arguments.delegatedFrom')" = undefined ] \
+    || fail "a task launched inside T3 must remain a separate thread"
   [ "$(t3_request "$create" 'r.arguments.runtimeMode')" = full-access ] || fail "the launch must run full-access"
   [ "$(t3_request "$create" 'r.arguments.modelSelection')" = '{"instanceId":"claudeAgent","model":"claude-sonnet-5","options":[{"id":"effort","value":"high"}]}' ] \
     || fail "the launch must carry --model/--effort as the model selection"

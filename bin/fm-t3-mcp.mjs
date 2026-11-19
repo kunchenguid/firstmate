@@ -42,7 +42,6 @@
 //     then checked against that model's descriptors. Exit 4 refuses.
 //   fm-t3-mcp.mjs launch --project <id> --title <title> --model-selection <json>
 //       [--worktree <abs-path>] [--branch <name>] [--message-file <file>]
-//       [--delegated-from <thread-id>]
 //     t3_thread_launch at runtimeMode full-access. With --worktree the
 //     workspace strategy is existing_worktree; without it, root (the project's
 //     own checkout). Reads the thread and its t3_thread_configuration back and
@@ -54,10 +53,7 @@
 //     catch-all orchestration_error can follow a created thread, so it exits
 //     1 as well. A transport or unexpected failure of the
 //     gate, before t3_thread_launch is requested, exits 8: no thread was
-//     launched. Without --message-file the thread is created idle. With
-//     --delegated-from, the thread carries T3's delegatedFrom link to that
-//     thread (the captain's own T3 thread), so T3 Code shows the crew as
-//     delegated from it; a parent that cannot be read only drops the link.
+//     launched. Without --message-file the thread is created idle.
 //   fm-t3-mcp.mjs send --thread <id> --message-file <file> --client-request-id <id>
 //     t3_thread_send mode auto: start an idle thread's next turn or steer the
 //     running one. T3 derives the message and command ids from the client
@@ -851,19 +847,6 @@ function bindingProblems(t, config, selection, worktree) {
   return problems;
 }
 
-// T3's delegatedFrom link to the thread that spawned this one, titled as T3
-// shows it. Only a link: an unreadable parent launches the thread without it.
-async function delegatedFrom(session, g, threadId) {
-  if (!threadId) return {};
-  try {
-    const parent = threadOf(await session.call("t3_thread_read", { threadId, limit: 1, runLimit: 1 }));
-    return { delegatedFrom: { environmentId: g.environmentId, threadId, title: parent.title || threadId } };
-  } catch (err) {
-    process.stderr.write(`fm-t3-mcp: warning: launching without a delegatedFrom link, since thread ${threadId} could not be read (${err?.message ?? err})\n`);
-    return {};
-  }
-}
-
 async function launch(flags) {
   const worktree = flags.worktree;
   if (worktree !== undefined && !path.isAbsolute(worktree)) usage("--worktree must be an absolute path");
@@ -888,7 +871,6 @@ async function launch(flags) {
     interactionMode: "default",
     workspaceStrategy,
     ...(message ? { message } : {}),
-    ...(await delegatedFrom(session, g, flags["delegated-from"])),
   };
   let out;
   try {

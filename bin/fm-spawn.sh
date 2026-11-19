@@ -5462,7 +5462,7 @@ EOF
       T3CODE_CREATE_UNCERTAIN=1
       T=$(fm_backend_t3code_thread_create "$T3CODE_PROJECT_ID" \
         "$(fm_backend_t3code_thread_title "$([ "$BASE_BRANCH_SET" = 1 ] && printf '%s' "$BASE_BRANCH")" "$W")" \
-        "$(git -C "$WT" branch --show-current 2>/dev/null || true)" "$WT" "$T3CODE_MODEL_SELECTION" "${T3CODE_THREAD_ID:-}") || {
+        "$(git -C "$WT" branch --show-current 2>/dev/null || true)" "$WT" "$T3CODE_MODEL_SELECTION") || {
           [ "$?" -eq 1 ] || T3CODE_CREATE_UNCERTAIN=0
           exit 1
         }

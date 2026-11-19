@@ -212,23 +212,6 @@ process.exit(live.length === 1 && live[0].id === process.env.FM_T3_ID ? 0 : 1);
   pass "fm-t3-mcp projects: matched by real path, deleted ones skipped, a failed create resolves to a registered project, project-read returns the default model"
 }
 
-test_launch_links_delegated_from() {
-  local project parent call
-  fresh_case launch-delegated
-  mcp project-ensure --root "$TMP_ROOT/proj"
-  project=$(field "$OUT" projectId)
-  t3_fake_set 'w.threads = { "thread-captain": { threadId: "thread-captain", projectId: "p", title: "Firstmate captain", status: "running", activeRunId: "run-c", archived: false, worktreePath: null, items: [], runs: [{ runId: "run-c", ordinal: 1, status: "running" }] } }'
-  mcp launch --project "$project" --title fm-a --model-selection "$SEL" --worktree "$WT" --delegated-from thread-captain
-  expect_code 0 "$RC" "a launch from the captain's thread: $ERR"
-  call=$(t3_fake_calls t3_thread_launch | tail -1)
-  assert_equals '{"environmentId":"env-fake-1","threadId":"thread-captain","title":"Firstmate captain"}' "$(field "$call" delegatedFrom)" "the crew links back to the captain's thread by its title"
-  mcp launch --project "$project" --title fm-b --model-selection "$SEL" --worktree "$WT" --delegated-from thread-gone
-  expect_code 0 "$RC" "an unreadable parent only drops the link: $ERR"
-  assert_contains "$ERR" "without a delegatedFrom link" "the dropped link is reported"
-  assert_equals "" "$(field "$(t3_fake_calls t3_thread_launch | tail -1)" delegatedFrom)" "no link to a thread that could not be read"
-  pass "fm-t3-mcp launch: --delegated-from links the crew to the captain's T3 thread, and never blocks the launch"
-}
-
 test_launch_binds_workspace() {
   local project call
   fresh_case launch
@@ -850,7 +833,6 @@ test_expiry_and_permissions
 test_revoked_credential_refused
 test_projects_by_real_path
 test_launch_binds_workspace
-test_launch_links_delegated_from
 test_launch_refusals
 test_send_state_capture_interrupt_archive
 test_thread_for_root

@@ -137,12 +137,11 @@ fm_backend_t3code_thread_title() {  # <base-branch> <name> -> title
 # read-back leaves the binding unproven even after requesting archive, and a
 # mis-bound thread may not read back archived. In each case spawn keeps the
 # lease; the helper owns those failure verdicts.
-fm_backend_t3code_thread_create() {  # <project-id> <title> <branch> <worktree> <model-selection-json> [delegated-from] -> thread id
-  local project_id=$1 title=$2 branch=$3 worktree=$4 selection=$5 delegated_from=${6:-} out rc
+fm_backend_t3code_thread_create() {  # <project-id> <title> <branch> <worktree> <model-selection-json> -> thread id
+  local project_id=$1 title=$2 branch=$3 worktree=$4 selection=$5 out rc
   local -a args=(launch --project "$project_id" --title "$title" --model-selection "$selection")
   [ -z "$branch" ] || args+=(--branch "$branch")
   [ -z "$worktree" ] || args+=(--worktree "$worktree")
-  [ -z "$delegated_from" ] || args+=(--delegated-from "$delegated_from")
   out=$(fm_backend_t3code_mcp "${args[@]}") && rc=0 || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   printf '%s' "$out" | fm_backend_t3code_json_get threadId || return 1
