@@ -121,6 +121,13 @@ process.stdout.write(JSON.stringify(d.selection));
 '
 }
 
+# fm_backend_t3code_thread_title <base-branch> <name>: a task thread's T3
+# title. A task on an explicit base branch leads with it, so T3 Code lists the
+# threads of one integration branch together ("ws/checkout · fm-api-fix").
+fm_backend_t3code_thread_title() {  # <base-branch> <name> -> title
+  if [ -n "$1" ]; then printf '%s · %s' "$1" "$2"; else printf '%s' "$2"; fi
+}
+
 # fm_backend_t3code_thread_create: launch an idle thread at full access and
 # print the id T3 assigned. A worktree launches with the existing_worktree
 # strategy; an empty one launches at the project's own root, which is a

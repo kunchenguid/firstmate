@@ -78,7 +78,9 @@ Every selected option is checked against the model's catalog descriptors.
 
 ### Capability gate
 
-Every call first runs `tools/list` and refuses unless T3 offers every tool in `REQUIRED_TOOLS` in `bin/fm-t3-mcp.mjs` (the thread, project, configuration, pending-request, and catalog tools) and `t3_environment_read`.
+Every call first runs `tools/list` and refuses unless T3 offers every tool in `REQUIRED_TOOLS` in `bin/fm-t3-mcp.mjs` (the thread, project, and catalog tools), one complete `TOOL_GENERATIONS` set, and `t3_environment_read`.
+The thread-configuration and pending-request tools come in two generations: `t3_thread_configure` and `t3_pending_request` with an action (T3 0.1.10), or the older `t3_thread_configuration` and `t3_pending_request_list`, `_read`, and `_respond`.
+Their arguments and replies match, and every later call uses the generation the server lists.
 It then refuses unless `t3_environment_read` reports the environment id recorded at sign-in, so a different T3 server behind the same address is never driven with this credential.
 A refusal names the missing tool or both environment ids, and spawn, control, and teardown stop before their first mutation.
 This gate replaces the HTTP dispatch probe and version floor of the pre-V2 transport, which T3 0.0.46 removed.
@@ -121,7 +123,11 @@ A `claude` task checks the leased worktree and refuses a tracked, existing, or s
 ## Current lifecycle and safety
 
 Spawn matches the project (the home, for a secondmate) by real path against T3's live projects, creating one titled `fm-<directory name>` with `t3_project_create` when absent, and leases the worktree for a worker.
-It then launches an idle thread with `t3_thread_launch` (the workspace strategy and branch, `full-access` runtime mode, the model selection) and reads the thread and its `t3_thread_configuration` back; a thread T3 bound to another workspace, runtime mode, instance, model, or option value is archived and the spawn refuses.
+It then launches an idle thread with `t3_thread_launch` (the workspace strategy and branch, `full-access` runtime mode, the model selection) and reads the thread and its configuration back; a thread T3 bound to another workspace, runtime mode, instance, model, or option value is archived and the spawn refuses.
+A task on an explicit `--base-branch` is titled `<base branch> · fm-<id>`, so T3 Code lists one integration branch's threads together; any other task is titled `fm-<id>`.
+When spawn runs inside a T3 thread, such as a captain that itself runs in T3 Code, T3 sets `T3CODE_THREAD_ID` and the launch carries T3's `delegatedFrom` link to that thread, so T3 Code shows the task as delegated from it.
+A parent thread that cannot be read only drops the link.
+T3 lists a thread under its parent's agents only when the parent agent creates it with `delegate_task`, which runs the child in the parent's own checkout, so a worktree task gets the link rather than that nesting.
 It installs the harness hooks, records metadata, installs the [per-directory harness environment](#per-directory-harness-environment), and sends the encoded brief (the charter, for a secondmate) as the thread's first message with `t3_thread_send`.
 Exact call payloads are owned by `bin/fm-t3-mcp.mjs` and `bin/backends/t3code.sh`.
 

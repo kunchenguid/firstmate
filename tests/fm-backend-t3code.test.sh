@@ -11,6 +11,8 @@ set -u
 # A fleet pane already carries GIT_CONFIG core.hooksPath. These cases set the
 # Git config they assert on themselves, so drop the inherited one before any git command.
 unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_PARAMETERS
+# A run from inside a T3 thread must not link the fake server's threads to it.
+unset T3CODE_THREAD_ID
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -2682,6 +2684,15 @@ test_teardown_keeps_tracked_claude_local_md() {
 }
 
 # The watcher accepts a fractional poll interval, so the T3 event wait does too.
+test_thread_title_leads_with_base_branch() {
+  t3_case thread-title
+  [ "$(t3_run 'fm_backend_t3code_thread_title "ws/checkout" fm-api-fix')" = "ws/checkout · fm-api-fix" ] \
+    || fail "a task on an explicit base branch must lead its thread title with that branch"
+  [ "$(t3_run 'fm_backend_t3code_thread_title "" fm-api-fix')" = "fm-api-fix" ] \
+    || fail "a task without an explicit base branch keeps its plain name"
+  pass "t3code: a task thread's title leads with its explicit base branch so one branch's threads list together"
+}
+
 test_fractional_poll_event_wait() {
   local state rec rc
   t3_case push-fractional running
@@ -2820,5 +2831,6 @@ test_nested_t3_secondmate_home_reaped_before_removal
 test_uncertain_launch_message_keeps_task_record
 test_spawn_rejected_lease_is_neither_cleaned_nor_returned
 test_teardown_keeps_tracked_claude_local_md
+test_thread_title_leads_with_base_branch
 test_fractional_poll_event_wait
 test_housekeeping_removes_the_iterated_stale_marker

@@ -2825,6 +2825,17 @@ FM_T3CODE_PR_TOOLS_LIVE=1 FM_CONFIG_OVERRIDE=<home>/config bin/fm-test-run.sh te
 ok - t3code live: T3 0.0.46-nightly.20261010.2935 with 2.1.296 (Claude Code) (claudeAgent claude-haiku-5-5) ran link_pull_request, list_thread_pull_requests, and unlink_pull_request in a Claude thread without a crash
 ```
 
+### Stable 0.1.10
+
+T3 0.1.10 replaced `t3_thread_configuration` and the three `t3_pending_request_*` tools with `t3_thread_configure` and `t3_pending_request` (action `list`, `read`, or `respond`), keeping their arguments and replies, so the earlier gate refused every 0.1.10 server.
+On 2026-11-19 the sign-in and the live transport guard passed against `t3 v0.1.10` on Linux x64 once the gate accepted either generation:
+
+```text
+ok - t3code live transport: T3 0.1.10 environment <id> passes the gate (telemetry=on)
+```
+
+That server ran with telemetry on, which `status` reports as a warning.
+
 ### Live transport guard
 
 The token-free guard checks the gate, the project catalog, a typed missing-thread read, and the supervisor lookup against the server the configured credential names, and changes nothing there.
