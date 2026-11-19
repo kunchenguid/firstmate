@@ -35,6 +35,8 @@
 #   <task>.inbox/.busy-state   consecutive busy deferrals: "<msg>\t<count>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
+#   <task>.inbox/.owed-state   doorbells still owed behind that escalation:
+#                              "<msg>\t<count>\t<epoch>" (see "Owed ring")
 #   <task>.inbox/.retry-ring   name of a fire-and-forget record still owed its
 #                              one retry ring (fm_task_inbox_mark_retry)
 #
@@ -106,6 +108,23 @@
 # writing the deduplication marker: normal polls surface a message once, while a
 # crash or marker failure may produce a rare duplicate rather than silently lose
 # a wake.
+#
+# Owed ring (the `owed` due action): an escalation hands ONE record to recovery
+# and surfaces the inbox once; it must not end the doorbell for the records
+# behind it. While the escalated record stays unhandled, the newest unhandled
+# record past grace is still owed its doorbell, and so is the escalated record
+# itself when the caller marked it at a stuck-busy escalation, which types no
+# doorbell at all (fm_task_inbox_mark_owed). A record escalated for any other
+# reason - a spent ring budget, unwritable bookkeeping, a dead endpoint - is
+# never rung again on its own account. The caller
+# rings only an idle, live endpoint; a busy or dead one is skipped at no cost.
+# Owed rings pace by FM_TASK_INBOX_GRACE_SECS, spend at most
+# FM_TASK_INBOX_RING_MAX attempts per record in .owed-state, and never escalate
+# or wake: the inbox already surfaced. Without this, one stale record silenced
+# the ladder for the whole inbox, so a later request whose first ring was
+# swallowed sat unread until some unrelated send rang the inbox again
+# (2026-11-18: a captain refresh request unread for 13 minutes while its reply
+# guard spent its recovery and its escalation).
 #
 # Retry ring (fm_task_inbox_mark_retry): only while config/wait-no-turns is
 # present. A fire-and-forget record never enters the ladder, but when
@@ -708,10 +727,12 @@ fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
 #   ring <record-path>        one doorbell re-ring is due
 #   escalate <record-path> <count>   attempt budget spent; surface as stale
 #   retry <record-path>       a fire-and-forget record's one retry ring is due
+#   owed <record-path>        the tracked record already escalated and a
+#                             doorbell is still owed behind it (see the header)
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last f any=0
+  local dir oldest base now grace max ladder rec_base count last f any=0 newest=''
   dir=$(fm_task_inbox_dir "$1" "$2")
   grace=$(fm_task_inbox_grace_secs)
   # The ladder tracks the record first in reading order among those past grace:
@@ -724,11 +745,11 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
     fm_task_inbox_is_fire_and_forget "$f" && continue
     any=1
     [ "$(fm_path_age "$f")" -ge "$grace" ] || continue
-    oldest=$f
-    break
+    [ -n "$oldest" ] || oldest=$f
+    newest=$f
   done < <(fm_task_inbox_list_ordered "$1" "$2")
   if [ "$any" = 0 ]; then
-    rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.busy-state" 2>/dev/null || true
+    rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.busy-state" "$dir/.owed-state" 2>/dev/null || true
     # The one retry ring exists only while config/wait-no-turns is present.
     # Absent, a mark is left untouched and the inbox stays quiet, as before.
     if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
@@ -760,11 +781,33 @@ EOF
   fi
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  max=$(fm_task_inbox_ring_max)
   if [ "$(cat "$dir/.escalated" 2>/dev/null || true)" = "$base" ]; then
-    printf 'quiet'
+    # Recovery owns the escalated record, but a doorbell is still owed to the
+    # newest record behind it, and to the record itself when it was marked.
+    count=0
+    last=0
+    ladder=$(cat "$dir/.owed-state" 2>/dev/null || true)
+    IFS=$(printf '\t') read -r rec_base count last <<EOF
+$ladder
+EOF
+    if [ "$newest" = "$oldest" ] && [ "$rec_base" != "$base" ]; then
+      printf 'quiet'
+      return 0
+    fi
+    if [ "$rec_base" != "${newest##*/}" ]; then
+      count=0
+      last=0
+    fi
+    case "$count" in ''|*[!0-9]*) count=0 ;; esac
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    if [ "$count" -ge "$max" ] || [ "$(($(date +%s) - last))" -lt "$grace" ]; then
+      printf 'quiet'
+      return 0
+    fi
+    printf 'owed %s' "$newest"
     return 0
   fi
-  max=$(fm_task_inbox_ring_max)
   if [ "$count" -ge "$max" ]; then
     printf 'escalate %s %s' "$oldest" "$count"
     return 0
@@ -797,6 +840,37 @@ EOF
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   [ -d "$dir" ] || return 0
   if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
+    [ -d "$dir" ] || return 0
+    return 1
+  fi
+}
+
+# Owe an escalated record its own doorbell: the caller marks a record whose
+# escalation typed none (stuck-busy), so the first idle poll still rings it.
+# Best-effort like fm_task_inbox_mark_retry: an unwritable mark only leaves the
+# record to recovery, exactly as before.
+fm_task_inbox_mark_owed() {  # <state-dir> <task-id> <record-path>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  { printf '%s\t0\t0\n' "${3##*/}" > "$dir/.owed-state"; } 2>/dev/null
+}
+
+# Advance the owed-ring budget after one owed doorbell attempt, whatever its
+# result, so a blocked composer or an unreadable pane cannot be rung forever.
+# Same failure contract as fm_task_inbox_record_ring.
+fm_task_inbox_record_owed() {  # <state-dir> <task-id> <record-path>
+  local dir base ladder rec_base count last
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  base=${3##*/}
+  count=0
+  ladder=$(cat "$dir/.owed-state" 2>/dev/null || true)
+  IFS=$(printf '\t') read -r rec_base count last <<EOF
+$ladder
+EOF
+  [ "$rec_base" = "$base" ] || count=0
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  [ -d "$dir" ] || return 0
+  if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.owed-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi

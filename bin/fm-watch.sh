@@ -645,7 +645,7 @@ inbox_steer_busy() {  # <window> <backend> <task> <tail40>
 # Runs for secondmates too: their pane-staleness exemption is about quiet panes
 # being healthy, while an unacknowledged instruction can still be a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state stuck_busy=0
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -664,9 +664,11 @@ inbox_steer_check() {  # <window> <task>
   agent_state=$(fm_backend_agent_state "$backend" "$w" 2>/dev/null || true)
   case "$agent_state" in
     dead|missing)
+      # An owed ring sits behind an escalation that already surfaced this
+      # inbox, so an unavailable endpoint is skipped rather than surfaced again.
       if [ "$verb" = retry ]; then
         fm_task_inbox_clear_retry "$STATE" "$task" "$rec" || true
-      else
+      elif [ "$verb" != owed ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
       fi
       return 0
@@ -674,6 +676,23 @@ inbox_steer_check() {  # <window> <task>
   esac
   watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
   tail40=$WATCHER_CAPTURE
+  if [ "$verb" = owed ]; then
+    # Owed doorbell behind an escalated record (bin/fm-task-inbox-lib.sh "Owed
+    # ring"): typed only into an idle pane, budgeted by the library, and never
+    # a second escalation. A busy pane costs nothing and is retried next poll.
+    ! inbox_steer_busy "$w" "$backend" "$task" "$tail40" || return 0
+    ring_rc=0
+    FM_COMPOSER_HARNESS=$(window_harness "$w") \
+      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+    [ "$ring_rc" -ne 3 ] || return 0
+    if ! fm_task_inbox_record_owed "$STATE" "$task" "$rec" && [ -f "$rec" ] && [ -d "${rec%/*}" ]; then
+      reason="stale: $w (steering-inbox ladder bookkeeping unwritable: ${rec%/*}/.owed-state cannot be written while $rec stays unhandled, so its doorbell would ring on every poll - inspect the inbox directory)"
+      fm_wake_append stale "$w" "$reason" || exit 1
+      wake "$reason"
+    fi
+    triage_log "steer-inbox owed ring: $task ${rec##*/} result=$ring_rc"
+    return 0
+  fi
   if inbox_steer_busy "$w" "$backend" "$task" "$tail40"; then
     [ "$verb" != retry ] || return 0
     if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
@@ -681,6 +700,7 @@ inbox_steer_check() {  # <window> <task>
       reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory)"
     elif [ "$count" -ge "$(fm_task_inbox_busy_max)" ]; then
       reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells; $rec stays unhandled and no doorbell was typed; inspect the worker)"
+      stuck_busy=1
     else
       return 0
     fi
@@ -733,6 +753,9 @@ inbox_steer_check() {  # <window> <task>
         echo "error: stale wake was queued for $task but its inbox escalation marker could not be written" >&2
         exit 1
       fi
+      # A stuck-busy escalation typed no doorbell, so the record stays owed one
+      # at the first idle poll (bin/fm-task-inbox-lib.sh "Owed ring").
+      [ "$stuck_busy" = 0 ] || fm_task_inbox_mark_owed "$STATE" "$task" "$rec" || true
       wake "$reason"
       ;;
   esac

@@ -842,6 +842,66 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+# Incident 2026-11-18 (data/secondmate-board-refresh-reply/report.md): an old
+# record in a secondmate inbox had escalated and stayed unhandled, and from
+# then on the ladder answered `quiet` for the whole inbox, so a captain refresh
+# request whose first doorbell was swallowed sat unread for 13 minutes and its
+# reply guard spent its recovery and its escalation before the mate had read
+# anything. An escalation hands ONE record to recovery; it must not end the
+# doorbell for every record behind it.
+test_escalated_head_never_starves_newer_records() {
+  local state head rec newer action
+  state="$TMP_ROOT/owed/state"; mkdir -p "$state"
+  head=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "old order")
+  age_path "$head"
+  printf '001.msg\t3\t100\n' > "$state/t1.inbox/.ring-state"
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$head"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "refresh the board")
+  # Inside its own grace the newer record is still covered by its first ring.
+  action=$(FM_TASK_INBOX_GRACE_SECS=3600 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a fresh record behind an escalated head should wait out its grace, got: $action"
+  age_path "$rec"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "owed $rec" ] \
+    || fail "an aged record behind an escalated head is owed a doorbell, got: $action"
+  # The owed ring paces by grace like the ladder does.
+  inbox_lib "$state" fm_task_inbox_record_owed "$state" t1 "$rec"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "an owed ring inside its spacing should be quiet, got: $action"
+  printf '002.msg\t1\t100\n' > "$state/t1.inbox/.owed-state"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "owed $rec" ] || fail "an aged owed ring should be due again, got: $action"
+  # The budget is bounded and never becomes a second escalation.
+  printf '002.msg\t3\t100\n' > "$state/t1.inbox/.owed-state"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a spent owed budget should go quiet without escalating, got: $action"
+  # A still newer record is owed its own doorbells.
+  newer=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "repost required")
+  age_path "$newer"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "owed $newer" ] || fail "a newer record should start a fresh owed budget, got: $action"
+  # Handling the escalated head returns the rest to the ordinary ladder.
+  mv "$head" "$state/t1.inbox/handled/"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $rec" ] || fail "the ladder should resume once the escalated head is handled, got: $action"
+  mv "$rec" "$newer" "$state/t1.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_due_action "$state" t1 >/dev/null
+  [ ! -e "$state/t1.inbox/.owed-state" ] || fail "an empty inbox kept the owed-ring bookkeeping"
+
+  # A head marked at a stuck-busy escalation, which typed no doorbell, is
+  # itself still owed one; a head escalated any other way stays with recovery.
+  state="$TMP_ROOT/owed-head/state"; mkdir -p "$state"
+  head=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "never rung")
+  age_path "$head"
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$head"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "an unmarked escalated head should stay quiet for recovery, got: $action"
+  inbox_lib "$state" fm_task_inbox_mark_owed "$state" t1 "$head"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "owed $head" ] || fail "a head marked at a stuck-busy escalation is owed a doorbell, got: $action"
+  pass "inbox: an escalated head keeps newer records and a stuck-busy head owed a bounded doorbell"
+}
+
 # Priority headers: records carry an optional priority=captain|main|notice
 # header (absent means main, so every legacy record keeps its meaning), and the
 # ordered listing reads captain, then main (with legacy), then notice, numeric
@@ -1167,6 +1227,40 @@ test_watcher_retry_ignores_busy_reset_failure() {
   [ ! -e "$dir/state/t1.inbox/.escalated" ] || fail "fire-and-forget retry entered escalation"
   [ -f "$rec" ] || fail "fire-and-forget retry lost its instruction"
   pass "watcher: unremovable obsolete busy state does not block or escalate a fire-and-forget retry"
+}
+
+# The incident replayed through the real watcher check: the mate is busy, an
+# old order escalates stuck-busy with no doorbell typed, and the captain's
+# refresh request arrives behind it. The request must be rung the moment the
+# mate is idle, without a second wake to firstmate and within a bounded budget.
+test_watcher_rings_request_behind_escalated_record() {
+  local dir rec check
+  dir=$(busy_case owed-behind-escalated)
+  busy_steer_check "$dir"
+  busy_steer_check "$dir"
+  grep -q 'stuck-busy' "$dir/state/.wake-queue" || fail "the old order did not escalate stuck-busy"
+  [ ! -s "$dir/send.log" ] || fail "the stuck-busy escalation typed into the pane"
+  rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "captain pressed refresh")
+  age_path "$rec"
+  busy_steer_check "$dir"
+  [ ! -s "$dir/send.log" ] || fail "an owed doorbell was typed into a busy pane"
+  [ "$(cut -f1 "$dir/state/t1.inbox/.owed-state")" = 001.msg ] \
+    || fail "the stuck-busy escalation did not leave its never-rung record owed a doorbell"
+  busy_steer_check "$dir" "$(idle_capture "$dir")"
+  [ "$(grep -cF 'Firstmate instruction waiting' "$dir/send.log")" = 1 ] \
+    || fail "the request behind an escalated record was never rung on an idle pane:"$'\n'"$(cat "$dir/send.log" 2>/dev/null)"
+  for check in 1 2 3 4; do
+    busy_steer_check "$dir" "$(idle_capture "$dir")"
+  done
+  [ "$(grep -cF 'Firstmate instruction waiting' "$dir/send.log")" = 3 ] \
+    || fail "owed doorbells are not bounded by the ring budget:"$'\n'"$(cat "$dir/send.log")"
+  [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] \
+    || fail "an owed doorbell woke firstmate again:"$'\n'"$(cat "$dir/state/.wake-queue")"
+  FM_FAKE_TMUX_AGENT=zsh busy_steer_check "$dir" "$(idle_capture "$dir")"
+  [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] \
+    || fail "an owed doorbell on a dead pane woke firstmate again"
+  [ -f "$rec" ] && [ -f "$dir/state/t1.inbox/001.msg" ] || fail "an owed doorbell lost an unhandled instruction"
+  pass "watcher: a request behind an escalated record is rung once the pane is idle, bounded, with no second wake"
 }
 
 test_watcher_successor_escalation_stays_quiet() {
@@ -1495,6 +1589,7 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
+test_escalated_head_never_starves_newer_records
 test_priority_headers_and_ordering
 test_notice_bundling_collapses_same_kind
 test_notice_bundling_skips_handled_and_other_kinds
@@ -1516,6 +1611,7 @@ test_watcher_busy_limit_validation invalid 2
 test_watcher_busy_limit_validation 1 1
 test_watcher_busy_limit_validation 3 3
 test_watcher_retry_ignores_busy_reset_failure
+test_watcher_rings_request_behind_escalated_record
 test_watcher_successor_escalation_stays_quiet busy
 test_watcher_successor_escalation_stays_quiet dead
 test_watcher_successor_escalation_stays_quiet missing
