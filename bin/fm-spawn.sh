@@ -429,7 +429,7 @@
 #   and never launches the worker raw. The task binds (spawn_sandbox_wrap) name
 #   only the task's own status, turn-ended, steering inbox, data directory,
 #   read-only launch record, hooks, busy extension and the code root's bin/,
-#   .agents/, .omp/ and .claude/mods/, its private temp root, and the busy relay
+#   .agents/ and .omp/, its private temp root, and the busy relay
 #   spool state/<id>.sbx/events; never state/, the code root itself, or
 #   FM_HOME. The omp busy extension drops edge files into that spool and
 #   bin/fm-sandbox-relay.sh, started by the wrapper as --host-helper, applies
@@ -4208,7 +4208,7 @@ spawn_sandbox_resolve() {
 # task's binds. Everything the worker may touch outside its worktree is named
 # here and nowhere else: its own status and turn-ended files, its steering inbox,
 # its data directory, the read-only launch record, hooks, busy extension and
-# the code root's bin/, .agents/, .omp/ and .claude/mods/ (never the root
+# the code root's bin/, .agents/ and .omp/ (never the root
 # itself, which is FM_HOME when FM_HOME is unset), its private temp root, and
 # the relay spool. The read-only code binds come first so a wrapper that applies
 # binds in order never shadows a writable task bind. Never state/ and never
@@ -4226,7 +4226,7 @@ spawn_sandbox_wrap() {
     return 1
   }
   binds=(--profile "$SANDBOX_PROFILE" --worktree "$WT")
-  for path in bin .agents .omp .claude/mods; do
+  for path in bin .agents .omp; do
     [ ! -e "$root_real/$path" ] || binds+=(--ro "$root_real/$path")
   done
   binds+=(--rw-create "$STATE_REAL/$ID.status" --rw-create "$TURNEND")

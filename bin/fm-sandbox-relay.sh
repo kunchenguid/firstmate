@@ -149,7 +149,7 @@ relay_one() {
 # symlink in between the check and the read.
 relay_pass() {
   local f held n=0
-  (umask 077 && mkdir -p "$INFLIGHT") || return 0
+  [ -d "$INFLIGHT" ] || return 0
   # Names sort in write order (zero-padded sequence), so edges apply in order.
   for f in "$EVENTS"/*; do
     [ -e "$f" ] || [ -L "$f" ] || continue
