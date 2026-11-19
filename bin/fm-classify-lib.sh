@@ -3452,21 +3452,34 @@ pr_forge_checks_green() {  # <pr-url>
   ' >/dev/null 2>&1
 }
 
+# The ONE owner of the red-rollup predicate: an OPEN pull request whose forge
+# rollup array holds at least one red check - a CheckRun COMPLETED as FAILURE,
+# TIMED_OUT or CANCELLED, or a status context in FAILURE or ERROR. Drafts count:
+# a red draft with nobody driving it is as unpicked as a red ready PR, and the
+# pickup ladder never licenses a merge. Required-ness is not separable from the
+# rollup without a second protected-branch read, so EVERY red check counts -
+# wider than the required set, never narrower. Both red readers compose this
+# predicate - pr_forge_checks_red on one `gh pr view` payload, and
+# pr_forge_branch_red on each element of one `gh pr list` payload - so a
+# branch-matched PR and a pr=-named PR can never disagree on what red is.
+FM_PR_RED_ROLLUP_JQ='type == "object" and .state == "OPEN"
+    and (.statusCheckRollup | type) == "array"
+    and any(.statusCheckRollup[];
+      if .__typename == "CheckRun" then
+        .status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
+      else (.state == "FAILURE" or .state == "ERROR") end)'
+
 # 0 when a GitHub pull request is OPEN and at least one check the forge reports
-# on its current head is red: a check run COMPLETED as FAILURE, TIMED_OUT or
-# CANCELLED, or a status context in FAILURE or ERROR. The red twin of
-# pr_forge_checks_green above, on the same single bounded `gh` read and the same
-# forge-owned current-head rollup, so a re-run check replaces the run it
-# superseded and no supersession rule is needed here either. A draft counts: a
-# red draft with nobody driving it is as unpicked as a red ready PR, and the
-# pickup ladder never licenses a merge the way the green twin does. Required-ness
-# is not separable from the rollup without a second protected-branch read, so
-# EVERY red check counts - wider than the required set, never narrower. Return
-# codes split what the caller must not conflate: 1 when the forge ANSWERED and
-# the PR is not red (green, pending, closed, merged - its episode is over), 2
-# when there is no answer to trust (another forge, a timed-out or failed read,
-# malformed json) - a shape the caller keeps silent, never a false alarm and
-# never a forgiven clock. Needs bin/fm-pr-lib.sh sourced, as bin/fm-watch.sh does.
+# on its current head is red, per the shared predicate above (FM_PR_RED_ROLLUP_JQ
+# owns what red is). The single-PR twin of pr_forge_branch_red below, on the
+# same single bounded `gh` read and the same forge-owned current-head rollup,
+# so a re-run check replaces the run it superseded and no supersession rule is
+# needed here either. Return codes split what the caller must not conflate: 1
+# when the forge ANSWERED and the PR is not red (green, pending, closed, merged
+# - its episode is over), 2 when there is no answer to trust (another forge, a
+# timed-out or failed read, malformed json) - a shape the caller keeps silent,
+# never a false alarm and never a forgiven clock. Needs bin/fm-pr-lib.sh
+# sourced, as bin/fm-watch.sh does.
 pr_forge_checks_red() {  # <pr-url>
   local url=$1 json secs=${FM_FORGE_READ_SECS:-15} st
   fm_pr_url_parse "$url" 2>/dev/null && [ "$FM_PR_PROVIDER" = github ] || return 2
@@ -3474,19 +3487,113 @@ pr_forge_checks_red() {  # <pr-url>
   json=$(fm_pr_github_host_export "$FM_PR_HOST"; fm_run_timed "$secs" gh pr view "$url" --json state,statusCheckRollup 2>/dev/null) || return 2
   [ -n "$json" ] || return 2
   st=0
-  printf '%s' "$json" | jq -e '
-    type == "object" and .state == "OPEN"
-    and (.statusCheckRollup | type) == "array"
-    and any(.statusCheckRollup[];
-      if .__typename == "CheckRun" then
-        .status == "COMPLETED" and (.conclusion == "FAILURE" or .conclusion == "TIMED_OUT" or .conclusion == "CANCELLED")
-      else (.state == "FAILURE" or .state == "ERROR") end)
-  ' >/dev/null 2>&1 || st=$?
+  printf '%s' "$json" | jq -e "$FM_PR_RED_ROLLUP_JQ" >/dev/null 2>&1 || st=$?
   [ "$st" -eq 0 ] && return 0
   # jq -e exits 1 when it answered "not red" and >1 when it could not read
   # the answer; only an answer of not-red clears the PR.
   [ "$st" -eq 1 ] || return 2
   return 1
+}
+
+# --- branch discovery for lanes with no pr= in their meta -------------------
+# A no-mistakes run whose PR step was skipped leaves a task with a branch and
+# no pr= identity, so the pickup scan cannot name its PR from the meta alone.
+# pr_forge_branch_red resolves it the other way round: ONE bounded
+# `gh pr list --state open --json url,headRefName,state,statusCheckRollup` read
+# PER REPO PER SCAN (cached in _FM_PR_BRANCH_LISTS, so every task on the same
+# repo shares the answer and a failing repo is never retried inside one scan;
+# pr_forge_branch_cache_clear starts a new scan), matched on the head branch,
+# with the red verdict composed from the same FM_PR_RED_ROLLUP_JQ predicate the
+# single-PR twin uses. Return codes carry the same three states: 0 with
+# FM_PR_BRANCH_URL set when the branch has an OPEN red PR (drafts included), 1
+# when the forge ANSWERED and the branch has no open red PR (no PR, green,
+# pending - an episode this scan cannot start), 2 when there is no answer to
+# trust (unreadable repo, failed or timed-out read, malformed payload) - the
+# caller freezes, never a false alarm and never a forgiven clock. A repo with
+# more open PRs than FM_RED_PR_PICKUP_LIST_LIMIT (default 100) answers only for
+# the newest ones, so raise the knob before a monorepo outgrows it. Needs
+# bin/fm-pr-lib.sh sourced, as bin/fm-watch.sh does.
+_FM_PR_BRANCH_LISTS=
+pr_forge_branch_cache_clear() {
+  _FM_PR_BRANCH_LISTS=
+}
+
+pr_forge_branch_red() {  # <host> <owner/repo> <branch>
+  local host=$1 slug=$2 branch=$3 key json secs limit prog verdict
+  local LC_ALL=C
+  FM_PR_BRANCH_URL=
+  case "$host" in ''|-*|*[!a-zA-Z0-9.-]*) return 2 ;; esac
+  [ "${#host}" -le 253 ] || return 2
+  case "$slug" in ''|-*|*[!A-Za-z0-9._/-]*|*//*) return 2 ;; esac
+  case "$branch" in ''|-*|*[!A-Za-z0-9._/~+-]*) return 2 ;; esac
+  key=$host/$slug
+  # Lookup without an unquoted heredoc: the cached line is forge text, and a
+  # hostile branch name inside it must never be expanded by the shell. A raw
+  # tab cannot appear inside gh's one-line json (tabs are escaped to two
+  # bytes), so `key TAB ... NL` is an unambiguous record framing.
+  json=${_FM_PR_BRANCH_LISTS#*"$key"$'\t'}
+  [ "$json" != "$_FM_PR_BRANCH_LISTS" ] || json=
+  json=${json%%$'\n'*}
+  if [ -z "$json" ]; then
+    secs=${FM_FORGE_READ_SECS:-15}
+    case "$secs" in ''|0*|*[!0-9]*) secs=15 ;; esac
+    limit=${FM_RED_PR_PICKUP_LIST_LIMIT:-}
+    case "$limit" in ''|0*|*[!0-9]*|????*) limit=100 ;; esac
+    json=$(fm_pr_github_host_export "$host"; fm_run_timed "$secs" gh pr list --repo "$slug" --state open --limit "$limit" --json url,headRefName,state,statusCheckRollup 2>/dev/null) || json=
+    # The cache keeps even a failed or empty read (the __unreadable__ sentinel),
+    # so one unreadable repo costs exactly one bounded call per scan, never one
+    # per task on it. A `gh` answer is one line; anything multi-line would
+    # corrupt the cache rows, and the jq verdict below then reads unreadable,
+    # which freezes rather than lies.
+    [ -n "$json" ] || json=__unreadable__
+    _FM_PR_BRANCH_LISTS="$_FM_PR_BRANCH_LISTS$key"$'\t'"$json"$'\n'
+  fi
+  [ "$json" != __unreadable__ ] || return 2
+  # shellcheck disable=SC2016  # jq program text: $b is jq's --arg, not shell.
+  prog='
+    if type != "array" then "__bad__"
+    else
+      [ .[] | select((.headRefName // "") == $b) ] as $m
+      | if ($m | length) == 0 then "none"
+        else $m[0] as $pr
+        | if ($pr | RED_PREDICATE) then ($pr.url // "") else "notred" end
+        end
+    end'
+  prog=${prog//RED_PREDICATE/$FM_PR_RED_ROLLUP_JQ}
+  verdict=$(printf '%s' "$json" | jq -r --arg b "$branch" "$prog" 2>/dev/null) || verdict=
+  case "$verdict" in
+    none|notred) return 1 ;;
+    ''|__bad__) return 2 ;;
+    *$'\n'*) return 2 ;;
+    http://*|https://*) # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
+      FM_PR_BRANCH_URL=$verdict
+      return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Parse a git origin URL into the GitHub host and owner/repo slug
+# ("github.com o/r"), lowercasing only the host, or fail. Accepts the https
+# and ssh spellings a clone records (https://h/o/r[.git], ssh://git@h:o/r.git,
+# git@h:o/r.git, git://h/o/r); a path that is not exactly owner/repo - deeper
+# nesting, a port-only suffix, an empty component - fails rather than guessing,
+# because a wrong repo would silently blind the branch discovery above.
+pr_repo_slug_from_origin() {  # <origin-url>
+  local u=${1-} host rest owner repo
+  local LC_ALL=C
+  case "$u" in ''|*$'\n'*|*$'\t'*) return 1 ;; esac
+  u=${u#ssh://}; u=${u#http://}; u=${u#https://}; u=${u#git+ssh://}; u=${u#git://}; u=${u#git@}
+  case "$u" in *.git) u=${u%.git} ;; esac
+  host=${u%%[/:]*}
+  rest=${u#*[/:]}
+  [ "$rest" != "$u" ] || return 1  # a host/repo separator must exist
+  case "$host" in ''|*[!a-zA-Z0-9.-]*) return 1 ;; esac
+  case "$rest" in */*/*|''|.|..|*/|./*|../*|*/.|*/..) return 1 ;; esac
+  owner=${rest%%/*}
+  repo=${rest#*/}
+  [ -n "$owner" ] && [ -n "$repo" ] || return 1
+  case "$owner$repo" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s %s/%s\n' "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" "$owner" "$repo"
 }
 
 # --- red-PR pickup record ----------------------------------------------------

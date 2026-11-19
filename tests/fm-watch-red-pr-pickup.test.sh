@@ -27,13 +27,20 @@ chmod +x "$STUB"
 export FM_CREW_STATE_BIN="$STUB"
 
 # The forge: `gh pr view <url> --json ...` prints the payload kept in
-# <state>/.gh-json and records every call, so a test can prove when the forge
-# was and was not read. A missing payload is a failed read.
+# <state>/.gh-json and `gh pr list --repo ... --json ...` the one kept in
+# <state>/.gh-list-json (the branch-discovery read), recording every call so a
+# test can prove when the forge was and was not read and how many bounded
+# reads a scan spent. A missing payload is a failed read.
 cat > "$TMP_ROOT/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_STATE_OVERRIDE/.gh-calls"
-[ -f "$FM_STATE_OVERRIDE/.gh-json" ] || exit 1
-cat "$FM_STATE_OVERRIDE/.gh-json"
+case "$1 $2" in
+  'pr view') [ -f "$FM_STATE_OVERRIDE/.gh-json" ] || exit 1
+    cat "$FM_STATE_OVERRIDE/.gh-json"; exit 0 ;;
+  'pr list') [ -f "$FM_STATE_OVERRIDE/.gh-list-json" ] || exit 1
+    cat "$FM_STATE_OVERRIDE/.gh-list-json"; exit 0 ;;
+esac
+exit 1
 EOF
 chmod +x "$TMP_ROOT/bin/gh"
 export PATH="$TMP_ROOT/bin:$PATH"
@@ -74,6 +81,38 @@ lane() {  # <task> <crew-state line> [pr-url] [kind]
 forge() {  # <json>
   printf '%s\n' "$1" > "$STATE/.gh-json"
 }
+
+# Branch-discovery lanes: a task with NO pr= (a no-mistakes run whose PR step
+# was skipped) whose PR must be found by its task branch on the origin named
+# by the project clone. The clone is a real git repo with only an origin
+# remote, exactly what red_pr_task_repo reads.
+PROJECT="$TMP_ROOT/project-clone"
+make_origin_repo() {
+  rm -rf -- "$1"
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" remote add origin "$2"
+}
+
+lane_branch() {  # <task> <crew-state line> [branch] - no pr=, project clone as repo
+  printf 'working [at=1000]: on it\n' > "$STATE/$1.status"
+  {
+    printf 'worktree=%s\n' "$TMP_ROOT"
+    printf 'project=%s\n' "$PROJECT"
+    [ -z "${3:-}" ] || printf 'branch=%s\n' "$3"
+  } > "$STATE/$1.meta"
+  printf '%s\n' "$2" > "$STATE/$1.crew-state-line"
+}
+
+listforge() {  # <json> - the open-PR list the branch discovery reads
+  printf '%s\n' "$1" > "$STATE/.gh-list-json"
+}
+
+PR3=https://github.com/o/r/pull/21
+PRKEY3=https___github.com_o_r_pull_21
+DONE_NOIDENT="state: done · source: run-step · run passed: PR state unknown (no PR identity)"
+LIST_LANDED_RED='[{"url":"https://github.com/o/r/pull/21","headRefName":"fm/landed","state":"OPEN","isDraft":true,"statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE"}]}]'
+LIST_ONE_RED_DRAFT='[{"url":"https://github.com/o/r/pull/21","headRefName":"fm/taska","state":"OPEN","isDraft":true,"statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE"}]},{"url":"https://github.com/o/r/pull/22","headRefName":"fm/taskb","state":"OPEN","isDraft":false,"statusCheckRollup":[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}]'
 
 count_wakes() {
   if [ -f "$FM_WAKE_QUEUE" ]; then wc -l < "$FM_WAKE_QUEUE" | tr -d ' '; else printf 0; fi
@@ -231,7 +270,7 @@ test_record_silences_and_stale_reescalates() {
 
 test_scope_and_episode_reset() {
   reset_case
-  lane done "$DONE" https://github.com/o/r/pull/9
+  lane donelane "$DONE" https://github.com/o/r/pull/9
   lane paused 'state: paused · source: status-log · paused: waiting [until 2030-01-01T00:00Z]' https://github.com/o/r/pull/10
   lane worker "$PARKED" "$PR"
   lane working "$WORKING" "$PR2"
@@ -373,7 +412,112 @@ test_watcher_loop() {
   pass "the actual watcher wakes and exits on an overdue red PR, keeping the clock across a restart"
 }
 
+test_branch_discovery_no_pr_meta() {
+  reset_case
+  make_origin_repo "$PROJECT" https://github.com/o/r.git
+  lane_branch taska "$PARKED"            # no branch= -> default fm/<task-id>
+  lane_branch taskb "$WORKING" fm/taskb  # recorded branch
+  printf 'worktree=%s\n' "$TMP_ROOT" > "$STATE/norepo.meta"  # no repo identity
+  printf '%s\n' "$WORKING" > "$STATE/norepo.crew-state-line"
+  listforge "$LIST_ONE_RED_DRAFT"
+  red_pr_pickup_tick 1000
+  [ -f "$STATE/.red-pr-pickups" ] || fail "a red branch-matched PR got no episode row"
+  awk -F '\t' -v k="$PRKEY3" '$1==k && $2==1000 && $3==1000 && $6=="github.com/o/r" {found=1} END { exit found?0:1 }' \
+    "$STATE/.red-pr-pickups" || fail "the discovered draft PR row lacks first red or repo column"
+  [ "$(awk 'END { print NR }' "$STATE/.red-pr-pickups")" = 1 ] \
+    || fail "taska and taskb did not share the single discovered PR"
+  [ "$(grep -c 'pr list' "$STATE/.gh-calls")" = 1 ] \
+    || fail "two tasks on one repo did not share one bounded list read"
+  [ "$(grep -c 'pr view' "$STATE/.gh-calls")" = 0 ] \
+    || fail "a branch-discovered red PR was re-read through pr view"
+  [ -f "$STATE/.red-pr-pickups-skip" ] || fail "a task with no repo identity was skipped without a reason"
+  grep -q "^norepo"$'\t\t'"no forge repository identity" "$STATE/.red-pr-pickups-skip" \
+    || fail "the skip reason did not name the task and its cause"
+  grep -q "^epoch=1000$" "$STATE/.red-pr-pickups-skip" || fail "the skip file does not carry the scan epoch"
+  if [ -f "$STATE/.stub-calls" ] && grep -q '^norepo ' "$STATE/.stub-calls"; then
+    fail "a skipped task paid a crew-state read"
+  fi
+  red_pr_pickup_tick 1300
+  [ "$(count_wakes)" = 1 ] || fail "the discovered red PR did not wake at the threshold"
+  case "$RED_PR_PICKUP" in
+    "check: red pr pickup overdue: taska $PR3 red 300s (threshold 300s, crew parked, no owner/step/eta record) - pickup: bin/fm-red-pr-pickup.sh record $PR3 owner=<owner> step='<next step>' eta='<eta>'") ;;
+    *) fail "unexpected branch-discovery wake: $RED_PR_PICKUP" ;;
+  esac
+  red_pr_pickup_tick 1301
+  [ "$(grep -c 'pr list' "$STATE/.gh-calls")" = 3 ] \
+    || fail "a new scan did not get exactly one fresh bounded list read"
+  pass "a meta without pr= is discovered by its task branch: one bounded list read per repo per scan, red drafts count, no repo is a recorded skip"
+}
+
+test_done_lane_with_open_red_pr() {
+  reset_case
+  make_origin_repo "$PROJECT" https://github.com/o/r.git
+  lane_branch landed "$DONE_NOIDENT"
+  listforge "$LIST_LANDED_RED"
+  red_pr_pickup_tick 1000
+  [ -f "$STATE/.red-pr-pickups" ] || fail "a done lane's open red PR (run passed, no PR identity) got no row"
+  awk -F '\t' -v k="$PRKEY3" '$1==k && $2==1000 {found=1} END { exit found?0:1 }' \
+    "$STATE/.red-pr-pickups" || fail "the done lane's row is missing its episode fields"
+  red_pr_pickup_tick 1300
+  [ "$(count_wakes)" = 1 ] || fail "a done lane's unowned red PR did not wake"
+  case "$RED_PR_PICKUP" in "check: red pr pickup overdue: landed $PR3 red 300s (threshold 300s, crew done,"*) ;;
+    *) fail "unexpected done-lane wake: $RED_PR_PICKUP" ;; esac
+  # the same done lane whose PR left the open list (merged or closed) is out
+  listforge '[]'
+  red_pr_pickup_tick 1600
+  [ "$(awk 'END { print NR }' "$STATE/.red-pr-pickups")" = 0 ] \
+    || fail "a done lane whose PR merged kept its episode row"
+  [ "$(count_wakes)" = 1 ] || fail "a merged PR kept escalating"
+  pass "a done lane with no PR identity counts exactly while its matched PR is open and red"
+}
+
+test_branch_merged_drops_episode() {
+  reset_case
+  make_origin_repo "$PROJECT" https://github.com/o/r.git
+  lane_branch taska "$PARKED"
+  listforge "$LIST_ONE_RED_DRAFT"
+  red_pr_pickup_tick 1000
+  [ "$(awk 'END { print NR }' "$STATE/.red-pr-pickups")" = 1 ] || fail "the branch episode did not start"
+  listforge '[]'
+  red_pr_pickup_tick 1300
+  [ "$(awk 'END { print NR }' "$STATE/.red-pr-pickups")" = 0 ] \
+    || fail "a merged branch PR did not drop its episode row"
+  [ "$(count_wakes)" = 0 ] || fail "a merged branch PR still woke"
+  listforge "$LIST_ONE_RED_DRAFT"
+  red_pr_pickup_tick 2000
+  red_pr_pickup_tick 2300
+  awk -F '\t' -v k="$PRKEY3" '$1==k && $2==2000 {found=1} END { exit found?0:1 }' \
+    "$STATE/.red-pr-pickups" || fail "a re-reddened branch PR did not start a fresh episode"
+  [ "$(count_wakes)" = 1 ] || fail "a fresh branch episode did not wake at its own threshold"
+  pass "a merged or closed branch PR ends its episode and a re-reddened branch starts fresh"
+}
+
+test_unreadable_list_freezes_branch_episodes() {
+  reset_case
+  make_origin_repo "$PROJECT" https://github.com/o/r.git
+  lane_branch taska "$PARKED"
+  listforge "$LIST_ONE_RED_DRAFT"
+  red_pr_pickup_tick 2000
+  red_pr_pickup_tick 2300
+  [ "$(count_wakes)" = 1 ] || fail "setup: level 1 did not fire"
+  rm -f "$STATE/.gh-list-json"
+  red_pr_pickup_tick 2400
+  red_pr_pickup_tick 3000
+  [ "$(count_wakes)" = 1 ] || fail "an unreadable open list woke"
+  awk -F '\t' -v k="$PRKEY3" '$1==k && $2==2000 && $3==2000 && $4==1 {found=1} END { exit found?0:1 }' \
+    "$STATE/.red-pr-pickups" \
+    || fail "an unreadable list did not keep the episode row frozen with its clock"
+  listforge "$LIST_ONE_RED_DRAFT"
+  red_pr_pickup_tick 3100
+  [ "$(count_wakes)" = 2 ] || fail "a resumed branch episode did not escalate"
+  grep -q "red-pr-$PRKEY3-l2" "$FM_WAKE_QUEUE" \
+    || fail "the resumed episode did not escalate to main with its full first-red age"
+  pass "an unreadable open-list read freezes every branch episode row it owns without waking or forgiving"
+}
+
 fm_test_run test_record_cli_writes_and_reads test_record_freshness test_forge_red_is_strict \
   test_ladder_supervisor_main_captain test_record_silences_and_stale_reescalates \
   test_scope_and_episode_reset test_secondmate_lanes_and_remote_mates test_mate_home_backstop \
-  test_unreadable_forge_keeps_the_episode test_scan_throttle_and_joined_wake test_watcher_loop
+  test_unreadable_forge_keeps_the_episode test_scan_throttle_and_joined_wake test_watcher_loop \
+  test_branch_discovery_no_pr_meta test_done_lane_with_open_red_pr \
+  test_branch_merged_drops_episode test_unreadable_list_freezes_branch_episodes

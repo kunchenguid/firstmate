@@ -3188,17 +3188,30 @@ EOF
 # and no clock anywhere on the pair - is the defect: a red PR may never sit
 # waiting, whatever shape the wait takes. The scan is PR-centric, not
 # run-centric: state/<id>.meta pr= names the PR regardless of how the lane
-# validates, one crew-state read per candidate task scopes it (done and paused
-# lanes are out - finished work and declared waits own their own visibility;
-# working, parked, blocked, failed and unknown lanes are live or parked), and
-# one bounded forge read per in-scope PR decides red (pr_forge_checks_red,
-# bin/fm-classify-lib.sh). A gate-red PR - a check that stays red until some
+# validates, and a lane with NO pr= - a no-mistakes run whose PR step was
+# skipped, so the meta never learned the URL - is resolved by its task branch
+# (the meta's recorded branch, else fm/<task-id>) through pr_forge_branch_red:
+# ONE bounded open-PR list read per repo per scan (the repo named by the task's
+# project clone or worktree origin remote; a task whose repo cannot be named is
+# skipped with a recorded reason in STATE/.red-pr-pickups-skip, never
+# silently), matched on the head branch, red decided by the same
+# FM_PR_RED_ROLLUP_JQ predicate pr_forge_checks_red uses, drafts included.
+# One crew-state read per candidate task scopes it (done and paused lanes are
+# out - finished work and declared waits own their own visibility; working,
+# parked, blocked, failed and unknown lanes are live or parked), with ONE
+# branch-path exception: a DONE lane whose run passed with no PR identity
+# counts while its matched PR is open and red - the PR the lane never recorded
+# is the one piece of its delivery the scan can still see - while a done lane
+# whose PR merged or closed never appears in the open list and stays out. A
+# gate-red PR - a check that stays red until some
 # record is committed - is owned only while its recorded step is moving, so a
 # fresh record silences the ladder and a stale one (no refresh past
 # FM_RED_PR_RECORD_STALE_SECS and no future UTC eta) re-enters it with a fresh
 # missing clock.
 # STATE/.red-pr-pickups keeps <pr-key> TAB <first-red> TAB <missing-since> TAB
-# <level> TAB <last-escalated> per PR; <missing-since> 0 is the owned sentinel
+# <level> TAB <last-escalated> TAB <repo> per PR (<repo> empty for pr=-named
+# PRs; rows written before the column existed read with it empty); <missing-
+# since> 0 is the owned sentinel
 # (a fresh record held at the last scan, so the walk resumes from level 1 when
 # ownership lapses). The ladder runs on the missing age:
 #   level 1 at FM_RED_PR_PICKUP_SECS (default 300) - wake the owning
@@ -3216,9 +3229,12 @@ EOF
 # Each level fires once when reached and repeats at most once per
 # PAUSE_RESURFACE_SECS while it stays the reached level; a fresh record resets
 # the level, and its later staleness restarts the walk from level 1. A PR that
-# leaves scope - green, closed, merged, forge-unreadable (which stays silent,
-# never a false alarm), or its lane gone, done or paused - drops its row, so the
-# next episode starts fresh. Scans run at most once per
+# leaves scope - green, closed, merged, its lane gone or paused - drops its
+# row, so the next episode starts fresh; an UNREADABLE answer freezes instead:
+# the per-PR read freezes its row, and an unreadable repo list read freezes
+# every row that repo's branch discovery produced (the row's <repo> column
+# names them), both staying silent, never a false alarm and never a forgiven
+# clock. Scans run at most once per
 # FM_RED_PR_PICKUP_SCAN_SECS (default 300); first red is the first SIGHTING, so
 # the true red age can lag by at most one scan interval.
 RED_PR_PICKUP_SCAN_SECS=${FM_RED_PR_PICKUP_SCAN_SECS:-}
@@ -3247,11 +3263,29 @@ red_pr_ring_mate() {  # <mate-task> <window> <pr-url> <age-secs>
   fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
 }
 
+# Resolve the forge repository a task's branch lives on: the meta's project
+# clone (the project registry's local checkout) first, else the task's own
+# worktree, each read through its origin remote - one local git read per
+# candidate, no forge traffic. Prints "<host> <owner/repo>" or fails; a meta
+# naming neither, or a directory whose origin cannot be read, leaves the task
+# to the recorded skip path rather than a guess.
+red_pr_task_repo() {  # <meta-file>
+  local meta=$1 d origin
+  for d in "$(fm_meta_get "$meta" project)" "$(fm_meta_get "$meta" worktree)"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    origin=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
+    if pr_repo_slug_from_origin "$origin"; then return 0; fi
+  done
+  return 1
+}
+
 red_pr_pickup_tick() {  # [now-epoch], for deterministic clock callers
   local now=${1:-} ledger="$STATE/.red-pr-pickups" scan="$STATE/.red-pr-pickups-scan"
   local old='' rows='' due_keys='' tmp f meta task kind pr word home mate prkey
   local first missing level last due='' reason lvl since_age ring_marker mate_w st
-  local old_key old_first old_missing old_level old_last
+  local old_key old_first old_missing old_level old_last old_repo
+  local branch_tasks='' skip_rows='' unreadable_repos='' present='' RSEP='|'
+  local btask bmeta bbranch bhome bmate repo_line bhost bslug repo
   RED_PR_PICKUP=
   [ -n "$now" ] || fm_epoch_seconds_to now
   if [ -f "$scan" ]; then
@@ -3287,37 +3321,94 @@ red_pr_pickup_tick() {  # [now-epoch], for deterministic clock callers
         case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
         [ "$(fm_meta_get "$meta" kind)" = secondmate ] && continue
         pr=$(fm_meta_get "$meta" pr)
-        [ -n "$pr" ] || continue
-        prkey=$(fm_red_pr_key "$pr") || continue
-        case $'\n'"$due_keys" in *$'\n'"$prkey"$'\n'*) continue ;; esac
-        word=$(crew_state_word "$task" "$home")
-        case "$word" in working|parked|blocked|failed|unknown) ;; *) continue ;; esac
-        rows="$rows$prkey"$'\t'"$pr"$'\t'"$task"$'\t'"$word"$'\t'"$mate"$'\t'"$home"$'\n'
-        due_keys="$due_keys$prkey"$'\n'
+        if [ -n "$pr" ]; then
+          prkey=$(fm_red_pr_key "$pr") || continue
+          case $'\n'"$due_keys" in *$'\n'"$prkey"$'\n'*) continue ;; esac
+          word=$(crew_state_word "$task" "$home")
+          case "$word" in working|parked|blocked|failed|unknown) ;; *) continue ;; esac
+          rows="$rows$prkey$RSEP$pr$RSEP$task$RSEP$word$RSEP$mate$RSEP$home$RSEP"$'\n'
+          due_keys="$due_keys$prkey"$'\n'
+        else
+          # No pr= on the worker meta either: the PR, if any, lives on the
+          # task branch and is resolved below, after the pr= lanes have claimed
+          # their own PRs.
+          bbranch=$(fm_meta_get "$meta" branch)
+          [ -n "$bbranch" ] || bbranch="fm/$task"
+          branch_tasks="$branch_tasks$task$RSEP$meta$RSEP$bbranch$RSEP$home$RSEP$mate"$'\n'
+        fi
       done
       continue
     fi
-    [ -n "$pr" ] || continue
+    if [ -n "$pr" ]; then
+      prkey=$(fm_red_pr_key "$pr") || continue
+      case $'\n'"$due_keys" in *$'\n'"$prkey"$'\n'*) continue ;; esac
+      word=$(crew_state_word "$task")
+      case "$word" in working|parked|blocked|failed|unknown) ;; *) continue ;; esac
+      rows="$rows$prkey$RSEP$pr$RSEP$task$RSEP$word$RSEP$RSEP$RSEP"$'\n'
+      due_keys="$due_keys$prkey"$'\n'
+    else
+      # No pr= in the meta (a no-mistakes run may skip the PR step): the open
+      # PR on the task branch, if any, is resolved below after every pr= lane
+      # has claimed its own, so a pr= identity always wins the claim.
+      bbranch=$(fm_meta_get "$f" branch)
+      [ -n "$bbranch" ] || bbranch="fm/$task"
+      branch_tasks="$branch_tasks$task$RSEP$f$RSEP$bbranch$RSEP$RSEP"$'\n'
+    fi
+  done
+  # Branch discovery: a lane with no pr= in its meta still owns every open red
+  # PR on its task branch, resolved by head-branch match against ONE bounded
+  # open-PR list read per repo per scan (pr_forge_branch_red, cached per scan
+  # by repo) - never a read per task, never a per-task retry of a repo that
+  # failed. The repo is the task's project clone or worktree origin
+  # (red_pr_task_repo); a task whose repo cannot be named is skipped with a
+  # recorded reason, never silently. This is also the ONLY path where a done
+  # lane counts: its run passed with no PR identity, and the open red PR the
+  # branch match finds is the piece of its delivery the run never recorded -
+  # while a merged or closed PR is never in the open list, so done-with-landed
+  # stays out exactly like before.
+  pr_forge_branch_cache_clear
+  while IFS="$RSEP" read -r btask bmeta bbranch bhome bmate; do
+    [ -n "$btask" ] && [ -n "$bmeta" ] || continue
+    if ! repo_line=$(red_pr_task_repo "$bmeta"); then
+      skip_rows="$skip_rows$btask"$'\t'"$bmate"$'\t'"no forge repository identity: neither the project clone nor the worktree in the meta has a readable origin remote"$'\n'
+      continue
+    fi
+    bhost=${repo_line%% *}; bslug=${repo_line#* }
+    pr_forge_branch_red "$bhost" "$bslug" "$bbranch" && st=0 || st=$?
+    if [ "$st" -eq 2 ]; then
+      case $'\n'"$unreadable_repos" in *$'\n'"$bhost/$bslug"$'\n'*) : ;; *) unreadable_repos="$unreadable_repos$bhost/$bslug"$'\n' ;; esac
+      continue
+    fi
+    [ "$st" -eq 0 ] || continue
+    pr=$FM_PR_BRANCH_URL
     prkey=$(fm_red_pr_key "$pr") || continue
     case $'\n'"$due_keys" in *$'\n'"$prkey"$'\n'*) continue ;; esac
-    word=$(crew_state_word "$task")
-    case "$word" in working|parked|blocked|failed|unknown) ;; *) continue ;; esac
-    rows="$rows$prkey"$'\t'"$pr"$'\t'"$task"$'\t'"$word"$'\t'""$'\t'"$home"$'\n'
+    # crew_state_word only runs once the branch actually matched an open red
+    # PR, so a done/paused lane whose branch has no red PR costs no crew-state
+    # read. (done is branch-path-only: above, pr= lanes keep the old filter.)
+    word=$(crew_state_word "$btask" "$bhome")
+    case "$word" in working|parked|blocked|failed|unknown|done) ;; *) continue ;; esac
+    rows="$rows$prkey$RSEP$pr$RSEP$btask$RSEP$word$RSEP$bmate$RSEP$bhome$RSEP$bhost/$bslug"$'\n'
     due_keys="$due_keys$prkey"$'\n'
-  done
+  done <<EOF
+$branch_tasks
+EOF
   # One pass over the candidates: forge-red PRs carry their episode row. An
   # answered not-red (green, pending, closed, merged) drops the row so the next
   # episode starts fresh, exactly like the ci-fixing-green scan; an UNREADABLE
   # forge keeps the existing row frozen - no clock advance, no wake - so a
   # transient gh outage neither floods the captain nor forgives the SLA, and
   # the next readable scan resumes the episode with its full first-red age.
-  # (word and a mate's task are never empty here and the possibly-empty
-  # fields ride last, so read's collapsing of repeated tabs cannot shift one.)
+  # (word and a matched repo are never empty here, a mate's task is never
+  # empty on the mate path, and the possibly-empty fields - a home, a repo -
+  # ride behind them with | as the in-memory separator, which read never
+  # collapses, unlike tabs; the PERSISTED ledger row below keeps its
+  # tab-separated shape with its own possibly-empty repo column riding last.)
   new_rows=''
-  while IFS=$'\t' read -r prkey pr task word mate home; do
+  while IFS="$RSEP" read -r prkey pr task word mate home repo; do
     [ -n "$prkey" ] || continue
     first=$now missing=$now level=0 last=0 had_row=''
-    while IFS=$'\t' read -r old_key old_first old_missing old_level old_last; do
+    while IFS=$'\t' read -r old_key old_first old_missing old_level old_last old_repo; do
       [ "$old_key" = "$prkey" ] || continue
       case "$old_first:$old_level:$old_last" in *[!0-9:]*) continue ;; esac
       [ "${#old_first}" -le 12 ] && [ "${#old_last}" -le 12 ] || continue
@@ -3334,14 +3425,21 @@ red_pr_pickup_tick() {  # [now-epoch], for deterministic clock callers
     done <<EOF
 $old
 EOF
-    pr_forge_checks_red "$pr" && st=0 || st=$?
-    # 0 red, 1 answered not-red, 2 unreadable
+    if [ -n "$repo" ]; then
+      # Branch-discovered this scan: the repo's open list already answered red
+      # through the same FM_PR_RED_ROLLUP_JQ predicate, so no per-PR read runs
+      # and the scan cost stays one bounded forge read per repo.
+      st=0
+    else
+      pr_forge_checks_red "$pr" && st=0 || st=$?
+      # 0 red, 1 answered not-red, 2 unreadable
+    fi
     if [ "$st" -eq 1 ]; then
       continue
     fi
     if [ "$st" -ne 0 ]; then
       if [ -n "$had_row" ]; then
-        new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\n'
+        new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\t'"$repo"$'\n'
       fi
       continue
     fi
@@ -3360,7 +3458,7 @@ EOF
       missing=$now level=0 last=0
     fi
     if [ "$missing" -eq 0 ]; then
-      new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\n'
+      new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\t'"$repo"$'\n'
       continue
     fi
     [ "$now" -ge "$missing" ] || missing=$now
@@ -3428,20 +3526,51 @@ EOF
       fi
       level=$lvl last=$now
     fi
-    new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\n'
+    new_rows="$new_rows$prkey"$'\t'"$first"$'\t'"$missing"$'\t'"$level"$'\t'"$last"$'\t'"$repo"$'\n'
   done <<EOF
 $rows
 EOF
+  # An unreadable open-list read freezes every existing episode row the repo's
+  # branch discovery produced (its repo column names them): the scan cannot
+  # tell whether the PR is still red, so - exactly like a per-PR unreadable -
+  # no clock advances, no wake fires, and the row is kept as-is rather than
+  # dropped, so a transient gh outage neither floods nor forgives. Rows this
+  # scan did write for the repo (a pr= lane on it) are unaffected.
+  if [ -n "$unreadable_repos" ]; then
+    present=$(printf '%s' "$new_rows" | awk -F '\t' '$1 != "" { print $1 }')
+    while IFS=$'\t' read -r old_key old_first old_missing old_level old_last old_repo; do
+      case "$old_key" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+      case "$old_first:$old_level:$old_last" in *[!0-9:]*) continue ;; esac
+      [ -n "$old_repo" ] || continue
+      case $'\n'"$present" in *$'\n'"$old_key"$'\n'*) continue ;; esac
+      case $'\n'"$unreadable_repos" in *$'\n'"$old_repo"$'\n'*) ;; *) continue ;; esac
+      new_rows="$new_rows$old_key"$'\t'"$old_first"$'\t'"$old_missing"$'\t'"$old_level"$'\t'"$old_last"$'\t'"$old_repo"$'\n'
+    done <<EOF
+$old
+EOF
+  fi
   tmp=$(mktemp "$STATE/.red-pr-pickups.XXXXXX") || return 1
   if ! printf '%s' "$new_rows" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
     rm -f -- "$tmp"
     return 1
   fi
+  # Recorded skip reasons: a lane whose PR cannot be discovered (no repo
+  # identity) is out of this scan BY A NAMED CAUSE, never silently - the file
+  # carries the scan epoch so a stale reason is visible as such, and a clean
+  # scan removes it. Lines are <task> TAB <mate-or-empty> TAB <reason>.
+  if [ -n "$skip_rows" ]; then
+    tmp=$(mktemp "$STATE/.red-pr-pickups-skip.XXXXXX") || return 1
+    if ! printf 'epoch=%s\n%s' "$now" "$skip_rows" > "$tmp" || ! mv -f "$tmp" "$STATE/.red-pr-pickups-skip"; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+  else
+    rm -f -- "$STATE/.red-pr-pickups-skip"
+  fi
   [ -n "$due" ] || return 0
   RED_PR_PICKUP=$due
   return 0
 }
-
 # Drive-floor backstop (docs/configuration.md "Drive floor"): with the floor
 # configured, fewer than that many ACTUALLY WORKING lanes is a defect to
 # explain even when many lanes merely look busy. A lane counts as working only
