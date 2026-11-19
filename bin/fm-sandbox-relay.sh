@@ -77,6 +77,7 @@ MAX_BYTES=${FM_SANDBOX_RELAY_MAX_BYTES:-512}
 RATE=${FM_SANDBOX_RELAY_RATE:-20}
 MAX_PASS=${FM_SANDBOX_RELAY_PASS:-64}
 LOG="${EVENTS%/events}/relay.log"
+INFLIGHT="${EVENTS%/events}/inflight"
 LOG_MAX_BYTES=65536
 
 win=-1
@@ -90,8 +91,9 @@ log_drop() {  # <reason>
     "$(date +%s)" "$ID" "$1" >>"$LOG" 2>/dev/null || true
 }
 
-# relay_one <path>: validate one event file and apply it. The file is removed
-# whatever the verdict, so the spool never accumulates.
+# relay_one <path>: validate one event file, already moved out of the spool into
+# the host-only inflight directory, and apply it. The file is removed whatever
+# the verdict, so the spool never accumulates.
 relay_one() {
   local f=$1 body parsed st ev
   if [ -L "$f" ] || [ ! -f "$f" ]; then
@@ -142,21 +144,28 @@ relay_one() {
   return 0
 }
 
+# relay_pass: each entry is renamed into INFLIGHT (beside events/, never bound
+# into the sandbox) before it is inspected, so the worker cannot swap a FIFO or
+# symlink in between the check and the read.
 relay_pass() {
-  local f n=0
+  local f held n=0
+  (umask 077 && mkdir -p "$INFLIGHT") || return 0
   # Names sort in write order (zero-padded sequence), so edges apply in order.
   for f in "$EVENTS"/*; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     n=$((n + 1))
+    held="$INFLIGHT/$n"
+    rm -rf -- "$held"
+    mv -f -- "$f" "$held" 2>/dev/null || continue
     if [ "$n" -gt "$MAX_PASS" ]; then
-      rm -rf -- "$f"
+      rm -rf -- "$held"
       log_drop flood
       continue
     fi
     case "$f" in
-    *.json) relay_one "$f" ;;
+    *.json) relay_one "$held" ;;
     *)
-      rm -rf -- "$f"
+      rm -rf -- "$held"
       log_drop nonregular
       ;;
     esac

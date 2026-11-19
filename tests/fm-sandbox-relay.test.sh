@@ -138,6 +138,48 @@ test_symlink_is_dropped_and_never_followed() {
   pass "relay: a symlink is dropped without following it"
 }
 
+# The worker can rename a FIFO over its event file at any moment. A `head` shim
+# plays that worker at the worst instant, just as the relay opens the file: it
+# turns the spool entry of the same name into a FIFO first. A relay that reads
+# the sandbox-writable path blocks on that FIFO forever; one that reads only a
+# host-held copy applies the edge and finishes.
+test_entry_swapped_after_the_check_cannot_block_the_relay() {
+  local c state gen shim pid waited=0
+  c=$(new_case swap relay-s1)
+  state=${c% *}
+  gen=${c#* }
+  shim="$TMP_ROOT/swap/bin"
+  mkdir -p "$shim"
+  cat >"$shim/head" <<'SH'
+#!/usr/bin/env bash
+for last in "$@"; do :; done
+t="$FM_TEST_SPOOL/${last##*/}"
+if [ -f "$t" ]; then
+  rm -f -- "$t"
+  mkfifo "$t"
+fi
+exec "$FM_TEST_REAL_HEAD" "$@"
+SH
+  chmod +x "$shim/head"
+  printf '%s' '{"state":"idle","event":"agent-end"}' >"$state/relay-s1.sbx/events/0000000000001-1-000000.json"
+  relay_once "$state" relay-s1 "$gen" PATH="$shim:$PATH" FM_TEST_SPOOL="$state/relay-s1.sbx/events" \
+    FM_TEST_REAL_HEAD="$(command -v head)" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    : >"$state/relay-s1.sbx/events/0000000000001-1-000000.json" &
+    wait "$pid"
+    fail "the relay blocked on a FIFO swapped into the spool after its check"
+  fi
+  wait "$pid" || fail "relay pass failed"
+  [ "$(fm_busy_classify tmux w omp relay-s1 "$state")" = "idle omp-ext" ] || fail "the held edge must still apply: $(cat "$state/relay-s1.busy-state")"
+  spool_empty "$state" relay-s1 || fail "the spool must be empty after the pass"
+  pass "relay: an entry swapped for a FIFO after the check cannot block the relay"
+}
+
 test_flood_is_bounded() {
   local c state gen i seq_before seq_after e started elapsed applied_edges dropped
   c=$(new_case flood relay-f1)
@@ -241,6 +283,7 @@ test_edges_apply_in_write_order
 test_superseded_incarnation_and_file_gen_are_ignored
 test_bad_events_are_dropped_without_a_state_change
 test_symlink_is_dropped_and_never_followed
+test_entry_swapped_after_the_check_cannot_block_the_relay
 test_flood_is_bounded
 test_run_applies_edges_and_ends_with_the_spool
 test_run_ends_when_the_task_is_rearmed

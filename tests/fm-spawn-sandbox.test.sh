@@ -69,9 +69,17 @@ if [ "$profile" = unknown-profile ]; then
   exit 2
 fi
 [ "$dry" = 0 ] || exit 0
-while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
+# Like a bubblewrap --clearenv wrapper, the command sees only PATH, HOME, and the
+# names passed with --env.
+keep=("PATH=$PATH" "HOME=$HOME")
+prev=
+while [ $# -gt 0 ] && [ "$1" != -- ]; do
+  if [ "$prev" = --env ] && [ -n "${!1+x}" ]; then keep+=("$1=${!1}"); fi
+  prev=$1
+  shift
+done
 shift
-exec "$@"
+exec env -i "${keep[@]}" "$@"
 SH
   chmod +x "$1/worker-sandbox"
 }
@@ -162,7 +170,9 @@ test_mapped_project_is_wrapped_at_the_seam() {
   assert_contains "$launch" "'--rw' '$s/$id.inbox'" "the steering inbox must be writable"
   assert_contains "$launch" "'--rw' '$HOME_DIR/data/$id'" "the task data directory must be writable"
   assert_contains "$launch" "'--ro' '$s/$id.omp-ext.ts'" "the busy extension must be read-only"
-  assert_contains "$launch" "'--ro' '$ROOT'" "the code root must be read-only"
+  assert_contains "$launch" "'--ro' '$ROOT/bin' '--ro' '$ROOT/.agents' '--ro' '$ROOT/.omp'" "the code root's tools must be read-only"
+  assert_not_contains "$launch" "'--ro' '$ROOT'" "the code root itself must never be bound"
+  assert_contains "$launch" "'--env' 'FM_TASK_INBOX'" "the steering doorbell must reach the sandbox"
   assert_contains "$launch" "'--rw' '/tmp/fm-$id'" "the private temp root must be writable"
   assert_contains "$launch" "'--rw' '$s/$id.sbx/events'" "the relay spool must be the only writable state path"
   assert_contains "$launch" "'--host-helper' '$s/$id.sbx/relay-helper'" "the relay must start as the wrapper's helper"
@@ -188,6 +198,68 @@ test_mapped_project_is_wrapped_at_the_seam() {
   assert_contains "$(cat "$s/$id.sbx/relay-helper")" "--gen '$(cat "$s/$id.busy-gen")'" "the helper must pin the armed busy gen"
   assert_contains "$(cat "$SB_LOG")" '[--dry-run]' "the wrapper must be probed with --dry-run before any launch"
   pass "fm-spawn: a mapped scout is wrapped at the one seam with the task binds, never state/ or FM_HOME"
+}
+
+# wrapper_binds <launch>: run the launch's wrapper prefix under bash against the
+# recording stub and print each bind the wrapper received as "<flag> <path>".
+wrapper_binds() {
+  local launch=$1 prefix line prev='' a
+  prefix="${launch%% -- env -u*}"
+  prefix="'$FAKEBIN_DIR/worker-sandbox'${prefix#*"'$FAKEBIN_DIR/worker-sandbox'"}"
+  : > "$SB_LOG"
+  FM_FAKE_SANDBOX_LOG="$SB_LOG" PATH="$FAKEBIN_DIR:$PATH" bash -c "$prefix -- true" || return 1
+  line=$(tail -n 1 "$SB_LOG")
+  line=${line#CALL [}
+  line=${line%]}
+  while IFS= read -r a; do
+    case "$prev" in --ro | --rw | --rw-create) printf '%s %s\n' "$prev" "$a" ;; esac
+    prev=$a
+  done <<EOF
+${line//"] ["/$'\n'}
+EOF
+}
+
+# The documented default layout leaves FM_HOME unset, so it IS the code root.
+# The wrapper must then still never see FM_HOME, state/, data/, config/ or
+# projects/ (other tasks' records, briefs, reports, and clones), and no
+# read-only bind may contain a writable one, whichever order a wrapper applies
+# them in.
+test_home_at_the_code_root_is_never_bound() {
+  local id=sbx-root-a1 out status home binds flag p q f
+  read_case "$(make_case rootish "$id")"
+  home="$CASE_DIR/fmroot"
+  mkdir -p "$home"
+  cp -R "$ROOT/bin" "$ROOT/.agents" "$ROOT/.omp" "$ROOT/.claude" "$home/"
+  fm_test_spawn_home "$home" omp
+  fm_test_spawn_brief "$home" "$id"
+  HOME_DIR=$home
+  write_sandbox_config 'project:project=strict'
+  : > "$LAUNCH_LOG"
+  out=$(ROOT=$home FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" FM_FAKE_PANE_LOG="$PANE_LOG" \
+    fm_test_run_spawn "$home" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" --scout --harness omp)
+  status=$?
+  expect_code 0 "$status" "a mapped spawn from a home at the code root should succeed: $out"
+  home=$(cd "$home" && pwd -P)
+  binds=$(wrapper_binds "$(cat "$LAUNCH_LOG")") || fail "the wrapper prefix failed to run"
+  assert_contains "$binds" "--ro $home/bin" "the code root's bin/ must be read-only"
+  while read -r flag p; do
+    for f in "$home" "$home/state" "$home/data" "$home/config" "$home/projects"; do
+      case "$f/" in
+        "$p"/*) fail "the wrapper was handed $p ($flag), which exposes $f" ;;
+      esac
+    done
+    [ "$flag" = --ro ] || continue
+    while read -r _ q; do
+      case "$q" in
+        "$p" | "$p"/*) fail "read-only $p would shadow writable $q" ;;
+      esac
+    done <<EOF
+$(printf '%s\n' "$binds" | grep -v '^--ro ')
+EOF
+  done <<EOF
+$binds
+EOF
+  pass "fm-spawn: with FM_HOME at the code root the wrapper never sees the home, state/, data/, config/ or projects/"
 }
 
 test_ship_kind_default_and_explicit_precedence() {
@@ -530,15 +602,36 @@ test_relaunch_rewraps_with_the_recorded_profile() {
     "$SPAWN" "$id" --relaunch --harness omp 2>&1)
   expect_code 0 $? "a relaunch after a waiver should succeed: $out"
   assert_equals off "$(sed -n 's/^sandbox=//p' "$home/state/$id.meta")" "a recorded waiver must stay a waiver"
-  # A flagless relaunch is decided by its record alone: a broken config/sandbox
-  # must not strand a task that does not use it.
+  # enforce=strict refuses --sandbox off on a fresh spawn, so a waiver recorded
+  # under enforce=on must not outlive the move to strict either.
+  printf '%s\n' "wrapper=$fakebin/worker-sandbox" 'enforce=strict' 'default=strict' > "$home/config/sandbox"
+  : > "$dir/fake-state/literal"
+  out=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake-state" TMUX=fake,1,0 FM_BACKEND=tmux \
+    HOME="$dir/user-home" FM_SPAWN_NO_GUARD=1 FM_FAKE_SANDBOX_LOG="$dir/sandbox.log" \
+    "$SPAWN" "$id" --relaunch --harness omp 2>&1)
+  expect_code 1 $? "enforce=strict must refuse relaunching a recorded waiver: $out"
+  assert_contains "$out" "enforce=strict refuses relaunching $id under its recorded sandbox=off waiver" "the refusal must say why: $out"
+  assert_contains "$out" "set enforce=on" "the refusal must name the remedy: $out"
+  [ ! -s "$dir/fake-state/literal" ] || fail "a refused relaunch must launch nothing: $(cat "$dir/fake-state/literal")"
+  assert_equals off "$(sed -n 's/^sandbox=//p' "$home/state/$id.meta")" "a refused relaunch must keep the record"
+  # A task recorded without a sandbox relaunches plain and is decided by its
+  # record alone, under strict and even with a broken config/sandbox.
+  sed -i.bak '/^sandbox=/d' "$home/state/$id.meta" && rm -f "$home/state/$id.meta.bak"
+  : > "$dir/fake-state/literal"
+  out=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake-state" TMUX=fake,1,0 FM_BACKEND=tmux \
+    HOME="$dir/user-home" FM_SPAWN_NO_GUARD=1 FM_FAKE_SANDBOX_LOG="$dir/sandbox.log" \
+    "$SPAWN" "$id" --relaunch --harness omp 2>&1)
+  expect_code 0 $? "a task recorded without a sandbox must relaunch plain under strict: $out"
+  assert_not_contains "$(cat "$dir/fake-state/literal")" worker-sandbox "an unrecorded task must relaunch unwrapped"
   printf '%s\n' 'bogus=1' > "$home/config/sandbox"
   out=$(env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake-state" TMUX=fake,1,0 FM_BACKEND=tmux \
     HOME="$dir/user-home" FM_SPAWN_NO_GUARD=1 FM_FAKE_SANDBOX_LOG="$dir/sandbox.log" \
     "$SPAWN" "$id" --relaunch --harness omp 2>&1)
-  expect_code 0 $? "a flagless relaunch must not read a broken config/sandbox: $out"
-  pass "fm-spawn: --relaunch re-wraps with the recorded profile and a fresh relay gen; --sandbox off is the only override"
+  expect_code 0 $? "a flagless relaunch of an unrecorded task must not read a broken config/sandbox: $out"
+  pass "fm-spawn: --relaunch re-wraps with the recorded profile and a fresh relay gen; --sandbox off is the only override; strict refuses a recorded waiver"
 }
 
 # --- 6. Busy edge end to end ----------------------------------------------------
@@ -604,11 +697,14 @@ test_optional_env_words_survive_zsh_and_bash() {
     command -v "$sh" >/dev/null 2>&1 || { echo "skip: $sh not installed"; continue; }
     ran=$((ran + 1))
     : > "$SB_LOG"
-    FM_FAKE_SANDBOX_LOG="$SB_LOG" PATH="$FAKEBIN_DIR:$PATH" GOTMPDIR=/tmp/gt TRACEPARENT=00-x "$sh" -c "$prefix -- true" \
+    FM_FAKE_SANDBOX_LOG="$SB_LOG" PATH="$FAKEBIN_DIR:$PATH" GOTMPDIR=/tmp/gt TRACEPARENT=00-x FM_TASK_ID="$id" LAVISH_AXI_PORT=4387 \
+      "$sh" -c "unset LAVISH_AXI_HOST; $prefix -- true" \
       || fail "$sh: the wrapper prefix failed to run"
     calls=$(tail -n 1 "$SB_LOG")
     assert_contains "$calls" "[--env] [GOTMPDIR]" "$sh: GOTMPDIR must be two argv words"
     assert_contains "$calls" "[--env] [TRACEPARENT]" "$sh: TRACEPARENT must be two argv words"
+    assert_contains "$calls" "[--env] [FM_TASK_ID]" "$sh: the task marker must reach the sandbox"
+    assert_contains "$calls" "[--env] [LAVISH_AXI_PORT]" "$sh: the lavish port must travel with its host"
     assert_not_contains "$calls" "LAVISH_AXI_HOST" "$sh: an unset name must not be passed"
     assert_not_contains "$calls" "[--env GOTMPDIR]" "$sh: the pair must never be one word"
   done
@@ -617,32 +713,32 @@ test_optional_env_words_survive_zsh_and_bash() {
 }
 
 # observed_launch <case-dir> <id>: everything the seam could touch, with the
-# per-case directory and the per-spawn tokens (task temp hash, generation ids,
-# staged-file stamps) normalized out.
+# per-case directory, the code root, and the per-spawn tokens (task temp hash,
+# generation ids, staged-file stamps) normalized out.
 observed_launch() {
-  local norm="s#$1#<case>#g;s#+[0-9a-f]\{64\}#+<hash>#g;s#g[0-9]\{8,\}\.[0-9.]*#<gen>#g;s#\.s[0-9]\{8,\}\.[0-9.]*\.sh#.<stamp>.sh#g"
+  local real norm
+  real=$(cd "$1" && pwd -P)
+  norm="s#$real#<case>#g;s#$1#<case>#g;s#$ROOT#<root>#g;s#+[0-9a-f]\{64\}#+<hash>#g;s#g[0-9]\{8,\}\.[0-9.]*#<gen>#g;s#\.s[0-9]\{8,\}\.[0-9.]*\.sh#.<stamp>.sh#g"
   sed "$norm" "$LAUNCH_LOG" "$PANE_LOG"
   sed "$norm;/^spawn_gen=/d;/^busy_gen=/d" "$STATE_DIR/$2.meta"
   sed "$norm" "$STATE_DIR/$2.omp-ext.ts"
 }
 
 # With no config/sandbox the launch, the task record, and the busy extension are
-# exactly what a present-but-inactive config (enforce=off, with a wrapper and a
-# mapping on file) produces: the seam leaves no byte of its own behind. Both
-# runs use one task id.
+# byte for byte what bin/fm-spawn.sh produced before the seam existed: the
+# golden is the same spawn run at commit 427056c4 and normalized the same way.
+# A present-but-inactive config (enforce=off, with a wrapper and a mapping on
+# file) produces exactly the same bytes. Both runs use one task id.
 test_default_launch_is_byte_identical() {
-  local id=sbx-same-a1 out status
+  local id=sbx-same-a1 out status golden="$ROOT/tests/fixtures/fm-spawn-default-omp-scout-427056c4.golden"
   read_case "$(make_case same1 "$id")"
   out=$(run_spawn "$id" "$PROJ_DIR" --scout --harness omp)
   status=$?
   expect_code 0 "$status" "the baseline spawn should succeed: $out"
   observed_launch "$CASE_DIR" "$id" > "$CASE_DIR/observed.txt"
-  [ -s "$CASE_DIR/observed.txt" ] || fail "the baseline recorded nothing"
+  cmp -s "$golden" "$CASE_DIR/observed.txt" \
+    || fail "the default launch, record, or extension drifted from the pre-seam output: $(diff "$golden" "$CASE_DIR/observed.txt")"
   cp "$CASE_DIR/observed.txt" "$TMP_ROOT/observed-baseline.txt"
-  # The unsandboxed extension is what it always was: its transport is spliced in
-  # without a stray blank line, and no relay spool code is present.
-  ! grep -q '^$' "$STATE_DIR/$id.omp-ext.ts" || fail "the default busy extension gained a blank line"
-  assert_not_contains "$(cat "$STATE_DIR/$id.omp-ext.ts")" "renameSync" "the default busy extension must not carry the relay transport"
 
   read_case "$(make_case same2 "$id")"
   write_sandbox_config 'enforce=off' 'default=strict'
@@ -653,7 +749,7 @@ test_default_launch_is_byte_identical() {
   cmp -s "$TMP_ROOT/observed-baseline.txt" "$CASE_DIR/observed.txt" \
     || fail "an inactive config/sandbox changed the launch, record, or extension: $(diff "$TMP_ROOT/observed-baseline.txt" "$CASE_DIR/observed.txt")"
   assert_absent "$STATE_DIR/$id.sbx" "an inactive config must create no relay spool"
-  pass "fm-spawn: the launch, task record, and busy extension are byte-identical with no config/sandbox"
+  pass "fm-spawn: the launch, task record, and busy extension match the pre-seam bytes with no or an inactive config/sandbox"
 }
 
 test_absent_config_changes_nothing
@@ -666,6 +762,7 @@ test_unusable_wrapper_refuses_without_a_raw_launch
 test_unsupported_shapes_refuse
 test_secondmate_is_never_sandboxed
 test_relaunch_rewraps_with_the_recorded_profile
+test_home_at_the_code_root_is_never_bound
 test_sandboxed_extension_reports_through_the_relay
 test_default_launch_is_byte_identical
 test_optional_env_words_survive_zsh_and_bash

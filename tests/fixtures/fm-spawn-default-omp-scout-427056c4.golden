@@ -1,0 +1,47 @@
+export DISABLE_AUTOUPDATER='1'; export COMPACT_ADVISER_DISABLE=1; export FM_TASK_INBOX='<case>/home/state/sbx-same-a1.inbox'; '<root>/bin/fm-osc7501.sh' arm --task 'sbx-same-a1' --harness 'omp' --backend 'tmux' --kind 'scout' --state '<case>/home/state' --config '<case>/home/config' --target 'firstmate:fm-sbx-same-a1' --agent-bin 'omp' >/dev/null || true
+'<root>/bin/fm-git-strip-ai-trailers.sh' env-file '<case>/home/state/sbx-same-a1.git-hooks' '/tmp/fm-sbx-same-a1+<hash>/git-config.<stamp>.sh' && . '/tmp/fm-sbx-same-a1+<hash>/git-config.<stamp>.sh' || return 1 2>/dev/null || exit 1; export FM_HOME='<case>/home'; env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '<case>/fake/fakebin/omp' --config '<root>/.omp/fm-worker-overlay.yml' --auto-approve --cwd '<case>/wt' -e '<case>/home/state/sbx-same-a1.omp-ext.ts' "$('<root>/bin/fm-operational-input.sh' encode launch-brief < '<case>/home/data/sbx-same-a1/launch-brief.md')"
+'<root>/bin/fm-osc7501.sh' disarm --state '<case>/home/state' >/dev/null 2>/dev/null || true
+treehouse get
+cd -- '<case>/wt'
+export GOTMPDIR=/tmp/fm-sbx-same-a1/gotmp
+export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=sbx-same-a1
+window=firstmate:fm-sbx-same-a1
+endpoint_task_id=sbx-same-a1
+worktree=<case>/wt
+project=<case>/project
+harness=omp
+kind=scout
+tasktmp=/tmp/fm-sbx-same-a1
+model=default
+effort=default
+// Firstmate semantic busy-state events + turn-end notification for omp (Oh My
+// Pi); written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+// Semantic state: "agent_start" -> busy when a low-level agent run begins;
+// "agent_end" -> idle only when event.willContinue is not true. omp has no
+// agent_settled at all (verified, omp 18.1.2 and 18.1.11: zero occurrences in
+// the binary); agent_end is its loop boundary and willContinue is the reliable
+// "another loop is coming" flag, covering auto-retries, compaction retries,
+// queued follow-ups, and a session_stop-forced continuation. ctx.isIdle() is
+// deliberately NOT consulted: at a natural TUI agent_end it still reads false
+// because session_stop is awaited before the session settles, so gating on it
+// would leave every completed turn recorded busy. "turn_end" fires at every
+// inner turn boundary and stays a wake NOTIFICATION touch for the watcher,
+// never current-state truth.
+import { execFile } from "node:child_process";
+const notifyTurnEnd = true;
+const busyEvent = (state: string, event: string) =>
+  new Promise<void>((resolve) => {
+    execFile("<root>/bin/fm-busy-event.sh", [
+      "apply", "<case>/home/state", "sbx-same-a1", state,
+      "--gen", "<gen>", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+export default function (pi: any) {
+  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  pi.on("agent_end", (event: any) => {
+    if (event && event.willContinue === true) return;
+    return busyEvent("idle", "agent-end");
+  });
+  pi.on("turn_end", () => { if (notifyTurnEnd) execFile("touch", ["<case>/home/state/sbx-same-a1.turn-ended"]); });
+}
