@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--after-done <reason>] [--hold[=<seconds>] | --release-hold[=<id>]] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--after-done <reason>] [--priority <captain|main|notice>] [--notice <kind>] [--hold[=<seconds>] | --release-hold[=<id>]] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -123,6 +123,24 @@
 # sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
 # without creating a reply expectation; its delivery id makes uncertain retries
 # idempotent while allowing a later identical instruction to be distinct.
+#
+# Inbox priorities and notice bundling: a steer names its reading class with
+# --priority <captain|main|notice> (default main, which every record without a
+# priority header already is, so ordering for existing traffic is unchanged);
+# --notice <kind> is the sender-side sugar for a mechanical notice: it implies
+# priority=notice and bundles - writing a notice of kind K while unhandled
+# notices of the same kind K sit in the inbox collapses them into the one new
+# record, losslessly: bundle=<n> names how many it replaced, the newest text is
+# kept, the collapsed copies move to the inbox's bundled/ dir, and any
+# pending-reply corr they carried is superseded (bin/fm-pending-reply-lib.sh
+# fm_pending_reply_resolve_superseded) so bundled-away requests stop firing
+# recovery reposts and missed alarms. --notice cannot combine with
+# --fire-and-forget (the remote mode word carries one mode) and --priority
+# cannot combine with --notice (it already says notice). Only same-kind
+# notices collapse; captain relays, ordinary requests, and other kinds keep
+# their own records, and an acknowledged or bundled record is never resurrected.
+# The reading order the doorbell and the brief name - captain, main, notice,
+# numeric within one class - is owned by bin/fm-task-inbox-lib.sh.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send_stdin) that writes the message as a
@@ -568,6 +586,8 @@ fi
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
 AFTER_DONE=
+PRIORITY_CLASS=
+NOTICE_KIND=
 HOLD_MODE=
 HOLD_SECS_EXPLICIT=
 HOLD_RELEASE_ID=
@@ -635,6 +655,72 @@ while :; do
     }
     AFTER_DONE=$2
     shift 2
+    ;;
+  --priority)
+    [ $# -ge 2 ] || {
+      echo "error: --priority requires a class (captain, main, notice)" >&2
+      exit 1
+    }
+    [ -z "$PRIORITY_CLASS" ] || {
+      echo "error: duplicate --priority" >&2
+      exit 1
+    }
+    case "$2" in
+    captain | main | notice) ;;
+    *)
+      echo "error: --priority '$2' is not a class (captain, main, notice)" >&2
+      exit 1
+      ;;
+    esac
+    PRIORITY_CLASS=$2
+    shift 2
+    ;;
+  --priority=*)
+    [ -z "$PRIORITY_CLASS" ] || {
+      echo "error: duplicate --priority" >&2
+      exit 1
+    }
+    case "${1#--priority=}" in
+    captain | main | notice) ;;
+    *)
+      echo "error: --priority '${1#--priority=}' is not a class (captain, main, notice)" >&2
+      exit 1
+      ;;
+    esac
+    PRIORITY_CLASS=${1#--priority=}
+    shift
+    ;;
+  --notice)
+    [ $# -ge 2 ] || {
+      echo "error: --notice requires a kind (A-Z a-z 0-9 . _ -)" >&2
+      exit 1
+    }
+    [ -z "$NOTICE_KIND" ] || {
+      echo "error: duplicate --notice" >&2
+      exit 1
+    }
+    case "$2" in
+    '' | *[!A-Za-z0-9._-]*)
+      echo "error: --notice '$2' is not a valid notice kind (allowed: A-Z a-z 0-9 . _ -)" >&2
+      exit 1
+      ;;
+    esac
+    NOTICE_KIND=$2
+    shift 2
+    ;;
+  --notice=*)
+    [ -z "$NOTICE_KIND" ] || {
+      echo "error: duplicate --notice" >&2
+      exit 1
+    }
+    case "${1#--notice=}" in
+    '' | *[!A-Za-z0-9._-]*)
+      echo "error: --notice '${1#--notice=}' is not a valid notice kind (allowed: A-Z a-z 0-9 . _ -)" >&2
+      exit 1
+      ;;
+    esac
+    NOTICE_KIND=${1#--notice=}
+    shift
     ;;
   --hold)
     [ -z "$HOLD_MODE" ] || {
@@ -821,6 +907,56 @@ fm_send_resolve_close_note() { # <key> <excerpt>
   printf 'answered: %s' "$excerpt"
 }
 
+# Supersede the pending-reply expectations of every record a notice bundle
+# collapsed (bin/fm-task-inbox-lib.sh reports them in _FM_TASK_INBOX_BUNDLED_RECS):
+# the worker will never see those records, so their corrs cannot be answered and
+# must not keep firing recovery reposts and missed alarms - the exact notice
+# noise bundling exists to remove. Degradations warn and never fail the send:
+# the steer itself is durably delivered, and a warning must never invite a
+# resend that would duplicate it.
+fm_send_supersede_bundled_corrs() {  # <bundled-record-paths> <bundle-into-base>
+  local paths=$1 into=$2 path body corr
+  [ -n "$paths" ] || return 0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    body=$(fm_task_inbox_body "$path" 2>/dev/null) || continue
+    corr=$(fm_pending_reply_extract_corr "$body")
+    [ -n "$corr" ] || continue
+    if fm_pending_reply_resolve_superseded "$STATE" "$corr" "$into"; then
+      echo "fm-send: notice bundle superseded pending-reply expectation $corr (bundled into $into)" >&2
+    else
+      echo "warning: reply-tracking-degraded (steer delivered, do not resend): superseding bundled pending-reply expectation $corr failed; inspect $STATE" >&2
+    fi
+  done <<EOF
+$paths
+EOF
+}
+
+# Consume the remote leg's bundling report: `bundled-into=<base>` names the
+# record the remote enqueue wrote, one `bundled-corr=<corr>` line names each
+# collapsed record that carried a pending-reply correlation. The corrs are
+# parent-owned, so the supersession runs here against THIS home even though
+# the bundling happened on the remote host. Warn-only, never resend-inviting,
+# for the same reason as the local supersession.
+fm_send_supersede_remote_bundled() {  # <remote-leg-stdout>
+  local out=$1 line corr into
+  into=$(printf '%s\n' "$out" | sed -n 's/^bundled-into=//p' | head -1)
+  [ -n "$into" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+    bundled-corr=*) corr=${line#bundled-corr=} ;;
+    *) continue ;;
+    esac
+    if fm_pending_reply_resolve_superseded "$STATE" "$corr" "$into"; then
+      echo "fm-send: remote notice bundle superseded pending-reply expectation $corr (bundled into $into)" >&2
+    else
+      echo "warning: reply-tracking-degraded (steer delivered, do not resend): superseding remote-bundled pending-reply expectation $corr failed; inspect $STATE" >&2
+    fi
+  done <<EOF
+$out
+EOF
+}
+
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
   printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' ||
     {
@@ -837,6 +973,24 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
       echo "error: --fire-and-forget cannot accompany --resolve-key" >&2
       exit 1
     }
+  [ -z "$NOTICE_KIND" ] ||
+    {
+      echo "error: --fire-and-forget cannot accompany --notice; send the notice without a delivery id, or the delivery without the notice kind" >&2
+      exit 1
+    }
+fi
+
+# One way to say the class: --notice already carries priority=notice, so an
+# explicit --priority alongside it is a contradiction in terms, not a default.
+[ -z "$NOTICE_KIND" ] || [ -z "$PRIORITY_CLASS" ] ||
+  {
+    echo "error: --priority cannot accompany --notice; --notice already means priority=notice" >&2
+    exit 1
+  }
+# A captain notice is a contradiction: bundling is for mechanical notices only.
+if [ "$PRIORITY_CLASS" = notice ] && [ -z "$NOTICE_KIND" ]; then
+  echo "error: --priority notice needs --notice <kind>: a notice without a kind neither bundles nor orders among other notices" >&2
+  exit 1
 fi
 
 # A hold is steering, an answer closes a decision: both flags on one send
@@ -1326,24 +1480,45 @@ else
     fi
     remote_rc=0
     remote_completion_unknown=0
+    remote_out=''
     REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID")
     [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
-    # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
+    [ -z "$NOTICE_KIND" ] || REMOTE_SEND_ARGS+=("notice=$NOTICE_KIND")
+    # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds and
+    # captures the leg's stdout (its stderr keeps flowing to the operator): a
+    # notice-kind send reports what its remote bundling collapsed there, and
+    # anything else the leg prints on stdout is diagnostics this parse ignores.
     # fm_run_timed's 124 means the attempt was killed at the bound with remote
     # completion unknown - the enqueue may have landed - so it exits through
     # the same unconfirmed-delivery contract as a lost transport, without a
     # retry that would only wait out the same busy remote queue again. (A
     # remote job's own timeout also relays as 124; treating it as unconfirmed
     # stays safe because the remote enqueue deduplicates.)
-    printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
-      "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
+    remote_out=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+      "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}") || remote_rc=$?
     if [ "$remote_rc" -eq 124 ]; then
       remote_completion_unknown=1
     elif [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
-      printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
-        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
+      remote_out=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}") || remote_rc=$?
+    fi
+    # An older remote code root does not know the notice mode word and rejects
+    # the send before anything is written there; the identical send without
+    # the kind then lands as a plain (unbundled) notice, which is exactly what
+    # that root's traffic looked like before bundling existed. Any other
+    # known-failed completion fails again the same way below, so a real remote
+    # failure never degrades quietly into an unbundled send.
+    if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 0 ] && [ -n "$NOTICE_KIND" ]; then
+      echo "notice: the remote code root does not understand notice kinds yet; sending $TARGET_REMOTE_ID's notice without remote bundling" >&2
+      REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID")
+      remote_rc=0
+      remote_out=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}") || remote_rc=$?
+      if [ "$remote_rc" -eq 124 ]; then
+        remote_completion_unknown=1
+      fi
     fi
     fm_lock_release "$REMOTE_META_LOCK"
     if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
@@ -1377,6 +1552,10 @@ else
       exit 1
     fi
     # The remote record is durable delivery, exactly as a local enqueue is.
+    # A remote notice bundle collapsed remote records whose pending-reply
+    # expectations are parent-owned here: supersede them through the leg's
+    # stdout report. Warn-only, like the local plane.
+    fm_send_supersede_remote_bundled "${remote_out:-}"
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
         :
@@ -1446,13 +1625,21 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    inbox_write_out=$(mktemp "${TMPDIR:-/tmp}/fm-send-inbox-write.XXXXXX")
     if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
-      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
-        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+      fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
+        "${FIRE_AND_FORGET_ID:+fire-and-forget}" "$NOTICE_KIND" "$PRIORITY_CLASS" \
+        > "$inbox_write_out" || inbox_write_rc=$?
     else
-      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
-        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+      # The write runs in THIS shell rather than under command substitution:
+      # the bundling report arrives through the library's globals, which a
+      # subshell would trap and lose.
+      fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
+        "${FIRE_AND_FORGET_ID:+fire-and-forget}" "$NOTICE_KIND" "$PRIORITY_CLASS" \
+        > "$inbox_write_out" || inbox_write_rc=$?
     fi
+    INBOX_RECORD=$(cat "$inbox_write_out" 2>/dev/null)
+    rm -f "$inbox_write_out"
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
@@ -1462,6 +1649,14 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
+    # A same-kind notice bundle collapsed earlier unhandled notices: name what
+    # it replaced for the operator, then supersede any pending-reply
+    # expectations the collapsed records carried. This can never fail the send:
+    # the new record is already durably delivered.
+    if [ -n "${_FM_TASK_INBOX_BUNDLED_RECS:-}" ]; then
+      echo "fm-send: notice kind $NOTICE_KIND bundled $(printf '%s\n' "$_FM_TASK_INBOX_BUNDLED_RECS" | grep -c .) earlier unhandled notice(s) into ${INBOX_RECORD##*/}" >&2
+      fm_send_supersede_bundled_corrs "$_FM_TASK_INBOX_BUNDLED_RECS" "${INBOX_RECORD##*/}"
+    fi
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.

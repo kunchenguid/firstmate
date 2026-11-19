@@ -24,6 +24,12 @@
 # acknowledgement. A same-basename restatement-copy of the mate home's
 # state/<task_id>.status onto the parent channel is a repair of the
 # FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
+# One more mechanical close (resolved_via=helper, see
+# fm_pending_reply_resolve_superseded): when a same-kind notice bundle
+# (bin/fm-task-inbox-lib.sh) collapses a still-unhandled request record, the
+# worker will never see it, so the request it minted is closed rather than
+# left firing recovery reposts and missed alarms. A correlated report that
+# already landed always wins over the supersession.
 #
 # Record location (parent FM_HOME):
 #   state/pending-replies/<corr_id>
@@ -1563,6 +1569,47 @@ EOF
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalation_closed_epoch "$now"
+}
+
+# Supersede a pending-reply expectation whose steering-inbox record was
+# collapsed into a same-kind notice bundle (bin/fm-task-inbox-lib.sh): the
+# worker will never see the bundled record, so the request it minted cannot be
+# answered, and leaving it armed would keep firing recovery reposts and missed
+# alarms - the exact notice noise bundling exists to remove. A correlated
+# report that already landed always wins (checked first under the per-corr
+# lock); otherwise the record resolves mechanically with resolved_via=helper
+# and superseded_by naming the bundle record that replaced it. Like expiry,
+# this is a bookkeeping close: it must never read as the mate acknowledging
+# work. Failure returns 1 and leaves the expectation to the watcher's ordinary
+# reconciliation; the caller surfaces a warning, never a resend.
+fm_pending_reply_resolve_superseded() {  # <state-dir> <corr_id> <superseded-by-record-base>
+  local state=$1 corr=$2 superseded_by=$3 rec now lock rc=1
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 0
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  if _fm_pending_reply_try_resolve_locked "$state" "$corr" \
+    || [ "$(fm_pending_reply_get "$rec" phase)" = resolved ]; then
+    # Answered (or already closed) in the meantime: the supersession changes
+    # nothing about an already-settled request.
+    fm_lock_release "$lock"
+    return 0
+  fi
+  now=$(fm_pending_reply_now)
+  if fm_pending_reply_set "$rec" phase resolved \
+    && fm_pending_reply_set "$rec" resolved_epoch "$now" \
+    && fm_pending_reply_set "$rec" resolved_via helper \
+    && fm_pending_reply_set "$rec" superseded_by "$superseded_by"; then
+    fm_pending_reply_inbox "$state" "$corr" close || true
+    _fm_pending_reply_close_escalation_locked "$state" "$corr" || true
+    rc=0
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
 }
 
 # Escalate once after a missed recovery report or failed delivery outcome.

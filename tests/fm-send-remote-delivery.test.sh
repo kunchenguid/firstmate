@@ -130,6 +130,23 @@ remote_home=$(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0]
 rargs=()
 while IFS= read -r -d '' a; do rargs+=("$a"); done \
   < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$argv_b64")
+# An old remote code root: it receives the notice= mode word but its leg does
+# not understand it, so it dies with the usage error BEFORE anything is
+# written there. FM_FAKE_SSH_REJECT_NOTICE rejects only the first notice= call
+# (the marker file lets later identical calls through, so the degraded plain
+# retry executes against this same "root").
+if [ "${FM_FAKE_SSH_REJECT_NOTICE:-0}" = 1 ] \
+  && [ ! -f "${FM_SSH_LOG}.notice-rejected" ]; then
+  for a in "${rargs[@]}"; do
+    case "$a" in
+    notice=*)
+      printf 'x' > "${FM_SSH_LOG}.notice-rejected"
+      printf 'invalid send delivery mode\n' >&2
+      exit 1
+      ;;
+    esac
+  done
+fi
 cmd=${rargs[0]}
 rc=0
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
@@ -292,6 +309,74 @@ test_remote_steer_lands_in_remote_inbox() {
   [ "$(grep '^phase=' "$pend" | tail -1 | cut -d= -f2-)" = awaiting_report ] \
     || fail "the delivered expectation must await its report: $(cat "$pend")"
   pass "fm-send remote: a text steer lands as a durable remote inbox record and exits 0 at enqueue"
+}
+
+test_remote_notice_bundles_and_supersedes_parent_corrs() {
+  local dir fb ssh_log home rhome rc err recs rec corr1 pr1 names
+  dir="$TMP_ROOT/remote-notice"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-notice)
+  home=$(setup_remote_parent_home remote-notice "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm --notice restart-demo "remote notice one" >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  expect_code 0 "$rc" "a remote notice steer must exit 0: $err"
+  recs=$(remote_inbox_records "$rhome")
+  rec=$(printf '%s\n' "$recs" | head -1)
+  grep -q '^notice-kind=restart-demo$' "$rec" || fail "the remote notice record lost its kind header"
+  corr1=$(fm_task_inbox_body "$rec" | grep -oE 'corr=[a-f0-9]{16}' | head -1 | cut -d= -f2)
+  [ -n "$corr1" ] || fail "the first remote notice minted no corr"
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm --notice restart-demo "remote notice two" >"$dir/out2" 2>"$dir/err2" || rc=$?
+  err=$(cat "$dir/err2")
+  expect_code 0 "$rc" "the bundling remote notice steer must exit 0: $err"
+  names=$(find "$rhome/state/parent-route/rsm.inbox" -maxdepth 1 -name '*.msg' | sed 's|.*/||' | tr '\n' ' ')
+  [ "$names" = "002.msg " ] || fail "remote bundling should leave one root record, got: $names"
+  rec="$rhome/state/parent-route/rsm.inbox/002.msg"
+  grep -q '^bundle=1$' "$rec" || fail "the remote bundle record should carry bundle=1"
+  [ -f "$rhome/state/parent-route/rsm.inbox/bundled/001.msg" ] \
+    || fail "the collapsed remote notice should have moved to the remote bundled/ dir"
+  # The collapsed corr is parent-owned: its expectation must resolve in the
+  # PARENT home through the leg's stdout report, never in the remote home.
+  pr1="$home/state/pending-replies/$corr1"
+  [ "$(grep '^phase=' "$pr1" | tail -1 | cut -d= -f2)" = resolved ] \
+    || fail "the remote-bundled corr must resolve parent-side, got:"$'\n'"$(cat "$pr1")"
+  grep -q '^resolved_via=helper$' "$pr1" || fail "the remote supersession should record resolved_via=helper"
+  grep -q '^superseded_by=002.msg$' "$pr1" || fail "the remote supersession should name the bundle record"
+  assert_contains "$err" "remote notice bundle superseded pending-reply expectation $corr1" \
+    "the operator should learn which corr the remote bundle superseded"
+  pass "fm-send remote: a same-kind notice bundles remotely and supersedes parent-side corrs"
+}
+
+test_remote_notice_falls_back_on_old_root() {
+  local dir fb ssh_log home rhome rc err rec
+  dir="$TMP_ROOT/remote-notice-old-root"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-notice-old-root)
+  home=$(setup_remote_parent_home remote-notice-old-root "$rhome")
+
+  rc=0
+  (
+    cd "$TMP_ROOT" || exit 1
+    send_env "$fb" "${home#"$TMP_ROOT/"}" "$ssh_log" FM_FAKE_SSH_REJECT_NOTICE=1 \
+      "$SEND" rsm --notice restart-demo "old root notice"
+  ) >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  expect_code 0 "$rc" "a degraded old-root notice send must still deliver: $err"
+  assert_contains "$err" "does not understand notice kinds yet" \
+    "the degraded fallback should say the remote root predates notice kinds"
+  [ "$(cat "$ssh_log.count")" = 2 ] \
+    || fail "the fallback should retry exactly once without the kind, got $(cat "$ssh_log.count") attempts"
+  rec=$(remote_inbox_records "$rhome" | head -1)
+  [ -n "$rec" ] || fail "the degraded notice was not delivered"
+  ! grep -q '^notice-kind=' "$rec" \
+    || fail "the degraded retry must land as a plain record, got:"$'\n'"$(cat "$rec")"
+  grep -q '^bundle=' "$rec" && fail "the degraded retry must not claim a bundle"
+  pass "fm-send remote: an old remote root degrades to an unbundled notice without failing"
 }
 
 test_remote_rerun_is_idempotent() {
@@ -823,6 +908,8 @@ test_local_pending_does_not_close_resolve_key() {
 
 test_remote_large_steer_uses_stdin
 test_remote_steer_lands_in_remote_inbox
+test_remote_notice_bundles_and_supersedes_parent_corrs
+test_remote_notice_falls_back_on_old_root
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
 test_remote_fire_and_forget_never_arms_reply_recovery

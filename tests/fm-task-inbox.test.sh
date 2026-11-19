@@ -842,6 +842,110 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+# Priority headers: records carry an optional priority=captain|main|notice
+# header (absent means main, so every legacy record keeps its meaning), and the
+# ordered listing reads captain, then main (with legacy), then notice, numeric
+# within each class.
+test_priority_headers_and_ordering() {
+  local state dir ordered first names
+  state="$TMP_ROOT/priority-order/state"; mkdir -p "$state"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "main early" >/dev/null
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "notice one" "" kindA >/dev/null
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "captain relay" "" "" captain >/dev/null
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "main late" >/dev/null
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "notice two" "" kindB >/dev/null
+  printf 'schema=fm-task-inbox.v1\nat=2020-01-01T00:00:00Z\n--\nlegacy body' > "$state/t1.inbox/legacy.msg"
+  ordered=$(inbox_lib "$state" fm_task_inbox_list_ordered "$state" t1)
+  names=$(printf '%s\n' "$ordered" | sed 's|.*/||' | tr '\n' ' ')
+  [ "$names" = "003.msg legacy.msg 001.msg 004.msg 002.msg 005.msg " ] \
+    || fail "priority ordering should read captain, main+legacy, notice in numeric order, got: $names"
+  first=$(printf '%s\n' "$ordered" | head -1)
+  [ "$(inbox_lib "$state" fm_task_inbox_priority "$first")" = captain ] \
+    || fail "priority=captain should be readable from the record"
+  [ "$(inbox_lib "$state" fm_task_inbox_priority "$state/t1.inbox/001.msg")" = main ] \
+    || fail "a record without a priority header reads as main"
+  [ "$(inbox_lib "$state" fm_task_inbox_priority "$state/t1.inbox/002.msg")" = notice ] \
+    || fail "a notice record should read priority=notice"
+  [ "$(inbox_lib "$state" fm_task_inbox_notice_kind "$state/t1.inbox/002.msg")" = kindA ] \
+    || fail "notice-kind should be readable from the record"
+  [ "$(inbox_lib "$state" fm_task_inbox_notice_kind "$state/t1.inbox/001.msg")" = "" ] \
+    || fail "a non-notice record has no notice kind"
+  pass "inbox: ordered listing reads captain, main (legacy included), then notices"
+}
+
+# Same-kind bundling: writing a notice of kind K while unhandled notices of
+# kind K sit in the inbox collapses them into the one new record - losslessly:
+# bundle=<n> names how many it replaced, the newest text is kept, the collapsed
+# copies move to bundled/, seqs stay retired, and other kinds, mains, captains,
+# and handled records never collapse.
+test_notice_bundling_collapses_same_kind() {
+  local state dir rec1 rec2 rec3 plain newest names bundled_names next
+  state="$TMP_ROOT/notice-bundle/state"; mkdir -p "$state"
+  dir="$state/t1.inbox"
+  rec1=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "restart notice one" "" restart-demo)
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "unrelated drain" "" other-kind >/dev/null
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "restart notice two" "" restart-demo)
+  [ "$(inbox_lib "$state" fm_task_inbox_bundle_count "$rec1")" = 0 ] \
+    || fail "the first notice of a kind must not carry a bundle header"
+  rec3=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "restart notice three" "" restart-demo)
+  [ -f "$dir/bundled/${rec1##*/}" ] || fail "the first same-kind notice should have moved to bundled/"
+  [ -f "$dir/bundled/${rec2##*/}" ] || fail "the second same-kind notice should have moved to bundled/"
+  [ "$(inbox_lib "$state" fm_task_inbox_bundle_count "$rec3")" = 2 ] \
+    || fail "the newest notice should name how many records it replaced, got $(inbox_lib "$state" fm_task_inbox_bundle_count "$rec3")"
+  [ "$(inbox_lib "$state" fm_task_inbox_body "$dir/bundled/${rec1##*/}")" = "restart notice one" ] \
+    || fail "a bundled copy must keep its original body for audit"
+  names=$(find "$dir" -maxdepth 1 -name '*.msg' | sort -V | sed 's|.*/||' | tr '\n' ' ')
+  [ "$names" = "002.msg 004.msg " ] \
+    || fail "bundled records must leave the root listing while other kinds stay, got: $names"
+  # Sequences stay retired: the next record continues after the bundle.
+  next=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "after bundle")
+  [ "${next##*/}" = 005.msg ] \
+    || fail "a bundled sequence must never be reissued, got ${next##*/}"
+  pass "inbox: same-kind notices bundle losslessly with bundle=n naming the collapse"
+}
+
+test_notice_bundling_skips_handled_and_other_kinds() {
+  local state dir rec names
+  state="$TMP_ROOT/notice-bundle-scope/state"; mkdir -p "$state"
+  dir="$state/t1.inbox"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "handled notice" "" keepkind)
+  mv "$rec" "$dir/handled/"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "main stays" >/dev/null
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "other kind stays" "" otherkind >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "fresh notice" "" keepkind)
+  [ "$(inbox_lib "$state" fm_task_inbox_bundle_count "$rec")" = 0 ] \
+    || fail "a handled notice, a main record, and another kind must not bundle"
+  [ -f "$dir/bundled/001.msg" ] && fail "a handled notice must never be moved to bundled/"
+  names=$(find "$dir" -maxdepth 1 -name '*.msg' | sort -V | sed 's|.*/||' | tr '\n' ' ')
+  [ "$names" = "002.msg 003.msg 004.msg " ] \
+    || fail "no unhandled record may leave the root listing, got: $names"
+  pass "inbox: bundling collapses only unhandled notices of the same kind"
+}
+
+# The re-ring ladder tracks the first unhandled record in reading order that
+# is past its grace: a young captain never silences an aged notice's ring, and
+# an aged captain outranks an aged notice.
+test_due_action_orders_by_priority() {
+  local state dir cap notice action
+  state="$TMP_ROOT/priority-ladder/state"; mkdir -p "$state"
+  dir="$state/t1.inbox"
+  notice=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "old notice" "" somestall)
+  cap=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "young captain" "" "" captain)
+  age_path "$notice"
+  action=$(FM_TASK_INBOX_GRACE_SECS=3600 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $notice" ] \
+    || fail "an aged notice must ring even while a young captain waits, got: $action"
+  age_path "$cap"
+  action=$(FM_TASK_INBOX_GRACE_SECS=3600 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $cap" ] \
+    || fail "an aged captain must outrank an aged notice, got: $action"
+  mv "$cap" "$dir/handled/"
+  action=$(FM_TASK_INBOX_GRACE_SECS=3600 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $notice" ] \
+    || fail "acking the captain should return the ladder to the aged notice, got: $action"
+  pass "inbox: the ladder rings by priority order without starving lower classes"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -1391,6 +1495,10 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
+test_priority_headers_and_ordering
+test_notice_bundling_collapses_same_kind
+test_notice_bundling_skips_handled_and_other_kinds
+test_due_action_orders_by_priority
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack

@@ -137,7 +137,7 @@ fm_secondmate_health_observe() { # <id> <startable-rows> <now-epoch>
       if [ -n "$rec" ]; then
         FM_COMPOSER_HARNESS=$harness fm_task_inbox_ring "$backend" "$target" "$rec" "$(fm_meta_get "$meta" label)" || return 0
       else
-        FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$FM_SM_HEALTH_DIR/fm-send.sh" "$id" \
+        FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$FM_SM_HEALTH_DIR/fm-send.sh" "$id" --notice secondmate-goal-drain \
           "You own startable goal items with no parent-status progress for ${threshold}s. Drain your steering inbox and wake queue, inspect fm-goal.sh startable, and advance the ready items through their next safe step. Respect holds and pauses; report concrete progress or the blocker." >/dev/null 2>&1 || return 0
       fi
       fm_secondmate_health_store "$marker" "$signature" "$now" rung || return 1

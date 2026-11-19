@@ -25,6 +25,10 @@
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
+#   <task>.inbox/bundled/       same-kind notices collapsed by a newer notice;
+#                              audit trail only: sequence allocation scans it so
+#                              a number is never reused, but the worker listing,
+#                              the ladder, and the idempotent dedup never see it
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
@@ -40,14 +44,48 @@
 #   body-terminator=1          present on records written with a synthetic final newline
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #                              (it still gets one retry ring; see below)
+#   priority=captain|notice     present only when the record is not an ordinary
+#                              request from firstmate: captain names a relayed
+#                              captain message, notice a mechanical notice.
+#                              Absent means main, so every legacy record reads as
+#                              a main-priority request and ordering never changes
+#                              for records written before this field existed
+#   notice-kind=<kind>          on a notice: the kind whose repetitions collapse
+#                              (see bundling below)
+#   bundle=<n>                  present only when this record collapsed n earlier
+#                              unhandled notices of the same kind at write time;
+#                              the body is the NEWEST text, losslessly replacing
+#                              the collapsed ones, which move to bundled/ as the
+#                              audit copy of what was replaced
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
 #
-# Sequence numbers are never reused within a task: allocation scans both the
-# inbox root and handled/, so a message is processed at most once per worker
+# Sequence numbers are never reused within a task: allocation scans the inbox
+# root, handled/, and bundled/, so a message is processed at most once per worker
 # lifetime even if every doorbell is duplicated. Concurrent writers serialize
 # on .seq.lock; the worst racing outcome is ordering, never loss.
+#
+# Priority order (reading contract, restated by the doorbell and the brief
+# scaffold): captain records first, then main (the default), then notices;
+# numeric order within one priority. The worker acts in that order;
+# fm_task_inbox_list_ordered is the one implementation of it, and the ladder's
+# tracked record (fm_task_inbox_oldest_unhandled) follows the same rule so a
+# stale notice escalation never suppresses a captain message's ring.
+#
+# Notice bundling (fm_task_inbox_write / _write_idempotent with a notice kind):
+# a new notice of kind K written while unhandled records of the same kind K sit
+# in the root collapses them: the new record is written FIRST with bundle=<sum
+# of the collapsed records' own bundle counts plus their number> and the newest
+# text, then the collapsed records move to bundled/. Write-before-move means a
+# crash mid-bundle can only leave the older copies visible in the root (the
+# worker sees a duplicate, never a loss) and the next same-kind write converges.
+# Only same-kind notices collapse: requests from firstmate, captain relays, and
+# every other notice kind keep their own records, and a record that reached
+# handled/ or bundled/ is never resurrected. A collapsed record that carried a
+# pending-reply corr is superseded by the caller (bin/fm-send.sh resolves the
+# expectation via bin/fm-pending-reply-lib.sh), so a bundled-away request
+# cannot keep firing recovery reposts and missed alarms.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
@@ -171,11 +209,11 @@ fm_task_inbox_seq_of() {  # <basename>
   printf '%s' "$((10#$n))"
 }
 
-# Next unused sequence, scanning the inbox root AND handled/ so an
-# acknowledged sequence is never reissued. Caller must hold .seq.lock.
+# Next unused sequence, scanning the inbox root, handled/, AND bundled/ so an
+# acknowledged or collapsed sequence is never reissued. Caller must hold .seq.lock.
 fm_task_inbox_next_seq() {  # <inbox-dir>
   local dir=$1 max=0 d f n
-  for d in "$dir" "$dir/handled"; do
+  for d in "$dir" "$dir/handled" "$dir/bundled"; do
     for f in "$d"/*.msg; do
       [ -e "$f" ] || continue
       n=$(fm_task_inbox_seq_of "${f##*/}") || continue
@@ -201,10 +239,69 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   done
 }
 
+# Validate a notice kind. The charset matches decision keys so a kind can
+# never forge or break a header line.
+fm_task_inbox_valid_notice_kind() {  # <kind>
+  case "$1" in
+    '' | *[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Phase 1 of a bundle, before the new record is written: count the unhandled
+# same-kind notices the new record will replace and list their root paths in
+# _FM_TASK_INBOX_BUNDLE_COUNT / _FM_TASK_INBOX_BUNDLE_CANDIDATES. No record is
+# touched, so a crash here changes nothing. Each existing bundle record counts
+# itself plus what it had collapsed, so the new count is the true number of
+# notices the one new record replaces. Caller must hold .seq.lock.
+_fm_task_inbox_scan_kind_locked() {  # <inbox-dir> <kind>
+  local dir=$1 kind=$2 f n
+  _FM_TASK_INBOX_BUNDLE_COUNT=0
+  _FM_TASK_INBOX_BUNDLE_CANDIDATES=''
+  for f in "$dir"/*.msg; do
+    [ -e "$f" ] || continue
+    [ "$(fm_task_inbox_notice_kind "$f")" = "$kind" ] || continue
+    n=$(fm_task_inbox_bundle_count "$f")
+    _FM_TASK_INBOX_BUNDLE_COUNT=$((_FM_TASK_INBOX_BUNDLE_COUNT + n + 1))
+    _FM_TASK_INBOX_BUNDLE_CANDIDATES="${_FM_TASK_INBOX_BUNDLE_CANDIDATES}${_FM_TASK_INBOX_BUNDLE_CANDIDATES:+$'\n'}$f"
+  done
+}
+
+# Phase 2 of a bundle, after the new record is durably written: move the
+# scanned candidates into bundled/ and name the moved paths in
+# _FM_TASK_INBOX_BUNDLED_RECS (one path per collapsed record) for the caller's
+# corr supersession. Write-before-move means a crash can only leave an old copy
+# visible in the root (a duplicate the worker simply also handles), never a
+# loss; a move that fails mid-list leaves the unmoved copies in the root, where
+# the next same-kind write converges by bundling them too. Caller must hold
+# .seq.lock.
+_fm_task_inbox_move_bundled_locked() {  # <inbox-dir>
+  local dir=$1 f moved=''
+  _FM_TASK_INBOX_BUNDLED_RECS=''
+  [ -n "${_FM_TASK_INBOX_BUNDLE_CANDIDATES:-}" ] || return 0
+  mkdir -p "$dir/bundled" || return 1
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -e "$f" ] || continue
+    if mv -- "$f" "$dir/bundled/" 2>/dev/null; then
+      moved="${moved}${moved:+$'\n'}$dir/bundled/${f##*/}"
+    fi
+  done <<EOF
+$_FM_TASK_INBOX_BUNDLE_CANDIDATES
+EOF
+  _FM_TASK_INBOX_BUNDLED_RECS=$moved
+}
+
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
-  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
+# <notice-kind> is empty for every non-notice write; <bundle-count> is written
+# only when a same-kind bundling collapsed earlier records for this one;
+# <priority> captain names a relayed captain message (main needs no header,
+# notice is implied by a notice kind and never passed separately).
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [notice-kind] [bundle-count] [priority]
+  local dir=$1 text=$2 delivery_mode=${3:-} notice_kind=${4:-} bundle_count=${5:-0} priority=${6:-}
+  local seq tmp rec status=0
+  case "$bundle_count" in '' | *[!0-9]*) bundle_count=0 ;; esac
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
@@ -216,6 +313,13 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
       *) printf 'body-terminator=1\n' ;;
     esac
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
+    if [ -n "$notice_kind" ]; then
+      printf 'priority=notice\n'
+      printf 'notice-kind=%s\n' "$notice_kind"
+      [ "$bundle_count" -le 0 ] || printf 'bundle=%s\n' "$bundle_count"
+    elif [ "$priority" = captain ]; then
+      printf 'priority=captain\n'
+    fi
     printf -- '--\n'
     case "$text" in
       *$'\n') printf '%s' "$text" ;;
@@ -228,15 +332,43 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
 
 # Durably enqueue one steer: temp-write, then atomic rename into the next
 # sequence slot. Prints the record path. Fails without a partial record.
-fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock rec status=0
+# With a notice kind, first bundles the unhandled same-kind notices (see the
+# header) and sets _FM_TASK_INBOX_BUNDLED_RECS / _FM_TASK_INBOX_BUNDLE_INTO for
+# the caller's corr supersession; both are empty strings when nothing collapsed.
+fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode] [notice-kind] [priority]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} notice_kind=${5:-} priority=${6:-}
+  local dir lock rec status=0 bundle=0
+  _FM_TASK_INBOX_BUNDLED_RECS=''
+  _FM_TASK_INBOX_BUNDLE_INTO=''
+  _FM_TASK_INBOX_BUNDLE_COUNT=0
+  _FM_TASK_INBOX_BUNDLE_CANDIDATES=''
+  if [ -n "$notice_kind" ]; then
+    fm_task_inbox_valid_notice_kind "$notice_kind" || return 1
+    priority=notice
+  else
+    case "$priority" in
+      '' | main) priority='' ;;
+      captain) ;;
+      *) return 1 ;;
+    esac
+  fi
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
-  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
+  if [ -n "$notice_kind" ]; then
+    _fm_task_inbox_scan_kind_locked "$dir" "$notice_kind"
+    bundle=$_FM_TASK_INBOX_BUNDLE_COUNT
+  fi
+  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" "$notice_kind" "$bundle" "$priority") || status=1
+  if [ "$status" -eq 0 ] && [ -n "$notice_kind" ]; then
+    _fm_task_inbox_move_bundled_locked "$dir" || true
+  fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
+  if [ -n "${_FM_TASK_INBOX_BUNDLED_RECS:-}" ]; then
+    _FM_TASK_INBOX_BUNDLE_INTO=$rec
+  fi
   printf '%s' "$rec"
 }
 
@@ -251,9 +383,27 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
 # secondmate request embeds a per-request correlation token in its body. The
 # local plane keeps plain fm_task_inbox_write: its outcome is synchronous, so
 # a repeated identical local steer is a deliberate new instruction.
-fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock want have f rec='' status=0
+# With a notice kind, the dedup scan deliberately does NOT look at bundled/:
+# a collapsed record is superseded, so an exact retry after a bundle writes a
+# fresh record and re-delivers (a duplicate, never a loss).
+fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode] [notice-kind] [priority]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} notice_kind=${5:-} priority=${6:-}
+  local dir lock want have f rec='' status=0 bundle=0
   local first_line=${3%%$'\n'*} scan_dir
+  _FM_TASK_INBOX_BUNDLED_RECS=''
+  _FM_TASK_INBOX_BUNDLE_INTO=''
+  _FM_TASK_INBOX_BUNDLE_COUNT=0
+  _FM_TASK_INBOX_BUNDLE_CANDIDATES=''
+  if [ -n "$notice_kind" ]; then
+    fm_task_inbox_valid_notice_kind "$notice_kind" || return 1
+    priority=notice
+  else
+    case "$priority" in
+      '' | main) priority='' ;;
+      captain) ;;
+      *) return 1 ;;
+    esac
+  fi
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
@@ -312,10 +462,20 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
     status=1
   fi
   if [ "$status" -eq 0 ] && [ -z "$rec" ]; then
-    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
+    if [ -n "$notice_kind" ]; then
+      _fm_task_inbox_scan_kind_locked "$dir" "$notice_kind"
+      bundle=$_FM_TASK_INBOX_BUNDLE_COUNT
+    fi
+    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" "$notice_kind" "$bundle" "$priority") || status=1
+    if [ "$status" -eq 0 ] && [ -n "$notice_kind" ]; then
+      _fm_task_inbox_move_bundled_locked "$dir" || true
+    fi
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
+  if [ -n "${_FM_TASK_INBOX_BUNDLED_RECS:-}" ]; then
+    _FM_TASK_INBOX_BUNDLE_INTO=$rec
+  fi
   printf '%s' "$rec"
 }
 
@@ -364,7 +524,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     ''|*[![:print:]]*) return 1 ;;
   esac
   quoted=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
-  printf ": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, read and act on each in numeric order, then mv each into its handled/." \
+  printf ": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, act by priority - captain, main, notices, numeric order within one - then mv each into handled/." \
     "$quoted"
 }
 
@@ -442,21 +602,86 @@ fm_task_inbox_is_fire_and_forget() {  # <record-path>
   ' "$rec"
 }
 
-# Oldest escalation-tracked unhandled record, or fail when none is due.
-fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
-  local dir best='' best_n=0 f n
+# The priority class of one record: captain, main, or notice. Absent or an
+# unreadable header means main, so every legacy record and every write that
+# does not name a priority is an ordinary request from firstmate.
+fm_task_inbox_priority() {  # <record-path>
+  local p
+  p=$(awk '
+    $0 == "--" { exit }
+    $0 == "priority=captain" || $0 == "priority=main" || $0 == "priority=notice" { print substr($0, 10); exit }
+  ' "$1" 2>/dev/null) || p=''
+  case "$p" in
+    captain | main | notice) printf '%s' "$p" ;;
+    *) printf 'main' ;;
+  esac
+}
+
+# Reading-order rank of a priority class: 0 captain, 1 main, 2 notice.
+fm_task_inbox_priority_rank() {  # <class>
+  case "$1" in
+    captain) printf '0' ;;
+    notice) printf '2' ;;
+    *) printf '1' ;;
+  esac
+}
+
+# The notice kind of one record, or empty when it is not a bundling notice.
+# A malformed kind header reads as absent: the record then sorts as its
+# priority says (notice) but never takes part in a bundle.
+fm_task_inbox_notice_kind() {  # <record-path>
+  local k
+  k=$(awk '
+    $0 == "--" { exit }
+    $0 ~ /^notice-kind=/ { print substr($0, 13); exit }
+  ' "$1" 2>/dev/null) || k=''
+  case "$k" in
+    '' | *[!A-Za-z0-9._-]*) printf '' ;;
+    *) printf '%s' "$k" ;;
+  esac
+}
+
+# How many earlier same-kind notices this record replaced at write time.
+fm_task_inbox_bundle_count() {  # <record-path>
+  local n
+  n=$(awk '
+    $0 == "--" { exit }
+    $0 ~ /^bundle=/ { print substr($0, 8); exit }
+  ' "$1" 2>/dev/null) || n=''
+  case "$n" in
+    '' | *[!0-9]*) printf '0' ;;
+    *) printf '%s' "$((10#$n))" ;;
+  esac
+}
+
+# All unhandled records in reading order: priority rank first (captain, main,
+# notice), then numeric sequence within one priority - the order the doorbell
+# names and the brief scaffold tells the worker to act in. Handled and bundled
+# records are not listed; nothing here reads them.
+fm_task_inbox_list_ordered() {  # <state-dir> <task-id>
+  local dir f
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/*.msg; do
     [ -e "$f" ] || continue
+    printf '%s\t%s\t%s\n' \
+      "$(fm_task_inbox_priority_rank "$(fm_task_inbox_priority "$f")")" \
+      "$(fm_task_inbox_seq_of "${f##*/}" 2>/dev/null || printf '0')" \
+      "$f"
+  done | LC_ALL=C sort -t "$(printf '\t')" -k1,1n -k2,2n | cut -f3-
+}
+
+# The ladder's tracked unhandled record: the first in reading order - highest
+# priority first, then oldest sequence within it - skipping fire-and-forget
+# records, or fail when none exists. The name keeps "oldest" because within one
+# priority that is exactly what it is.
+fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
+  local f
+  while IFS= read -r f; do
     fm_task_inbox_is_fire_and_forget "$f" && continue
-    n=$(fm_task_inbox_seq_of "${f##*/}") || continue
-    if [ -z "$best" ] || [ "$n" -lt "$best_n" ]; then
-      best=$f
-      best_n=$n
-    fi
-  done
-  [ -n "$best" ] || return 1
-  printf '%s' "$best"
+    printf '%s' "$f"
+    return 0
+  done < <(fm_task_inbox_list_ordered "$1" "$2")
+  return 1
 }
 
 # Owe a fire-and-forget record its one retry ring (see the header). A newer
@@ -486,9 +711,23 @@ fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last
+  local dir oldest base now grace max ladder rec_base count last f any=0
   dir=$(fm_task_inbox_dir "$1" "$2")
-  if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
+  grace=$(fm_task_inbox_grace_secs)
+  # The ladder tracks the record first in reading order among those past grace:
+  # priority rank decides which unhandled record a ring or escalation is FOR,
+  # while the grace check stays per-record, so a fresh captain message never
+  # starves an older notice's re-ring and a stale notice's escalation never
+  # suppresses a captain message. Equal priority keeps numeric order.
+  oldest=''
+  while IFS= read -r f; do
+    fm_task_inbox_is_fire_and_forget "$f" && continue
+    any=1
+    [ "$(fm_path_age "$f")" -ge "$grace" ] || continue
+    oldest=$f
+    break
+  done < <(fm_task_inbox_list_ordered "$1" "$2")
+  if [ "$any" = 0 ]; then
     rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.busy-state" 2>/dev/null || true
     # The one retry ring exists only while config/wait-no-turns is present.
     # Absent, a mark is left untouched and the inbox stays quiet, as before.
@@ -504,12 +743,11 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
     printf 'quiet'
     return 0
   fi
-  base=${oldest##*/}
-  grace=$(fm_task_inbox_grace_secs)
-  if [ "$(fm_path_age "$oldest")" -lt "$grace" ]; then
+  if [ -z "$oldest" ]; then
     printf 'quiet'
     return 0
   fi
+  base=${oldest##*/}
   count=0
   last=0
   ladder=$(cat "$dir/.ring-state" 2>/dev/null || true)

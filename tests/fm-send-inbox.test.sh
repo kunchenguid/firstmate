@@ -252,6 +252,87 @@ test_failed_ring_is_still_sent() {
 # or whose window is gone has nobody to read a record, so the send refuses with a
 # clear message and queues nothing. A second mate, an explicit opt-in, and an
 # endpoint whose liveness is merely unclear keep the durable record.
+test_notice_flag_bundles_and_supersedes() {
+  local dir err corr1 rec names pr1
+  dir=$(setup_case notice-bundle)
+  err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  run_send "$dir" "$err" -- domain --notice restart-demo "restart notice one" ||
+    fail "a notice steer should succeed"
+  rec="$dir/home/state/domain.inbox/001.msg"
+  [ -f "$rec" ] || fail "the first notice was not recorded"
+  grep -q '^priority=notice$' "$rec" || fail "the first notice record lost priority=notice"
+  grep -q '^notice-kind=restart-demo$' "$rec" || fail "the first notice record lost its kind"
+  corr1=$(record_body _ "$rec" | grep -oE 'corr=[a-f0-9]{16}' | head -1 | cut -d= -f2)
+  [ -f "$dir/home/state/pending-replies/$corr1" ] || fail "first notice minted no expectation"
+  run_send "$dir" "$err" -- domain --notice restart-demo "restart notice two" ||
+    fail "a second same-kind notice steer should succeed"
+  rec="$dir/home/state/domain.inbox/002.msg"
+  grep -q '^bundle=1$' "$rec" || fail "the second notice should carry bundle=1, got:"$'\n'"$(grep '^bundle=' "$rec" || true)"
+  [ -f "$dir/home/state/domain.inbox/bundled/001.msg" ] \
+    || fail "the collapsed notice should have moved to bundled/"
+  names=$(find "$dir/home/state/domain.inbox" -maxdepth 1 -name '*.msg' | sed 's|.*/||' | tr '\n' ' ')
+  [ "$names" = "002.msg " ] || fail "the root listing should hold only the bundle record, got: $names"
+  pr1="$dir/home/state/pending-replies/$corr1"
+  [ "$(grep '^phase=' "$pr1" | cut -d= -f2)" = resolved ] \
+    || fail "the bundled record's expectation should resolve, got:"$'\n'"$(cat "$pr1")"
+  grep -q '^resolved_via=helper$' "$pr1" \
+    || fail "the supersession should record resolved_via=helper"
+  grep -q '^superseded_by=002.msg$' "$pr1" \
+    || fail "the supersession should name the bundle record that replaced it"
+  assert_contains "$(cat "$err")" "bundled 1 earlier unhandled notice(s) into 002.msg" \
+    "the operator should be told what the bundle collapsed"
+  pass "fm-send inbox: --notice bundles same-kind notices and supersedes their expectations"
+}
+
+test_priority_flag_sets_the_reading_class() {
+  local dir err rec
+  dir=$(setup_case priority-flags)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --priority captain "relay from the captain" ||
+    fail "a captain-priority steer should succeed"
+  rec="$dir/home/state/t1.inbox/001.msg"
+  grep -q '^priority=captain$' "$rec" || fail "--priority captain lost its header"
+  run_send "$dir" "$err" -- t1 "ordinary steer" ||
+    fail "an ordinary steer should still succeed"
+  rec="$dir/home/state/t1.inbox/002.msg"
+  ! grep -q '^priority=' "$rec" || fail "a default steer must not grow a priority header"
+  run_send "$dir" "$err" -- t1 --priority=main "explicit main" ||
+    fail "an explicit --priority=main steer should succeed"
+  rec="$dir/home/state/t1.inbox/003.msg"
+  ! grep -q '^priority=' "$rec" || fail "--priority main must stay headerless like every legacy record"
+  pass "fm-send inbox: --priority sets the reading class and defaults stay headerless"
+}
+
+test_priority_and_notice_refusals() {
+  local dir err rc count args flag target text
+  dir=$(setup_case flag-refusals)
+  err="$dir/send.err"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-domain"
+  for args in "--priority bogus|t1|text" \
+    "--priority notice|t1|text" \
+    "--priority captain --priority main|t1|text" \
+    "--notice=bad:kind|t1|text" \
+    "--notice kind --priority notice|t1|text"; do
+    IFS='|' read -r flag target text <<<"$args"
+    # shellcheck disable=SC2086
+    run_send "$dir" "$err" -- "$target" $flag "$text"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "refusal case '$flag' unexpectedly succeeded"
+    count=$(find "$dir/home/state" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+    [ "$count" = 0 ] || fail "refusal case '$flag' left $count records behind"
+  done
+  run_send "$dir" "$err" -- domain --notice kindX --fire-and-forget 0123456789abcdef0123 "text"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "--notice with --fire-and-forget should refuse"
+  run_send "$dir" "$err" -- domain --fire-and-forget deadbeefdeadbeef --notice kindY "text"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "--fire-and-forget with --notice should refuse"
+  count=$(find "$dir/home/state" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$count" = 0 ] || fail "refusals must leave the inbox untouched"
+  pass "fm-send inbox: bad --priority/--notice combinations refuse before recording"
+}
+
 test_dead_or_missing_endpoint_refuses_the_steer() {
   local dir err rc
   dir=$(setup_case dead-endpoint)
@@ -610,4 +691,7 @@ test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
 test_finished_worker_takes_no_new_work
+test_notice_flag_bundles_and_supersedes
+test_priority_flag_sets_the_reading_class
+test_priority_and_notice_refusals
 test_dead_or_missing_endpoint_refuses_the_steer

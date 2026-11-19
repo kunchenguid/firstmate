@@ -1594,6 +1594,36 @@ test_inbox_guidance_explains_marked_body_terminator() {
   pass "fm-brief: inbox guidance explains marked synthetic terminators in every scaffold"
 }
 
+test_inbox_guidance_names_priority_order_and_bundles() {
+  local home brief kind id
+  home="$TMP_ROOT/inbox-priority-guidance"
+  for kind in no-mistakes scout secondmate; do
+    id="inbox-prio-$kind"
+    case "$kind" in
+      no-mistakes)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null \
+          || fail "ship scaffold failed"
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null \
+          || fail "scout scaffold failed"
+        ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null \
+          || fail "secondmate scaffold failed"
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_grep 'priority=captain' "$brief" "$kind scaffold omitted the captain reading class"
+    assert_grep 'priority=notice' "$brief" "$kind scaffold omitted the notice reading class"
+    assert_grep 'bundle=<n>' "$brief" "$kind scaffold omitted the bundle header meaning"
+    assert_grep 'replaced n earlier unhandled notices of the same kind' "$brief" \
+      "$kind scaffold omitted what a bundle replaced"
+  done
+  pass "fm-brief: inbox guidance names the priority reading order and bundle meaning in every scaffold"
+}
+
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
@@ -2045,6 +2075,7 @@ test_workers_wait_without_spending_turns
 test_workers_raise_a_question_the_moment_it_blocks
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_inbox_guidance_explains_marked_body_terminator
+test_inbox_guidance_names_priority_order_and_bundles
 test_home_brief_include_is_appended_last
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm

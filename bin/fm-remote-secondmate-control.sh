@@ -7,7 +7,7 @@
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
-#   fm-remote-secondmate-control.sh send-stdin <id> [fire-and-forget]  # message on stdin
+#   fm-remote-secondmate-control.sh send-stdin <id> [fire-and-forget|notice=<kind>]  # message on stdin
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
@@ -409,8 +409,17 @@ cmd_relaunch() {
 
 cmd_send_body() {
   local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
+  local notice_kind='' write_out write_rc=0 bundled_path bundled_corr
   validate_id "$id"
-  [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
+  case "$delivery_mode" in
+  '' | fire-and-forget) ;;
+  notice=*)
+    notice_kind=${delivery_mode#notice=}
+    fm_task_inbox_valid_notice_kind "$notice_kind" || die "invalid send notice kind"
+    delivery_mode=''
+    ;;
+  *) die "invalid send delivery mode" ;;
+  esac
   validate_home "$id"
   # Before the lock and before anything is written: a home whose recorded session
   # and account cannot be read, or names another session, is refused rather than
@@ -432,10 +441,34 @@ cmd_send_body() {
   # transport failure lands on the existing record instead of a duplicate - so
   # the parent may safely repeat this leg. Exit 0 once the record durably
   # exists; no ring outcome changes it, because the parent transport owns any
-  # retry or reply-tracking policy from here.
-  if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode"); then
+  # retry or reply-tracking policy from here. A notice=<kind> send runs in this
+  # shell (record path through a temp file, not command substitution) so the
+  # same-kind bundling report survives, and the bundling it reports is echoed
+  # on stdout as machine-readable lines - bundled-into=<base> and one
+  # bundled-corr=<corr> per collapsed record that carried a pending-reply
+  # correlation - for the parent's own corr supersession; the parent's remote
+  # roots that predate notice kinds simply die here before writing, and the
+  # parent retries the identical send without the kind.
+  write_out=$(mktemp "${TMPDIR:-/tmp}/fm-remote-send.XXXXXX") || die "remote send record path could not be staged"
+  if ! fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode" "$notice_kind" > "$write_out"; then
+    write_rc=1
+  fi
+  rec=$(cat "$write_out" 2>/dev/null)
+  rm -f "$write_out"
+  if [ "$write_rc" -ne 0 ] || [ -z "$rec" ]; then
     fm_lock_release "$meta_lock"
     die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
+  fi
+  if [ -n "${_FM_TASK_INBOX_BUNDLED_RECS:-}" ]; then
+    printf 'bundled-into=%s\n' "${rec##*/}"
+    while IFS= read -r bundled_path; do
+      [ -n "$bundled_path" ] || continue
+      bundled_corr=$(fm_pending_reply_extract_corr "$(fm_task_inbox_body "$bundled_path" 2>/dev/null)")
+      [ -n "$bundled_corr" ] || continue
+      printf 'bundled-corr=%s\n' "$bundled_corr"
+    done <<EOF
+$_FM_TASK_INBOX_BUNDLED_RECS
+EOF
   fi
   fm_lock_release "$meta_lock"
   case "$rec" in
