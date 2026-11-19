@@ -16,6 +16,8 @@ CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE/state" "$REMOTE/data/reply" "$CLAIMS"
 # shellcheck source=bin/fm-remote-job-lib.sh
 . "$ROOT/bin/fm-remote-job-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$ROOT/bin/fm-classify-lib.sh"
 # The recorded worker pid is the serving child, not its restart supervisor, so
 # stopping that pid alone leaves the supervisor to respawn - the leak
 # tests/fm-remote-job-orphan-reap.test.sh pins. Stop the whole worker tree.
@@ -415,8 +417,14 @@ assert_contains "$out" 'ingested: ios appended=0' "earlier generation did not re
 assert_contains "$out" 'handled: remote-reply-ios 2' "earlier generation remained unacknowledged after later cursor advancement"
 [ "$(grep -cF 'working [corr=1111111111111111]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "earlier generation replay duplicated its parent status"
-grep -Fxq 'working [corr=1111111111111111]: second generation' "$PARENT/state/ios.status" \
-  || fail "relay invented an emission time for a legacy source event"
+# The ingest stamp records ARRIVAL, not a rewritten emission: a legacy source
+# event with no source time is now stamped on the way in so the parent log
+# stays orderable (audit item 13), and the stamp is an ingest time the status
+# parser accepts rather than an invented emission time.
+status_line_at_epoch "$(grep -F 'working [corr=1111111111111111]' "$PARENT/state/ios.status")" >/dev/null \
+  || fail "a legacy unstamped source event reached the parent stream with no ingest time"
+grep -Fq 'working [corr=1111111111111111] [at=' "$PARENT/state/ios.status" \
+  || fail "the ingest stamp is missing from a legacy source event"
 pass "later generations cannot invalidate an unacknowledged ingested result"
 
 # The channel mirrors the remote mate's content-bearing status lines at most once
@@ -445,6 +453,15 @@ RESULT_FOUR="$PARENT/state/procevent-inbox/$SID.4.result"
 remote_env "$ADAPTER" handle ios 4 "$RESULT_FOUR" > "$TMP_ROOT/handle-mirror.out" 2>&1 \
   || fail "an uncorrelated status line stopped the delta: $(cat "$TMP_ROOT/handle-mirror.out")"
 assert_grep 'working [key=version-audit]' "$PARENT/state/ios.status" "an uncorrelated progress line never reached the parent stream"
+# A mirrored line that arrived without a source time is stamped at ingest, so
+# every line the parent log receives is orderable; the stamp lands in the head
+# where _fm_status_at_epoch reads it.
+assert_grep 'working [key=version-audit] [at=' "$PARENT/state/ios.status" \
+  "an unstamped remote progress line reached the parent stream with no ingest time"
+status_line_at_epoch "$(grep 'working \[key=version-audit\] \[at=' "$PARENT/state/ios.status" | tail -n 1)" >/dev/null \
+  || fail "the ingest stamp is not a time the status parser accepts"
+assert_no_grep 'needs-decision [at=1700000000] [at=' "$PARENT/state/ios.status" \
+  "a relayed source time was stamped over or duplicated"
 assert_grep 'needs-decision [key=rough-cut-version]' "$PARENT/state/ios.status" "a newly raised remote decision never reached the parent stream"
 assert_grep "done [corr=$PENDING_CORR]" "$PARENT/state/ios.status" "the correlated answer sharing the delta was lost"
 for epoch in 1700000000 1700086400; do
@@ -504,7 +521,11 @@ await_reply_result "$PARENT/state/procevent-inbox/$SID.5.result" \
 RESULT_FIVE="$PARENT/state/procevent-inbox/$SID.5.result"
 remote_env "$ADAPTER" handle ios 5 "$RESULT_FIVE" >/dev/null 2>&1 \
   || fail "a control character stopped the stream"
-assert_grep 'blocked [key=ctl]: escape ?[31mhere' "$PARENT/state/ios.status" \
+# The ingest stamp splits head from note, so the normalized bytes are checked
+# as two fixed fragments around the stamped head.
+assert_grep 'blocked [key=ctl] [at=' "$PARENT/state/ios.status" \
+  "the control-character line was not stamped at ingest"
+assert_grep ']: escape ?[31mhere' "$PARENT/state/ios.status" \
   "the control-character line was not mirrored in normalized form"
 [ -z "$(LC_ALL=C tr -d '\11\12\40-\176\200-\377' < "$PARENT/state/ios.status")" ] \
   || fail "a control byte reached the parent status file"
@@ -534,7 +555,9 @@ await_reply_result "$PARENT/state/procevent-inbox/$SID.7.result" \
 RESULT_SEVEN="$PARENT/state/procevent-inbox/$SID.7.result"
 remote_env "$ADAPTER" handle ios 7 "$RESULT_SEVEN" >/dev/null 2>&1 \
   || fail "a NUL byte stopped the stream"
-assert_grep 'working [key=nul-byte]: before?after' "$PARENT/state/ios.status" \
+assert_grep 'working [key=nul-byte] [at=' "$PARENT/state/ios.status" \
+  "the NUL-bearing line was not stamped at ingest"
+assert_grep ']: before?after' "$PARENT/state/ios.status" \
   "the NUL byte was not normalized in place"
 nul_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
 assert_grep "offset=$nul_offset" "$PARENT/state/remote-replies/ios.cursor" \
@@ -845,12 +868,12 @@ assert_absent "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
   "the generation whose ingestion receipt failed was acknowledged"
 [ "$(cat "$PARENT/state/remote-replies/ios.cursor")" = "$replay_commit_cursor_before" ] \
   || fail "an ingestion receipt failure advanced the remote reply cursor"
-[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF 'needs-decision [key=replay-decision] [at=' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "the pre-rewrite decision line was not mirrored exactly once before commit failure"
 printf '# replay decision report\n' > "$REMOTE/data/reply/replay.md"
 remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_REPLAY_COMMIT" >/dev/null \
   || fail "the uncommitted generation did not retry after its document arrived"
-[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF 'needs-decision [key=replay-decision] [at=' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "retrying after document arrival duplicated the source decision line"
 assert_no_grep 'needs-decision [key=replay-decision]: pick report=data/remote-secondmates/ios/data/reply/replay.md' \
   "$PARENT/state/ios.status" "retrying after document arrival appended a rewritten duplicate"
@@ -866,7 +889,7 @@ await_recapture_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
   || fail "the replay-identity whole-log recapture was not captured"
 assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
   "the replay-identity whole-log recapture was not applied"
-[ "$(grep -cF "$REPLAY_LINE" "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(grep -cF 'needs-decision [key=replay-decision] [at=' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "cursor-loss recapture duplicated the resolved decision"
 assert_no_grep 'needs-decision [key=replay-decision]: pick report=data/remote-secondmates/ios/data/reply/replay.md' \
   "$PARENT/state/ios.status" "cursor-loss recapture reopened the decision in rewritten form"

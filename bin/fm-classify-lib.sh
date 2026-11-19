@@ -687,7 +687,10 @@ status_line_at_epoch() {  # <status-line> -> epoch; nonzero when unknown
 
 # Stamp only a newly emitted event. Preserve an existing tag, even malformed,
 # and preserve the event itself if the clock cannot be read. Never use this to
-# timestamp a copied historical line.
+# timestamp a copied historical line: a relayed line that arrives without a
+# source time is stamped with its ingest time by the relaying adapter, so the
+# stamp records arrival and never an invented emission, and a source stamp
+# always wins and is preserved byte for byte.
 status_stamp_line() {  # <new-status-line> -> line (without newline)
   local head epoch
   case "$1" in

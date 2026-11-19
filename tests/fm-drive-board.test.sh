@@ -189,8 +189,8 @@ test_apply_refusals() {
   try 'goal=I1 pick= away=no' 'malformed'
   try 'goal=I1 pick=a@live away=maybe' 'malformed'
   try 'goal=I1 pick=a@live' 'malformed'
-  goal mark I1 b "done" -- ok >/dev/null
-  goal mark I1 a "done" -- ok >/dev/null
+  goal mark I1 b "done" -- "ok https://github.com/example/fixture/pull/7" >/dev/null
+  goal mark I1 a "done" -- "ok https://github.com/example/fixture/pull/7" >/dev/null
   board render --candidates "$H/cands.json" >/dev/null
   before=$(goal export I1)
   try 'goal=I1 pick=b@- away=no' 'already done'

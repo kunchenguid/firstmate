@@ -68,7 +68,12 @@
 # with states open|running|waiting|blocked|done|dropped. `open` resets an item
 # to unstarted. A progress mark carries a state, a stage, or both; the stage folds on
 # its own newest-wins clock, so a stage-only mark never changes the item's
-# state or since. A secondmate runs `mark` in its own home; the command routes
+# state or since. A done mark on a drive item must name the PR it landed
+# through: a full PR URL word in the note (the first one folds as the item's
+# pr), or a pr an earlier done mark already folded for the item. Without it
+# the landing lag of a done item cannot be measured, which is why the mark
+# is refused (audit item 12). The folded pr renders beside the task in
+# `show` and the projection. A secondmate runs `mark` in its own home; the command routes
 # the line through fm_parent_channel_report (stamped, deduplicated,
 # appended), and on a local route validates the item against the parent's
 # record read-only first. The fold keeps, per item, the mark with the newest
@@ -145,7 +150,10 @@
 # it changes neither state nor stage nor their clocks. It remains in the
 # normal marks archive and is shown by `show`. Local parent-channel routes
 # validate the parent's linked task and owner; remote routes fail closed.
-# Done drive marks must identify a task or include a full PR URL in the note.
+# Done drive marks must name the PR they landed through: a full PR URL in the
+# note, or the PR an earlier done mark already recorded for the item (a
+# --task alone no longer suffices; a remote route keeps the task-or-URL rule
+# because it cannot see the item's class).
 #
 # `driven` renders every goal active at any point of the window (active now,
 # or closed since <epoch>) in the captain's words, for the return brief's
@@ -181,7 +189,8 @@
 # array when none is active. A goal carries id, title, state, named_by, plan,
 # done_when, started_epoch, last_progress_epoch (null when no mark exists),
 # progress {total, closed, at_target, with_target} and items. An item carries
-# id, owner, class, title, state (the folded mark state), task, project,
+# id, owner, class, title, state (the folded mark state), task, pr (the PR a
+# done mark landed through, null when none is folded), project,
 # target, stage, stage_at, since, until (each null when absent), after,
 # waiting_on and stop_on (lists), and the booleans startable, target_reached
 # and landing_hint. It is read-only, takes no lock, and needs jq.
@@ -504,6 +513,7 @@ FM_GOAL_REC_CLOSED_EPOCH='' FM_GOAL_REC_CLOSED_REASON='' FM_GOAL_REC_CLOSED_WORD
 FM_GOAL_ITEM_COUNT=0
 FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
 FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
+FM_GOAL_ITEMS_PRS=()
 FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
 FM_GOAL_ITEMS_STOPONS=()
 _FM_GOAL_READ_ERROR=''
@@ -514,6 +524,7 @@ _fm_goal_items_reset() {
   FM_GOAL_ITEM_COUNT=0
   FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
   FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
+  FM_GOAL_ITEMS_PRS=()
   FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
   FM_GOAL_ITEMS_STOPONS=()
 }
@@ -525,6 +536,7 @@ _fm_goal_items_append() {
   FM_GOAL_ITEMS_AFTERS[${#FM_GOAL_ITEMS_AFTERS[@]}]=$FM_GOAL_ITEM_AFTER
   FM_GOAL_ITEMS_CLASSES[${#FM_GOAL_ITEMS_CLASSES[@]}]=$FM_GOAL_ITEM_CLASS
   FM_GOAL_ITEMS_TASKS[${#FM_GOAL_ITEMS_TASKS[@]}]=$FM_GOAL_ITEM_TASK
+  FM_GOAL_ITEMS_PRS[${#FM_GOAL_ITEMS_PRS[@]}]=''
   FM_GOAL_ITEMS_TITLES[${#FM_GOAL_ITEMS_TITLES[@]}]=$FM_GOAL_ITEM_TITLE
   FM_GOAL_ITEMS_PROJECTS[${#FM_GOAL_ITEMS_PROJECTS[@]}]=$FM_GOAL_ITEM_PROJECT
   FM_GOAL_ITEMS_TARGETS[${#FM_GOAL_ITEMS_TARGETS[@]}]=$FM_GOAL_ITEM_TARGET
@@ -826,7 +838,7 @@ _fm_goal_items_graph_ok() {
 
 # --- the mark fold -----------------------------------------------------------
 
-FM_GOAL_M_STATES=() FM_GOAL_M_ATS=() FM_GOAL_M_NOTES=() FM_GOAL_M_TASKS=()
+FM_GOAL_M_STATES=() FM_GOAL_M_ATS=() FM_GOAL_M_NOTES=() FM_GOAL_M_TASKS=() FM_GOAL_M_PRS=()
 FM_GOAL_EVIDENCE=() FM_GOAL_EVIDENCE_ATS=()
 FM_GOAL_FOLD_IGNORED=0
 FM_GOAL_PROGRESS_ATS=()
@@ -842,7 +854,7 @@ _FM_GOAL_FOLD_NOW=0
 
 _fm_goal_fold_reset() {
   local i=0
-  FM_GOAL_M_STATES=(); FM_GOAL_M_ATS=(); FM_GOAL_M_NOTES=(); FM_GOAL_M_TASKS=()
+  FM_GOAL_M_STATES=(); FM_GOAL_M_ATS=(); FM_GOAL_M_NOTES=(); FM_GOAL_M_TASKS=(); FM_GOAL_M_PRS=()
   FM_GOAL_EVIDENCE=(); FM_GOAL_EVIDENCE_ATS=()
   FM_GOAL_S_STAGES=(); FM_GOAL_S_ATS=()
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
@@ -854,6 +866,7 @@ _fm_goal_fold_reset() {
     FM_GOAL_M_ATS[${#FM_GOAL_M_ATS[@]}]=''
     FM_GOAL_M_NOTES[${#FM_GOAL_M_NOTES[@]}]=''
     FM_GOAL_M_TASKS[${#FM_GOAL_M_TASKS[@]}]=''
+    FM_GOAL_M_PRS[${#FM_GOAL_M_PRS[@]}]=''
     i=$((i + 1))
   done
   FM_GOAL_FOLD_IGNORED=0
@@ -872,7 +885,7 @@ _fm_goal_fold_reset() {
 # retain the latest evidence without touching either progress clock.
 _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now> <owner> <stage>
   local item=$2 state=$3 at=$4 task=$5 note=$6 now=$7 owner=$8 stage=${9-}
-  local idx u known=0
+  local idx u known=0 pr=''
   [ -z "$state" ] || fm_goal_state_valid "$state" || return 1
   if [ -z "$state$stage" ]; then
     fm_goal_id_valid "$task" || return 1
@@ -900,6 +913,18 @@ _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now
       FM_GOAL_M_ATS[idx]=$at
       FM_GOAL_M_NOTES[idx]=$note
       FM_GOAL_M_TASKS[idx]=$task
+      # The PR a done mark landed through folds from the note's first full
+      # PR URL word (audit item 12); a later mark without one keeps the pr
+      # an earlier done mark recorded for the item.
+      if [ "$state" = 'done' ]; then
+        local -a note_words=()
+        local w
+        read -r -a note_words <<< "$note"
+        for w in ${note_words[@]+"${note_words[@]}"}; do
+          if fm_pr_url_parse "$w" >/dev/null 2>&1; then pr=$w; break; fi
+        done
+      fi
+      [ -z "$pr" ] || FM_GOAL_M_PRS[idx]=$pr
     fi
     if [ -n "$stage" ] && { [ -z "${FM_GOAL_S_ATS[$idx]}" ] || [ "$at" -ge "${FM_GOAL_S_ATS[$idx]}" ]; }; then
       FM_GOAL_S_STAGES[idx]=$stage
@@ -1111,11 +1136,13 @@ fm_goal_fold() {  # <id> [state-dir] [data-dir] [now] [marks-override]
   return 0
 }
 
-# A mark may bind an item to the child that actually does the work.
+# A mark may bind an item to the child that actually does the work, and a
+# done mark binds the PR that work landed through.
 _fm_goal_fold_tasks() {
   local i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     [ -z "${FM_GOAL_M_TASKS[$i]}" ] || FM_GOAL_ITEMS_TASKS[i]=${FM_GOAL_M_TASKS[$i]}
+    [ -z "${FM_GOAL_M_PRS[$i]}" ] || FM_GOAL_ITEMS_PRS[i]=${FM_GOAL_M_PRS[$i]}
     i=$((i + 1))
   done
 }
@@ -1288,10 +1315,10 @@ fm_goal_project() {  # <id> [state-dir] [data-dir] [now]
       startable="$startable (orphaned running, no live task)"
     fi
     if _fm_goal_item_landing "$i" "$state"; then landing=yes; else landing=no; fi
-    printf 'item %s owner=%s class=%s state=%s since=%s task=%s startable=%s waiting_on=%s landing_hint=%s\n' \
+    printf 'item %s owner=%s class=%s state=%s since=%s task=%s startable=%s waiting_on=%s landing_hint=%s pr=%s\n' \
       "${FM_GOAL_ITEMS_IDS[$i]}" "${FM_GOAL_ITEMS_OWNERS[$i]}" "${FM_GOAL_ITEMS_CLASSES[$i]}" \
       "${FM_GOAL_M_STATES[$i]}" "${FM_GOAL_M_ATS[$i]:--}" "${FM_GOAL_ITEMS_TASKS[$i]:--}" \
-      "$startable" "${FM_GOAL_WAITING:--}" "$landing"
+      "$startable" "${FM_GOAL_WAITING:--}" "$landing" "${FM_GOAL_ITEMS_PRS[$i]:--}"
     # a v2 item appends its stage fields; a v1 item's line is unchanged
     [ -z "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] || printf 'item %s project=%s stage=%s target=%s\n' \
       "${FM_GOAL_ITEMS_IDS[$i]}" "${FM_GOAL_ITEMS_PROJECTS[$i]}" \
@@ -1454,6 +1481,7 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
     if _fm_goal_item_landing "$i" "$state"; then landing=yes; else landing=no; fi
     line="  item ${FM_GOAL_ITEMS_IDS[$i]} [owner=${FM_GOAL_ITEMS_OWNERS[$i]} class=${FM_GOAL_ITEMS_CLASSES[$i]}"
     [ -z "${FM_GOAL_ITEMS_TASKS[$i]}" ] || line="$line task=${FM_GOAL_ITEMS_TASKS[$i]}"
+    [ -z "${FM_GOAL_ITEMS_PRS[$i]}" ] || line="$line pr=${FM_GOAL_ITEMS_PRS[$i]}"
     [ -z "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] || line="$line project=${FM_GOAL_ITEMS_PROJECTS[$i]}"
     line="$line]: ${FM_GOAL_ITEMS_TITLES[$i]}"
     printf '%s\n' "$line"
@@ -2047,6 +2075,10 @@ _fm_goal_mark_line() {  # <id> <item> <state> <task> <note> [stage] -> printed
 
 # Bind completion evidence to the folded task, including a task assigned by
 # an earlier mark. Planning items may remain unbound until work is dispatched.
+# Bind completion evidence to the folded task, including a task assigned by
+# an earlier mark, and require the PR a done mark lands through (audit item
+# 12): a task alone proves who worked, not where the work landed, and
+# without the PR the landing lag of a done item cannot be measured.
 _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
   [ "$3" = 'done' ] || return 0
   local idx word
@@ -2056,13 +2088,20 @@ _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
     idx=$(_fm_goal_index_of "$2") || return 1
     [ -n "$task" ] || task=${FM_GOAL_ITEMS_TASKS[$idx]}
     [ "${FM_GOAL_ITEMS_CLASSES[$idx]}" = drive ] || return 0
+    # A PR an earlier done mark folded for this item already records the
+    # landing, so a re-mark need not name it again.
+    [ -z "${FM_GOAL_ITEMS_PRS[$idx]}" ] || return 0
+  else
+    # No parent record is readable on a remote route, so the drive/captain
+    # distinction cannot be seen there; the long-standing task-or-URL rule
+    # stays for it.
+    [ -z "$task" ] || return 0
   fi
-  [ -z "$task" ] || return 0
   read -r -a pr_words <<< "$note"
   for word in "${pr_words[@]}"; do
     fm_pr_url_parse "$word" >/dev/null 2>&1 && return 0
   done
-  fm_goal_log 'done drive items must name a task (--task) or a full PR URL'
+  fm_goal_log 'done drive items must name the PR they landed through (a full PR URL in the note)'
   return 1
 }
 
@@ -2404,6 +2443,7 @@ _fm_goal_export_one() {  # <id>
       --arg project "${FM_GOAL_ITEMS_PROJECTS[$i]}" --arg target "${FM_GOAL_ITEMS_TARGETS[$i]}" \
       --arg stage "${FM_GOAL_S_STAGES[$i]}" --arg stage_at "${FM_GOAL_S_ATS[$i]}" \
       --arg state "${FM_GOAL_M_STATES[$i]}" --arg since "${FM_GOAL_M_ATS[$i]}" \
+      --arg pr "${FM_GOAL_ITEMS_PRS[$i]}" \
       --arg after "${FM_GOAL_ITEMS_AFTERS[$i]}" --arg waiting "$FM_GOAL_WAITING" \
       --arg until "${FM_GOAL_ITEMS_UNTILS[$i]}" --arg stopon "$stopon" \
       --arg title "${FM_GOAL_ITEMS_TITLES[$i]}" \
@@ -2412,6 +2452,7 @@ _fm_goal_export_one() {  # <id>
       def epoch: if . == "" then null else tonumber end;
       {id: $id, owner: $owner, class: $class, title: $title, state: $state,
        task: (if $task == "" then null else $task end),
+       pr: (if $pr == "" then null else $pr end),
        project: (if $project == "" then null else $project end),
        target: (if $target == "" then null else $target end),
        stage: (if $stage == "" then null else $stage end),

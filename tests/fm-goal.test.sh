@@ -102,8 +102,8 @@ test_marks() {
 
 test_local_mate() {
   fixture; start >/dev/null; local_mate
-  mate_goal mark I1 a 'done' -- landed >/dev/null
-  mate_goal mark I1 a 'done' -- landed >/dev/null
+  mate_goal mark I1 a 'done' -- "landed https://github.com/example/fixture/pull/7" >/dev/null
+  mate_goal mark I1 a 'done' -- "landed https://github.com/example/fixture/pull/7" >/dev/null
   assert_equals 1 "$(wc -l < "$H/state/terp.status" | tr -d ' ')" 'retry idempotent'
   assert_grep 'goal [goal=I1] [item=a] [state=done]' "$H/state/terp.status" 'local parent channel'
   expect_rc 1 mate_goal mark I1 missing 'done' -- unknown
@@ -170,7 +170,7 @@ test_symlinks() {
 
 test_edit() {
   fixture; start >/dev/null
-  goal mark I1 a 'done' -- landed >/dev/null
+  goal mark I1 a 'done' -- "landed https://github.com/example/fixture/pull/7" >/dev/null
   printf '%s\n' 'item [id=b] [owner=main]: changed plan' > "$ITEMS"
   goal edit I1 --items-file "$ITEMS" --title Revised --done-when 'new check' >/dev/null
   assert_grep 'title: Revised' "$H/state/goals/I1.goal" 'edit changes title'
@@ -217,8 +217,8 @@ test_large_brief() {
 test_close() {
   fixture; start >/dev/null
   expect_rc 1 goal close I1 --done
-  goal mark I1 a 'done' -- landed >/dev/null
-  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
+  goal mark I1 a 'done' -- "landed https://github.com/example/fixture/pull/7" >/dev/null
+  goal mark I1 b 'done' --task verify-child -- "verified https://github.com/example/fixture/pull/7" >/dev/null
   local now; now=$(date +%s)
   mark_line c dropped "$now" > "$H/state/captain.status"
   FM_SUPERVISION_ACTOR=branch goal close I1 --done >/dev/null
@@ -337,7 +337,7 @@ test_stage_marks() {
   assert_contains "$(goal show I1)" 'stage: merged since' 'show prints the stage'
   assert_contains "$(goal show I1)" ', target: deployed' 'show prints the target beside the stage'
   assert_not_contains "$(goal show I1)" '(reached)' 'a stage short of target is not reached'
-  goal mark I1 a 'done' --stage deployed -- 'live on dev' >/dev/null
+  goal mark I1 a 'done' --stage deployed -- "live on dev https://github.com/example/fixture/pull/7" >/dev/null
   assert_grep 'goal [goal=I1] [item=a] [state=done] [stage=deployed] [task=child] [at=' "$H/state/goals/I1.marks" 'state and stage in one mark'
   assert_contains "$(goal show I1)" '(reached)' 'the target is reached when the stage equals it'
   mark_line a 'running' "$((now + 5))" > "$H/state/goals/I1.marks"
@@ -563,8 +563,8 @@ test_orphaned_running() {
 
 test_target_close_and_brief() {
   probe_fixture
-  goal mark I1 a 'done' -- 'merged and done' >/dev/null
-  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
+  goal mark I1 a 'done' -- "merged and done https://github.com/example/fixture/pull/7" >/dev/null
+  goal mark I1 b 'done' --task verify-child -- "verified https://github.com/example/fixture/pull/7" >/dev/null
   assert_contains "$(goal brief)" 'short of target: a at no stage, target deployed' 'the brief names an item short of target'
   expect_rc 1 goal close I1 --done
   assert_contains "$(cat "$TMP_ROOT/out")" 'short of their target stage: a' 'close --done refuses short of target'
@@ -573,7 +573,7 @@ test_target_close_and_brief() {
   expect_rc 0 goal close I1 --done
   fixture; v2_items; start >/dev/null
   goal mark I1 a dropped -- 'not needed' >/dev/null
-  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
+  goal mark I1 b 'done' --task verify-child -- "verified https://github.com/example/fixture/pull/7" >/dev/null
   expect_rc 0 goal close I1 --done
   pass 'close --done and the brief hold an item to its target; a dropped item owes none'
 }
@@ -594,6 +594,9 @@ test_export() {
   assert_equals 'deployed true running' \
     "$(jq -r '.goals[0].items[0] | "\(.stage) \(.target_reached) \(.state)"' <<< "$out")" 'a stage mark reaches the target in the export'
   assert_equals '1' "$(jq -r '.goals[0].progress.at_target' <<< "$out")" 'progress counts items at target'
+  goal mark I1 a 'done' -- 'landed https://github.com/example/fixture/pull/9' >/dev/null
+  out=$(goal export I1)
+  assert_equals 'https://github.com/example/fixture/pull/9' "$(jq -r '.goals[0].items[0].pr' <<< "$out")" 'the done PR exports on its item'
   expect_rc 1 goal export nosuch
   expect_rc 2 goal export a b
   fixture
@@ -626,7 +629,7 @@ test_driven() {
   first_hour=$(date -u -d "@$((since / 3600 * 3600))" +%Y-%m-%dT%H:00Z)
   assert_contains "$out" "$first_hour" 'the first hour row names the hour the window opened in'
   # a goal closed inside the window is still reported, with its final stage
-  goal mark I1 a 'done' --stage deployed -- ok >/dev/null
+  goal mark I1 a 'done' --stage deployed -- "ok https://github.com/example/fixture/pull/7" >/dev/null
   expect_rc 0 goal close I1 --done
   expect_rc 1 goal active
   out=$(goal driven --since "$since")
@@ -673,7 +676,7 @@ test_worker_evidence() {
   printf '%s\n' 'item [id=a] [owner=main] [task=child]: archive proof' > "$ITEMS"
   start >/dev/null
   FM_TASK_ID=child goal evidence I1 a -- preserved-proof >/dev/null
-  goal mark I1 a 'done' -- real-finish >/dev/null
+  goal mark I1 a 'done' -- "real-finish https://github.com/example/fixture/pull/7" >/dev/null
   goal close I1 --done >/dev/null
   local archive
   archive=$(find "$H/state/goals/closed" -name '*.marks')
@@ -684,12 +687,23 @@ test_worker_evidence() {
 test_done_identity() {
   fixture; start >/dev/null
   expect_rc 1 goal mark I1 b 'done' -- anonymous
-  goal mark I1 b 'done' --task verify-child -- verified >/dev/null
+  expect_rc 1 goal mark I1 b 'done' --task verify-child -- verified
+  goal mark I1 b 'done' --task verify-child -- "verified https://github.com/example/fixture/pull/7" >/dev/null
   assert_grep '[state=done] [task=verify-child]' "$H/state/goals/I1.marks" 'completion names its task'
+  assert_contains "$(goal show I1)" 'pr=https://github.com/example/fixture/pull/7' 'the done PR is recorded and shown'
+  assert_contains "$(project)" 'landing_hint=no pr=https://github.com/example/fixture/pull/7' 'the projection carries the PR'
+  # The recorded PR satisfies a re-mark, so a duplicate done need not name it again.
+  goal mark I1 b 'done' --task verify-child -- re-confirmed >/dev/null
   fixture; start >/dev/null
   goal mark I1 b 'done' -- 'verified https://github.com/example/fixture/pull/7' >/dev/null
   assert_grep 'https://github.com/example/fixture/pull/7' "$H/state/goals/I1.marks" 'URL-only completion names the PR'
-  pass 'unbound drive completions require a task or full PR URL'
+  # A captain item lands no PR: its done mark needs none.
+  fixture
+  printf '%s\n' 'item [id=cap] [owner=main] [class=captain]: rotate the secret' > "$ITEMS"
+  start >/dev/null
+  goal mark I1 cap 'done' -- rotated-by-hand >/dev/null
+  assert_grep '[item=cap] [state=done]' "$H/state/goals/I1.marks" 'captain completions carry no PR requirement'
+  pass 'drive completions require and record the full PR URL they landed through'
 }
 
 fm_test_run test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \

@@ -158,6 +158,17 @@ complete_request_turn() {
   fm_pending_reply_mark_turn_completed "$1" "$2" request
 }
 
+# Force a record into a terminal shape: resolved at <epoch>, inbox
+# acknowledged, with optional escalation/closed epochs.
+settle_record() {  # <record-path> <resolved-epoch> [escalated] [closed]
+  local rec=$1 resolved=$2 escalated=${3:-} closed=${4:-}
+  fm_pending_reply_set "$rec" phase resolved
+  fm_pending_reply_set "$rec" resolved_epoch "$resolved"
+  fm_pending_reply_set "$rec" inbox_closed 1
+  [ -z "$escalated" ] || fm_pending_reply_set "$rec" escalated_epoch "$escalated"
+  [ -z "$closed" ] || fm_pending_reply_set "$rec" escalation_closed_epoch "$closed"
+}
+
 # --- tests ------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once() {
@@ -2228,6 +2239,7 @@ test_same_kind_escalation_reopens_after_operator_close() {
     home=$(setup_parent same-kind)
     state="$home/state"
     fm_write_secondmate_meta "$state/mate.meta" "$home/sm" "sess:fm-mate"
+    # shellcheck disable=SC2030 # This fixture owns its subshell clock.
     export FM_PENDING_REPLY_NOW=10000
     corr=$(fm_pending_reply_create "$home" "$state" mate "wake after lost transport")
     status="$state/mate.status"
@@ -2292,8 +2304,128 @@ test_same_kind_escalation_reopens_after_operator_close() {
   pass "a same-kind escalation after an operator close opens the decision again"
 }
 
-test_summary_keeps_accents_and_caps_by_character() {
-  local out long cap_chars loc
+test_operator_close_settles_the_escalated_record() (
+  local home state corr rec status open resolved_lines
+  home=$(setup_parent operator-settle)
+  state="$home/state"
+  unset FM_PENDING_REPLY_NOW FM_PENDING_REPLY_SEND_HOOK
+  # shellcheck disable=SC2030,SC2031 # Fresh clock/hook for this fixture, not the prior subshell's.
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_NOW=6000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "refresh the board")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  complete_request_turn "$state" "$corr"
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
+  status="$state/hibit.status"
+  # Every pending-reply-id= line that is not the reserved-key close - the
+  # blocked payloads - still never resolves, exactly as before.
+  if fm_pending_reply_line_resolves \
+  "blocked: pending-reply-missed: task=hibit pending-reply-id=$corr request=refresh the board" "$corr"; then
+  fail "the escalation payload must not self-resolve"
+  fi
+  if fm_pending_reply_line_resolves \
+  "blocked: pending-reply-delivery-unknown: task=hibit pending-reply-id=$corr request=refresh the board" "$corr"; then
+  fail "the delivery-unknown payload must not self-resolve"
+  fi
+  # The operator answers the escalation exactly as fm-send --resolve-key
+  # writes it (fm_send_resolve_close_note).
+  printf 'resolved [key=pending-reply-%s] [at=6100]: %s\n' \
+  "$corr" "$(fm_pending_reply_resolved_note hibit "$corr" operator-resolve-key 'Captain refresh settled by hand')" \
+  >> "$status"
+  open=$(status_open_decisions "$status")
+  [ -z "$open" ] || fail "the operator close should close the decision first: $open"
+  # The watcher's periodic path for an escalated record settles it now.
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "post-close tick failed"
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] \
+  || fail "the operator close must settle the escalated record, not leave it a zombie"
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = operator-resolve-key ] \
+  || fail "resolved_via must name the operator close, got '$(fm_pending_reply_get "$rec" resolved_via)'"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+  || fail "the escalation close bookkeeping must be recorded"
+  [ "$(fm_pending_reply_get "$rec" inbox_closed)" = 1 ] \
+  || fail "the settled record should acknowledge its inbox"
+  resolved_lines=$(grep -cF "resolved [key=pending-reply-$corr]" "$status")
+  [ "$resolved_lines" = 1 ] \
+  || fail "the already-closed decision must not be appended again, got $resolved_lines"
+  # Settled terminal: a further tick is a no-op, never a re-escalation.
+  fm_pending_reply_tick_one "$state" "$corr" unknown || fail "settled tick failed"
+  [ "$(grep -cF "blocked [key=pending-reply-$corr]" "$status")" = 1 ] \
+  || fail "a settled record must never re-escalate"
+  pass "an operator --resolve-key close settles the escalated record"
+)
+
+test_settled_records_sweep_only_what_is_terminal_and_old() (
+  local home state dir swept_plain swept_closed kept_open_decision kept_inbox kept_ancient kept_fresh
+  home=$(setup_parent sweep-settled)
+  state="$home/state"
+  unset FM_PENDING_REPLY_NOW FM_PENDING_REPLY_RESOLVED_RETAIN_SECS
+  # shellcheck disable=SC2030,SC2031 # Fresh clock/retention for this fixture, not the prior subshell's.
+  export FM_PENDING_REPLY_NOW=20000
+  # shellcheck disable=SC2030
+  export FM_PENDING_REPLY_RESOLVED_RETAIN_SECS=100
+  dir=$(fm_pending_reply_dir "$state")
+  swept_plain=$(fm_pending_reply_create "$home" "$state" hibit "old plain")
+  settle_record "$dir/$swept_plain" 5000
+  swept_closed=$(fm_pending_reply_create "$home" "$state" hibit "old escalated")
+  settle_record "$dir/$swept_closed" 5000 6000 6100
+  # Resolved and old, but its escalation decision is still open, its inbox is
+  # not acknowledged, or it is not terminal at all: every one of these stays.
+  kept_open_decision=$(fm_pending_reply_create "$home" "$state" hibit "open decision")
+  settle_record "$dir/$kept_open_decision" 5000 6000 ""
+  kept_inbox=$(fm_pending_reply_create "$home" "$state" hibit "inbox open")
+  settle_record "$dir/$kept_inbox" 5000
+  fm_pending_reply_set "$dir/$kept_inbox" inbox_closed ""
+  kept_ancient=$(fm_pending_reply_create "$home" "$state" hibit "ancient open")
+  kept_fresh=$(fm_pending_reply_create "$home" "$state" hibit "fresh resolved")
+  settle_record "$dir/$kept_fresh" 19900
+  fm_pending_reply_sweep_settled "$state" || fail "sweep failed"
+  [ ! -e "$dir/$swept_plain" ] || fail "an old settled record must be swept"
+  [ ! -e "$dir/$swept_closed" ] || fail "an old record with a closed escalation must be swept"
+  [ -e "$dir/$kept_open_decision" ] || fail "a record with an open escalation decision must never be swept"
+  [ -e "$dir/$kept_inbox" ] || fail "a record with an unacknowledged inbox must never be swept"
+  [ -e "$dir/$kept_ancient" ] || fail "an open record must never be swept, however old"
+  [ -e "$dir/$kept_fresh" ] || fail "a freshly resolved record must be retained"
+  # A disabled sweep (retain 0) touches nothing, including the sweepable one.
+  local again
+  again=$(fm_pending_reply_create "$home" "$state" hibit "sweepable but disabled")
+  settle_record "$dir/$again" 5000
+  FM_PENDING_REPLY_RESOLVED_RETAIN_SECS=0 fm_pending_reply_sweep_settled "$state" \
+    || fail "disabled sweep failed"
+  [ -e "$dir/$again" ] || fail "a disabled sweep must remove nothing"
+  pass "the sweep removes only old, fully settled records"
+)
+
+test_tick_drains_the_settled_store() (
+  local home state dir old open
+  home=$(setup_parent sweep-in-tick)
+  state="$home/state"
+  unset FM_PENDING_REPLY_NOW FM_PENDING_REPLY_RESOLVED_RETAIN_SECS FM_PENDING_REPLY_SEND_HOOK
+  # shellcheck disable=SC2030,SC2031 # Fresh clock/retention/hook for this fixture, not the prior subshell's.
+  export FM_PENDING_REPLY_NOW=30000
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_RESOLVED_RETAIN_SECS=100
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  dir=$(fm_pending_reply_dir "$state")
+  old=$(fm_pending_reply_create "$home" "$state" hibit "tick sweeps me")
+  settle_record "$dir/$old" 5000
+  open=$(fm_pending_reply_create "$home" "$state" hibit "tick keeps me")
+  fm_pending_reply_tick "$state" || fail "tick failed"
+  [ ! -e "$dir/$old" ] || fail "the tick must sweep the old settled record"
+  [ -e "$dir/$open" ] || fail "the tick must keep the open record"
+  # Idempotent: a second tick changes nothing.
+  fm_pending_reply_tick "$state" || fail "second tick failed"
+  [ ! -e "$dir/$old" ] || fail "second sweep changed its mind"
+  [ -e "$dir/$open" ] || fail "second sweep touched the open record"
+  pass "the tick drains fully settled records past retention"
+)
+
+test_summary_keeps_accents_and_caps_by_character() {  local out long cap_chars loc
   out=$(fm_pending_reply_summarize "não faça a correção")
   [ "$out" = "não faça a correção" ] || fail "accented summary must survive unchanged, got '$out'"
   out=$(fm_pending_reply_summarize "$(printf 'a\001b\033c\177d\tnão\r\nfaça')")
@@ -2663,6 +2795,9 @@ test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
+test_operator_close_settles_the_escalated_record || exit 1
+test_settled_records_sweep_only_what_is_terminal_and_old || exit 1
+test_tick_drains_the_settled_store || exit 1
 test_summary_keeps_accents_and_caps_by_character
 test_old_backlog_expires_without_a_repost_burst || exit 1
 test_repost_cap_spreads_a_recent_backlog_over_windows || exit 1

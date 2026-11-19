@@ -498,9 +498,11 @@ normalize_payload() { # <source> <destination>
 
 # Adapter-authored escalations and notes use exact-byte append suppression.
 # Their callers first apply fm-classify-lib.sh's retry contract and stamp only
-# the line they append. Mirrored payload lines keep their source time (or its
-# absence) and use their pre-rewrite source identity in stage_mirror_lines
-# instead, because delivery state can change between replays.
+# the line they append. Mirrored payload lines keep their source time, and a
+# line that arrives without one is stamped with its ingest time by
+# stage_mirror_lines - the stamp records arrival, never an invented emission,
+# and a source stamp always wins. Dedup uses the pre-rewrite source identity
+# because delivery state can change between replays.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
@@ -513,13 +515,19 @@ append_status_once() { # <status-file> <line>
 # second: reversing that order could record a line the parent never received.
 # The record lives outside cursor state and survives adapter retirement because
 # the parent status stream it describes survives that retirement too.
-stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-additions> <source-additions>
+# A mirrored line whose head carries no [at= time is stamped with the ingest
+# epoch, head-inserted before the colon so _fm_status_at_epoch can read it;
+# colonless lines have no head grammar to stamp and pass through unchanged, and
+# the source record keeps the verbatim source line so mirror identity is stable
+# across replays whatever the stamp did.
+stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-additions> <source-additions> <ingest-epoch>
   LC_ALL=C awk \
     -v rewritten_file="$2" \
     -v source_record="$3" \
     -v status_file="$4" \
     -v status_additions="$5" \
-    -v source_additions="$6" '
+    -v source_additions="$6" \
+    -v ingest_at="$7" '
     BEGIN {
       printf "%s", "" > status_additions
       printf "%s", "" > source_additions
@@ -538,6 +546,10 @@ stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-a
       if (source == "" || (source in mirrored)) next
       mirrored[source] = 1
       print source > source_additions
+      colon = index(rewritten, ":")
+      if (colon > 0 && rewritten !~ /^[^:]*\[at=/) {
+        rewritten = substr(rewritten, 1, colon - 1) " [at=" ingest_at "]" substr(rewritten, colon)
+      }
       if (!(rewritten in present)) {
         present[rewritten] = 1
         print rewritten > status_additions
@@ -556,7 +568,7 @@ stage_mirror_lines() { # <source> <rewritten> <source-record> <status> <status-a
 cmd_ingest() {
   local id=${1:-} result=${2:-} seq=${3:-} class blank payload normalized_payload schema status path from to from_hash to_hash payload_hash payload_bytes reason
   local actual_bytes actual_hash line doc local_doc appended=0 cursor_already=0 lock status_file source_record tmp
-  local fetch_rc append_rc offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered=''
+  local fetch_rc append_rc offered='' delivered_map='' mirrored='' status_additions='' source_additions='' undelivered='' ingest_epoch=''
   validate_id "$id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file is unavailable or unsafe: $result"
   class=$(classify_result "$result")
@@ -673,12 +685,16 @@ EOF
     || { fm_lock_release "$lock"; die "cannot rewrite remote document pointers"; }
   status_additions="$tmp/status-additions"
   source_additions="$tmp/source-additions"
+  ingest_epoch=$(date +%s) \
+    || { fm_lock_release "$lock"; die "cannot read the ingest clock"; }
+  case "$ingest_epoch" in ''|*[!0-9]*) \
+    { fm_lock_release "$lock"; die "cannot read the ingest clock"; } ;; esac
   : > "$status_additions" \
     || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
   : > "$source_additions" \
     || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
   stage_mirror_lines "$normalized_payload" "$mirrored" "$source_record" "$status_file" \
-    "$status_additions" "$source_additions" \
+    "$status_additions" "$source_additions" "$ingest_epoch" \
     || { fm_lock_release "$lock"; die "cannot stage remote reply mirror identity"; }
   cat "$status_additions" >> "$status_file" \
     || { fm_lock_release "$lock"; die "cannot append remote reply"; }
