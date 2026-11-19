@@ -937,6 +937,17 @@ silent_receipt="$SILENT_HOME/state/remote-replies/ios.2.ingested"
 printf 'result_sha256=%s\n' "$(sha256_file "$SILENT_RESULT")" > "$silent_receipt"
 FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT" \
   || fail "a matching receipt from another sequence did not silence the delta"
+# The earlier capture wrote its receipt and stopped before it moved the cursor.
+# Handling this capture is then the only thing that re-arms the source.
+{
+  printf 'schema=fm-remote-reply-cursor.v1\n'
+  printf 'offset=%s\n' "$(sed -n 's/^from_offset=//p' "$SILENT_RESULT")"
+  printf 'prefix_sha256=%s\n' "$(sed -n 's/^from_prefix_sha256=//p' "$SILENT_RESULT")"
+} > "$SILENT_HOME/state/remote-replies/ios.cursor"
+if FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT"; then
+  fail "a delta the unmoved cursor can still ingest was silenced"
+fi
+rm -f "$SILENT_HOME/state/remote-replies/ios.cursor"
 mv "$silent_receipt" "$SILENT_HOME/state/remote-replies/ios.2.3.ingested"
 if FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT"; then
   fail "a receipt from a different mate with a shared name prefix silenced the delta"
@@ -951,7 +962,7 @@ printf 'result_sha256=%s\n' "$(sha256_file "$SILENT_RESULT")" > "$silent_receipt
 if FM_HOME="$SILENT_HOME" "$ADAPTER" silent "$SILENT_RESULT"; then
   fail "a matching receipt silenced a continuity break"
 fi
-pass "silence requires identical delta bytes receipted by the exact same mate"
+pass "silence requires identical delta bytes receipted by the exact same mate and a moved cursor"
 
 # A remote mate cannot squat the decision keys this parent's pending-reply
 # library owns. The guard is deliberately NOT in this adapter: rejecting a line

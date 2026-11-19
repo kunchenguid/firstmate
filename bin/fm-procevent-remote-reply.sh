@@ -43,10 +43,10 @@
 # running `handle` on that wake is idempotent.
 #
 # `silent` retires a delta only when another sequence of the same source has a
-# receipt for its exact bytes. A handler stopped before its receipt can leave
-# such an orphan behind, and `handle` cannot ingest it after the cursor moves
-# past it. Its own receipt never counts: that capture may still owe its
-# acknowledgement and re-arm. Retirement removes every receipt.
+# receipt for its exact bytes and the cursor has left the delta's start. A
+# handler stopped before its receipt can leave such an orphan, which `handle`
+# cannot ingest once the cursor moves past it. Its own receipt never counts:
+# that capture may still owe its acknowledgement and re-arm. Retirement removes every receipt.
 #
 # This channel is a status-stream MIRROR, not a correlated-reply channel. A local
 # secondmate appends its whole status stream straight into the parent's
@@ -766,7 +766,7 @@ cmd_autohandle() {
 }
 
 cmd_silent() {
-  local result=${1:-} base sid seq id hash receipt other
+  local result=${1:-} base sid seq id hash receipt other from from_hash
   [ -f "$result" ] && [ ! -L "$result" ] || return 1
   base=${result##*/}
   base=${base%.result}
@@ -776,6 +776,12 @@ cmd_silent() {
   validate_id "$id"
   case "$seq" in ''|*[!0-9]*) return 1 ;; esac
   [ "$(classify_result "$result")" = delta ] || return 1
+  from=$(result_field "$result" from_offset) || return 1
+  from_hash=$(result_field "$result" from_prefix_sha256) || return 1
+  read_cursor "$id"
+  # A cursor still at this capture's start means `handle` can ingest it, and
+  # only that handling re-arms the source.
+  [ "$CURSOR_OFFSET" != "$from" ] || [ "$CURSOR_HASH" != "$from_hash" ] || return 1
   hash=$(sha256_file "$result") || return 1
   while IFS= read -r receipt; do
     other=${receipt#"$CURSOR_DIR/$id."}
