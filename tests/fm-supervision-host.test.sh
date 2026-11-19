@@ -16,8 +16,8 @@ set -u
 # shellcheck source=tests/supervision-host-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
-test_park_exit_probe_uses_half_second_child_sleeps() {
-  local home host_pid
+test_park_exit_probe_samples_without_child_sleeps() {
+  local home host_pid arm_pid t0 t1
   home=$(make_home park-cadence attended)
   cat > "$home/fakebin/sleep" <<'SH'
 #!/bin/bash
@@ -36,10 +36,27 @@ SH
   host_pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
   [ -n "$host_pid" ] || fail "park-cadence: no recorded host"
   printf '%s\n' "$host_pid" > "$home/probe-host"
-  wait_until 100 test -s "$home/park-sleeps" || fail "park-cadence: no child sleep observed"
-  [ "$(sort -u "$home/park-sleeps")" = 0.5 ] || fail "park-cadence: exit probing did not use half-second sleeps"
+  # Parked and idle for several seconds: the exit-probe loop must sample the
+  # arm without shelling out to `sleep` children at all (they used to run
+  # twice a second, host-wide, for the life of every idle park).
+  sleep 4
+  [ ! -e "$home/park-sleeps" ] || [ ! -s "$home/park-sleeps" ] \
+    || fail "park-cadence: the parked host still spawned sleep children: $(cat "$home/park-sleeps")"
+  # The sampling cadence itself is what must survive: the host has to notice
+  # the arm's close within seconds (a 0.5s probe cadence) and pass through.
+  arm_pid=$(awk -F '\t' '$1 == "arm" { print $2; exit }' "$home/state/.supervision-host")
+  [ -n "$arm_pid" ] || fail "park-cadence: no arm to close"
+  t0=$SECONDS
+  kill -TERM "$arm_pid" 2>/dev/null || true
+  wait_until 80 grep -q "pass-through" "$home/state/.supervision-host.log" \
+    || fail "park-cadence: the host did not notice the arm's close in time: $(cat "$home/host.out" 2>/dev/null)"
+  t1=$((SECONDS - t0))
+  [ "$t1" -le 6 ] || fail "park-cadence: close took ${t1}s to notice; the exit probe cadence regressed"
+  wait_until 50 [ -f "$home/host.rc" ] || fail "park-cadence: the host did not pass through after the close"
+  [ "$(cat "$home/host.rc" 2>/dev/null)" = 0 ] \
+    || fail "park-cadence: a close without a wake must pass through with exit 0"
   stop_home_processes "$home"
-  pass "host: parked child-exit sampling uses ordinary half-second sleeps"
+  pass "host: parked child-exit sampling needs no child sleeps and keeps its cadence"
 }
 
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
@@ -983,7 +1000,7 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
 }
 
 fm_test_run \
-  test_park_exit_probe_uses_half_second_child_sleeps \
+  test_park_exit_probe_samples_without_child_sleeps \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
   test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue \
   test_engine_in_another_time_zone_handles_its_granted_rows \

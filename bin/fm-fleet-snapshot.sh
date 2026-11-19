@@ -343,20 +343,47 @@ bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
 
-path_present_json() {  # <contract-path> [<observed-path>]
-  local path=$1 observed=${2:-$1} present=0
-  [ -e "$observed" ] && present=1
-  jq -n --arg path "$path" --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present}'
+# meta_value answers the same as fm_meta_get (the LAST `key=` value in the
+# file) but re-reads the meta once per task instead of once per key: one row
+# asks for a dozen keys against the same captured copy. The cache holds the
+# most recently loaded file only, which is the access pattern of both callers
+# (prefetch_task_observations, task_json_line, contribution_tasks_json).
+_SNAPSHOT_META_CACHE_FILE=
+declare -A _SNAPSHOT_META_CACHE
+_meta_cache_load() {  # <meta-file>
+  local meta=$1 line key value=''
+  if [ "$meta" = "$_SNAPSHOT_META_CACHE_FILE" ]; then return 0; fi
+  _SNAPSHOT_META_CACHE=()
+  _SNAPSHOT_META_CACHE_FILE=$meta
+  [ -f "$meta" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *=*) key=${line%%=*}; value=${line#*=} ;;
+      *) continue ;;
+    esac
+    _SNAPSHOT_META_CACHE["$key"]=$value
+  done < "$meta" 2>/dev/null || true
 }
 
+# The LAST value of `key=` wins, matching fm_meta_get exactly.
 meta_value() {  # <meta-file> <key>
-  fm_meta_get "$1" "$2"
+  _meta_cache_load "$1"
+  printf '%s' "${_SNAPSHOT_META_CACHE[$2]-}"
 }
 
+# The last line that is not entirely whitespace, without the grep|tail fork
+# pair this used to pay per task: the snapshot reads one status capture per
+# task row, several times a second host-wide.
 last_nonempty_line() {  # <file>
+  local line last=''
   [ -f "$1" ] || return 1
-  grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *[!$' \t\r\v\f']*) last=$line ;;
+    esac
+  done < "$1" 2>/dev/null || true
+  [ -n "$last" ] || return 0
+  printf '%s\n' "$last"
 }
 
 # A local crew-state read is bounded so one slow child cannot extend this
@@ -380,7 +407,9 @@ crew_state_json() {  # <id> [<captured-meta>] [<captured-status>]
       FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
   )
-  raw=$(printf '%s\n' "$raw" | head -1)
+  # First line only, without the printf|head fork pair this used to pay per
+  # task; $( ) has already stripped the trailing newline.
+  raw=${raw%%$'\n'*}
   sep=' · '
   state=unknown
   source=none
@@ -412,14 +441,8 @@ status_event_json() {  # <observed-status-log> [<contract-path>]
       age=$((SNAPSHOT_EPOCH - epoch))
     fi
   fi
-  jq -n \
-    --arg path "$path" \
-    --arg raw "$raw" \
-    --arg verb "$verb" \
-    --arg note "$note" \
-    --argjson age "$age" \
-    --argjson present "$(bool_json "$present")" \
-    '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw,age_seconds:$age}}'
+  printf 'present=%s\nraw=%s\nverb=%s\nnote=%s\nage=%s\npath=%s\n' \
+    "$present" "$raw" "$verb" "$note" "$age" "$path"
 }
 
 board_status_event_json() {  # <captured-status-log>
@@ -442,8 +465,13 @@ board_status_event_json() {  # <captured-status-log>
 }
 
 first_pr_url_in_file() {  # <file>
+  local out
   [ -f "$1" ] || return 1
-  grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null | head -1
+  out=$(grep -Eo 'https?://[^[:space:])"]+/pull/[0-9]+' "$1" 2>/dev/null) || return 1
+  # The first match line, without the head fork this used to pay: grep -Eo
+  # prints one match per line, so the first line is the first match.
+  [ -n "$out" ] || return 1
+  printf '%s\n' "${out%%$'\n'*}"
 }
 
 # Isolate this read-only projection from the fleet collector's shell state.
@@ -656,6 +684,20 @@ snapshot_task_cleanup() {
 # <suffix> file when one is named. A slot is refilled as soon as its job ends,
 # so a job that runs to its bound delays only itself, never the jobs queued
 # behind it. Polling keeps this portable to shells without `wait -n`.
+# Blocks until at least one running job exits, without the sleep-0.1 polling
+# fork this loop used to pay ten times a second while workers ran: one
+# snapshot spends most of its wall time here. `wait -n` is used when this
+# bash provides it (4.3+); the sleep fallback keeps the old cadence elsewhere.
+_snapshot_wait_one() {
+  if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] \
+     || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 3 ]; }; then
+    # A reaped exit status stays readable by pid: wait -n does not consume it.
+    wait -n 2>/dev/null || true
+  else
+    sleep 0.1
+  fi
+}
+
 snapshot_tasks_parallel() {  # <function> [<output-suffix>]
   local fn=$1 suffix=${2:-} meta id pid index=0 rc=0
   local -a pids=() running=()
@@ -681,7 +723,7 @@ snapshot_tasks_parallel() {  # <function> [<output-suffix>]
         wait "$pid" || rc=1
       fi
     done
-    [ "${#running[@]}" -lt "${#pids[@]}" ] || sleep 0.1
+    [ "${#running[@]}" -lt "${#pids[@]}" ] || _snapshot_wait_one
     pids=(${running[@]+"${running[@]}"})
   done
   return "$rc"
@@ -741,7 +783,9 @@ prefetch_task_observations() {  # <meta> <id>
   fi
 
   if [ -n "$remote_host" ]; then
-    jq -n '{state:"unknown",source:"none",detail:"remote endpoint liveness not collected by fleet snapshot",raw:""}' \
+    # A fixed ASCII constant: printed directly instead of a jq -n fork per
+    # remote task, byte-identical to what jq -n printed for it.
+    printf '%s\n' '{"state":"unknown","source":"none","detail":"remote endpoint liveness not collected by fleet snapshot","raw":""}' \
       > "$current_file" || current_rc=1
     agent_alive=unknown
   elif [ "$generation_current" = 1 ]; then
@@ -761,7 +805,7 @@ prefetch_task_observations() {  # <meta> <id>
       fi
     fi
   else
-    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+    printf '%s\n' '{"state":"unknown","source":"none","detail":"task generation changed during snapshot","raw":""}' \
       > "$current_file" || current_rc=1
     agent_alive=unknown
   fi
@@ -771,7 +815,7 @@ prefetch_task_observations() {  # <meta> <id>
   # the manifest. If teardown/relaunch raced any read, discard the whole sample.
   if ! snapshot_task_generation_is_current "$meta" "$id"; then
     rm -f -- "$status_capture" "$report_capture"
-    jq -n '{state:"unknown",source:"none",detail:"task generation changed during snapshot",raw:""}' \
+    printf '%s\n' '{"state":"unknown","source":"none","detail":"task generation changed during snapshot","raw":""}' \
       > "$current_file" || current_rc=1
     endpoint_exists=null
     agent_alive=unknown
@@ -793,7 +837,10 @@ prefetch_task_current_states() {
   # composition one coherent task manifest even if publication or teardown races it.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    id=$(basename "$meta" .meta)
+    # Directory and suffix stripped in the shell; basename cost one fork per
+    # task per snapshot.
+    id=${meta##*/}
+    id=${id%.meta}
     captured_meta="$SNAPSHOT_TASK_DIR/$id.meta"
     if ! cp -- "$meta" "$captured_meta" 2>"$captured_meta.copy-error"; then
       # Teardown may unlink a task after the glob selected it but before cp opens
@@ -822,9 +869,12 @@ prefetch_task_current_states() {
 task_json_line() {  # <captured-meta> <id>
   local meta=$1 id=$2 original_meta kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root current_file endpoint_file observation_line
-  local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
+  local pr pr_source current_json endpoint_exists agent_alive
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json board_fields model
+  local status_present status_raw status_verb status_note status_age status_log_contract
+  local meta_present worktree_present home_present report_contract_path report_path_present
+  local event_part open_line open_verb
 
   original_meta="$STATE/$id.meta"
   kind=$(meta_value "$meta" kind)
@@ -870,11 +920,32 @@ task_json_line() {  # <captured-meta> <id>
   if [ "$OUTPUT_MODE" = live-board-input ]; then
     board_fields=$(set -o pipefail; board_status_event_json "$status_log" | jq '{last_meaningful_event:.}') || return 1
   fi
-  event_json=$(status_event_json "$status_log" "$STATE/$id.status")
-  last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-  read -r current_state current_source < <(
-    printf '%s' "$current_json" | jq -r '[.state // "", .source // ""] | @tsv'
-  )
+  # The status event rides as parts (status_event_json above) into the row
+  # assembler's jq, which builds the same event object inline: this used to pay
+  # three jq forks per task (event JSON, its raw echo, the TSV read) plus the
+  # printf/process-substitution forks around them. Every part is single-line by
+  # construction (last_nonempty_line, status_line_verb, status_line_note and the
+  # state/source vocabulary), so the key=value block parses without ambiguity.
+  status_present=0
+  status_raw=''
+  status_verb=''
+  status_note=''
+  status_age=null
+  status_log_contract=''
+  while IFS= read -r event_part || [ -n "$event_part" ]; do
+    case "$event_part" in
+      present=*) status_present=${event_part#present=} ;;
+      raw=*) status_raw=${event_part#raw=} ;;
+      verb=*) status_verb=${event_part#verb=} ;;
+      note=*) status_note=${event_part#note=} ;;
+      age=*) status_age=${event_part#age=} ;;
+      path=*) status_log_contract=${event_part#path=} ;;
+    esac
+  done <<EOF
+$(status_event_json "$status_log" "$STATE/$id.status")
+EOF
+  last_event_raw=$status_raw
+  read -r current_state current_source <<< "$(jq -r '[.state // "", .source // ""] | @tsv' <<< "$current_json")"
 
   # Durable keyed open-decision set: fold the WHOLE status stream
   # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -900,12 +971,28 @@ task_json_line() {  # <captured-meta> <id>
        || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
     open_decisions_tsv=""
   fi
-  open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
+  open_decisions_json=$(jq -R -s '
     [ splits("\n") | select(length > 0)
       | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
-      | select(. != null) ]')
-  pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
-  blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
+      | select(. != null) ]' <<< "$open_decisions_tsv")
+  # The two hints answer the same question the jq `any` scans answered - does
+  # any folded line carry that verb - without two jq forks per task. A line
+  # joins the set only when it holds at least two tabs, exactly the lines the
+  # capture above parses; then the verb is the field between the first two.
+  pending_decision=0
+  blocked_event=0
+  while IFS= read -r open_line || [ -n "$open_line" ]; do
+    case "$open_line" in
+      *$'\t'*$'\t'*)
+        open_verb=${open_line#*$'\t'}
+        open_verb=${open_verb%%$'\t'*}
+        [ "$open_verb" = needs-decision ] && pending_decision=1
+        [ "$open_verb" = blocked ] && blocked_event=1
+        ;;
+    esac
+  done <<EOF
+$open_decisions_tsv
+EOF
 
   endpoint_exists=null
   agent_alive=not_checked
@@ -919,17 +1006,20 @@ task_json_line() {  # <captured-meta> <id>
     return 1
   }
   [ -f "$report_path" ] && report_present=1 || report_present=0
-  meta_json=$(path_present_json "$original_meta" "$meta")
-  status_json=$event_json
-  report_json=$(path_present_json "$DATA/$id/report.md" "$report_path")
-  if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
+  [ -e "$report_path" ] && report_path_present=true || report_path_present=false
+  # Presence flags and contract paths only: the assembler jq below builds each
+  # {path,present} object inline from the same arguments the per-object jq -n
+  # calls (path_present_json and friends) used to serialize, one fork per
+  # object per task.
+  [ -e "$meta" ] && meta_present=true || meta_present=false
+  [ -e "$worktree" ] && worktree_present=true || worktree_present=false
+  home_present=false
   if [ -n "$home" ] && [ -n "$remote_host" ]; then
-    home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')
+    home_present=null
   elif [ -n "$home" ]; then
-    home_json=$(path_present_json "$home")
-  else
-    home_json=$(jq -n '{path:null,present:false}')
+    [ -e "$home" ] && home_present=true || home_present=false
   fi
+  report_contract_path="$DATA/$id/report.md"
 
   jq -n \
     --arg id "$id" \
@@ -956,15 +1046,22 @@ task_json_line() {  # <captured-meta> <id>
     --arg last_event_raw "$last_event_raw" \
     --argjson board_fields "$board_fields" \
     --argjson current_state "$current_json" \
-    --argjson meta_path "$meta_json" \
-    --argjson status_log "$status_json" \
-    --argjson report "$report_json" \
-    --argjson worktree_path "$worktree_json" \
-    --argjson home_path "$home_json" \
+    --arg meta_contract_path "$original_meta" \
+    --arg report_contract_path "$report_contract_path" \
+    --arg status_contract_path "$status_log_contract" \
+    --arg status_raw "$status_raw" \
+    --arg status_verb "$status_verb" \
+    --arg status_note "$status_note" \
+    --argjson status_present "$(bool_json "$status_present")" \
+    --argjson status_age "$status_age" \
+    --argjson meta_present "$meta_present" \
+    --argjson worktree_present "$worktree_present" \
+    --argjson home_present "$home_present" \
     --argjson endpoint_exists "$endpoint_exists" \
     --argjson open_decisions "$open_decisions_json" \
     --argjson pending_decision "$(bool_json "$pending_decision")" \
     --argjson blocked_event "$(bool_json "$blocked_event")" \
+    --argjson report_path_present "$report_path_present" \
     --argjson report_present "$(bool_json "$report_present")" \
     '{
       id:$id,
@@ -979,11 +1076,12 @@ task_json_line() {  # <captured-meta> <id>
       backend:$backend,
       remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
       paths:{
-        meta:$meta_path,
-        status_log:$status_log,
-        worktree:$worktree_path,
-        home:$home_path,
-        report:$report
+        meta:{path:$meta_contract_path,present:$meta_present},
+        status_log:{path:$status_contract_path,present:$status_present,kind:"event_history",
+          last_event:{state:$status_verb,note:$status_note,raw:$status_raw,age_seconds:$status_age}},
+        worktree:(if $worktree == "" then {path:null,present:false} else {path:$worktree,present:$worktree_present} end),
+        home:(if $home == "" then {path:null,present:false} else {path:$home,present:$home_present} end),
+        report:{path:$report_contract_path,present:$report_path_present}
       },
       secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
       current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
@@ -2079,7 +2177,10 @@ contribution_tasks_json() {
   local meta id merge_authority
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    id=$(basename "$meta" .meta)
+    # Strip the directory and .meta suffix in the shell: basename cost one fork
+    # per contribution row.
+    id=${meta##*/}
+    id=${id%.meta}
     merge_authority=unknown
     if fm_merge_authority_resolve "$FM_HOME" "$STATE" "$meta" "$id"; then
       merge_authority=$FM_MERGE_AUTHORITY

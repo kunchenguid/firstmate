@@ -314,19 +314,108 @@ identity_of() {  # <pid>
   _fm_engine_identity "$1" || true
 }
 
+# Fork-free identity read producing the same "linux-starttime=<ticks>
+# cmdline-hex=<hex>" line identity_of (via fm_pid_identity) prints, byte for
+# byte: stat field 22 parsed exactly like _fm_proc_starttime_to, and cmdline
+# hexed byte for byte. The kernel NUL-separates and NUL-terminates
+# /proc/<pid>/cmdline, so hex(arg) 00 per argument reproduces od -An -v -tx1's
+# stream. Returns 1 on any doubt - missing files, odd formats, or a bash
+# without mapfile -d - leaving callers on the forkful path.
+host_identity_read() {  # <pid> <output-variable>
+  local pid=$1 outvar=$2 line starttime hex arg j
+  local -a fields=() args=()
+  local proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ] \
+     && { [ "${BASH_VERSINFO[0]:-0}" -ne 4 ] || [ "${BASH_VERSINFO[1]:-0}" -lt 4 ]; }; then
+    return 1
+  fi
+  IFS= read -r line < "$proc_root/$pid/stat" 2>/dev/null || return 1
+  # After the final comm delimiter, array index 19 is proc stat field 22.
+  line=${line##*)}
+  read -r -a fields <<< "$line"
+  [ "${#fields[@]}" -ge 20 ] || return 1
+  starttime=${fields[19]}
+  case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+  mapfile -d '' -t args < "$proc_root/$pid/cmdline" 2>/dev/null || return 1
+  [ "${#args[@]}" -gt 0 ] || return 1
+  hex=
+  local LC_ALL=C
+  for arg in "${args[@]}"; do
+    for ((j = 0; j < ${#arg}; j++)); do
+      printf -v hex '%s%02x' "$hex" "'${arg:j:1}"
+    done
+    hex=${hex}00
+  done
+  printf -v "$outvar" 'linux-starttime=%s cmdline-hex=%s' "$starttime" "$hex"
+}
+
 # Record one process this host runs, so a successor host can stop exactly it.
 record_process() {  # <role> <pid>
   printf '%s\t%s\t%s\n' "$1" "$2" "$(identity_of "$2")" >> "$HOST_RECORD" 2>/dev/null || true
 }
 
+# Refresh cache: the pid whose identity the last refresh settled, and that
+# identity as the fork-free reader saw it (host_identity_read output is only
+# trusted for a pid once it has matched identity_of byte for byte).
+_REFRESH_ID_CACHE_PID=
+_REFRESH_ID_CACHE_VALUE=
+
 # Re-record a process under its current identity. Safe only for this host's
 # own unreaped child, whose pid cannot be recycled: its first identity may have
 # been read between its fork and its exec.
+# True when the record's row for <pid> already holds <identity>: a fork-free
+# line scan replacing the awk probe the refresh used to pay per poll. Rows are
+# tab-separated with the pid in field 2 and the identity in field 3.
+_refresh_row_current() {  # <pid> <identity>
+  local pid=$1 identity=$2 row f2 f3
+  while IFS= read -r row || [ -n "$row" ]; do
+    case "$row" in
+      *"$pid"*) ;;
+      *) continue ;;
+    esac
+    f2=${row#*$'\t'}
+    f2=${f2%%$'\t'*}
+    [ "$f2" = "$pid" ] || continue
+    f3=${row#*$'\t'}
+    f3=${f3#*$'\t'}
+    f3=${f3%%$'\t'*}
+    [ "$f3" = "$identity" ] && return 0
+  done < "$HOST_RECORD" 2>/dev/null
+  return 1
+}
+
+# The park calls this once a second while idle. When it is the same child as
+# the last refresh, the fork-free identity read still agrees with the cached,
+# cross-checked identity, and the record's row still holds that identity, the
+# rewrite below would be a no-op; skipping it removes the per-poll fork chain
+# (identity subprocesses, the awk scan, the temp-file dance) the park paid
+# while idle. Anything else - a new pid, an identity change, a row that no
+# longer matches - falls to the full path, unchanged.
+# A takeover truncates the record wholesale, which ends this host, so a stale
+# skip cannot outlive ownership.
 refresh_process() {  # <pid>
-  local pid=$1 identity tmp
+  local pid=$1 identity tmp fast
   [ -n "$pid" ] && [ -f "$HOST_RECORD" ] || return 0
+  if [ "$pid" = "$_REFRESH_ID_CACHE_PID" ] \
+     && host_identity_read "$pid" fast \
+     && [ "$fast" = "$_REFRESH_ID_CACHE_VALUE" ] \
+     && _refresh_row_current "$pid" "$fast"; then
+    return 0
+  fi
   identity=$(identity_of "$pid")
   [ -n "$identity" ] || return 0
+  # Trust the fork-free reader for this pid only while it agrees byte for
+  # byte with the forkful one; a disagreement leaves the cache off. This must
+  # happen before the staleness gate below: an already-current row is the
+  # steady state, and skipping the cache there would fork on every cycle.
+  if host_identity_read "$pid" fast && [ "$fast" = "$identity" ]; then
+    _REFRESH_ID_CACHE_PID=$pid
+    _REFRESH_ID_CACHE_VALUE=$fast
+  else
+    _REFRESH_ID_CACHE_PID=
+    _REFRESH_ID_CACHE_VALUE=
+  fi
   awk -F '\t' -v pid="$pid" -v id="$identity" '$2 == pid && $3 != id { found = 1 } END { exit !found }' "$HOST_RECORD" 2>/dev/null || return 0
   tmp=$(mktemp "$HOST_RECORD.tmp.XXXXXX" 2>/dev/null) || return 0
   awk -F '\t' -v OFS='\t' -v pid="$pid" -v id="$identity" '$2 == pid { $3 = id } { print }' "$HOST_RECORD" > "$tmp" 2>/dev/null \
@@ -444,6 +533,7 @@ stop_engine_turn() {
 cleanup() {
   local rc=$? f
   trap - EXIT HUP TERM INT
+  park_sleep_fini
   # A signal can land inside the handled-turn settle, which holds the queue and
   # marker locks; the grant release below needs the queue lock, so drop any of
   # them this process still owns first (fm_lock_release ignores foreign owners).
@@ -656,6 +746,47 @@ mark_engine_compacted() {  # <ended>
   fi
 }
 
+# The park's idle loop paid one `sleep 0.5` fork twice a second, every second
+# of every idle park, host-wide. park_sleep times the same interval with a read
+# timeout on a fifo this host holds open for both reading and writing: no data
+# ever arrives, so read blocks for exactly the timeout and no process is forked
+# per cycle. Shells without auto-allocated redirection fds or fractional read
+# timeouts (bash < 4.1, e.g. macOS 3.2) keep the portable sleep cadence.
+PARK_SLEEP_FD=
+PARK_SLEEP_FIFO=
+park_sleep_init() {
+  local fifo="$STATE/.supervision-host-pipe.$HOST_PID"
+  PARK_SLEEP_FD=
+  PARK_SLEEP_FIFO=
+  if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] \
+     || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 1 ]; }; then
+    if mkfifo "$fifo" 2>/dev/null && exec {PARK_SLEEP_FD}<> "$fifo" 2>/dev/null; then
+      PARK_SLEEP_FIFO=$fifo
+      return 0
+    fi
+    rm -f "$fifo" 2>/dev/null || true
+  fi
+}
+
+park_sleep_fini() {
+  if [ -n "$PARK_SLEEP_FD" ]; then
+    eval "exec ${PARK_SLEEP_FD}>&-" 2>/dev/null || true
+    PARK_SLEEP_FD=
+  fi
+  [ -n "$PARK_SLEEP_FIFO" ] || return 0
+  rm -f "$PARK_SLEEP_FIFO" 2>/dev/null || true
+  PARK_SLEEP_FIFO=
+}
+
+park_sleep() {  # <seconds>
+  if [ -n "$PARK_SLEEP_FD" ]; then
+    # The fifo stays empty: read can only time out, so its status is ignored.
+    IFS= read -r -t "$1" -u "$PARK_SLEEP_FD" || true
+  else
+    sleep "$1"
+  fi
+}
+
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
 # or 1 when the park boundary arrives first.
 await_close() {
@@ -669,7 +800,7 @@ await_close() {
     # changing the outer identity refresh, readiness, or boundary cadence.
     i=$((POLL * 2))
     while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
-      sleep 0.5
+      park_sleep 0.5
       i=$((i - 1))
     done
   done
@@ -1240,6 +1371,7 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 activate || { echo "supervision-host stood down: the host record could not be written"; exit 0; }
 log_line "start	gen=$GEN	primary=$PRIMARY"
+park_sleep_init
 
 # The first cycle.
 if [ "$FIRST_ARM_RESTART" -eq 1 ]; then
