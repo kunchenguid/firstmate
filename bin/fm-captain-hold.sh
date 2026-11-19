@@ -86,7 +86,8 @@
 # answered captain call. A hold that expired by date (`--until` in the past) is
 # still answerable: the surviving hold annotations, not tasks-axi's live
 # `held:` bit, prove the captain owned it. Every settlement path - close,
-# release, repair, or an evidence-backed reconcile close - retracts the
+# release, repair, an evidence-backed reconcile close, or a forge PR
+# settlement (`settle-pr`) - retracts the
 # status-log hold declaration itself, so a stopped worker cannot leave the
 # lane reading as still held.
 #
