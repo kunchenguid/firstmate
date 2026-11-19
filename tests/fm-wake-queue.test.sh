@@ -195,7 +195,7 @@ test_stale_enqueue_before_suppressor() {
   # stale wake with a signal wake.
   printf 'done: ready in branch fm/stale\n' > "$state/stale.status"
   prime_status_seen "$state" "$state/stale.status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle prompt")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -227,7 +227,7 @@ test_not_working_stale_enqueue_before_suppressor() {
   # signal scan does not pre-empt the stale path.
   printf 'working: implementing\n' > "$state/stopped.status"
   prime_status_seen "$state" "$state/stopped.status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle prompt, finished")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -268,6 +268,34 @@ SH
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
   [ -e "$state/.last-check" ] || fail "check cadence marker was not written after queue append"
   pass "registered custom check output is queued before cadence suppression"
+}
+
+test_multiline_check_output_wakes_as_one_line() {
+  local dir state fakebin out drain_out check_file
+  dir=$(make_case check-multiline)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  check_file="$state/task.check.sh"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+printf 'first event\nsecond event\nthird event\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register multi-line custom check"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit for multi-line check output"
+  # Wake consumers keep only lines carrying a wake prefix, so every check line
+  # must ride the one prefixed line, matching the queued row's payload.
+  [ "$(grep -c '' "$out")" -eq 1 ] || fail "multi-line check wake spanned more than one output line"
+  grep -Fx "check: $check_file: first event second event third event" "$out" >/dev/null \
+    || fail "watcher wake line did not carry every check output line"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after multi-line check wake failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F 'first event second event third event' >/dev/null \
+    || fail "multi-line check wake was not queued in full"
+  pass "multi-line check output wakes as one line matching its queued row"
 }
 
 test_atomic_double_drain() {
@@ -317,6 +345,22 @@ test_drain_dedupes_obvious_duplicates() {
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null || fail "heartbeat was not preserved"
   grep "$(printf '\tsignal\ttask.status\t')" "$out" | grep -F "$state/task.turn-ended" >/dev/null || fail "latest signal payload was not preserved"
   pass "drain collapses obvious duplicate heartbeat and signal records"
+}
+
+test_drain_presents_every_distinct_check_payload() {
+  local dir state out
+  dir=$(make_case dedupe-check)
+  state="$dir/state"
+  out="$dir/drain.out"
+  append_wake "$state" check "$state/task.check.sh" "check: $state/task.check.sh: first event" || fail "first check append failed"
+  append_wake "$state" check "$state/task.check.sh" "check: $state/task.check.sh: second event" || fail "second check append failed"
+  append_wake "$state" check "$state/task.check.sh" "check: $state/task.check.sh: second event" || fail "repeated check append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "check dedupe drain failed"
+  # The acknowledgement consumes every row through the newest sequence, so an
+  # earlier distinct payload hidden here would be lost unread.
+  grep -F "$state/task.check.sh: first event" "$out" >/dev/null || fail "earlier check payload was not presented"
+  [ "$(grep -cF "$state/task.check.sh: second event" "$out")" -eq 1 ] || fail "repeated identical check row was not collapsed"
+  pass "drain presents every distinct payload from one check and collapses identical repeats"
 }
 
 # Run one watcher leg of the foreign-stall case at fake time <now>. Each leg
@@ -1568,6 +1612,45 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   [ ! -s "$state/.wake-queue" ] || fail "the main-owned row survived main's own ack"
 
   pass "a branch-actor scoped ack never swallows an unacked main-owned row, and main's later drain sees exactly what remains"
+}
+
+# A host publishes the branch's grant before its engine runs. Its branch tool
+# may not be allowed to inspect the host process through ps, but it must still
+# drain and acknowledge only the exact rows in that published snapshot.
+test_branch_actor_keeps_its_grant_when_ps_cannot_inspect_the_host() {
+  local dir state sequence generation
+  dir=$(make_case branch-ps-denied)
+  state="$dir/state"
+  mkdir -p "$dir/fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/ps"
+  chmod +x "$dir/fakebin/ps"
+
+  append_wake "$state" check "main-only.check.sh" "check: main-only" || fail "main append failed"
+  append_wake "$state" signal "task-a.status" "signal: task-a" || fail "branch append failed"
+  FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    "$GRANT" activate "$$" ps-denied || fail "branch owner activation failed"
+  FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    "$GRANT" publish ps-denied 2 || fail "branch grant publication failed"
+
+  PATH="$dir/fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" \
+    || fail "branch lost its live grant when ps was unavailable: $(cat "$dir/branch.err")"
+  grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/branch.out" \
+    || fail "branch drain omitted its granted row"
+  ! grep -Fq "$(printf '\tcheck\tmain-only.check.sh\t')" "$dir/branch.out" \
+    || fail "branch drain presented the main-owned row"
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/branch.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/branch.err")
+  [ "$sequence" = 2 ] && [ -n "$generation" ] || fail "branch drain omitted its exact acknowledgement"
+  PATH="$dir/fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISION_ACTOR=branch "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation" \
+    || fail "branch acknowledgement failed when ps was unavailable"
+  grep -Fq "$(printf '\tcheck\tmain-only.check.sh\t')" "$state/.wake-queue" \
+    || fail "branch acknowledgement swallowed the main-owned row"
+  ! grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$state/.wake-queue" \
+    || fail "branch acknowledgement left its granted row queued"
+
+  pass "branch drain and acknowledgement keep their published grant when ps cannot inspect the host"
 }
 
 test_main_drain_excludes_rows_already_granted_to_branch() {
@@ -3765,13 +3848,16 @@ test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
+test_multiline_check_output_wakes_as_one_line
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
+test_drain_presents_every_distinct_check_payload
 test_drain_asserts_watcher_liveness
 test_structural_signal_enrichment_preserves_raw_rows
 test_enrichment_preserves_all_unread_lines_and_status_file_failures
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row
+test_branch_actor_keeps_its_grant_when_ps_cannot_inspect_the_host
 test_main_drain_excludes_rows_already_granted_to_branch
 test_branch_ack_commits_secondmate_stall_receipts
 test_main_is_never_told_to_drain_rows_only_the_branch_owns

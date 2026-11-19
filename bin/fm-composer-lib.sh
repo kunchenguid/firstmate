@@ -65,7 +65,8 @@
 #                older claude). The bottom border may carry a TITLE (grok
 #                writes its model name there). A title embedded in the family's
 #                rule is tolerated at the aligned width, including Grok 1.0.44's
-#                rounded typed model/effort title with ` · always-approve`; Grok 1.0.5's
+#                rounded typed model/effort title with ` · always-approve`
+#                (Grok 1.0.77's `<version> Fast` model name too); Grok 1.0.5's
 #                typed title also permits its proven three-column overhang.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
@@ -115,7 +116,9 @@
 # (_fm_composer_row_is_composer_furniture): one unclaimed activity row
 # (`Working on request...`) makes the whole run activity and the envelope above
 # it stale, and a row leading with the SAME glyph the envelope was proven by
-# (`❯ my typed draft`) is a live composer that keeps winning. Where a shape
+# (`❯ my typed draft`) is a live composer that keeps winning. The one exception
+# is the selected row of Claude 2.1.291's slash-command popup, which carries
+# that glyph too (_fm_composer_bare_is_popup_selection). Where a shape
 # cannot demonstrate which it is, the refusal is the answer. The zone is
 # bounded further by a blank row, and an envelope that closed over no glyph row
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
@@ -1296,9 +1299,11 @@ EOF
   fi
 }
 
-# 0 when <title> is exactly the typed Grok model/effort title shape.
-_fm_composer_grok_typed_title_ok() {  # <title>
-  local title=$1 effort model
+# 0 when <title> is exactly the typed Grok model/effort title shape. With
+# <fast>=1 the model may also carry Grok 1.0.77's single ` Fast` word, the
+# title it draws for grok-4.7-build-fast (`Grok 4.7 Fast (medium)`).
+_fm_composer_grok_typed_title_ok() {  # <title> [fast]
+  local title=$1 fast=${2:-0} effort model
   case "$title" in
     'Grok '*\ \(low\)) effort=low ;;
     'Grok '*\ \(medium\)) effort=medium ;;
@@ -1308,6 +1313,7 @@ _fm_composer_grok_typed_title_ok() {  # <title>
   esac
   model=${title#Grok }
   model=${model%" ($effort)"}
+  [ "$fast" != 1 ] || model=${model%' Fast'}
   [ -n "$model" ] || return 1
   case "$model" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   return 0
@@ -1356,11 +1362,12 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   # mid-dot. Only that exact suffix on a typed Grok title is known; the single
   # mid-dot column is swapped for an ASCII one so it cannot survive as residue
   # in the geometry comparison, while any other mid-dot stays non-space.
+  # Grok 1.0.77's ` Fast` model word was observed only with this suffix.
   case "$title" in
     *' · always-approve')
       # Only the rounded family was observed for this approval-title shape.
       [ "$family" = rounded ] || return 1
-      _fm_composer_grok_typed_title_ok "${title%' · always-approve'}" || return 1
+      _fm_composer_grok_typed_title_ok "${title%' · always-approve'}" 1 || return 1
       inner=${inner/' · always-approve'/' . always-approve'}
       ;;
   esac
@@ -1937,6 +1944,45 @@ _fm_composer_locate_footer_zone() {  # <plain>
     && [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$FM_COMPOSER_FOOTER_LAST" ]
 }
 
+# _fm_composer_bare_is_popup_selection: 0 when bare agent-glyph <row> is the
+# selected row of a slash-command suggestion popup, not a composer of its own.
+# Claude Code 2.1.291 marks the selected suggestion with the same `❯` its
+# composer uses (`  ❯ /exit    Exit the CLI`, where 2.1.289 drew it unmarked),
+# so that row became the bottom-most bare candidate and the whole popup was
+# read as the typed text. It runs after _fm_composer_locate_footer_zone, whose
+# FM_COMPOSER_FOOTER_AFTER and FM_COMPOSER_FOOTER_GLYPH name the envelope the
+# popup sits under. Every condition must hold, so that the demotion can only
+# swap one non-empty read for another and never move a verdict toward `empty`:
+#   - the row lies below the closing row of a glyph-proven envelope;
+#   - that envelope's own glyph row leads with its agent glyph on <plain-screen>,
+#     the borderless row the caller falls back to;
+#   - that glyph row holds typed text opening with `/`, the only input that
+#     opens the popup, so the envelope it falls back to is non-empty. It is read
+#     from <screen> through _fm_composer_row_content, the same ghost-stripped
+#     view the verdict and the extractor read;
+#   - the row opens `/` (or `…`, a name truncated to its column) and carries a
+#     gap of two or more spaces before its description. A numbered-choice
+#     dialog row (`❯ 1. Yes`) has neither, and stays a bare candidate.
+_fm_composer_bare_is_popup_selection() {  # <plain-screen> <screen> <styled> <row>
+  local plain=$1 screen=$2 styled=$3 row=$4 trimmed glyph='' rest
+  [ "$row" -ge 0 ] && [ "$FM_COMPOSER_FOOTER_GLYPH" -ge 0 ] \
+    && [ "$row" -gt "$FM_COMPOSER_FOOTER_AFTER" ] || return 1
+  trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
+  fm_composer_normalize_trim_var trimmed
+  fm_composer_leading_agent_glyph_var glyph "$trimmed" || return 1
+  rest=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$screen")
+  rest=$(_fm_composer_row_content "$rest" "$styled")
+  rest=${rest#"$glyph"}
+  fm_composer_normalize_trim_var rest
+  case "$rest" in /*) ;; *) return 1 ;; esac
+  trimmed=$(_fm_composer_screen_row "$row" "$plain")
+  fm_composer_normalize_trim_var trimmed
+  fm_composer_leading_agent_glyph_var glyph "$trimmed" || return 1
+  rest=${trimmed#*"$glyph"}
+  fm_composer_normalize_trim_var rest
+  [[ $rest =~ ^(/|…)[^[:space:]].*[[:space:]]{2,}[^[:space:]] ]]
+}
+
 # _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its
 # own titled composer: a titled rule directly above it and the screen's only
 # unmatched separator directly below it, which is that composer's closing rule.
@@ -1959,8 +2005,8 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
   _fm_composer_titled_rule_row "$above" "${below//─/ }"
 }
 
-_fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+_fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
+  local plain=$1 screen=$2 styled=$3 generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1977,9 +2023,10 @@ _fm_composer_select_cursorless() {
   # harness's own furniture, never a composer. The envelope it sits under is
   # what the screen actually shows, so when that envelope's proving glyph row
   # is itself borderless, the bare candidate moves UP to it; otherwise the
-  # envelope (box, left bar) stays selected on its own.
+  # envelope (box, left bar) stays selected on its own. The selected row of the
+  # slash-command popup under that envelope is demoted the same way.
   bare=$FM_COMPOSER_SCAN_BARE_ROW
-  if [ "$footer" = 1 ]; then
+  if [ "$footer" = 1 ] || _fm_composer_bare_is_popup_selection "$plain" "$screen" "$styled" "$bare"; then
     trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
     fm_composer_normalize_trim_var trimmed
     if fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
@@ -2096,7 +2143,7 @@ $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_cursorless "$plain" || return 1
+  _fm_composer_select_cursorless "$plain" "$screen" "$styled" || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
   cwd_start=-1
   if [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ]; then
@@ -2369,7 +2416,7 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  if ! _fm_composer_select_cursorless "$plain"; then
+  if ! _fm_composer_select_cursorless "$plain" "$screen" "$styled"; then
     printf 'unknown'
     return 0
   fi

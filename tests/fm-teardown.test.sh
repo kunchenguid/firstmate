@@ -42,6 +42,9 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) GitLab MR merged by squash or train, main moved on, MR head unfetched,
+#        config/park-on-review or config/auto-land present -> ALLOW; open MR -> REFUSE;
+#        neither flag -> REFUSE without a glab read, as before the opt-in
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -63,6 +66,18 @@
 #   (z3d) forced secondmate + child return leaves residue    -> warning, retirement completes, exit 4
 #   (z3e) return removes the copy                            -> cannot-verify warning, exit 4
 #   (z4) scout + ignored file                                -> ignored file survives
+#
+# Landed-work proof from current remote state, not stale tracking refs:
+#   (aa) work on another origin branch, pushed from another clone -> ALLOW (any mode)
+#   (ab) same, but the refresh fails                              -> REFUSE, names remote
+#   (ac) refresh runs, commits on no remote branch                -> REFUSE
+#   (ad) same landed work plus uncommitted changes                -> REFUSE
+#   (ae) no remote at all                                         -> REFUSE, no fetch
+#   (af) remote dropped a branch, fetch.prune=true                -> tracking ref kept
+#   (ag) work already reachable                                   -> ALLOW, no fetch
+#   (ah) hung fetch                                               -> bounded, REFUSE
+#   (ai) commits held only by the no-mistakes gate                -> REFUSE, gate not fetched
+#   (aj) file saved during the refresh, work landed                -> REFUSE, file intact
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -899,6 +914,271 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# A merge-time cleanup request belongs to the detached cleanup that runs this
+# teardown: only that cleanup removes it, after its outcome report is saved, so
+# a cleanup that dies mid-teardown is still retried by the next park tick.
+test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup() {
+  local case_dir wt_head rc
+  case_dir=$(make_case keep-cleanup-request)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'pr=https://github.com/example/repo/pull/7\n' > "$case_dir/state/task-x1.review-park-land"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "keep-cleanup-request: teardown should succeed when work is merged into local main"
+  assert_present "$case_dir/state/task-x1.review-park-land" "teardown removed the merge cleanup request its cleanup still owns"
+  pass "teardown leaves a merge cleanup request for the detached cleanup that owns it"
+}
+
+# Send the task branch's commits to <target> on origin from a separate clone, so
+# the task copy's tracking refs do not show them. Args: case_dir target
+land_task_commits_from_other_clone() {
+  local case_dir=$1 target=$2 other
+  other="$case_dir/_other"
+  git clone -q "$case_dir/origin.git" "$other"
+  git -C "$other" fetch -q "$case_dir/project" fm/task-x1
+  git -C "$other" push -q origin "FETCH_HEAD:refs/heads/$target"
+  rm -rf "$other"
+  [ -n "$(git -C "$case_dir/wt" log --oneline HEAD --not --remotes --)" ] \
+    || fail "fixture: tracking refs already show the task commits"
+}
+
+# Log every git fetch to $case_dir/fetch.log; FM_TEST_FETCH_HANG makes it hang,
+# and FM_TEST_FETCH_WRITES names a file it saves first.
+add_fetch_logging_git() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = fetch ]; then
+    printf '%s\n' "\$*" >> "$case_dir/fetch.log"
+    [ -z "\${FM_TEST_FETCH_WRITES:-}" ] || printf 'saved during fetch\n' > "\$FM_TEST_FETCH_WRITES"
+    [ -z "\${FM_TEST_FETCH_HANG:-}" ] || sleep 120
+    break
+  fi
+done
+exec "\$REAL_GIT_FOR_TEST" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+test_landed_on_other_origin_branch_with_stale_refs_allows() {
+  local mode case_dir rc
+  for mode in local-only direct-PR no-mistakes; do
+    case_dir=$(make_case "stale-refs-$mode")
+    write_meta "$case_dir" "$mode" ship
+    wt_commit_file "$case_dir" feature.txt landed
+    land_task_commits_from_other_clone "$case_dir" release
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "stale-refs-$mode: work on origin should be proven landed"
+    ! grep -q REFUSED "$case_dir/stderr" || fail "stale-refs-$mode: teardown printed a REFUSED line"
+  done
+  pass "work landed on another origin branch from another clone is proven after a refresh"
+}
+
+test_refresh_failure_does_not_read_as_landed() {
+  local case_dir rc
+  case_dir=$(make_case stale-refs-fetch-fails)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt landed
+  land_task_commits_from_other_clone "$case_dir" release
+  git -C "$case_dir/project" remote set-url origin "$case_dir/missing.git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-refs-fetch-fails: a failed refresh must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-refs-fetch-fails: no REFUSED line"
+  grep -q 'Could not refresh remote: origin' "$case_dir/stderr" || fail "stale-refs-fetch-fails: refusal does not name the remote"
+  [ -d "$case_dir/wt" ] || fail "stale-refs-fetch-fails: worktree was removed"
+
+  case_dir=$(make_case stale-refs-fetch-fails-pr)
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt landed
+  land_task_commits_from_other_clone "$case_dir" release
+  git -C "$case_dir/project" remote set-url origin "$case_dir/missing.git"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-refs-fetch-fails-pr: a failed refresh must refuse"
+  grep -q 'Could not refresh remote: origin' "$case_dir/stderr" || fail "stale-refs-fetch-fails-pr: refusal does not name the remote"
+  pass "a failed refresh refuses and names the remote it could not reach"
+}
+
+test_refreshed_refs_still_refuse_unreachable_commits() {
+  local case_dir rc
+  case_dir=$(make_case refreshed-unreachable)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt never-landed
+  land_on_origin_main "$case_dir" other.txt unrelated
+  add_fetch_logging_git "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "refreshed-unreachable: unreachable commits must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "refreshed-unreachable: no REFUSED line"
+  [ -s "$case_dir/fetch.log" ] || fail "refreshed-unreachable: no refresh ran, so the case proves nothing"
+  ! grep -q 'Could not refresh' "$case_dir/stderr" || fail "refreshed-unreachable: reported a failure for a working remote"
+  pass "commits on no remote branch still refuse after a successful refresh"
+}
+
+test_uncommitted_work_refuses_even_when_commits_landed() {
+  local case_dir rc
+  case_dir=$(make_case stale-refs-dirty)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt landed
+  land_task_commits_from_other_clone "$case_dir" release
+  printf 'unsaved\n' > "$case_dir/wt/unsaved.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-refs-dirty: uncommitted work must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "stale-refs-dirty: no REFUSED line"
+  [ -f "$case_dir/wt/unsaved.txt" ] || fail "stale-refs-dirty: uncommitted file was lost"
+  pass "uncommitted work refuses even when the commits have landed"
+}
+
+test_edit_saved_during_refresh_refuses() {
+  local mode case_dir rc
+  for mode in local-only direct-PR no-mistakes; do
+    case_dir=$(make_case "edit-during-refresh-$mode")
+    write_meta "$case_dir" "$mode" ship
+    wt_commit_file "$case_dir" feature.txt landed
+    land_task_commits_from_other_clone "$case_dir" release
+    add_fetch_logging_git "$case_dir"
+
+    set +e
+    FM_TEST_FETCH_WRITES="$case_dir/wt/saved-during-fetch.txt" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "edit-during-refresh-$mode: an edit saved during the refresh must refuse"
+    grep -q REFUSED "$case_dir/stderr" || fail "edit-during-refresh-$mode: no REFUSED line"
+    [ -f "$case_dir/wt/saved-during-fetch.txt" ] || fail "edit-during-refresh-$mode: the saved file was lost"
+  done
+  pass "a file saved during the refresh refuses teardown and survives"
+}
+
+test_no_remote_project_refuses_without_fetching() {
+  local case_dir rc
+  case_dir=$(make_case no-remote-unpushed)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt never-landed
+  git -C "$case_dir/project" remote remove origin
+  add_fetch_logging_git "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-remote-unpushed: unlanded work must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "no-remote-unpushed: no REFUSED line"
+  [ ! -e "$case_dir/fetch.log" ] || fail "no-remote-unpushed: a project with no remote ran a fetch"
+  ! grep -q 'Could not refresh' "$case_dir/stderr" || fail "no-remote-unpushed: reported a refresh failure with no remote"
+  pass "a project with no remote refuses as before and fetches nothing"
+}
+
+test_refresh_never_prunes_a_dropped_branch() {
+  local case_dir rc
+  case_dir=$(make_case refresh-no-prune)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" config fetch.prune true
+  git -C "$case_dir/origin.git" update-ref refs/heads/dropped refs/heads/main
+  git -C "$case_dir/project" fetch -q origin
+  git -C "$case_dir/origin.git" update-ref -d refs/heads/dropped
+  wt_commit_file "$case_dir" feature.txt never-landed
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "refresh-no-prune: unlanded work must refuse"
+  git -C "$case_dir/project" rev-parse --verify -q refs/remotes/origin/dropped >/dev/null \
+    || fail "refresh-no-prune: the refresh pruned a branch the remote dropped"
+  pass "the refresh keeps a dropped branch's tracking ref even with fetch.prune set"
+}
+
+test_reachable_work_needs_no_fetch() {
+  local case_dir rc
+  case_dir=$(make_case reachable-no-fetch)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt pushed
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  add_fetch_logging_git "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "reachable-no-fetch: reachable work should be torn down"
+  [ ! -e "$case_dir/fetch.log" ] || fail "reachable-no-fetch: work the refs already show still paid for a fetch"
+  pass "work the tracking refs already show adds no network call"
+}
+
+test_hung_fetch_is_bounded_and_refuses() {
+  local case_dir rc started elapsed
+  case_dir=$(make_case hung-fetch)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt landed
+  land_task_commits_from_other_clone "$case_dir" release
+  add_fetch_logging_git "$case_dir"
+
+  started=$(date +%s)
+  set +e
+  FM_TEST_FETCH_HANG=1 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+
+  expect_code 1 "$rc" "hung-fetch: a hung refresh must refuse"
+  grep -q 'Could not refresh remote: origin' "$case_dir/stderr" || fail "hung-fetch: refusal does not name the remote"
+  [ "$elapsed" -ge 29 ] || fail "hung-fetch: teardown gave up after ${elapsed}s, before the 30-second bound"
+  [ "$elapsed" -lt 60 ] || fail "hung-fetch: teardown waited ${elapsed}s, past the 30-second bound"
+  pass "a hung refresh is cut off at its bound and refuses"
+}
+
+test_gate_remote_is_not_refreshed_into_landed() {
+  local case_dir rc
+  case_dir=$(make_case gate-not-refreshed)
+  write_meta "$case_dir" local-only ship
+  wt_commit_file "$case_dir" feature.txt validating
+  git init -q --bare "$case_dir/gate.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/gate.git"
+  git -C "$case_dir/wt" push -q "$case_dir/gate.git" fm/task-x1
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gate-not-refreshed: commits only on the gate must refuse"
+  grep -q REFUSED "$case_dir/stderr" || fail "gate-not-refreshed: no REFUSED line"
+  pass "commits held only by the no-mistakes gate are not refreshed into landed"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -936,6 +1216,30 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+test_no_mistakes_mirror_only_branch_refuses() {
+  local case_dir rc local_head
+  case_dir=$(make_case nm-mirror-only)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "mirror-only work"
+  # A branch pushed only to the local pipeline mirror is not on a forge.
+  git init -q --bare "$case_dir/mirror.git"
+  git -C "$case_dir/project" remote add no-mistakes "$case_dir/mirror.git"
+  git -C "$case_dir/wt" push -q no-mistakes fm/task-x1
+  git -C "$case_dir/project" fetch -q no-mistakes
+  git -C "$case_dir/wt" rev-parse --verify -q refs/remotes/no-mistakes/fm/task-x1 >/dev/null \
+    || fail "nm-mirror-only: mirror remote-tracking ref was not created"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "nm-mirror-only: teardown should refuse mirror-only work"
+  grep -q REFUSED "$case_dir/stderr" || fail "nm-mirror-only: no REFUSED line in stderr"
+  assert_refusal_retained_task_state "$case_dir" nm-mirror-only "$local_head"
+  pass "branch pushed only to the no-mistakes mirror is refused as unlanded"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -1187,6 +1491,83 @@ test_squash_merged_forgejo_pr_allows_when_main_moved_on() {
       || fail "forgejo-merged-$merged: teardown did not read the Forgejo pull request through tea"
   done
   pass "teardown proves a Forgejo task landed from the merged pull request when the content check is inconclusive"
+}
+
+add_glab_mr_for_head() {
+  local case_dir=$1 state=$2 head=$3
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/glab.log"
+[ "\${1:-} \${2:-}" = "mr view" ] || exit 1
+printf '{"state":"%s","sha":"%s","squash_commit_sha":"%s"}\n' '$state' '$head' 0000000000000000000000000000000000000001
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
+# A GitLab merge request squash-merged (or merged by a merge train) lands a
+# commit on main that is not the MR head, and main then moved on over the same
+# lines, so the content check is inconclusive. The MR's own head is published
+# only as refs/merge-requests/<n>/head, which this copy never fetched. With
+# config/park-on-review or config/auto-land present, teardown must read the MR
+# through glab, fetch that ref, and accept the merged record; the same history
+# with the MR still open refuses. With neither flag the merged MR is never read
+# through glab and teardown refuses on the inconclusive content check.
+test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
+  local case_dir rc local_head pr_head tmp scenario state expected
+  for scenario in merged:park-on-review merged:auto-land opened:park-on-review merged:; do
+    state=${scenario%%:*}
+    case_dir=$(make_case "gitlab-mr-$state-${scenario#*:}")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    tmp="$case_dir/_pipeline"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    git -C "$tmp" fetch -q "$case_dir/wt" "fm/task-x1:fm/task-x1"
+    git -C "$tmp" checkout -q fm/task-x1
+    printf '%s\n' pipeline > "$tmp/fix.txt"
+    git -C "$tmp" add -- fix.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "no-mistakes fix"
+    pr_head=$(git -C "$tmp" rev-parse HEAD)
+    git -C "$tmp" push -q origin "HEAD:refs/merge-requests/7/head"
+    git -C "$tmp" checkout -q main
+    printf '%s\n' reworded > "$tmp/feature.txt"
+    git -C "$tmp" add -- feature.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash then main rewords"
+    git -C "$tmp" push -q origin main
+    rm -rf "$tmp"
+    ! git -C "$case_dir/wt" cat-file -e "$pr_head^{commit}" 2>/dev/null \
+      || fail "gitlab-mr-$state: test setup bug, the MR head is already local"
+    printf '%s\n' 'pr=https://gitlab.example.com/team/sub/repo/-/merge_requests/7' \
+      >> "$case_dir/state/task-x1.meta"
+    add_gh_axi_error "$case_dir"
+    add_glab_mr_for_head "$case_dir" "$state" "$pr_head"
+    [ -z "${scenario#*:}" ] || : > "$case_dir/config/${scenario#*:}"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    if [ -z "${scenario#*:}" ]; then
+      expect_code 1 "$rc" "gitlab-mr-no-flag: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+      [ ! -e "$case_dir/glab.log" ] || fail "gitlab-mr-no-flag: teardown read the merge request through glab without an opt-in flag"
+      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-no-flag: no REFUSED line in stderr"
+      assert_refusal_retained_task_state "$case_dir" gitlab-mr-no-flag "$local_head"
+      continue
+    fi
+    expected=1
+    [ "$state" != merged ] || expected=0
+    expect_code "$expected" "$rc" "gitlab-mr-$scenario: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'mr view 7 -R https://gitlab.example.com/team/sub/repo -F json' "$case_dir/glab.log" \
+      || fail "gitlab-mr-$scenario: teardown did not read the merge request through glab"
+    if [ "$state" = merged ]; then
+      ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
+    else
+      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-opened: no REFUSED line in stderr"
+      assert_refusal_retained_task_state "$case_dir" gitlab-mr-opened "$local_head"
+    fi
+  done
+  pass "teardown proves a squash- or train-merged GitLab MR landed from the MR head only with an opt-in flag, and refuses an open one"
 }
 
 test_squash_merged_same_file_different_content_refuses() {
@@ -5558,6 +5939,40 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
 
+# An orphan status log archived by record hygiene must survive status-archive
+# retention: the prune counts 30 days from archive time, not the log's last write.
+test_record_hygiene_archive_survives_status_archive_prune() {
+  local case_dir rc=0
+  case_dir=$(make_case record-hygiene-archive-retention)
+  write_meta "$case_dir" local-only ship
+  touch "$case_dir/config/status-archive"
+  printf 'done: complete\n' > "$case_dir/state/task-x1.status"
+  printf 'failed [at=1]: orphan from a lost task\n' > "$case_dir/state/orphan-x2.status"
+  touch -t 200001010000 "$case_dir/state/orphan-x2.status"
+  FM_TEST_LIB_SOURCED=1 bash -c '
+    SCRIPT_DIR="$1/bin"; STATE="$2/state"; DATA="$2/data"
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$SCRIPT_DIR/fm-classify-lib.sh"
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh"
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+    # shellcheck source=bin/fm-record-hygiene-lib.sh
+    . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+    record_hygiene_report
+  ' _ "$ROOT" "$case_dir" > "$case_dir/hygiene.out" 2>&1 || fail "record hygiene archive pass failed: $(cat "$case_dir/hygiene.out")"
+  assert_present "$case_dir/data/orphan-x2/status.log" "record hygiene did not archive the orphan status log"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "status-archive teardown after record hygiene: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/data/task-x1/status.log" "status-archive teardown did not archive its own task"
+  assert_present "$case_dir/data/orphan-x2/status.log" "teardown pruned a status log record hygiene just archived"
+  pass "a status log archived by record hygiene survives the next status-archive teardown"
+}
+
 # Archive coverage uses the real teardown entry point over isolated homes.
 test_status_archive_opt_in() {
   local case_dir rc mode
@@ -5565,6 +5980,7 @@ test_status_archive_opt_in() {
     case_dir=$(make_case "status-archive-$mode")
     write_meta "$case_dir" local-only ship
     printf 'working: started\nneeds-decision [key=choice]: choose\nresolved [key=choice]: chosen\ndone: complete\n' > "$case_dir/state/task-x1.status"
+    printf 'marker\n' > "$case_dir/state/.paused-overdue-task-x1"
     cp "$case_dir/state/task-x1.status" "$case_dir/expected"
     mkdir -p "$case_dir/data/old"
     printf 'old archive\n' > "$case_dir/data/old/status.log"
@@ -5574,6 +5990,7 @@ test_status_archive_opt_in() {
     run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
     expect_code 0 "$rc" "status archive $mode teardown"
     assert_absent "$case_dir/state/task-x1.status" "live status survived teardown"
+    assert_absent "$case_dir/state/.paused-overdue-task-x1" "overdue marker survived task teardown"
     if [ "$mode" = on ]; then
       cmp -s "$case_dir/expected" "$case_dir/data/task-x1/status.log" || fail "opt-in archive lost history"
     else
@@ -5998,6 +6415,9 @@ test_status_archive_nested_secondmate_children() {
     printf 'done: parent history\n' > "$case_dir/state/task-x1.status"
     printf 'done: child history\n' > "$home/state/nested-sm.status"
     printf 'done: grandchild history\n' > "$nested_home/state/grandchild.status"
+    printf 'marker\n' > "$case_dir/state/.paused-overdue-task-x1"
+    printf 'marker\n' > "$home/state/.paused-overdue-nested-sm"
+    printf 'marker\n' > "$nested_home/state/.paused-overdue-grandchild"
     if [ "$unsafe" = children ]; then
       mkdir -p "$case_dir/data/task-x1" "$case_dir/outside"
       ln -s "$case_dir/outside" "$case_dir/data/task-x1/children"
@@ -6013,6 +6433,9 @@ test_status_archive_nested_secondmate_children() {
       assert_grep 'parent history' "$case_dir/data/task-x1/status.log" "parent history missing"
       assert_grep 'child history' "$case_dir/data/task-x1/children/nested-sm/status.log" "child history missing"
       assert_grep 'grandchild history' "$case_dir/data/task-x1/children/nested-sm/children/grandchild/status.log" "grandchild history missing"
+      assert_absent "$case_dir/state/.paused-overdue-task-x1" "parent overdue marker survived teardown"
+      assert_absent "$home/state/.paused-overdue-nested-sm" "child overdue marker survived teardown"
+      assert_absent "$nested_home/state/.paused-overdue-grandchild" "grandchild overdue marker survived teardown"
       assert_absent "$home" "forced retirement retained secondmate home"
     fi
   done
@@ -6148,6 +6571,7 @@ test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
 test_status_archive_opt_in
+test_record_hygiene_archive_survives_status_archive_prune
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure
@@ -6174,8 +6598,20 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
+test_landed_on_other_origin_branch_with_stale_refs_allows
+test_refresh_failure_does_not_read_as_landed
+test_refreshed_refs_still_refuse_unreachable_commits
+test_uncommitted_work_refuses_even_when_commits_landed
+test_edit_saved_during_refresh_refuses
+test_no_remote_project_refuses_without_fetching
+test_refresh_never_prunes_a_dropped_branch
+test_reachable_work_needs_no_fetch
+test_hung_fetch_is_bounded_and_refuses
+test_gate_remote_is_not_refreshed_into_landed
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_mirror_only_branch_refuses
 test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_pr_ready_line_waits_for_green_when_opted_in
@@ -6213,6 +6649,7 @@ test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
+test_squash_merged_gitlab_mr_allows_when_main_moved_on
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable

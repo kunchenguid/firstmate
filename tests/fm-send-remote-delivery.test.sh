@@ -132,7 +132,7 @@ while IFS= read -r -d '' a; do rargs+=("$a"); done \
   < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$argv_b64")
 cmd=${rargs[0]}
 rc=0
-env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
+env HOME="${0%/*}/remote-account" FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
   "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" < "$stdin_file" || rc=$?
 if [ "${FM_FAKE_SSH_AMBIGUOUS:-0}" = 1 ] \
   || { [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -eq 1 ]; }; then
@@ -141,6 +141,7 @@ fi
 exit "$rc"
 SH
   chmod +x "$fb/fake-ssh"
+  mkdir -p "$fb/remote-account"
   printf '%s\n' "$fb"
 }
 
@@ -456,7 +457,8 @@ test_remote_send_revalidates_after_retirement_lock() {
   while [ ! -e "$ready" ]; do kill -0 "$holder_pid" 2>/dev/null || fail "metadata-lock holder exited early"; sleep 0.05; done
 
   rc=0
-  env FM_HOME="$rhome" FM_ROOT_OVERRIDE="$ROOT" \
+  mkdir -p "$dir/remote-account"
+  env HOME="$dir/remote-account" FM_HOME="$rhome" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-remote-secondmate-control.sh" send rsm "retirement-race steer" \
     >"$dir/out" 2>"$dir/err" &
   sender_pid=$!
