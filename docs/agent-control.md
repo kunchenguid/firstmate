@@ -58,6 +58,13 @@ For a typed exit, `exit` reads the composer's state before typing the exit comma
 `exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
 A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
+A Claude conversation that was moved to the background is stopped another way, because the exit command cannot stop it.
+One Left arrow on an empty Claude composer moves the conversation into a background session that Claude's own daemon hosts and turns the pane into Claude's agents view; reopened from there, the pane is only attached, so the exit command detaches and the Claude process stays alive ([verification record](verification/runtime-backends.md#claude-backgrounded-conversation)).
+When a Claude agent has not stopped after the settle wait, `exit` reads `claude agents --json` on the task's recorded store, stops every running background session whose working directory is the task's worktree with `claude stop <id>`, waits for the agents view the pane falls back to, and quits it with Ctrl-C twice.
+A pane that already shows the agents view is never typed into, because text submitted there starts a new session; it takes the same stop-then-quit path.
+Each step refuses rather than guesses: a session list that cannot be read while the agents view is on screen, a `claude stop` that fails, a session still running after the settle wait, and a pane that never shows the agents view all stop before any quit key is sent, since quitting the view over a running conversation would leave it running unseen.
+A session list that names no background session in the worktree leaves the ordinary wait and its `exit=unconfirmed` refusal, and a background session in any other worktree is never touched.
+[`fm_composer_claude_agents_view`](../bin/fm-composer-lib.sh) owns the view's recognition.
 T3 Code has no composer and its `/mcp` tools offer no session stop, so `exit` refuses there before sending anything ([`t3code-backend.md`](t3code-backend.md#current-lifecycle-and-safety)).
 
 **Teardown and discard are not verbs and will not become verbs.**

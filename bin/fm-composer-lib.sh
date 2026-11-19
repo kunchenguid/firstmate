@@ -2195,6 +2195,28 @@ fm_composer_blocking_dialog() {  # <screen> -> dialog name
   return 1
 }
 
+# fm_composer_claude_agents_view: whether <screen> is Claude Code's agents view
+# rather than a conversation. Returns 0 only for its recorded structure: one of
+# the view's section headings alone on a row, then the new-session composer row
+# alone on a later row. Both rows are needed, and in that order, because a
+# diff, a note, or a test fixture inside an ordinary conversation can quote
+# either one. The hint rows around them are not read: they differ between
+# versions, wrap on a narrow pane, and are replaced by a notice when a session
+# stops.
+# Recorded 2026-11-19 on Claude Code 2.1.325 and 2.1.328: one Left arrow on an
+# empty composer moves the conversation into a background session and shows
+# this view, and text typed into its composer starts a NEW session
+# (docs/verification/runtime-backends.md "Claude backgrounded conversation").
+fm_composer_claude_agents_view() {  # <screen>
+  local screen=${1-}
+  [ -n "$screen" ] || return 1
+  printf '%s\n' "$screen" | fm_composer_strip_ansi | LC_ALL=C awk '
+    /^[ \t]*(Needs input|Working|Completed)[ \t\r]*$/ { heading = 1; next }
+    heading && /^[ \t]*❯ describe a task for a new session[ \t\r]*$/ { composer = 1 }
+    END { exit !composer }
+  '
+}
+
 # A command substitution drops a shell variable, and every composer read runs
 # inside one. The name is therefore written to FM_COMPOSER_DIALOG_SINK when
 # that path is set. The classifier verdict is unchanged. When the sink is

@@ -216,6 +216,33 @@ fi
 exit 0
 SH
   chmod +x "$fb/sleep"
+  # Claude's own CLI, as the control plane uses it for a backgrounded
+  # conversation. `agents --json` prints claude-sessions (an empty list when
+  # the case wrote none) and fails when claude-list-fails exists. `stop <id>`
+  # is logged to claude-calls; it fails when claude-stop-fails exists, and
+  # otherwise empties the list and, as real Claude does, drops the pane to the
+  # agents view.
+  cat > "$fb/claude" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+printf '%s\n' "$*" >> "$D/claude-calls"
+case "${1:-} ${2:-}" in
+  'agents --json')
+    [ ! -e "$D/claude-list-fails" ] || exit 1
+    if [ -f "$D/claude-sessions" ]; then cat "$D/claude-sessions"; else printf '[]\n'; fi
+    exit 0 ;;
+  stop\ *)
+    [ ! -e "$D/claude-stop-fails" ] || exit 1
+    printf '[]\n' > "$D/claude-sessions"
+    rm -f "$D/after-enter"
+    cat "$D/agents-view" > "$D/pane"
+    printf 'stopped %s\n' "$2"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/claude"
   printf '%s\n' "$fb"
 }
 
@@ -1025,6 +1052,140 @@ test_exit_refuses_the_confirming_enter() {
   pass "fm-control exit: the Enter that opens the background-task picker is not followed by a confirming Enter"
 }
 
+# --- Claude backgrounded conversation ----------------------------------------
+#
+# The rows Claude Code 2.1.328 draws for its agents view once the session the
+# pane was attached to has stopped (docs/verification/runtime-backends.md
+# "Claude backgrounded conversation").
+agents_view_screen() {
+  printf '%s\n' \
+    ' Claude Code v2.1.328' \
+    '           1 completed' \
+    '  Your session moved to the background · enter opens it · esc returns to it · ctrl+c twice exits' \
+    '  Completed' \
+    '❯ ∙ Single word reply (2)  stopped                          8s' \
+    '──────────────────────────' \
+    '❯ describe a task for a new session' \
+    '──────────────────────────' \
+    '  That session was stopped'
+}
+
+# background_session <case-dir> <id> <cwd>: Claude's session list names one
+# running background session in <cwd>.
+background_session() {
+  printf '[{"pid":4242,"id":"%s","cwd":"%s","kind":"background","sessionId":"%s-0000","name":"n","status":"idle","state":"blocked"}]\n' \
+    "$2" "$3" "$2" > "$1/fake/claude-sessions"
+  agents_view_screen > "$1/fake/agents-view"
+}
+
+run_backgrounded_exit() {  # <case-dir>: an agent the exit command cannot stop
+  env FM_FAKE_NEVER_DIES=1 FM_FAKE_SECOND_CTRL_C_STOPS_AGENT=1 \
+    PATH="$1/fakebin:$PATH" FM_HOME="$1/home" FM_FAKE_DIR="$1/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_SETTLE_WAIT=0.05 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$CONTROL" t1 exit 2>&1
+}
+
+test_agents_view_is_recognised_by_structure() {
+  # shellcheck source=bin/fm-composer-lib.sh
+  . "$ROOT/bin/fm-composer-lib.sh"
+  fm_composer_claude_agents_view "$(agents_view_screen)" \
+    || fail "the recorded agents view should be recognised"
+  ! fm_composer_claude_agents_view "$(printf '%s\n' '● the view shows' '❯ describe a task for a new session' '────' '❯ ' '────')" \
+    || fail "a conversation quoting the new-session composer row is not the agents view"
+  ! fm_composer_claude_agents_view "$(printf '%s\n' '  Completed' '● it says: ❯ describe a task for a new session' '❯ ')" \
+    || fail "the composer row buried in a sentence is not the agents view"
+  ! fm_composer_claude_agents_view "$(exit_picker_screen)" \
+    || fail "the background-task exit picker is not the agents view"
+  ! fm_composer_claude_agents_view '' || fail "an empty screen is not the agents view"
+  pass "fm-control: Claude's agents view is recognised by its heading and new-session composer rows only"
+}
+
+# The reported failure: the conversation was moved to the background, so the
+# exit command only detached and the Claude process stayed alive.
+test_exit_stops_a_backgrounded_claude_conversation() {
+  local dir out rc
+  dir=$(new_case backgrounded)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  background_session "$dir" abc123 "$dir/wt-t1"
+  out=$(run_backgrounded_exit "$dir"); rc=$?
+  expect_code 0 "$rc" "exit should stop a backgrounded conversation"$'\n'"$out"
+  assert_contains "$out" "stopped t1" "the stop should be confirmed"
+  [ "$(literals "$dir")" = exit ] || fail "the exit command should be typed once, got '$(literals "$dir")'"
+  grep -qx 'stop abc123' "$dir/fake/claude-calls" \
+    || fail "the task's background session should be stopped through Claude's CLI, got: $(cat "$dir/fake/claude-calls")"
+  [ "$(keys_sent "$dir" | tr '\n' ' ')" = 'C-c C-c ' ] \
+    || fail "the agents view should be quit with Ctrl-C twice, got: $(keys_sent "$dir" | tr '\n' ' ')"
+  [ "$(awk '$0 == "stop abc123" { stop = NR } END { print stop + 0 }' "$dir/fake/claude-calls")" -gt 0 ] \
+    && [ "$(grep -n -m1 '^C-c$' "$dir/fake/keys" | cut -d: -f1)" -gt 0 ] \
+    || fail "the stop must be recorded before the view is quit"
+  pass "fm-control exit: a Claude conversation moved to the background is stopped, then its agents view is quit"
+}
+
+test_exit_types_nothing_into_the_agents_view() {
+  local dir out rc
+  dir=$(new_case agents-view)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  background_session "$dir" abc123 "$dir/wt-t1"
+  agents_view_screen > "$dir/fake/pane"
+  out=$(run_backgrounded_exit "$dir"); rc=$?
+  expect_code 0 "$rc" "exit from the agents view should stop the agent"$'\n'"$out"
+  assert_contains "$out" "stopped t1" "the stop should be confirmed"
+  [ ! -s "$dir/fake/literal" ] \
+    || fail "text typed into the agents view starts a new session; got '$(literals "$dir")'"
+  ! grep -qx Enter "$dir/fake/keys" || fail "Enter reopens a session from the agents view and must not be sent"
+  grep -qx 'stop abc123' "$dir/fake/claude-calls" || fail "the task's background session should be stopped"
+  [ "$(keys_sent "$dir" | tr '\n' ' ')" = 'C-c C-c ' ] \
+    || fail "the agents view should be quit with Ctrl-C twice, got: $(keys_sent "$dir" | tr '\n' ' ')"
+  pass "fm-control exit: an agents view on screen is never typed into; its session is stopped and the view quit"
+}
+
+test_exit_leaves_another_worktrees_background_session_alone() {
+  local dir out rc
+  dir=$(new_case foreign-session)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  background_session "$dir" other99 "$dir/some-other-worktree"
+  out=$(run_backgrounded_exit "$dir"); rc=$?
+  expect_code 1 "$rc" "an agent that does not stop must still fail closed"$'\n'"$out"
+  assert_contains "$out" "exit=unconfirmed" "the ordinary refusal should be kept"
+  ! grep -q '^stop ' "$dir/fake/claude-calls" \
+    || fail "a background session in another worktree must never be stopped: $(cat "$dir/fake/claude-calls")"
+  [ -z "$(keys_sent "$dir")" ] || fail "no quit key may be sent without a proven backgrounded conversation, got: $(keys_sent "$dir")"
+  pass "fm-control exit: a background session in another worktree is not this task's and is left running"
+}
+
+test_exit_refuses_to_quit_over_a_session_that_will_not_stop() {
+  local dir out rc
+  dir=$(new_case stop-fails)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  background_session "$dir" abc123 "$dir/wt-t1"
+  : > "$dir/fake/claude-stop-fails"
+  out=$(run_backgrounded_exit "$dir"); rc=$?
+  expect_code 1 "$rc" "a failed stop should refuse"$'\n'"$out"
+  assert_contains "$out" "'claude stop abc123' failed" "the refusal should name the session and the failed stop"
+  [ -z "$(keys_sent "$dir")" ] \
+    || fail "the agents view must not be quit over a running conversation, got: $(keys_sent "$dir")"
+  pass "fm-control exit: a background session that will not stop refuses before any quit key"
+}
+
+test_exit_refuses_an_agents_view_it_cannot_account_for() {
+  local dir out rc
+  dir=$(new_case view-unlisted)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  agents_view_screen > "$dir/fake/pane"
+  : > "$dir/fake/claude-list-fails"
+  out=$(run_backgrounded_exit "$dir"); rc=$?
+  expect_code 1 "$rc" "an unreadable session list should refuse"$'\n'"$out"
+  assert_contains "$out" "could not be read" "the refusal should say the session list was unreadable"
+  [ ! -s "$dir/fake/literal" ] || fail "nothing may be typed into the agents view, got '$(literals "$dir")'"
+  [ ! -s "$dir/fake/keys" ] || fail "no key may be sent when the conversation cannot be found, got: $(cat "$dir/fake/keys")"
+  pass "fm-control exit: an agents view whose sessions cannot be listed is neither typed into nor quit"
+}
+
 # The submit reads a cleared composer before the picker renders, so it reports
 # delivery and no read inside it sees the picker. Exit's own read after the
 # stop wait times out must still name the dialog.
@@ -1340,6 +1501,12 @@ test_exit_drops_meta_busy_gen_with_the_sidecar
 test_exit_refuses_an_open_background_picker
 test_exit_refuses_the_confirming_enter
 test_exit_names_a_picker_that_renders_after_the_submit
+test_agents_view_is_recognised_by_structure
+test_exit_stops_a_backgrounded_claude_conversation
+test_exit_types_nothing_into_the_agents_view
+test_exit_leaves_another_worktrees_background_session_alone
+test_exit_refuses_to_quit_over_a_session_that_will_not_stop
+test_exit_refuses_an_agents_view_it_cannot_account_for
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait

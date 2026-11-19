@@ -1872,6 +1872,48 @@ new mapping, busy: stopped t1 harness=claude backend=tmux endpoint=fmses:fm-t1 .
 
 `tests/fm-control.test.sh` pins the `exit` mapping without credentials.
 
+### Claude backgrounded conversation
+
+Measured 2026-11-19 against Claude Code 2.1.325 and 2.1.328 with tmux 3.2a on an isolated tmux server and Herdr 0.9.1 on `bin/fm-herdr-lab.sh` lab sessions, with no fleet pane involved.
+The reported failure was `bin/fm-secondmate-restart.sh` ending `interrupt=not-needed exit-command=delivered agent-state=alive exit=unconfirmed` for a Claude secondmate on Herdr.
+The bare word `exit` still stops Claude on both versions, idle or mid-turn, with or without `--disable-slash-commands`, so the exit command was not the fault.
+One Left arrow on an empty composer moves the conversation into a background session hosted by a `claude daemon run` child of the pane's Claude process, and the pane shows Claude's agents view.
+Enter in that view reopens the conversation, which then looks like an ordinary one, but the pane is only attached to it: `exit` detaches back to the agents view and the Claude process in the pane stays alive.
+The control plane's retried Enter then reopens the conversation, so the screen after the failed exit shows an ordinary composer again.
+Text submitted in the agents view's own composer starts a new session, and Ctrl-C twice quits the view while the conversation keeps running under the daemon, unseen by the pane and by Herdr.
+`claude agents --json` lists the session with its `id`, `pid`, `cwd`, and `kind: "background"`, and `claude stop <id>` stops it and keeps the conversation.
+The session's process is not an ownership test: Claude may run it on a pre-warmed `bg-spare` process whose arguments carry neither the session id nor the launch's `--settings` file, so the working directory is used instead.
+Stopping the session while the pane is attached drops the pane to the agents view with a `That session was stopped` notice in place of the key hints, on both versions.
+
+```sh
+claude --version
+# pane: claude --model haiku --settings <state>/<id>.claude-settings.json; one turn, then
+# Left, Enter (reopen), type exit, Enter
+claude agents --json     # after the detach
+claude stop <id>         # while the pane is attached
+# End to end on a Herdr lab pane whose state/hx.meta records harness=claude and that pane:
+FM_HOME="$LAB/home" bin/fm-control.sh hx exit
+```
+
+```text
+2.1.328 (Claude Code)
+after Left: Your session moved to the background · enter opens it · esc returns to it · ctrl+c twice exits and it keeps running
+2.1.325 after Left: Your conversation moved to the background — enter opens it · esc returns to it · ctrl+c twice quits
+exit in the reopened conversation: agents view, pane process alive
+Ctrl-C at the view: Press Ctrl-C again to exit · 1 agent will keep running
+agents --json: {"pid":709428,"id":"83b7beb9","cwd":"<worktree>","kind":"background","status":"idle","state":"blocked",...}
+claude stop 83b7beb9: stopped 83b7beb9
+attached pane after the stop: Completed / ∙ <name>  stopped / ❯ describe a task for a new session / That session was stopped
+before the fix: error: exit-delivered hx interrupt=not-needed exit-command=delivered agent-state=alive exit=unconfirmed; the agent did not stop within 30s (rc=1 after 47s)
+after the fix, 2.1.328 reopened: stopped hx harness=claude backend=herdr ... (rc=0 after 16s), session state "stopped"
+after the fix, 2.1.325 on a second store (claude_config_dir recorded) reopened: stopped hx ... (rc=0 after 13s)
+after the fix, pane left on the agents view: stopped hx ... (rc=0 after 5s), nothing typed
+after the fix, ordinary idle conversation: stopped hx ... (rc=0 after 5s)
+```
+
+Not covered: a background session whose working directory differs from the task's worktree, and a conversation that keeps running after someone quits the agents view by hand, which leaves no live agent in the pane and so reads `already-stopped`.
+`tests/fm-control.test.sh` pins the stop-then-quit order, the agents-view refusal to type, and each refusal without credentials.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

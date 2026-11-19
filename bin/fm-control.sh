@@ -178,6 +178,8 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_CLAUDE_CLI_WAIT   bound on each Claude CLI call that lists or stops
+#                                a backgrounded conversation (30)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -230,6 +232,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -255,6 +259,7 @@ ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+CLAUDE_CLI_WAIT=${FM_CONTROL_CLAUDE_CLI_WAIT:-30}
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -792,10 +797,107 @@ retire_busy_incarnation() {
   fi
 }
 
+# --- Claude backgrounded conversation ---------------------------------------
+#
+# One Left arrow on an empty Claude composer moves the conversation into a
+# background session that Claude's own daemon hosts, and turns the pane into
+# the agents view. Reopened from there the conversation looks and behaves as
+# before, but the pane is only attached to it: the exit command detaches back
+# to the agents view, the Claude process in the pane stays alive, and quitting
+# the view leaves the conversation running unseen. A retried Enter in the view
+# even reopens the conversation, so the screen after a failed exit proves
+# nothing either way. Such an agent is stopped in three steps, each proven
+# before the next: Claude's own session list names a running background
+# session in this task's worktree, that session is stopped through Claude's
+# CLI, and the agents view the pane then falls back to is quit
+# (docs/verification/runtime-backends.md "Claude backgrounded conversation").
+
+# claude_cli <args...>: Claude's CLI against the store this task launched on,
+# bounded so a hung call cannot hold the control transaction.
+claude_cli() {
+  local store bin=${FM_CONTROL_CLAUDE_BIN:-claude}
+  store=$(fm_meta_get "$META" claude_config_dir)
+  (
+    [ -z "$store" ] || export CLAUDE_CONFIG_DIR="$store"
+    fm_run_timed "$CLAUDE_CLI_WAIT" "$bin" "$@"
+  )
+}
+
+# claude_task_background_sessions: the ids of the running Claude background
+# sessions whose working directory is THIS task's worktree, one per line. The
+# list covers the whole store, so the worktree is the ownership test: one
+# worktree hosts one task. The session's own process cannot serve as that test,
+# because Claude may run it on a pre-warmed spare whose arguments name nothing.
+# Returns 1 when the list cannot be read or the worktree is unknown, which is
+# missing proof rather than an empty answer.
+claude_task_background_sessions() {
+  local json wt_real
+  [ -n "$WT" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || wt_real=$WT
+  json=$(claude_cli agents --json 2>/dev/null) || return 1
+  printf '%s' "$json" | jq -r --arg wt "$WT" --arg real "$wt_real" '
+    if type != "array" then error("not a session list") else .[] end
+    | select(.kind == "background" and (.pid | type) == "number"
+        and (.id | type) == "string" and (.id | test("^[A-Za-z0-9_-]+$"))
+        and (.cwd == $wt or .cwd == $real))
+    | .id
+  ' 2>/dev/null
+}
+
+# claude_agents_view_shown: whether the visible viewport is Claude's agents
+# view. An unreadable viewport is a no.
+claude_agents_view_shown() {
+  local screen
+  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
+  fm_composer_claude_agents_view "$screen"
+}
+
+# claude_stop_backgrounded <ids>: stop the task's background sessions, then
+# quit the agents view the pane falls back to. Every refusal leaves the pane
+# as it is and sends it no key.
+claude_stop_backgrounded() {
+  local ids=$1 id left elapsed=0
+  for id in $ids; do
+    claude_cli stop "$id" >/dev/null 2>&1 \
+      || die "task $ID's conversation runs as Claude background session $id and 'claude stop $id' failed; refusing to quit the agents view over a conversation that is still running. Stop it by hand, then retry '$VERB'"
+  done
+  while :; do
+    left=$(claude_task_background_sessions) \
+      || die "task $ID's Claude background session was told to stop, but 'claude agents --json' could not be re-read to prove it did; refusing to quit the agents view. Check 'claude agents', then retry '$VERB'"
+    [ -n "$left" ] || break
+    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' \
+      || die "task $ID's Claude background session $(printf '%s' "$left" | tr '\n' ' ')is still running ${SETTLE_WAIT}s after 'claude stop'; refusing to quit the agents view over it. Stop it by hand, then retry '$VERB'"
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  claude_quit_agents_view
+}
+
+# claude_quit_agents_view: quit Claude's agents view, which is the whole Claude
+# process in the pane. Keys go out only once the view is proven on screen: a
+# stopped session drops an attached pane back to it within a moment.
+claude_quit_agents_view() {
+  local elapsed=0
+  until claude_agents_view_shown; do
+    awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' \
+      || die "task $ID's Claude background session is stopped, but its pane did not show Claude's agents view within ${SETTLE_WAIT}s, so the keys that quit that view were not sent. Quit Claude in the pane by hand, then retry '$VERB'"
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  # The view quits on Ctrl-C pressed twice; the first press only arms it.
+  fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
+    || die "the key that quits Claude's agents view could not be sent to task $ID on $BACKEND"
+  sleep "$POLL"
+  [ "$(agent_state)" = dead ] || fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
+    || die "the key that quits Claude's agents view could not be sent to task $ID on $BACKEND"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
   local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog rec line
+  local claude_ids
   require_state_verified_backend exit
   fm_control_backend_exit_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, whose T3 Orchestrator V2 tools have no session stop, so 'exit' cannot stop its agent; 'interrupt' ends the running turn and teardown archives the thread"
@@ -870,6 +972,19 @@ do_exit() {
   hazard=$(fm_control_interrupt_hazard_signal "$HARNESS")
   if [ -n "$hazard" ] && rendered_matches "$hazard"; then
     die "task $ID shows the $HARNESS revert picker, where typed text becomes a search and Enter reverts file changes; refusing to type the $cmd exit command. Close it with $(fm_control_interrupt_key "$HARNESS"), never Enter, then retry '$VERB'"
+  fi
+  # Claude's agents view has a composer too, and text submitted there starts a
+  # NEW session instead of exiting anything. Nothing is typed into it: the
+  # task's background sessions are stopped and the view is quit.
+  if [ "$HARNESS" = claude ] && claude_agents_view_shown; then
+    claude_ids=$(claude_task_background_sessions) \
+      || die "task $ID shows Claude's agents view, where typed text starts a new session, and 'claude agents --json' could not be read to find the conversation it holds; refusing to type the $cmd exit command or quit the view. Stop the conversation with 'claude stop <id>' (list them with 'claude agents'), then retry '$VERB'"
+    claude_stop_backgrounded "$claude_ids"
+    state=$(wait_agent_state "$EXIT_WAIT" dead) \
+      || die "exit-delivered $ID interrupt=$interrupt_result agents-view-quit=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+    retire_busy_incarnation
+    printf 'stopped'
+    return 0
   fi
   : > "$FM_COMPOSER_DIALOG_SINK" \
     || die "task $ID's dialog check could not be recorded"
@@ -947,6 +1062,16 @@ do_exit() {
       fi
       ;;
   esac
+  # A Claude conversation that was moved to the background answers the exit
+  # command by detaching, and its Claude process stays alive. When the agent
+  # has not stopped after the settle wait, Claude's own session list decides
+  # whether that is what happened; a list that cannot be read, or that names
+  # no background session here, leaves the ordinary wait and its refusal.
+  if [ "$HARNESS" = claude ] && [ "$cmd" = exit ] \
+     && ! wait_agent_state "$SETTLE_WAIT" dead >/dev/null; then
+    claude_ids=$(claude_task_background_sessions) || claude_ids=
+    [ -z "$claude_ids" ] || claude_stop_backgrounded "$claude_ids"
+  fi
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     # A submit can return before any read sees the picker: a native busy
     # verdict needs no composer read, and a cleared composer can be read
