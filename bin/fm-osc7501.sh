@@ -275,6 +275,8 @@ osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
+  # shellcheck source=bin/fm-hold-status-lib.sh
+  . "$SCRIPT_DIR/fm-hold-status-lib.sh" || return 1
   # shellcheck source=bin/fm-busy-lib.sh
   . "$SCRIPT_DIR/fm-busy-lib.sh" || return 1
   # shellcheck source=bin/fm-backend.sh

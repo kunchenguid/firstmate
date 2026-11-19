@@ -361,7 +361,10 @@ test_reclaim_ranks_idle_lanes() {
   write_lane "$home" pr "$home/wt-pr" "pr=https://example.invalid/pull/1"
   write_lane "$home" park "$home/wt-park"
   write_lane "$home" busy "$home/wt-busy"
-  printf 'done [at=%s]: finished\n' $((now - 3600)) > "$home/state/fin.status"
+  # A settled captain hold on top of the done line is bookkeeping: the lane
+  # must still rank as finished from the worker's own done time.
+  printf 'done [at=%s]: finished\ncaptain-held [key=captain-hold-fin-1] [at=%s]: held for the captain\nresolved [key=captain-hold-fin-1] [at=%s]: captain call released by fm-captain-hold\n' \
+    $((now - 3600)) $((now - 120)) $((now - 60)) > "$home/state/fin.status"
   printf 'paused [at=%s]: waiting until %s for review\n' $((now - 60)) "$(iso_at $((now + 10800)))" > "$home/state/park.status"
   printf '  600     1 409600   0:05.00\n  700     1 204800   0:05.00\n  800     1 102400   0:50.00\n' > "$p/v/ps"
   printf 'p600\nfcwd\nn%s\np700\nfcwd\nn%s\np800\nfcwd\nn%s\n' "$home/wt-pr" "$home/wt-park" "$home/wt-busy" > "$p/v/lsof"
