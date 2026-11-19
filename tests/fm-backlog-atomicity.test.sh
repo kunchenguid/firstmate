@@ -1097,7 +1097,7 @@ SH
 # A relaunch restarts an agent for work already In flight, so a captain hold on
 # the row must not block it, and must survive it byte for byte.
 test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
-  local case_dir id out before after endpoint source_line enter_line old_gen new_gen
+  local case_dir id out before after endpoint old_gen new_gen sourced entered kind event_target event_state event_path
   id=atomic-relaunch-held-b17
   case_dir=$(make_home relaunch-held "$id")
   add_item "$case_dir" "$id"
@@ -1117,10 +1117,18 @@ test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
   [ -n "$endpoint" ] || fail "fixture recorded no endpoint for $id"
   new_gen=$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta" | head -1)
   [ -n "$new_gen" ] && [ "$new_gen" != "$old_gen" ] || fail "relaunch did not publish a new spawn generation"
-  source_line=$(grep -n -E -- "^SOURCE $endpoint readable /.*/launch\\.$new_gen\\.sh$" "$case_dir/fakebin/send-keys.log" | head -1 | cut -d: -f1)
-  [ -n "$source_line" ] || fail "relaunch sourced no readable launch file for generation $new_gen at endpoint $endpoint"
-  tail -n +"$((source_line + 1))" "$case_dir/fakebin/send-keys.log" | grep -qx -- "ENTER $endpoint" \
-    || fail "relaunch did not press Enter at endpoint $endpoint after sourcing its launch file"
+  sourced=0
+  entered=0
+  while read -r kind event_target event_state event_path; do
+    if [ "$kind" = SOURCE ] && [ "$event_target" = "$endpoint" ] && [ "$event_state" = readable ] \
+      && [ "${event_path##*/}" = "launch.$new_gen.sh" ]; then
+      sourced=1
+    elif [ "$kind" = ENTER ] && [ "$event_target" = "$endpoint" ] && [ "$sourced" = 1 ]; then
+      entered=1
+    fi
+  done < "$case_dir/fakebin/send-keys.log"
+  [ "$sourced" = 1 ] || fail "relaunch sourced no readable launch.$new_gen.sh at endpoint $endpoint"
+  [ "$entered" = 1 ] || fail "relaunch did not press Enter at endpoint $endpoint after sourcing its launch file"
   after=$(cat "$(backlog_of "$case_dir")")
   [ "$before" = "$after" ] || fail "relaunch changed the held backlog row"
   pass "relaunch of a held In-flight row succeeds and keeps the hold unchanged"
