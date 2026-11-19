@@ -6058,6 +6058,84 @@ EOF
   pass "OpenCode clean empty close triggers a bounded continuity retry"
 }
 
+# The off switch (bin/fm-supervision.sh, docs/turnend-guard.md "Supervision
+# switched off"): a close while the marker exists is dropped without a retry
+# or a prompt, an idle turn end arms nothing even with X mode on, and once the
+# marker is gone the next idle turn end arms again.
+test_opencode_switched_off_arms_nothing_and_retries_nothing() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-switched-off-root"
+  home="$TMP_ROOT/opencode-switched-off-home"
+  log="$TMP_ROOT/opencode-switched-off.log"
+  stop="$TMP_ROOT/opencode-switched-off.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  : > "$home/config/x-mode.env"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE.$count" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = {
+  session: {
+    promptAsync: async () => {
+      prompts += 1;
+    },
+  },
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const arms = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length
+  : 0);
+const off = `${process.env.FM_HOME}/state/.supervision-off`;
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const idle = () => hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await idle();
+for (let i = 0; i < 250 && arms() < 1; i += 1) await sleep(10);
+if (arms() !== 1) throw new Error(`fixture: the first arm never started (${arms()})`);
+writeFileSync(off, "since=2026-01-01T00:00:00Z\n");
+writeFileSync(`${process.env.FM_STOP_FILE}.1`, "stop\n");
+await sleep(400);
+if (arms() !== 1) throw new Error(`a close while switched off was retried: ${arms()} arms`);
+await idle();
+await sleep(300);
+if (arms() !== 1) throw new Error(`an idle turn end armed while switched off: ${arms()} arms`);
+if (prompts !== 0) throw new Error(`switching off surfaced ${prompts} prompts`);
+rmSync(off);
+await idle();
+for (let i = 0; i < 250 && arms() < 2; i += 1) await sleep(10);
+if (arms() !== 2) throw new Error(`no arm started after the marker was removed: ${arms()} arms`);
+writeFileSync(off, "since=2026-01-01T00:00:00Z\n");
+writeFileSync(`${process.env.FM_STOP_FILE}.2`, "stop\n");
+await sleep(100);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must arm nothing and retry nothing while supervision is switched off"
+  [ -z "$out" ] || fail "OpenCode switched-off test printed output: $out"
+  pass "OpenCode arms nothing and retries nothing while supervision is switched off, and arms again once it is on"
+}
+
 test_opencode_established_empty_close_honors_retry_limit() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -6454,6 +6532,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
+test_opencode_switched_off_arms_nothing_and_retries_nothing
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
