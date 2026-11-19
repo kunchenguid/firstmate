@@ -3686,10 +3686,8 @@ pass "answers reads list-form choices and refuses a block it cannot account for"
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
-for adapter in when; do
-  ! "$ROOT/bin/fm-procevent-$adapter.sh" silent "$SIL" >/dev/null 2>&1 \
-    || fail "the $adapter adapter declared silence without implementing the seam"
-done
+! "$ROOT/bin/fm-procevent-when.sh" silent "$SIL" >/dev/null 2>&1 \
+  || fail "the when adapter declared silence without implementing the seam"
 pass "an adapter with no silence verdict keeps announcing every result"
 
 # --- the loss limitation is stated on the public interface ------------------
