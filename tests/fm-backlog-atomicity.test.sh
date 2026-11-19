@@ -1104,6 +1104,22 @@ test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
   pass "relaunch of a held In-flight row succeeds and keeps the hold unchanged"
 }
 
+test_relaunch_still_refuses_a_parked_in_flight_row() {
+  local case_dir id out rc=0
+  id=atomic-relaunch-parked-b17
+  case_dir=$(make_home relaunch-parked "$id")
+  add_item "$case_dir" "$id"
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "initial spawn failed: $out"
+  tasks-axi hold "$id" --reason "parked for later" --kind parked \
+    --file "$(backlog_of "$case_dir")" >/dev/null || fail "fixture could not park the row"
+  make_agent_free_pane "$case_dir"
+  out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) || rc=$?
+  [ "$rc" -ne 0 ] || fail "relaunch accepted a parked In-flight row"
+  assert_contains "$out" "not dispatchable in state in_flight yes no" \
+    "parked relaunch refusal did not name the actual state"
+  pass "relaunch still refuses a parked In-flight row"
+}
+
 test_relaunch_still_refuses_a_blocked_in_flight_row() {
   local case_dir id out rc=0
   id=atomic-relaunch-blocked-b17
@@ -1113,7 +1129,7 @@ test_relaunch_still_refuses_a_blocked_in_flight_row() {
   add_item "$case_dir" atomic-relaunch-blocker-b17
   tasks-axi block "$id" --by atomic-relaunch-blocker-b17 \
     --file "$(backlog_of "$case_dir")" >/dev/null 2>&1 \
-    || { pass "skipped (tasks-axi has no block verb here)"; return 0; }
+    || fail "fixture could not block the In-flight row"
   make_agent_free_pane "$case_dir"
   out=$(run_spawn "$case_dir" "$id" --relaunch --harness claude) || rc=$?
   [ "$rc" -ne 0 ] || fail "relaunch accepted a blocked In-flight row"
@@ -3180,6 +3196,7 @@ test_dispatch_refuses_a_blocked_row_before_creating_resources
 test_dispatch_refuses_a_held_in_flight_row_before_relaunch
 test_relaunch_of_a_held_in_flight_row_keeps_the_hold
 test_relaunch_still_refuses_a_blocked_in_flight_row
+test_relaunch_still_refuses_a_parked_in_flight_row
 test_dispatch_reads_the_row_from_the_backlog_root
 test_recovery_uses_the_parent_of_a_trailing_slash_data_record
 test_completion_targets_a_nested_relative_data_directory

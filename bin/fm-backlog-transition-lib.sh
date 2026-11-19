@@ -806,7 +806,7 @@ fm_backlog_meta_spawn_gen_optional() {  # <meta> <state>
 fm_backlog_row_dispatchable() {  # <row> [relaunch]
   case "$1" in
     in_flight\ no\ no|queued\ no\ no) return 0 ;;
-    in_flight\ yes\ no) [ "${2:-}" = relaunch ] ;;
+    in_flight\ yes\ no) [ "${2:-}" = relaunch ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ] ;;
     *) return 1 ;;
   esac
 }

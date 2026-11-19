@@ -7488,7 +7488,8 @@ spawn_report_preserved_state() {
     SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight"
     return 0
   fi
-  if [ "$RELAUNCH" -eq 1 ] && [ "$FM_BACKLOG_ROW_STATE" = "in_flight yes no" ]; then
+  if [ "$RELAUNCH" -eq 1 ] && [ "$FM_BACKLOG_ROW_STATE" = "in_flight yes no" ] &&
+    [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
     SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight, with its captain hold untouched"
     return 0
   fi
