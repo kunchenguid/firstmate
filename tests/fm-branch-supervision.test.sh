@@ -31,7 +31,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
   out_b=$(cd / && FM_HOME="$home_b" TZ=Australia/Eucla "$ROOT/bin/fm-branch-prompt.sh") \
     || fail "branch prompt generator failed for home B"
   sleep 1
-  out_c=$("$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed on re-run"
+  out_c=$(FM_HOME="$home_a" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed on re-run"
 
   [ "$out_a" = "$out_b" ] || fail "branch prompt differs across homes/cwd/timezone: prefix stability broken"
   [ "$out_a" = "$out_c" ] || fail "branch prompt differs across runs at different times: prefix stability broken"
@@ -70,6 +70,87 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the second-mate relay, signal-span, or stale-liveness rule" ;;
   esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
+}
+
+# A home adds its own rules through config/branch-prompt-include.md: absent or
+# blank leaves the prompt byte-identical, present text lands verbatim as the
+# last section, and an unusable path refuses with no prompt on stdout.
+test_branch_prompt_home_include_is_appended_last() {
+  local home config base out rc last_heading
+  home="$TMP_ROOT/prompt-include-home"
+  config="$home/config"
+  mkdir -p "$config"
+  base=$(FM_HOME="$TMP_ROOT/prompt-include-none" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt failed without a home"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt failed without an include"
+  [ "$out" = "$base" ] || fail "an absent include changed the branch prompt"
+  printf ' \n\n' > "$config/branch-prompt-include.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt failed with a blank include"
+  [ "$out" = "$base" ] || fail "a blank include changed the branch prompt"
+
+  # shellcheck disable=SC2016 # The include is literal text and must never expand.
+  printf '%s\n' 'Relaunch workers with `house-tool $(id)`.' > "$config/branch-prompt-include.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt failed with an include"
+  case "$out" in
+    "$base"*) ;;
+    *) fail "the include did not leave the tracked prompt as an unchanged prefix" ;;
+  esac
+  # shellcheck disable=SC2016 # Literal include text.
+  assert_contains "$out" 'Relaunch workers with `house-tool $(id)`.' "branch prompt did not carry the include verbatim"
+  assert_contains "$out" "every other section of this prompt takes precedence" "include section lost its precedence line"
+  last_heading=$(printf '%s\n' "$out" | grep '^# ' | tail -n 1)
+  [ "$last_heading" = '# Home prompt additions' ] || fail "include was not the last section (got: $last_heading)"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh")" = "$out" ] || fail "branch prompt with an include is not byte-stable across runs"
+
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$TMP_ROOT/prompt-include-empty-config" "$ROOT/bin/fm-branch-prompt.sh") \
+    || fail "branch prompt failed under FM_CONFIG_OVERRIDE"
+  [ "$out" = "$base" ] || fail "FM_CONFIG_OVERRIDE did not select the config directory"
+
+  rm -f "$config/branch-prompt-include.md"
+  mkdir "$config/branch-prompt-include.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh" 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "an unusable include path must stop the branch prompt"
+  [ -z "$out" ] || fail "an unusable include still emitted a partial prompt"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-branch-prompt.sh" 2>&1 >/dev/null)
+  assert_contains "$out" "branch-prompt-include.md must be a readable regular file" "unusable include refusal did not name the file"
+  pass "fm-branch-prompt.sh: the home prompt include lands last, verbatim, and refuses an unusable path"
+}
+
+test_branch_prompt_routes_completed_scouts_through_guarded_cleanup() {
+  local prompt skill
+  prompt=$(bash "$ROOT/bin/fm-branch-prompt.sh") || fail "branch prompt generator failed"
+
+  # The emitted system prompt is the contract, not the generator's source or
+  # proof that a model will obey it. No live agent or endpoint is involved.
+  case "$prompt" in
+    *"For a completed scout, follow the scout-completion and captain-hold-lifecycle policies included below in both postures."*"After their completion gate passes, retain the report, claim the task's lease, and run \`bin/fm-teardown.sh <task>\` with no flags."*"Report the findings and cleanup result in that event's outcome; a refusal is reported with its exact reason and never forced, worked around, or repaired by hand."*) ;;
+    *) fail "branch prompt omits the completed-scout cleanup sequence or refusal reporting" ;;
+  esac
+  assert_contains "$prompt" \
+    "Reporting a scout as finished and idle is not a substitute for that cleanup." \
+    "branch prompt permits stopping after an idle assessment of a completed scout"
+  assert_contains "$prompt" \
+    "Missing or incomplete reports, an unreviewed decision inventory or unrecorded captain calls, WIP ships, deliberate external waits, and idle or exited agents are not proof of task completion." \
+    "branch prompt lost the incomplete-work and agent-lifetime boundaries"
+  assert_contains "$prompt" \
+    "Ordinary teardown of a confirmed-landed ship or a completed scout, steering, lifecycle control, PR checks, and backlog status moves are yours, under the task's lease." \
+    "branch role limits still exclude completed-scout cleanup"
+
+  # This checks delivery of the per-task result contract, not model adherence.
+  assert_contains "$prompt" \
+    "Run each task's cleanup in a separate tool call and use that call's exit status and output for its outcome." \
+    "branch prompt omits per-task cleanup result attribution"
+  assert_contains "$prompt" \
+    "An allowance diagnostic is not a refusal; report a refusal only when that task's cleanup actually refuses, quoting its reason." \
+    "branch prompt does not distinguish cleanup permission from refusal"
+
+  # Verbatim policy inclusion is an owned output contract. These owners must
+  # reach hosts that disable automatic skill loading, without a policy copy.
+  for skill in scout-completion captain-hold-lifecycle; do
+    assert_contains "$prompt" "$(cat "$ROOT/.agents/skills/$skill/SKILL.md")" \
+      "branch prompt does not include the complete $skill policy"
+  done
+  pass "emitted branch prompt routes completed scouts through existing policies and leased cleanup, preserving unfinished work"
 }
 
 # --- append-only outcome store ------------------------------------------------
@@ -1073,6 +1154,40 @@ test_lease_liveness_binds_to_the_session_lock() {
   pass "lease liveness requires an exact valid session-lock pid"
 }
 
+test_claim_with_a_holder_pinned_before_a_reanchor_records_the_lock_holder() {
+  local home out status
+  local -x PI_CODING_AGENT=true
+  home="$TMP_ROOT/pinned-reanchor-home"
+  mkdir -p "$home/state"
+
+  # The branch turn pinned $PPID, then a same-session re-anchor moved line 1 to
+  # $$ while $PPID stayed alive: a new claim and a refresh record line 1.
+  printf '%s\n' "$$" > "$home/state/.lock"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$PPID "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch \
+    || fail "branch claim with the pinned pre-re-anchor holder failed"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$PPID "$ROOT/bin/fm-lease.sh" claim task-1 --actor branch \
+    || fail "branch refresh with the pinned pre-re-anchor holder failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-1)
+  case "$out" in
+    "branch $$ "*" live") ;;
+    *) fail "a claim pinned before the re-anchor did not record the live lock holder: $out" ;;
+  esac
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=main "$ROOT/bin/fm-lease.sh" claim task-1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "main claimed the branch's task after the re-anchor: $status: $out"
+
+  # A dead pinned holder means another session took the lock: the claim keeps
+  # the dead pid, so the lease stays stale.
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=999999 "$ROOT/bin/fm-lease.sh" claim task-2 --actor branch \
+    || fail "branch claim with a dead pinned holder failed"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-2)
+  case "$out" in
+    "branch 999999 "*" stale") ;;
+    *) fail "a dead pinned holder was replaced by the lock holder: $out" ;;
+  esac
+  pass "a claim pinned before a re-anchor records the live lock holder; a dead pin stays stale"
+}
+
 test_concurrent_stale_lease_claims_have_one_winner() {
   local home fakebin real_mv branch_pid main_pid branch_status main_status
   local -x PI_CODING_AGENT=true
@@ -1541,6 +1656,8 @@ WRAPPER
 }
 
 test_branch_prompt_is_byte_stable_and_above_cache_floor
+test_branch_prompt_home_include_is_appended_last
+test_branch_prompt_routes_completed_scouts_through_guarded_cleanup
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_append_keeps_a_bounded_display_tail
 test_outcome_tail_keeps_whole_newest_rows_within_its_byte_budget
@@ -1564,6 +1681,7 @@ test_unmarked_main_honors_a_live_branch_lease
 test_unmarked_guard_with_a_lease_file_holds_exclusivity_through_mutation
 test_host_home_unmarked_guard_excludes_the_first_claim
 test_lease_liveness_binds_to_the_session_lock
+test_claim_with_a_holder_pinned_before_a_reanchor_records_the_lock_holder
 test_concurrent_stale_lease_claims_have_one_winner
 test_guard_stale_clear_cannot_delete_a_new_claim
 test_guard_holds_exclusivity_through_mutation

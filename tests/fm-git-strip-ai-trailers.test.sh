@@ -430,6 +430,31 @@ SH
   pass "env-file writes the canonical hooks path so wrappers still chain the repository hook"
 }
 
+test_cortex_attribution_does_not_reach_the_commit_object() {
+  local repo hooks body
+  repo="$TMP_ROOT/cortex-object"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-cortex"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  # The exact message Cortex Code 1.1.104 produced live: its typed -m body,
+  # a Generated with link line, then the Co-authored-by trailer.
+  with_hooks_env "$hooks" git -C "$repo" commit -q \
+    -m 'probe commit' \
+    -m 'Generated with [Snowflake CoCo](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code)' \
+    -m 'Co-authored-by: Snowflake CoCo <noreply@snowflake.com>' \
+    -m 'Co-authored-by: Jane Doe <jane@snowflake.com>' \
+    -m 'Generated with care by a human, no link'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "Snowflake CoCo" "Cortex attribution reached the commit object"
+  assert_not_contains "$body" "noreply@snowflake.com" "Cortex bot address reached the commit object"
+  assert_contains "$body" "probe commit" "subject was rewritten"
+  assert_contains "$body" "Co-authored-by: Jane Doe <jane@snowflake.com>" "a human at the vendor domain was stripped"
+  assert_contains "$body" "Generated with care by a human, no link" "an unrelated Generated with line was stripped"
+  pass "Cortex Code's Generated with line and co-author trailer are stripped; a human at its vendor domain is kept"
+}
+
 test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   local msg
   msg="$TMP_ROOT/msg.txt"
@@ -440,7 +465,62 @@ test_strip_msgfile_alone_does_not_rewrite_author_fields() {
   pass "commit-msg file mode strips the trailer and keeps the subject"
 }
 
+test_commandcode_trailer_is_stripped() {
+  local msg
+  msg="$TMP_ROOT/commandcode-msg.txt"
+  printf '%s\n' 'Add computed sum to answer.txt' '' 'Co-authored-by: CommandCodeBot <noreply@commandcode.ai>' >"$msg"
+  "$STRIP" "$msg" || fail "strip should succeed"
+  assert_not_contains "$(cat "$msg")" "CommandCodeBot" "strip left the Command Code trailer in the file"
+  assert_contains "$(cat "$msg")" "Add computed sum to answer.txt" "strip dropped the subject"
+  pass "the Command Code trailer a worker writes into its own message is stripped"
+}
+
+test_no_strip_keeps_the_message_and_still_chains() {
+  local repo hooks orig body
+  repo="$TMP_ROOT/no-strip"
+  make_repo "$repo"
+  orig="$repo/.git/hooks"
+  mkdir -p "$orig"
+  cat >"$orig/commit-msg" <<'SH'
+#!/usr/bin/env bash
+printf 'ran\n' > "$(dirname "$1")/orig-commit-msg.ran"
+SH
+  chmod 700 "$orig/commit-msg"
+  hooks="$TMP_ROOT/hooks-no-strip"
+  "$STRIP" install --no-strip "$hooks" "$repo" || fail "install --no-strip should succeed"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  with_hooks_env "$hooks" git -C "$repo" commit -q --trailer 'Co-authored-by: Cursor <cursoragent@cursor.com>' -m 'fix: kept trailer'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_contains "$body" "cursoragent@cursor.com" "install --no-strip still stripped the trailer"
+  assert_present "$repo/.git/orig-commit-msg.ran" "install --no-strip did not chain the repository's commit-msg hook"
+  pass "install --no-strip leaves commit messages untouched while still chaining"
+}
+
+test_push_guard_install_runs_the_guard_before_chaining() {
+  local repo hooks guard bare out rc
+  repo="$TMP_ROOT/push-guard"
+  make_repo "$repo"
+  bare="$TMP_ROOT/push-guard-origin.git"
+  git init -q --bare "$bare"
+  git -C "$repo" remote add origin "file://$bare"
+  guard="$TMP_ROOT/push-guard-file"
+  "$ROOT/bin/fm-git-push-guard.sh" write "$guard" "$repo" fm/t1 fm/ || fail "guard write failed"
+  hooks="$TMP_ROOT/hooks-push-guard"
+  "$STRIP" install --push-guard "$guard" "$hooks" "$repo" || fail "install --push-guard should succeed"
+  [ ! -w "$hooks/pre-push" ] || fail "the guarded pre-push wrapper is writable"
+  [ ! -w "$hooks/fm-push-guard" ] || fail "the installed guard record is writable"
+  out=$(with_hooks_env "$hooks" git -C "$repo" push origin HEAD:refs/heads/main 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the guarded pre-push let a push to origin through"
+  assert_contains "$out" "fm-git-push-guard: refused:" "the guarded pre-push did not run the guard"
+  "$STRIP" install --push-guard "$TMP_ROOT/no-such-guard" "$TMP_ROOT/hooks-missing-guard" "$repo" 2>/dev/null \
+    && fail "install accepted a missing guard file"
+  pass "install --push-guard writes a read-only pre-push that runs the guard before chaining"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object
+test_commandcode_trailer_is_stripped
 test_human_coauthor_is_kept
 test_human_at_a_vendor_domain_is_kept
 test_hook_manager_cannot_displace_the_strip
@@ -457,6 +537,9 @@ test_repository_pre_push_runs_on_every_override_channel
 test_git_c_override_still_strips_and_chains_commit_hooks
 test_repository_hook_keeps_inherited_git_config
 test_env_file_canonicalizes_hooks_dir
+test_cortex_attribution_does_not_reach_the_commit_object
 test_strip_msgfile_alone_does_not_rewrite_author_fields
+test_no_strip_keeps_the_message_and_still_chains
+test_push_guard_install_runs_the_guard_before_chaining
 
 echo "# all fm-git-strip-ai-trailers tests passed"

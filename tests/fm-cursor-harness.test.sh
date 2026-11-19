@@ -137,6 +137,189 @@ test_verify_executable_refuses_unrelated_agent() {
   pass "fm_cursor_verify_executable: the legacy alias is accepted only with cursor evidence"
 }
 
+test_resolve_binary_skips_broken_cursor_agent() {
+  # Measured on a real host: Cursor's installer wrote its `cursor` IDE shim
+  # through ~/.local/bin/cursor -> cursor-agent into an older versioned
+  # cursor-agent, leaving a file with Cursor's own name and install-tree path
+  # that only prints this error and exits non-zero. Both structural signals
+  # match, so only running it can tell it apart.
+  local base broken good out launches
+  base="$TMP_ROOT/broken"
+  broken="$base/share/cursor-agent/versions/2026.09.15-d2fe57e"
+  good="$base/share/cursor-agent/versions/2026.10.01-e373342"
+  mkdir -p "$broken" "$good" "$base/bin"
+  # Versioned targets stay on the real install-tree path (via symlink) and
+  # count launches so a failed probe cannot silently pay a second --help.
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "Error: No Cursor IDE installation found. Use '"'"'cursor agent'"'"' or '"'"'agent'"'"' to run the agent." >&2\nexit 1\n' \
+    "$base/broken.launches" > "$broken/cursor-agent"
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "Start the Cursor Agent"\n' \
+    "$base/good.launches" > "$good/cursor-agent"
+  chmod +x "$broken/cursor-agent" "$good/cursor-agent"
+  ln -sf "$broken/cursor-agent" "$base/bin/cursor-agent"
+  ln -sf "$good/cursor-agent" "$base/bin/agent"
+  : > "$base/broken.launches"
+  : > "$base/good.launches"
+  fm_cursor_path_is_cursor "$base/bin/cursor-agent" \
+    || fail "fixture must keep cursor's structural evidence on the broken file"
+  ! fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "a cursor-agent that fails to run must NOT verify"
+  launches=$(wc -c < "$base/broken.launches" | tr -d '[:space:]')
+  [ "$launches" = 1 ] \
+    || fail "a failed probe must not re-launch --help, got $launches launches"
+  out=$(PATH="$base/bin:$PATH" fm_cursor_resolve_binary) \
+    || fail "resolve must fall through to the working agent alias"
+  [ "$out" = "$base/bin/agent" ] \
+    || fail "resolve must pick the working agent, got '$out'"
+  pass "fm_cursor_resolve_binary: a broken cursor-agent is skipped for a working agent"
+}
+
+test_resolve_binary_skips_broken_without_coreutils_timeout() {
+  # Launch verify must not depend on coreutils/BSD timeout being installed.
+  # fm_run_timed's bash fallback still bounds the probe, so a host without
+  # timeout/gtimeout still refuses the broken preferred name instead of
+  # accepting it on structure alone (the gap the name-only accept left open).
+  local base broken good out
+  base="$TMP_ROOT/broken-bash-timeout"
+  broken="$base/share/cursor-agent/versions/2026.09.15-d2fe57e"
+  good="$base/share/cursor-agent/versions/2026.10.01-e373342"
+  mkdir -p "$broken" "$good" "$base/bin"
+  printf '#!/bin/sh\necho "Error: No Cursor IDE installation found. Use '\''cursor agent'\'' or '\''agent'\'' to run the agent." >&2\nexit 1\n' \
+    > "$broken/cursor-agent"
+  printf '#!/bin/sh\necho "Start the Cursor Agent"\n' > "$good/cursor-agent"
+  chmod +x "$broken/cursor-agent" "$good/cursor-agent"
+  ln -sf "$broken/cursor-agent" "$base/bin/cursor-agent"
+  ln -sf "$good/cursor-agent" "$base/bin/agent"
+  out=$(PATH="$base/bin:/usr/bin:/bin" FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_cursor_resolve_binary) \
+    || fail "bash-bounded resolve must fall through to the working agent"
+  [ "$out" = "$base/bin/agent" ] \
+    || fail "bash-bounded resolve must pick the working agent, got '$out'"
+  ! PATH="$base/bin:/usr/bin:/bin" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "bash-bounded verify must still refuse the broken preferred name"
+  pass "fm_cursor_resolve_binary: bash timeout fallback still skips a broken cursor-agent"
+}
+
+test_verify_executable_single_successful_probe() {
+  # Structural evidence plus a successful --help without a Cursor marker must
+  # accept the candidate from that one launch - never a second bounded run.
+  local base ver launches
+  base="$TMP_ROOT/single-probe"
+  ver="$base/share/cursor-agent/versions/2026.10.01-ok"
+  mkdir -p "$ver" "$base/bin"
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "some other help text"\nexit 0\n' \
+    "$base.launches" > "$ver/cursor-agent"
+  chmod +x "$ver/cursor-agent"
+  ln -sf "$ver/cursor-agent" "$base/bin/cursor-agent"
+  : > "$base.launches"
+  fm_cursor_path_is_cursor "$base/bin/cursor-agent" \
+    || fail "fixture must keep structural evidence"
+  fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "structural candidate whose --help exits 0 must verify"
+  launches=$(wc -c < "$base.launches" | tr -d '[:space:]')
+  [ "$launches" = 1 ] \
+    || fail "verify must launch --help once on the structural success path, got $launches"
+  pass "fm_cursor_verify_executable: structural success reuses one probe exit"
+}
+
+test_verify_executable_refuses_ide_shim_refusal_text() {
+  # Measured broken file prints the IDE-missing line on stderr. Even if a
+  # future variant exits 0, that text is never Cursor Agent identity and must
+  # not verify through the structural fallback.
+  local base ver launches
+  base="$TMP_ROOT/ide-shim-refusal"
+  ver="$base/share/cursor-agent/versions/2026.09.15-d2fe57e"
+  mkdir -p "$ver" "$base/bin"
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "Error: No Cursor IDE installation found. Use '\''cursor agent'\'' or '\''agent'\'' to run the agent." >&2\necho "Or, install Cursor at https://cursor.com/download" >&2\nexit 0\n' \
+    "$base.launches" > "$ver/cursor-agent"
+  chmod +x "$ver/cursor-agent"
+  ln -sf "$ver/cursor-agent" "$base/bin/cursor-agent"
+  : > "$base.launches"
+  fm_cursor_path_is_cursor "$base/bin/cursor-agent" \
+    || fail "fixture must keep structural evidence"
+  ! fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "IDE-shim refusal text must not verify even on exit 0"
+  launches=$(wc -c < "$base.launches" | tr -d '[:space:]')
+  [ "$launches" = 1 ] \
+    || fail "refusal path must still probe once, got $launches launches"
+  pass "fm_cursor_verify_executable: IDE-shim refusal text is never launchable"
+}
+
+test_verify_executable_accepts_basename_outside_tree() {
+  # Structural launch evidence is the canonical basename OR the versioned
+  # install tree. A cursor-agent outside any Cursor tree with a successful,
+  # non-empty, non-refusal --help must verify; empty success must not, and a
+  # total miss must diagnose both structural shapes plus the non-empty rule.
+  local odd err
+  odd="$TMP_ROOT/basename-only"
+  mkdir -p "$odd"
+  printf '#!/bin/sh\necho "generic help"\nexit 0\n' > "$odd/cursor-agent"
+  chmod +x "$odd/cursor-agent"
+  fm_cursor_path_is_cursor "$odd/cursor-agent" \
+    || fail "basename cursor-agent outside the tree must still be structural"
+  fm_cursor_verify_executable "$odd/cursor-agent" \
+    || fail "basename cursor-agent with non-empty unmarked --help must verify"
+
+  printf '#!/bin/sh\nexit 0\n' > "$odd/cursor-agent"
+  chmod +x "$odd/cursor-agent"
+  ! fm_cursor_verify_executable "$odd/cursor-agent" \
+    || fail "basename cursor-agent with empty --help must not verify"
+
+  err=$(PATH="/usr/bin:/bin" HOME="$odd/no-home" fm_cursor_resolve_binary 2>&1) && \
+    fail "resolve with no candidates must fail"
+  case "$err" in
+    *"canonical cursor-agent name or Cursor versioned install-tree path"*) : ;;
+    *) fail "resolve diagnostic must name both structural shapes, got: $err" ;;
+  esac
+  case "$err" in
+    *"non-empty, non-refusal"*) : ;;
+    *) fail "resolve diagnostic must require non-empty non-refusal output, got: $err" ;;
+  esac
+  pass "fm_cursor_verify_executable: basename outside the tree needs non-empty successful probe"
+}
+
+test_isolated_fixture_timeout_sibling_contract() {
+  # Hook fixtures copy fm-cursor-lib into a temp bin. Process identity must
+  # stay silent with no timeout sibling (no probe), a launch probe without the
+  # sibling must fail closed without stderr noise, and the same probe must
+  # succeed when the timeout sibling sits next to the lib copy.
+  local bare full ver out status
+  bare="$TMP_ROOT/fixture-bare/bin"
+  full="$TMP_ROOT/fixture-full/bin"
+  ver="$TMP_ROOT/fixture-full/share/cursor-agent/versions/2026.10.01-ok"
+  mkdir -p "$bare" "$full" "$ver"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$bare/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$full/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$full/fm-timeout-lib.sh"
+  printf '#!/bin/sh\necho "Start the Cursor Agent"\n' > "$ver/cursor-agent"
+  chmod +x "$ver/cursor-agent"
+  ln -sf "$ver/cursor-agent" "$full/cursor-agent"
+
+  out=$(bash -c '
+    . "$1/fm-cursor-lib.sh" || exit 2
+    fm_cursor_process_matches cursor-agent "" cursor-agent || exit 3
+    printf %s ok
+  ' _ "$bare" 2>&1) || fail "process identity without timeout sibling failed: $out"
+  [ "$out" = ok ] \
+    || fail "process identity without timeout sibling must print only ok, got '$out'"
+
+  out=$(bash -c '
+    . "$1/fm-cursor-lib.sh" || exit 2
+    if fm_cursor_verify_executable /bin/true; then exit 3; fi
+    printf %s refused
+  ' _ "$bare" 2>&1) || fail "missing-timeout probe path crashed: $out"
+  [ "$out" = refused ] \
+    || fail "missing-timeout probe must refuse silently, got '$out'"
+
+  out=$(bash -c '
+    . "$1/fm-cursor-lib.sh" || exit 2
+    fm_cursor_verify_executable "$1/cursor-agent" || exit 3
+    printf %s verified
+  ' _ "$full" 2>&1) || fail "fixture with timeout sibling failed to verify: $out"
+  [ "$out" = verified ] \
+    || fail "fixture with timeout sibling must verify, got '$out'"
+  pass "fm_cursor_run_timed: isolated fixtures keep process identity silent and probe only with the timeout sibling"
+}
+
 test_resolve_binary_prefers_stable_path() {
   # The canonical path carries a version cursor replaces on its own auto-update,
   # so resolution must print the STABLE launcher even though identity is proven
@@ -418,6 +601,12 @@ test_transcript_fold_excludes_prior_conversations() {
 test_identity_accepts_cursor_shapes_rejects_lookalikes
 test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
+test_resolve_binary_skips_broken_cursor_agent
+test_resolve_binary_skips_broken_without_coreutils_timeout
+test_verify_executable_single_successful_probe
+test_verify_executable_refuses_ide_shim_refusal_text
+test_verify_executable_accepts_basename_outside_tree
+test_isolated_fixture_timeout_sibling_contract
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode

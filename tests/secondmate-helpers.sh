@@ -25,9 +25,37 @@ make_fake_tmux() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+window_file="$(dirname "$0")/.spawn-windows"
 case "${1:-}" in
-  has-session|new-session|new-window|kill-window)
+  has-session|new-session)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  new-window)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf 'firstmate:%s\n' "$name" >> "$window_file"
+    exit 0
+    ;;
+  kill-window)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    target=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -t ] && target=$arg
+      previous=$arg
+    done
+    target=${target#=}
+    target=${target/:=/\:}
+    if [ -s "$window_file" ]; then
+      grep -Fvx -- "$target" "$window_file" > "$window_file.tmp" || true
+      mv "$window_file.tmp" "$window_file"
+    fi
     exit 0
     ;;
   send-keys)
@@ -54,6 +82,7 @@ case "${1:-}" in
       if [ "$prev" = -t ]; then session=$arg; break; fi
       prev=$arg
     done
+    session=${session#=}
     while IFS= read -r recorded; do
       [ -n "$recorded" ] || continue
       if [ -z "$session" ]; then
@@ -68,6 +97,16 @@ case "${1:-}" in
     done <<EOF
 ${FM_FAKE_TMUX_WINDOW:-}
 EOF
+    if [ -s "$window_file" ]; then
+      while IFS= read -r recorded; do
+        [ -n "$recorded" ] || continue
+        if [ -z "$session" ]; then
+          printf '%s\n' "$recorded"
+        else
+          case "$recorded" in "$session":*) printf '%s\n' "${recorded#*:}" ;; esac
+        fi
+      done < "$window_file"
+    fi
     exit 0
     ;;
   display-message)

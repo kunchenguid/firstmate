@@ -38,8 +38,8 @@
 # either. Lineage that cannot be determined (no code root history, or a shallow
 # side sharing no root) refuses rather than permits. The publication target is
 # compared only against a maintainer scope or task consent: the first remote
-# named upstream, github, or origin (the order gh prefers when resolving a
-# default repository), reduced to lowercase host/owner/repo; a local-path remote
+# whose remote.<name>.gh-resolved is base, otherwise the first remote named
+# upstream, github, or origin, reduced to lowercase host/owner/repo; a local-path remote
 # is resolved one hop through that repository's own origin, and left as
 # path:<abs> when unreadable. An unknown target never permits.
 #
@@ -222,11 +222,22 @@ fm_role_git_common_dir() {
 }
 
 # fm_role_publication_target <git-dir> - the repository a default publication
-# (gh pr/issue, a no-mistakes PR) would reach: the first of upstream, github,
-# origin that is configured, in the order gh prefers, normalized to
-# host/owner/repo or path:<abs>. Empty when the repo has no such remote.
+# (gh pr/issue, a no-mistakes PR) would reach: the first remote whose
+# remote.<name>.gh-resolved is base, otherwise the first configured upstream,
+# github, or origin, normalized to host/owner/repo or path:<abs>. Empty when
+# the selected remote is unreadable or the repo has no such remote. Resolution
+# is entirely offline.
 fm_role_publication_target() {
-  local dir=$1 remote url=
+  local dir=$1 remote remotes url=
+  remotes=$(git -C "$dir" remote 2>/dev/null) || return 0
+  while IFS= read -r remote; do
+    [ -n "$remote" ] || continue
+    if [ "$(git -C "$dir" config --get "remote.$remote.gh-resolved" 2>/dev/null)" = base ]; then
+      url=$(git -C "$dir" remote get-url "$remote" 2>/dev/null) || return 0
+      fm_role_remote_identity "$url" "$dir"
+      return
+    fi
+  done <<< "$remotes"
   for remote in upstream github origin; do
     if url=$(git -C "$dir" remote get-url "$remote" 2>/dev/null) && [ -n "$url" ]; then
       break

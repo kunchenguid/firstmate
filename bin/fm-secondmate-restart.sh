@@ -273,11 +273,27 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     # a home whose config/secondmate-harness is deliberately NOT inherited, so
     # the file on that host belongs to a different home and re-resolving there
     # would silently move the mate onto another runtime. Resolve the pin here and
-    # pass it explicitly, so both placements land on the same decision.
-    HARNESS[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
+    # pass it explicitly, so both placements land on the same decision. The mate id
+    # rides along so a per-mate override is honored for exactly the mate being
+    # restarted, and an unreadable pin is refused for that mate instead of resolving
+    # to whatever it happened to run last time.
+    if ! resolved_harness=$("$SCRIPT_DIR/fm-harness.sh" secondmate "$id"); then
+      REASON[i]="its configured runtime pin could not be read; fix config/secondmate-harness"
+      i=$((i + 1))
+      continue
+    fi
+    HARNESS[i]=$resolved_harness
     [ -n "${HARNESS[i]}" ] || HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
-    MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
-    EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+    if ! MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$id"); then
+      REASON[i]="its configured model pin could not be read; fix config/secondmate-harness"
+      i=$((i + 1))
+      continue
+    fi
+    if ! EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$id"); then
+      REASON[i]="its configured effort pin could not be read; fix config/secondmate-harness"
+      i=$((i + 1))
+      continue
+    fi
     case "${EFFORT[i]}" in
       ''|low|medium|high|xhigh|max|ultra) ;;
       *) EFFORT[i]="" ;;

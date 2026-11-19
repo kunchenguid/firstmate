@@ -273,7 +273,18 @@ make_liveness_tmux() {
 #!/usr/bin/env bash
 set -u
 mode=${FM_TEST_PANE_CMD:-zsh}
+windows="${FM_TMUX_CALL_LOG:?}.windows"
 case "${1:-}" in
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in
+          ". '"*"'") staged=${arg#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || cat "$staged" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *'encode launch-brief'*|*'Firstmate operational input waiting: read'*) printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG" ;;
+        esac
+      done
+    fi
+    exit 0 ;;
   display-message)
     for a in "$@"; do
       case "$a" in
@@ -290,15 +301,31 @@ case "${1:-}" in
     ;;
   list-windows)
     case "$mode" in
-      missing) printf '%s\n' main; exit 0 ;;
+      missing)
+        printf '%s\n' main
+        [ ! -s "$windows" ] || cat "$windows"
+        exit 0 ;;
       unreadable) exit 1 ;;
-      *) [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1; exit 0 ;;
+      *)
+        [ -e "${FM_TMUX_CALL_LOG:?}.killed" ] || printf '%s\n' fm-sm1
+        [ ! -s "$windows" ] || cat "$windows"
+        exit 0 ;;
     esac
     ;;
   new-window|kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    [ "${FM_TEST_FAIL_KILL:-0}" = 1 ] && [ "${1:-}" = kill-window ] && exit 1
     if [ "${1:-}" = new-window ] && [ -n "${FM_TEST_NEW_WINDOW_PAUSE:-}" ]; then
       sleep "$FM_TEST_NEW_WINDOW_PAUSE"
+    fi
+    if [ "${1:-}" = new-window ]; then
+      name=
+      previous=
+      for arg in "$@"; do
+        [ "$previous" = -n ] && name=$arg
+        previous=$arg
+      done
+      grep -Fqx -- "$name" "$windows" 2>/dev/null || printf '%s\n' "$name" >> "$windows"
     fi
     [ "${1:-}" = kill-window ] && : > "${FM_TMUX_CALL_LOG}.killed"
     [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && [ "${1:-}" = new-window ] && exit 1
@@ -379,6 +406,51 @@ test_sweep_respawns_confirmed_dead_secondmate() {
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
 }
 
+test_sweep_respawns_on_the_recorded_backend() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-pinned-backend)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  # The home now selects hc for new spawns; the dead mate is recorded on tmux.
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BACKEND=hc)
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1:" \
+    "the respawn should succeed on the recorded backend: $out"
+  assert_contains "$(cat "$log")" "new-window" \
+    "the respawn must land on the backend the mate is recorded on, not the configured default"
+  assert_no_grep 'backend=hc' "$w/home/state/sm1.meta" \
+    "the respawned record must stay on its recorded backend"
+  pass "sweep: a dead secondmate respawns on its recorded backend, not a changed default"
+}
+
+test_sweep_recovers_the_durable_secondmate_account() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-account)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  mkdir -p "$w/home/config/secondmate-accounts/sm1" "$w/mate-account" "$w/primary-account" "$w/user-home"
+  printf 'claude\n' > "$w/home/config/secondmate-harness"
+  printf '%s\n' "$w/primary-account" > "$w/home/config/claude-account"
+  printf '%s\n' "$w/mate-account" > "$w/home/config/secondmate-accounts/sm1/claude-account"
+  : > "$w/mate-account/.credentials.json"
+  cat > "$fb/claude" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] || exit 0
+[ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json" ]
+SH
+  chmod +x "$fb/claude"
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" \
+    HOME="$w/user-home" CLAUDE_CONFIG_DIR="$w/ambient-account" FM_FAKE_LAUNCH_LOG="$w/launch.log")
+  assert_not_contains "$out" 'SECONDMATE_LIVENESS: secondmate sm1:' "account recovery should succeed: $out"
+  assert_grep 'relaunched' "$w/home/state/.secondmate-relaunch-sm1" "recovery must finish"
+  assert_grep "account=$w/mate-account" "$w/home/state/sm1.meta" "recovery must record the configured mate account"
+  assert_grep "CLAUDE_CONFIG_DIR='$w/mate-account'" "$w/launch.log" "recovery must launch on the durable mate pin, not the ambient account"
+  pass "sweep: secondmate recovery resolves its durable account despite a different ambient login"
+}
+
 test_sweep_serializes_distinct_secondmate_relaunches() {
   local w fb tmuxfb log out id
   w=$(new_world sweep-concurrent-relaunch)
@@ -400,6 +472,25 @@ test_sweep_serializes_distinct_secondmate_relaunches() {
   [ "$(grep -c '^new-window ' "$log")" -eq 2 ] \
     || fail "both mates should reach a fresh spawn: $(cat "$log")"
   pass "sweep: distinct secondmate relaunches serialize across the task-set lock"
+}
+
+# The T3-only close refusal (fm_secondmate_liveness_relaunch) must leave every
+# other backend on its existing best-effort kill: a tmux close that fails is
+# still followed by the guarded spawn, exactly as before.
+test_sweep_keeps_tmux_best_effort_kill_when_close_fails() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-dead-close-fails)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_TEST_FAIL_KILL=1)
+
+  assert_contains "$(cat "$log")" "kill-window -t =firstmate:=fm-sm1" "the close is attempted"
+  assert_not_contains "$out" "could not prove the old" "a non-T3 close failure must not take the T3-only refusal path"
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after confirmed agent absence on existing endpoint" \
+    "the guarded spawn still runs after a failed tmux close, as before"
+  pass "sweep: a tmux secondmate whose close fails keeps the existing best-effort kill and guarded spawn"
 }
 
 test_sweep_skips_mate_whose_liveness_lock_is_held() {
@@ -768,12 +859,146 @@ test_remote_poll_probe_unreachable_preserves_route() {
   pass "poll probe: unreachable or inconclusive remote reads preserve the route"
 }
 
+# make_remote_probe_world_rex <name>: the same remote probe world on a rex
+# route, whose fake ssh answers the doctor, the state verb, and the route verb
+# separately so a full-mode probe exercises readiness plus the route re-check.
+make_remote_probe_world_rex() {
+  local name=$1 w fakebin
+  w="$TMP_ROOT/$name"
+  fakebin=$(fm_fakebin "$w")
+  mkdir -p "$w/home/state" "$w/home/data" "$w/home/config"
+  cat > "$w/home/state/rsm1.meta" <<EOF
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+remote_backend=rex
+remote_rex_session_id=session:00000001-0000-7000-8000-000000000002
+remote_rex_server=unix:///remote/rex.sock
+remote_target=00000001-0000-7000-8000-000000000002:00000003-0000-7000-8000-000000000004
+home=/remote/rsm1-home
+EOF
+  cat > "$w/home/data/secondmates.md" <<EOF
+- rsm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/rsm1-home; scope: remote work; projects: alpha; added 2026-01-01)
+EOF
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
+done
+host=$1
+entry=$2
+shift 2
+[ "$host" = lab-host ] || exit 91
+[ "$entry" = fm-remote-entrypoint.sh ] || exit 92
+argv_b64=$4
+command_fields=$(perl -MMIME::Base64=decode_base64 -e '
+  my $data=decode_base64($ARGV[0]);
+  my @args=split(/\0/, $data);
+  print join("\t", map { defined $_ ? $_ : "" } @args[0..2]);
+' "$argv_b64")
+IFS=$'\t' read -r command_name _command_action command_rel <<EOF
+$command_fields
+EOF
+printf '%s %s %s\n' "$command_name" "$_command_action" "$command_rel" >> "${FM_FAKE_SSH_LOG:?}"
+case "$command_name:$_command_action" in
+  fm-remote-doctor.sh:*)
+    [ -z "${FM_FAKE_DOCTOR_OUT:-}" ] || printf '%s\n' "$FM_FAKE_DOCTOR_OUT"
+    exit "${FM_FAKE_DOCTOR_RC:-0}"
+    ;;
+  fm-remote-secondmate-control.sh:route)
+    [ "${FM_FAKE_REMOTE_RC:-0}" -eq 0 ] || exit "$FM_FAKE_REMOTE_RC"
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=%s\n' "${FM_FAKE_ROUTE_BACKEND:-rex}"
+    printf 'target=%s\n' "${FM_FAKE_ROUTE_TARGET:-00000001-0000-7000-8000-000000000002:00000003-0000-7000-8000-000000000004}"
+    printf 'rex_session_id=session:00000001-0000-7000-8000-000000000002\n'
+    printf 'rex_server=unix:///remote/rex.sock\n'
+    printf 'harness=claude\n'
+    exit 0
+    ;;
+  fm-remote-secondmate-control.sh:state)
+    printf '%s\n' "${FM_FAKE_REMOTE_REPLY:-alive}"
+    exit "${FM_FAKE_REMOTE_RC:-0}"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/ssh"
+  printf '%s\n' "$w"
+}
+
+test_remote_full_probe_rex_route() {
+  local w out
+  w=$(make_remote_probe_world_rex probe-rex)
+
+  # A green readiness gate, an alive rex endpoint, and a matching route keep
+  # the recorded rex backend live.
+  out=$(probe_remote "$w" full)
+  [ "$out" = 'alive|alive|0|||' ] || fail "a live rex route should stay a quiet no-op, got: $out"
+  grep -q -- '--backend rex' "$w/ssh.log" \
+    || fail "the readiness gate did not ask the remote doctor about rex: $(cat "$w/ssh.log")"
+  pass "full probe: a live rex route stays alive through the rex readiness gate"
+}
+
+test_remote_full_probe_rex_backend_drift() {
+  local w out
+  w=$(make_remote_probe_world_rex probe-rex-drift)
+
+  # The remote reports a different backend than this home recorded: a skip,
+  # never a silent migration.
+  out=$(probe_remote "$w" full FM_FAKE_ROUTE_BACKEND=herdr)
+  [ "$out" = "skipped|alive|0|||alive remote endpoint runs on backend 'herdr', but this home recorded 'rex'; migrate or retire it explicitly" ] \
+    || fail "a herdr route under a rex record must be reported, got: $out"
+
+  out=$(probe_remote "$w" full FM_FAKE_ROUTE_BACKEND=tmux)
+  [ "$out" = "skipped|alive|0|||alive remote endpoint is recorded on backend 'tmux'; migrate or retire it explicitly" ] \
+    || fail "an unsupported remote backend must be reported, got: $out"
+  pass "full probe: remote backend drift is reported, never migrated"
+}
+
+test_remote_full_probe_rex_readiness_verdicts() {
+  local w out
+  w=$(make_remote_probe_world_rex probe-rex-readiness)
+
+  out=$(probe_remote "$w" full FM_FAKE_DOCTOR_RC=1 \
+    FM_FAKE_DOCTOR_OUT='check rex-server=fixable: no persistent rex server answers')
+  case "$out" in
+    'skipped|unknown|0|||remote readiness failed on lab-host: check rex-server=fixable:'*) : ;;
+    *) fail "a rex readiness gap must be reported, got: $out" ;;
+  esac
+
+  out=$(probe_remote "$w" full FM_FAKE_DOCTOR_RC=255)
+  [ "$out" = 'skipped|unknown|0|||remote host unavailable or endpoint state unknown; route preserved on lab-host' ] \
+    || fail "an unreachable rex readiness probe must preserve the route, got: $out"
+  pass "full probe: rex readiness gaps and unreachable hosts stay explicit"
+}
+
+test_remote_full_probe_legacy_record_defaults_herdr() {
+  local w out
+  w=$(make_remote_probe_world_rex probe-legacy)
+
+  # A record written before rex existed carries no remote_backend; it is a
+  # herdr route, so the gate asks the doctor about herdr and a herdr route
+  # reply keeps it alive.
+  sed -i.bak '/^remote_backend=/d;/^remote_rex_/d' "$w/home/state/rsm1.meta"
+  rm -f "$w/home/state/rsm1.meta.bak"
+  printf 'remote_herdr_session=fm-remote\nremote_target=fm-remote:w1:p1\n' >> "$w/home/state/rsm1.meta"
+  out=$(probe_remote "$w" full FM_FAKE_ROUTE_BACKEND=herdr)
+  [ "$out" = 'alive|alive|0|||' ] || fail "a legacy route should stay alive on herdr, got: $out"
+  grep -q -- '--backend herdr' "$w/ssh.log" \
+    || fail "a legacy record did not ask the remote doctor about herdr: $(cat "$w/ssh.log")"
+  pass "full probe: a record without remote_backend stays a herdr route"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
 test_agent_state_dispatcher_and_compatibility
 test_sweep_respawns_confirmed_dead_secondmate
+test_sweep_respawns_on_the_recorded_backend
+test_sweep_recovers_the_durable_secondmate_account
 test_sweep_serializes_distinct_secondmate_relaunches
+test_sweep_keeps_tmux_best_effort_kill_when_close_fails
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
@@ -789,5 +1014,9 @@ test_relaunch_waits_for_other_mates_relaunch_lock
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
+test_remote_full_probe_rex_route
+test_remote_full_probe_rex_backend_drift
+test_remote_full_probe_rex_readiness_verdicts
+test_remote_full_probe_legacy_record_defaults_herdr
 
 echo "# all fm-secondmate-liveness tests passed"
