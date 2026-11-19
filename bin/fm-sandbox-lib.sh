@@ -234,7 +234,7 @@ fm_sandbox_events_dir() {
 }
 
 # fm_sandbox_prepare_task <state-real> <id> <gen> <fm-root>
-# Creates state/<id>.sbx/{events/,relay-helper} for this incarnation and prints
+# Creates state/<id>.sbx/{events/,inflight/,relay-helper} for this incarnation and prints
 # the helper path. A relaunch reaches here with the previous incarnation's files
 # on disk: the old relay is gone with its worker, so its spool is emptied and
 # the helper is rewritten with the new busy gen. The sandbox sees only events/.
@@ -247,8 +247,8 @@ fm_sandbox_prepare_task() {
     echo "error: sandbox helper path '$helper' carries characters the wrapper cannot take as one word; move the home to a plain path" >&2
     return 1
   }
-  (umask 077 && mkdir -p "$events") || return 1
-  chmod 700 "$sbx" "$events" || return 1
+  (umask 077 && mkdir -p "$events" "$sbx/inflight") || return 1
+  chmod 700 "$sbx" "$events" "$sbx/inflight" || return 1
   find "$events" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
   tmp="$sbx/.relay-helper.$$"
   (

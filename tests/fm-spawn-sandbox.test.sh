@@ -112,8 +112,11 @@ run_spawn() {  # <spawn args...>; uses the case globals
   : > "$LAUNCH_LOG"
   : > "$PANE_LOG"
   : > "$SB_LOG"
-  FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" FM_FAKE_PANE_LOG="$PANE_LOG" FM_FAKE_SANDBOX_LOG="$SB_LOG" \
-    fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$@"
+  (
+    unset DISABLE_AUTOUPDATER TRACEPARENT LAVISH_AXI_HOST LAVISH_AXI_PORT
+    FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" FM_FAKE_PANE_LOG="$PANE_LOG" FM_FAKE_SANDBOX_LOG="$SB_LOG" \
+      fm_test_run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$@"
+  )
 }
 
 # write_sandbox_config <lines...>: the fake wrapper is named unless a line already

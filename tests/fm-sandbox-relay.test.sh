@@ -28,7 +28,7 @@ new_case() {
   local state="$TMP_ROOT/$1/state" gen
   mkdir -p "$state"
   gen=$("$EV" arm "$state" "$2") || fail "arm failed"
-  mkdir -p "$state/$2.sbx/events"
+  mkdir -p "$state/$2.sbx/events" "$state/$2.sbx/inflight"
   printf '%s %s' "$state" "$gen"
 }
 
