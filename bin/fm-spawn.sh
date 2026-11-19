@@ -423,7 +423,7 @@
 #   accept the profile refuses BEFORE any endpoint, worktree, or record exists,
 #   and never launches the worker raw. The task binds (spawn_sandbox_wrap) name
 #   only the task's own status, turn-ended, steering inbox, data directory,
-#   read-only launch record, hooks, busy extension and the code root's bin/,
+#   read-only hooks, busy extension and the code root's bin/,
 #   .agents/ and .omp/, its private temp root, and the busy relay
 #   spool state/<id>.sbx/events; never state/, the code root itself, or
 #   FM_HOME. The omp busy extension drops edge files into that spool and
@@ -4041,8 +4041,10 @@ rovo_config_override_flag() {
 # operational-inbox (the launch record, read), inbox (steers, read and handled/
 # acknowledged), data (the task's brief and report directory), skills (the code
 # root's .agents/skills). A secondmate's only channel is its steering inbox.
-# claude_add_dirs_flag grants them to Claude and spawn_sandbox_wrap binds them
-# into the worker sandbox, so neither keeps a second copy of the list.
+# claude_add_dirs_flag grants them to Claude and spawn_sandbox_wrap binds the
+# inbox and data ones into the worker sandbox, so neither keeps a second copy of
+# the list. The sandbox never binds operational-inbox: it holds every task's
+# launch records, and the only sandboxed harness (omp) takes its brief inline.
 task_channel_dirs() {  # <kind> <state-dir> <data-dir> <code-root> <task-id>
   local kind=$1 state_dir=$2 data_dir=$3 code_root=$4 id=$5
   local state_real data_real root_real
@@ -4197,7 +4199,7 @@ spawn_sandbox_resolve() {
 # spawn_sandbox_wrap: prefix $LAUNCH (the agent segment) with the wrapper and this
 # task's binds. Everything the worker may touch outside its worktree is named
 # here and nowhere else: its own status and turn-ended files, its steering inbox,
-# its data directory, the read-only launch record, hooks, busy extension and
+# its data directory, the read-only hooks, busy extension and
 # the code root's bin/, .agents/ and .omp/ (never the root
 # itself, which is FM_HOME when FM_HOME is unset), its private temp root, and
 # the relay spool. The read-only code binds come first so a wrapper that applies
@@ -4222,7 +4224,6 @@ spawn_sandbox_wrap() {
   binds+=(--rw-create "$STATE_REAL/$ID.status" --rw-create "$TURNEND")
   while IFS=$'\t' read -r role path; do
     case "$role" in
-    operational-inbox) binds+=(--ro "$path") ;;
     inbox | data) binds+=(--rw "$path") ;;
     esac
   done <<EOF
