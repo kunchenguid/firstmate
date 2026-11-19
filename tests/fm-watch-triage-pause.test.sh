@@ -226,7 +226,7 @@ captain-held [key=captain-hold-done-1]: merge approval
 resolved [key=captain-hold-done-1]: captain call released by fm-captain-hold
 EOF
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-done_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle after the merge handoff")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -287,7 +287,7 @@ EOF
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle, holding for upstream")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -350,7 +350,7 @@ test_hold_mirror_transition_keeps_the_stale_throttle() {
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
   printf 'paused: waiting on the validation run to finish\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-parked_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf 'parked, idle' > "$capture_file"
   printf '%s' "$(hash_text 'parked, idle')" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -377,7 +377,7 @@ test_hold_mirror_transition_keeps_the_stale_throttle() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/done.meta"
   printf 'done: PR https://example.test/pull/1 checks green\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-done_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf 'idle after the delivery' > "$capture_file"
   pane_hash=$(hash_text 'idle after the delivery')
   printf '%s' "$pane_hash" > "$state/.hash-$key"
@@ -434,7 +434,7 @@ test_settled_transfer_keeps_the_stale_suppressor() {
   printf 'window=%s\nkind=scout\nharness=grok\nbackend=tmux\n' "$window" > "$state/scout.meta"
   printf 'needs-decision [key=route]: choose the sample route\n' > "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-scout_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf 'idle, awaiting the answer' > "$capture_file"
   pane_hash=$(hash_text 'idle, awaiting the answer')
   printf '%s' "$pane_hash" > "$state/.hash-$key"
