@@ -1359,6 +1359,44 @@ test_release_actor_drops_only_that_actors_leases() {
   pass "release commands authorize the caller and bulk release drops only that actor's leases"
 }
 
+# The lease readers are pure bash (one read per file, tab splitting without
+# cut), so this pins their exact contract through the command surface: a torn
+# final line survives whole, a delimited line reads missing fields as empty,
+# and a line with no tab names no lease at all.
+test_lease_reader_parses_complete_lines_exactly() {
+  local home out
+  local -x PI_CODING_AGENT=true
+  home="$TMP_ROOT/lease-reader-home"
+  mkdir -p "$home/state"
+  printf '%s\n' "$$" > "$home/state/.lock"
+  # Torn record, no trailing newline, pid still the session-lock holder: live.
+  printf 'main\t%s\t1700000000' "$$" > "$home/state/.lease-task-torn"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-lease.sh" check task-torn) \
+    || fail "check of a torn live lease failed"
+  [ "$out" = "main $$ 1700000000 live" ] \
+    || fail "the torn lease no longer reads line, fields, and liveness exactly: $out"
+  # An empty pid still names its actor, so only that actor's bulk release owns it.
+  printf 'main\t\t1700000000\n' > "$home/state/.lease-task-empty"
+  # A line with no tab is no lease at all: no actor may drop it by name.
+  printf 'garbage-no-tabs\n' > "$home/state/.lease-task-garbage"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release-actor --actor branch \
+    || fail "release-actor over foreign and malformed leases failed"
+  [ -e "$home/state/.lease-task-torn" ] || fail "release-actor dropped main's torn live lease"
+  [ -e "$home/state/.lease-task-empty" ] || fail "release-actor dropped main's empty-pid lease"
+  [ -e "$home/state/.lease-task-garbage" ] || fail "release-actor dropped a no-tab garbage line"
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" release-actor --actor main \
+    || fail "release-actor of main failed"
+  [ ! -e "$home/state/.lease-task-torn" ] || fail "release-actor kept main's torn live lease"
+  [ ! -e "$home/state/.lease-task-empty" ] || fail "release-actor kept main's empty-pid lease"
+  [ -e "$home/state/.lease-task-garbage" ] || fail "release-actor dropped the garbage lease by actor"
+  # Sweep never touches a live lease and clears what cannot prove liveness.
+  printf 'main\t%s\t1700000000' "$$" > "$home/state/.lease-task-torn"
+  FM_HOME="$home" "$ROOT/bin/fm-lease.sh" sweep || fail "sweep over malformed leases failed"
+  [ -e "$home/state/.lease-task-torn" ] || fail "sweep removed a torn live lease"
+  [ ! -e "$home/state/.lease-task-garbage" ] || fail "sweep kept a no-tab garbage line"
+  pass "the pure-bash lease reader reads complete lines exactly and leaves torn bytes whole"
+}
+
 # --- role-partition refinements ----------------------------------------------
 
 test_branch_cannot_force_teardown_or_directly_relaunch() {
@@ -1704,6 +1742,7 @@ test_guard_stale_clear_cannot_delete_a_new_claim
 test_guard_holds_exclusivity_through_mutation
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
+test_lease_reader_parses_complete_lines_exactly
 test_branch_cannot_force_teardown_or_directly_relaunch
 test_away_record_relocates_main_owned_actions_to_the_branch
 test_away_branch_spawn_requires_queued_dispatchable_work

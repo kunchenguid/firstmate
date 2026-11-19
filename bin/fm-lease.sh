@@ -35,8 +35,16 @@
 # 1 check-miss, 2 usage, 6 refused (other actor holds or actor mismatch).
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "$d" && pwd)"
+# The lexical parent of the canonical SCRIPT_DIR is the same directory the
+# subshell cd resolves to, so skip that fork when a slash is present.
+FM_ROOT=${FM_ROOT_OVERRIDE:-${FM_ROOT:-}}
+if [ -z "$FM_ROOT" ]; then
+  case "$SCRIPT_DIR" in
+    ?*/*) FM_ROOT=${SCRIPT_DIR%/*} ;;
+    *) FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd) ;;
+  esac
+fi
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-lease-lib.sh
@@ -44,7 +52,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
-mkdir -p "$STATE"
+[ -d "$STATE" ] || mkdir -p "$STATE"
 LEASE_COMMAND_LOCK="$STATE/.fm-lease-command.lock"
 fm_lock_acquire_wait "$LEASE_COMMAND_LOCK"
 trap 'fm_lock_release "$LEASE_COMMAND_LOCK"' EXIT
@@ -73,7 +81,7 @@ case "$CMD" in
       esac
     done
     if [ -z "$ACTOR" ]; then
-      ACTOR=$(fm_lease_actor) || exit 2
+      fm_lease_actor_to ACTOR || exit 2
     fi
     case "$ACTOR" in main|branch) ;; *) usage ;; esac
     ;;
@@ -106,7 +114,7 @@ case "$CMD" in
     # Loud accidental-override guard: a claim naming the OTHER actor than the
     # caller's own injected identity is a wiring mistake, never a role change.
     # Release and bulk release enforce the same caller authorization below.
-    CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+    fm_lease_actor_to CALLER || exit "$FM_LEASE_REFUSE_EXIT"
     if [ "$ACTOR" != "$CALLER" ]; then
       echo "error: claim refused - the $CALLER supervision actor cannot claim a lease as $ACTOR on '$TASK'" >&2
       exit "$FM_LEASE_REFUSE_EXIT"
@@ -138,7 +146,11 @@ case "$CMD" in
       win:*) fm_lease_tagged_holder_live "$HOLDER_PID" || HOLDER_PID= ;;
       *[!0-9]*) HOLDER_PID= ;;
     esac
-    LOCK_PID=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
+    # head -n 1 in pure bash: read keeps a torn final line (no trailing
+    # newline) exactly as head does; the pre-set value keeps a missing lock
+    # empty.
+    LOCK_PID=
+    { IFS= read -r LOCK_PID < "$STATE/.lock"; } 2>/dev/null || true
     case "$LOCK_PID" in
       win:*) fm_lease_tagged_holder_live "$LOCK_PID" || LOCK_PID= ;;
       *[!0-9]*) LOCK_PID= ;;
@@ -169,7 +181,7 @@ case "$CMD" in
     fi
     ;;
   release)
-    CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+    fm_lease_actor_to CALLER || exit "$FM_LEASE_REFUSE_EXIT"
     if [ "$ACTOR" != "$CALLER" ]; then
       echo "error: release refused - the $CALLER supervision actor cannot release a lease as $ACTOR on '$TASK'" >&2
       exit "$FM_LEASE_REFUSE_EXIT"
@@ -184,7 +196,7 @@ case "$CMD" in
     printf '%s %s %s %s\n' "${FM_LEASE_ACTOR:-unreadable}" "${FM_LEASE_PID:-0}" "${FM_LEASE_EPOCH:-0}" "$LIVENESS"
     ;;
   release-actor)
-    CALLER=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+    fm_lease_actor_to CALLER || exit "$FM_LEASE_REFUSE_EXIT"
     if [ "$ACTOR" != "$CALLER" ]; then
       echo "error: release-actor refused - the $CALLER supervision actor cannot release leases as $ACTOR" >&2
       exit "$FM_LEASE_REFUSE_EXIT"

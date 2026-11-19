@@ -271,6 +271,23 @@ test_local_done_head_is_pinned_before_parent_delivery() {
   pass 'inactive reconciliation pins local readiness under its existing lock before one parent delivery'
 }
 
+# The metadata and receipt readers are single read loops (last matching key=
+# line wins), so duplicate keys from a torn append must resolve exactly as the
+# grep|tail pipe they replace did: the LAST value is the operative one.
+test_meta_duplicate_keys_read_their_last_value() {
+  make_world meta-dup-kind; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green, risk low'
+  printf 'kind=secondmate\n' >> "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] \
+    || fail 'a meta whose last kind= line says secondmate was reported as an ordinary child'
+  printf 'kind=ship\n' >> "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail 'a meta whose last kind= line says ship was not reported'
+  pass 'duplicate metadata keys read their last value exactly'
+}
+
 # The ledger pass runs on every poll, so a ship done: already delivered does
 # not pay for the git reachability check again.
 test_delivered_ledger_done_skips_git_gate() {
@@ -1332,6 +1349,7 @@ test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery
+test_meta_duplicate_keys_read_their_last_value
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once

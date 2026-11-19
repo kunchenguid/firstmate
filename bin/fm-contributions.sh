@@ -163,8 +163,18 @@
 # jq_lib receives literal jq programs, not shell expressions.
 # shellcheck disable=SC2016
 set -eu
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "$d" && pwd)"
+# The lexical parent of the canonical SCRIPT_DIR is the same directory the
+# subshell cd resolves to, so skip that fork when a slash is present.
+FM_ROOT=${FM_ROOT_OVERRIDE:-}
+case "$FM_ROOT" in
+  '')
+    case "$SCRIPT_DIR" in
+      ?*/*) FM_ROOT=${SCRIPT_DIR%/*} ;;
+      *) FM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd) ;;
+    esac
+    ;;
+esac
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -223,8 +233,8 @@ jq_lib() { # jq options/program via final argument
 }
 
 read_saved() {
-  local file dir task
-  local -a files=() tasks=()
+  local file dir task i start batch=100 batch_no=0 err_count records
+  local -a files=() tasks=() kept_files=() kept_tasks=() sizes=() args=() part=() stat_cmd=()
   ERRORS=0
   if [ -L "$DATA" ]; then
     ERRORS=1; printf '[]\n' > "$TMP/saved.json"; return 0
@@ -233,7 +243,7 @@ read_saved() {
     [ -e "$file" ] || [ -L "$file" ] || continue
     fm_dirname_to dir "$file"
     fm_basename_to task "$dir"
-    if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ] || [ "$(wc -c < "$file")" -gt 1048576 ]; then
+    if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ]; then
       ERRORS=$((ERRORS + 1))
       continue
     fi
@@ -242,28 +252,52 @@ read_saved() {
   # Validate records in bounded jq batches: one process per file outgrows the
   # watcher's check timeout, and one process for all files outgrows ARG_MAX.
   [ "${#files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
-  local batch=100 start n=0
-  local -a args=() part=()
-  for ((start = 0; start < ${#files[@]}; start += batch)); do
-    part=("${tasks[@]:start:batch}")
-    printf '%s\0' "${part[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/tasks.json"
+  # The 1 MiB cap is one batched size read: a single stat names every record's
+  # size in argument order. When a record vanishes mid-read and misaligns the
+  # lines, the per-file fallback keeps the read exact - a record that cannot
+  # be sized has always been a hard read failure, not a quiet error row.
+  stat_cmd=(stat -c %s)
+  [ "$(uname)" != Darwin ] || stat_cmd=(/usr/bin/stat -f %z)
+  readarray -t sizes < <("${stat_cmd[@]}" -- "${files[@]}" 2>/dev/null)
+  if [ "${#sizes[@]}" -ne "${#files[@]}" ]; then
+    sizes=()
+    for i in "${!files[@]}"; do
+      sizes[i]=$(wc -c < "${files[i]}") || fail "could not size contribution record ${files[i]}"
+    done
+  fi
+  for i in "${!files[@]}"; do
+    case "${sizes[i]}" in '' | *[!0-9]*) fail "unreadable size for contribution record ${files[i]}" ;; esac
+    if [ "${sizes[i]}" -gt 1048576 ]; then
+      ERRORS=$((ERRORS + 1))
+      continue
+    fi
+    kept_files+=("${files[i]}"); kept_tasks+=("${tasks[i]}")
+  done
+  [ "${#kept_files[@]}" -gt 0 ] || { printf '[]\n' > "$TMP/saved.json"; return 0; }
+  for ((start = 0; start < ${#kept_files[@]}; start += batch)); do
+    part=("${kept_tasks[@]:start:batch}")
     args=()
-    for i in "${!part[@]}"; do args+=(--rawfile "rec$i" "${files[start + i]}"); done
-    jq -L "$SCRIPT_DIR" -n --slurpfile tasks "$TMP/tasks.json" "${args[@]}" 'include "fm-contributions";
-      [range(0; $tasks[0] | length) as $i
+    for i in "${!part[@]}"; do
+      args+=(--arg "task$i" "${part[i]}" --rawfile "rec$i" "${kept_files[start + i]}")
+    done
+    jq -L "$SCRIPT_DIR" -n --argjson batch_n "${#part[@]}" "${args[@]}" 'include "fm-contributions";
+      [range(0; $batch_n) as $i
         | [try ($ARGS.named["rec\($i)"] | fromjson) catch empty] as $parsed
         | if ($parsed | length) == 1
             and (try ($parsed[0] | valid_record) catch false)
-            and $parsed[0].task == $tasks[0][$i]
+            and $parsed[0].task == $ARGS.named["task\($i)"]
           then $parsed[0] else null end] as $checked
       | {records: [$checked[] | select(. != null)], errors: ($checked | map(select(. == null)) | length)}' \
-      > "$TMP/checked.$n.json"
-    n=$((n + 1))
+      > "$TMP/checked.$batch_no.json"
+    batch_no=$((batch_no + 1))
   done
-  jq -s '{records: (map(.records) | add), errors: (map(.errors) | add)}' "$TMP"/checked.*.json > "$TMP/checked.json"
+  # One merge pass prints the error count and the records array (tojson keeps
+  # it one raw line), so reading both back costs no further jq processes.
+  jq -sr '(map(.errors) | add), (map(.records) | add | tojson)' "$TMP"/checked.*.json > "$TMP/checked.json"
   rm -f "$TMP"/checked.[0-9]*.json
-  ERRORS=$((ERRORS + $(jq '.errors' "$TMP/checked.json")))
-  jq '.records' "$TMP/checked.json" > "$TMP/saved.json"
+  { IFS= read -r err_count && IFS= read -r records; } < "$TMP/checked.json"
+  printf '%s\n' "$records" > "$TMP/saved.json"
+  ERRORS=$((ERRORS + err_count))
 }
 
 get_input() {

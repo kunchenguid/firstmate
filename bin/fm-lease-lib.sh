@@ -148,11 +148,20 @@ fm_lease_home_runs_host() {
 # fm_lease_actor: print the current actor after validating it. Returns 1 (with
 # stderr) for an unknown FM_SUPERVISION_ACTOR value.
 fm_lease_actor() {
-  local actor=${FM_SUPERVISION_ACTOR:-main}
-  case "$actor" in
-    main|branch) printf '%s\n' "$actor" ;;
+  local fm_actor
+  fm_lease_actor_to fm_actor || return 1
+  printf '%s\n' "$fm_actor"
+}
+
+# fm_lease_actor_to <varname>: fm_lease_actor without the print subshell, for
+# the fork-sensitive callers that hold the value in a variable anyway. No
+# local is declared here: printf -v must reach the caller's variable through
+# bash's dynamic scope, and a same-named local would shadow it.
+fm_lease_actor_to() {
+  case "${FM_SUPERVISION_ACTOR:-main}" in
+    main|branch) printf -v "$1" '%s' "${FM_SUPERVISION_ACTOR:-main}" ;;
     *)
-      echo "error: unknown FM_SUPERVISION_ACTOR '$actor' (expected main or branch)" >&2
+      echo "error: unknown FM_SUPERVISION_ACTOR '${FM_SUPERVISION_ACTOR:-main}' (expected main or branch)" >&2
       return 1
       ;;
   esac
@@ -176,17 +185,36 @@ fm_lease_path() {
 # (unreadable actor or pid) reads as actor "" so callers treat it as stale
 # rather than blocking forever on a torn record.
 fm_lease_read() {
-  local file line
-  file=$(fm_lease_path "$1")
+  local file=$1 line rest
+  file="$STATE/.lease-$1"
   FM_LEASE_ACTOR=
   FM_LEASE_PID=
   FM_LEASE_EPOCH=
   [ -e "$file" ] || return 1
-  IFS= read -r line < "$file" 2>/dev/null || line=
-  FM_LEASE_ACTOR=$(printf '%s' "$line" | cut -f1)
-  FM_LEASE_PID=$(printf '%s' "$line" | cut -f2)
-  # shellcheck disable=SC2034 # Consumed by sourcing callers (bin/fm-lease.sh check).
-  FM_LEASE_EPOCH=$(printf '%s' "$line" | cut -f3)
+  line=
+  # A torn final line (no trailing newline) still carries its bytes: read
+  # returns non-zero at that EOF but has already set `line`, exactly the line
+  # head -n 1 prints, so the content is kept and only a failed open reads empty.
+  IFS= read -r line < "$file" 2>/dev/null || true
+  # Split on tabs with cut -fN's exact semantics (this runs once per lease in
+  # release-actor and sweep, so it stays in pure bash): a line with no tab
+  # passes through whole for every field, and a delimited line reads a missing
+  # field as empty. The one-line read above already bounds cut to one line.
+  if [[ $line == *$'\t'* ]]; then
+    FM_LEASE_ACTOR=${line%%$'\t'*}
+    rest=${line#*$'\t'}
+    if [[ $rest == *$'\t'* ]]; then
+      FM_LEASE_PID=${rest%%$'\t'*}
+      FM_LEASE_EPOCH=${rest#*$'\t'}
+    else
+      FM_LEASE_PID=$rest
+      FM_LEASE_EPOCH=
+    fi
+  else
+    FM_LEASE_ACTOR=$line
+    FM_LEASE_PID=$line
+    FM_LEASE_EPOCH=$line
+  fi
   case "$FM_LEASE_ACTOR" in
     main|branch) ;;
     *) FM_LEASE_ACTOR= ;;
@@ -210,7 +238,10 @@ fm_lease_live() {
   fm_lease_read "$1" || return 1
   [ -n "$FM_LEASE_ACTOR" ] || return 1
   [ -n "$FM_LEASE_PID" ] || return 1
-  lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
+  # head -n 1 in pure bash: read keeps a torn final line (no trailing newline)
+  # just as head does, and the pre-set value keeps a missing lock empty.
+  lock_pid=
+  { IFS= read -r lock_pid < "$STATE/.lock"; } 2>/dev/null || true
   # A Windows-tagged holder is outside this process table, so kill -0 cannot
   # see it; the lease is live while it is still the lock holder and that
   # holder is a live verified harness.

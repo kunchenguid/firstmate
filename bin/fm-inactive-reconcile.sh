@@ -155,8 +155,25 @@ reconcile_now() {
   esac
 }
 
-clean_field() {
-  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
+clean_field() { # <value>: tabs, CRs, and newlines read as spaces; first 1200 bytes
+  # (LC_ALL=C, so the substring counts bytes exactly as cut -c did).
+  local v=$1
+  local LC_ALL=C
+  v=${v//$'\t'/ }
+  v=${v//$'\r'/ }
+  v=${v//$'\n'/ }
+  printf '%s\n' "${v:0:1200}"
+}
+
+clean_field_to() { # <varname> <value>: clean_field without the print subshell
+  # No local shares a name a caller could pass: printf -v must reach the
+  # caller's variable through bash's dynamic scope.
+  local fm_v=$2
+  local LC_ALL=C
+  fm_v=${fm_v//$'\t'/ }
+  fm_v=${fm_v//$'\r'/ }
+  fm_v=${fm_v//$'\n'/ }
+  printf -v "$1" '%s' "${fm_v:0:1200}"
 }
 
 valid_id() {
@@ -165,21 +182,49 @@ valid_id() {
 }
 
 sha256_text() {
+  local digest
+  sha256_text_to digest "$1"
+  printf '%s\n' "$digest"
+}
+
+# sha256_text without the print subshell: the hot paths hash several fields
+# per child per poll, so the digest lands in the caller's variable instead.
+# The trailing-field truncation keeps awk's exact semantics: the digest is the
+# first whitespace-delimited field, cut to its first 32 characters.
+sha256_text_to() { # <varname> <text>
+  local fm_sum
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 32)}'
+    fm_sum=$(printf '%s' "$2" | shasum -a 256) || fm_sum=
   elif command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | awk '{print substr($1, 1, 32)}'
+    fm_sum=$(printf '%s' "$2" | sha256sum) || fm_sum=
   else
-    printf '%s' "$1" | cksum | awk '{printf "%08x%08x", $1, $2}'
+    fm_sum=$(printf '%s' "$2" | cksum) || fm_sum=
+    printf -v "$1" '%08x%08x' "${fm_sum%% *}" "${fm_sum##* }"
+    return 0
   fi
+  fm_sum=${fm_sum%% *}
+  printf -v "$1" '%s' "${fm_sum:0:32}"
 }
 
 record_path() { printf '%s/%s.%s\n' "$OUTCOME_DIR" "$1" "$2"; }
 
 record_value() {
-  local record=$1 key=$2
-  [ -f "$record" ] && [ ! -L "$record" ] || return 0
-  grep "^${key}=" "$record" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  local fm_value
+  record_value_to fm_value "$1" "$2"
+  printf '%s\n' "$fm_value"
+}
+
+# record_value without the print subshell: the last "key=" line's value in
+# the caller's variable, empty when the record or the key is absent. The read
+# loop keeps grep|tail|cut's exact "last match wins, everything after the
+# first equals sign" semantics, including unreadable and torn-tail files.
+record_value_to() { # <varname> <record> <key>
+  local fm_record=$2 fm_key=$3 fm_line fm_value=
+  [ -f "$fm_record" ] && [ ! -L "$fm_record" ] || { printf -v "$1" '%s' ''; return 0; }
+  while IFS= read -r fm_line || [ -n "$fm_line" ]; do
+    case "$fm_line" in "$fm_key="*) fm_value=${fm_line#*=} ;; esac
+  done < "$fm_record" 2>/dev/null
+  printf -v "$1" '%s' "$fm_value"
 }
 
 record_phase_set() {
@@ -220,7 +265,7 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
   if [ -f "$RECORD_PENDING" ] && [ ! -L "$RECORD_PENDING" ]; then
     return 0
   fi
-  mkdir -p "$OUTCOME_DIR" || return 1
+  [ -d "$OUTCOME_DIR" ] || mkdir -p "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   tmp=$(mktemp "$OUTCOME_DIR/.pending.XXXXXX") || return 1
   {
@@ -249,9 +294,15 @@ mark_reported() { # <record>
 }
 
 queue_key_exists() { # <key>
-  local key=$1 queued
+  local key=$1 queued k
   queued=$(fm_wake_queued_keys check 2>/dev/null || true)
-  printf '%s\n' "$queued" | grep -Fx -- "$key" >/dev/null 2>&1
+  # grep -Fx in pure bash: an exact whole-line compare per queued key.
+  while IFS= read -r k; do
+    [ "$k" = "$key" ] && return 0
+  done <<QUEUED_KEYS
+$queued
+QUEUED_KEYS
+  return 1
 }
 
 publish_actionable() { # <key> <payload>
@@ -263,7 +314,7 @@ publish_actionable() { # <key> <payload>
 
 queue_notice_once() { # <record> <key> <payload>
   local record=$1 key=$2 payload=$3 notified rc=0
-  notified=$(record_value "$record" notice_emitted)
+  record_value_to notified "$record" notice_emitted
   [ "$notified" = 1 ] && return 1
   publish_actionable "$key" "$payload" || rc=$?
   if [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]; then
@@ -300,8 +351,12 @@ scan_marker_age() {
 }
 
 scan_marker_cursor() {
+  local line value=
   [ -f "$SCAN_MARKER" ] && [ ! -L "$SCAN_MARKER" ] || return 0
-  grep '^cursor=' "$SCAN_MARKER" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in cursor=*) value=${line#*=} ;; esac
+  done < "$SCAN_MARKER" 2>/dev/null
+  printf '%s\n' "$value"
 }
 
 write_scan_marker() { # <cursor>
@@ -316,21 +371,37 @@ write_scan_marker() { # <cursor>
 }
 
 meta_field() {
-  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  local fm_value
+  meta_field_to fm_value "$1" "$2"
+  printf '%s\n' "$fm_value"
+}
+
+# meta_field without the print subshell: the last "key=" line's value in the
+# caller's variable, empty when the meta or the key is absent. This reader runs
+# several times per child per poll, so it stays a single read loop.
+meta_field_to() { # <varname> <meta> <key>
+  local fm_meta=$2 fm_key=$3 fm_line fm_value=
+  while IFS= read -r fm_line || [ -n "$fm_line" ]; do
+    case "$fm_line" in "$fm_key="*) fm_value=${fm_line#*=} ;; esac
+  done < "$fm_meta" 2>/dev/null
+  printf -v "$1" '%s' "$fm_value"
 }
 
 meta_incarnation() { # <meta>
-  local meta=$1 incarnation identity
-  incarnation=$(meta_field "$meta" spawn_gen)
+  local meta=$1 incarnation identity window worktree
+  meta_field_to incarnation "$meta" spawn_gen
   if valid_id "$incarnation"; then
     printf '%s\n' "$incarnation"
     return
   fi
-  identity=$(meta_field "$meta" tasktmp)
+  meta_field_to identity "$meta" tasktmp
   if [ -z "$identity" ]; then
-    identity="$(meta_field "$meta" window)|$(meta_field "$meta" worktree)"
+    meta_field_to window "$meta" window
+    meta_field_to worktree "$meta" worktree
+    identity="$window|$worktree"
   fi
-  printf 'legacy-%s\n' "$(sha256_text "$identity")"
+  sha256_text_to identity "$identity"
+  printf 'legacy-%s\n' "$identity"
 }
 
 # Parse the canonical state line described by this script's header.
@@ -418,15 +489,17 @@ terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
 # delivery.
 # A scout never delivers a PR, so it never carries one.
 pr_for_task() { # <meta> [preferred-line]
-  local meta=$1 preferred=${2:-} value
-  [ "$(meta_field "$meta" kind)" != scout ] || return 0
-  value=$(meta_field "$meta" pr)
+  local meta=$1 preferred=${2:-} value kind
+  meta_field_to kind "$meta" kind
+  [ "$kind" != scout ] || return 0
+  meta_field_to value "$meta" pr
   if [ -z "$value" ] && [ -n "$preferred" ]; then
     value=$(printf '%s\n' "$preferred" \
       | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?(; asks [0-9]+/[0-9]+)?$|\2|p' \
       | head -1 || true)
   fi
-  clean_field "$value"
+  clean_field_to value "$value"
+  printf '%s\n' "$value"
 }
 
 home_secondmate_id() {
@@ -459,16 +532,29 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 # terminal record whose continuation prose trails it, and an unfinished line of
 # ordinary prose withholds nothing.
 child_terminal_ledger_line() { # <status>
-  local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
-  [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
-  last=$(last_status_line "$status")
-  case "$(status_line_verb "$last")" in done|failed) ;; *) return 1 ;; esac
-  snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
-  case "$snapshot" in
-    *$'\n'"$marker") ;;
-    "$last$marker"|*$'\n'"$last$marker") return 2 ;;
+  local fm_line
+  child_terminal_ledger_line_to fm_line "$1" || return $?
+  printf '%s\n' "$fm_line"
+}
+
+# child_terminal_ledger_line without the print subshell. The snapshot read is
+# a single read of the whole file in place of `cat` into a subshell: the file
+# bytes land verbatim before the marker (the marker shields the file's own
+# trailing newline from the command substitution that used to wrap this, so
+# only a genuinely unterminated terminal line reads as still being appended).
+child_terminal_ledger_line_to() { # <varname> <status>
+  local fm_status=$2 fm_last fm_snapshot fm_marker='__FM_LEDGER_SNAPSHOT_END__'
+  [ -f "$fm_status" ] && [ ! -L "$fm_status" ] && [ -s "$fm_status" ] || return 1
+  fm_last=$(last_status_line "$fm_status")
+  case "$(status_line_verb "$fm_last")" in done|failed) ;; *) return 1 ;; esac
+  fm_snapshot=
+  IFS= read -r -d '' fm_snapshot < "$fm_status" 2>/dev/null || true
+  fm_snapshot="$fm_snapshot$fm_marker"
+  case "$fm_snapshot" in
+    *$'\n'"$fm_marker") ;;
+    "$fm_last$fm_marker"|*$'\n'"$fm_last$fm_marker") return 2 ;;
   esac
-  printf '%s\n' "$last"
+  printf -v "$1" '%s\n' "$fm_last"
 }
 
 # Claim one already-delivered inactive fallback as the delivery of this ledger
@@ -477,16 +563,20 @@ child_terminal_ledger_line() { # <status>
 # without that lock. The claim stores the exact ledger fingerprint: a retry of
 # this event stays suppressed, while a later terminal line remains a new event.
 claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fingerprint> <predecessor-head>
-  local task=$1 incarnation=$2 state=$3 ledger_fingerprint=$4 predecessor_head=$5 record key claim
+  local task=$1 incarnation=$2 state=$3 ledger_fingerprint=$4 predecessor_head=$5 record key claim value
   for record in "$OUTCOME_DIR"/*.reported; do
     [ -f "$record" ] && [ ! -L "$record" ] || continue
-    [ "$(record_value "$record" task_id)" = "$task" ] || continue
-    [ "$(record_value "$record" incarnation)" = "$incarnation" ] || continue
-    [ "$(record_value "$record" state)" = "$state" ] || continue
-    key=$(record_value "$record" outcome_key)
+    record_value_to value "$record" task_id
+    [ "$value" = "$task" ] || continue
+    record_value_to value "$record" incarnation
+    [ "$value" = "$incarnation" ] || continue
+    record_value_to value "$record" state
+    [ "$value" = "$state" ] || continue
+    record_value_to key "$record" outcome_key
     case "$key" in inactive-outcome-*) ;; *) continue ;; esac
-    [ "$(record_value "$record" status_head)" = "$predecessor_head" ] || continue
-    claim=$(record_value "$record" ledger_claim)
+    record_value_to value "$record" status_head
+    [ "$value" = "$predecessor_head" ] || continue
+    record_value_to claim "$record" ledger_claim
     if [ "$claim" = "$ledger_fingerprint" ]; then
       return 0
     fi
@@ -502,25 +592,30 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data kind worktree project incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
-  last=$(child_terminal_ledger_line "$status") || return 0
+  child_terminal_ledger_line_to last "$status" || return 0
   state=$(status_line_verb "$last")
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
-  fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
+  sha256_text_to fingerprint "$incarnation|$id|$state|ledger|$last"
   if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \
     && [ ! -f "$(record_path "$fingerprint" pending)" ] \
-    && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
-      "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
-      "$STATE" "$id" "$meta" meta-locked >/dev/null; then
+    && ! {
+      meta_field_to kind "$meta" kind
+      meta_field_to mode "$meta" mode
+      meta_field_to worktree "$meta" worktree
+      meta_field_to project "$meta" project
+      fm_dod_accept_ship_done "$kind" "$mode" "$worktree" "$project" "$last" \
+        "$STATE" "$id" "$meta" meta-locked >/dev/null
+    }; then
     return 0
   fi
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   last_status_line "$status" previous >/dev/null
-  predecessor_head=$(sha256_text "$previous")
+  sha256_text_to predecessor_head "$previous"
   if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
     # The fallback line is already on the parent channel. This reported ledger
     # receipt records that its richer rendering owes no second publication.
@@ -530,8 +625,10 @@ report_child_ledger_locked() { # <id> <meta>
     return 1
   fi
   note=$(clean_field "$(status_line_note "$last")")
-  mode=$(clean_field "$(meta_field "$meta" mode)")
-  yolo=$(clean_field "$(meta_field "$meta" yolo)")
+  meta_field_to mode "$meta" mode
+  clean_field_to mode "$mode"
+  meta_field_to yolo "$meta" yolo
+  clean_field_to yolo "$yolo"
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
   line="$state [key=$outcome_key]: child $id $state: $note"
   [ -z "$pr" ] || line="$line pr=$pr"
@@ -554,16 +651,21 @@ report_child_ledger_locked() { # <id> <meta>
 # runs on every poll in a secondmate home; a delivery failure is already queued as a
 # notice and never fails the scan.
 ledger_pass() {
-  local meta id lock
+  local meta id lock kind
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
+    id=${meta##*/}
+    id=${id%.meta}
     valid_id "$id" || continue
-    [ "$(meta_field "$meta" kind)" != secondmate ] || continue
+    meta_field_to kind "$meta" kind
+    [ "$kind" != secondmate ] || continue
     lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$lock" || continue
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
-      || [ "$(meta_field "$meta" kind)" = secondmate ]; then
+      || {
+        meta_field_to kind "$meta" kind
+        [ "$kind" = secondmate ]
+      }; then
       fm_lock_release "$lock"
       continue
     fi
@@ -574,20 +676,22 @@ ledger_pass() {
 
 # The `report <task-id>` entry point: the caller holds the child's meta lock.
 report_child() { # <id>
-  local id=$1 meta rc=0
-  mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
+  local id=$1 meta rc=0 kind
+  [ -d "$STATE" ] || mkdir -p "$STATE" || return 1
+  [ -d "$OUTCOME_DIR" ] || mkdir -p "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   home_secondmate_id >/dev/null || { rc=$?; [ "$rc" -eq 1 ] && return 0; return 1; }
   meta="$STATE/$id.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  [ "$(meta_field "$meta" kind)" != secondmate ] || return 0
+  meta_field_to kind "$meta" kind
+  [ "$kind" != secondmate ] || return 0
   report_child_ledger_locked "$id" "$meta"
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 status_head
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  kind=$(meta_field "$meta" kind)
+  meta_field_to kind "$meta" kind
   [ "$kind" = secondmate ] && return 0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
@@ -621,12 +725,13 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   # fresh parent event per sentence. The last line stays in the record as
   # status_head evidence.
   fingerprint=$(sha256_text "$incarnation|$id|$state|$pr")
+  sha256_text_to status_head "$last"
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else
     outcome_key="inactive-outcome-main-$id-$state"
   fi
-  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
+  ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$status_head" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
@@ -661,7 +766,8 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
   local cursor=$1 range=$2 deadline=$3 self=${4:-} meta id remaining rc first
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    id=$(basename "$meta" .meta)
+    id=${meta##*/}
+    id=${id%.meta}
     valid_id "$id" || continue
     case "$range" in
       after) [ -z "$cursor" ] || [[ "$id" > "$cursor" ]] || continue ;;
@@ -691,7 +797,8 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 
 scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
-  mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
+  [ -d "$STATE" ] || mkdir -p "$STATE" || return 1
+  [ -d "$OUTCOME_DIR" ] || mkdir -p "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
@@ -731,7 +838,7 @@ acknowledge() { # <fingerprint>
   pending=$(record_path "$fingerprint" pending)
   presented=$(record_path "$fingerprint" presented)
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
-  phase=$(record_value "$pending" phase)
+  record_value_to phase "$pending" phase
   [ "$phase" = presentation ] || return 0
   mv -f "$pending" "$presented"
 }
