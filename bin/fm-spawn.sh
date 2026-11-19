@@ -4928,6 +4928,8 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
 # a live pane. The authoritative mutation still runs under the meta lock below.
 BACKLOG_TRANSITION=0
 BACKLOG_ROW_STATE=
+BACKLOG_DISPATCH_MODE=
+[ "$RELAUNCH" -ne 1 ] || BACKLOG_DISPATCH_MODE=relaunch
 if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
   BACKLOG_TRANSITION=1
   if fm_backlog_row_probe "$DATA" "$ID"; then
@@ -4945,7 +4947,7 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
       echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only queued unblocked work (already queued, or filed by the branch from the captain's away words); task $ID has no dispatchable backlog item in this home" >&2
       exit 1
     fi
-  elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE" "$([ "$RELAUNCH" -eq 1 ] && echo relaunch)"; then
+  elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE" "$BACKLOG_DISPATCH_MODE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi
@@ -7460,7 +7462,7 @@ fi
 spawn_commit_backlog_transition() {
   [ "$BACKLOG_TRANSITION" = 1 ] || return 0
   fm_backlog_atomic_transition dispatch "$STATE/$ID.meta" "$DATA" "$ID" "$STATE" \
-    "$([ "$RELAUNCH" -eq 1 ] && echo relaunch)"
+    "$BACKLOG_DISPATCH_MODE"
 }
 
 # The deferred-signal exit path's preservation report. A claim about preserved
@@ -7485,7 +7487,7 @@ spawn_report_preserved_state() {
     return 1
   fi
   if [ "${FM_BACKLOG_ROW_STATE%% *}" = in_flight ] &&
-    fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE" "$([ "$RELAUNCH" -eq 1 ] && echo relaunch)"; then
+    fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE" "$BACKLOG_DISPATCH_MODE"; then
     SPAWN_PRESERVED_CLAIM="verified preserved: its paired task record is present and its backlog item is In flight"
     return 0
   fi
