@@ -1077,13 +1077,16 @@ make_agent_free_pane() {  # <case-dir>
 #!/usr/bin/env bash
 case "\$*" in *pane_current_command*) printf 'zsh\n'; exit 0 ;; esac
 if [ "\${1:-}" = send-keys ]; then
-  printf '%s\n' "\$*" >> "$fakebin/send-keys.log"
   if [ "\${4:-}" = -l ] && [ "\${5:0:2}" = ". " ]; then
     launch_path=\${5#. }
     launch_path=\${launch_path#\'}
     launch_path=\${launch_path%\'}
-    if [ -r "\$launch_path" ]; then launch_state=readable; else launch_state=missing; fi
-    printf '%s %s\n' "\$launch_state" "\$launch_path" >> "$fakebin/launch-files.log"
+    if [ -f "\$launch_path" ] && [ -r "\$launch_path" ]; then launch_state=readable; else launch_state=missing; fi
+    printf 'SOURCE %s %s %s\n' "\$3" "\$launch_state" "\$launch_path" >> "$fakebin/send-keys.log"
+  elif [ "\${4:-}" = Enter ]; then
+    printf 'ENTER %s\n' "\$3" >> "$fakebin/send-keys.log"
+  else
+    printf 'OTHER %s\n' "\$*" >> "$fakebin/send-keys.log"
   fi
 fi
 exec "$fakebin/tmux.real" "\$@"
@@ -1114,12 +1117,10 @@ test_relaunch_of_a_held_in_flight_row_keeps_the_hold() {
   [ -n "$endpoint" ] || fail "fixture recorded no endpoint for $id"
   new_gen=$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta" | head -1)
   [ -n "$new_gen" ] && [ "$new_gen" != "$old_gen" ] || fail "relaunch did not publish a new spawn generation"
-  source_line=$(grep -n -F -- "send-keys -t $endpoint -l . " "$case_dir/fakebin/send-keys.log" | grep -F "launch.$new_gen.sh" | head -1 | cut -d: -f1)
-  enter_line=$(grep -n -x -F -- "send-keys -t $endpoint Enter" "$case_dir/fakebin/send-keys.log" | tail -1 | cut -d: -f1)
-  grep -Eq -- "^readable /.*/launch\\.$new_gen\\.sh$" "$case_dir/fakebin/launch-files.log" 2>/dev/null \
-    || fail "relaunch submitted no readable staged launch file for generation $new_gen"
-  { [ -n "$source_line" ] && [ -n "$enter_line" ] && [ "$source_line" -lt "$enter_line" ]; } \
-    || fail "relaunch did not source its launch file then press Enter at endpoint $endpoint"
+  source_line=$(grep -n -E -- "^SOURCE $endpoint readable /.*/launch\\.$new_gen\\.sh$" "$case_dir/fakebin/send-keys.log" | head -1 | cut -d: -f1)
+  [ -n "$source_line" ] || fail "relaunch sourced no readable launch file for generation $new_gen at endpoint $endpoint"
+  tail -n +"$((source_line + 1))" "$case_dir/fakebin/send-keys.log" | grep -qx -- "ENTER $endpoint" \
+    || fail "relaunch did not press Enter at endpoint $endpoint after sourcing its launch file"
   after=$(cat "$(backlog_of "$case_dir")")
   [ "$before" = "$after" ] || fail "relaunch changed the held backlog row"
   pass "relaunch of a held In-flight row succeeds and keeps the hold unchanged"
