@@ -68,10 +68,8 @@ This touches only the firstmate repo and its own worktrees, never anything under
    This is automatic and needs no per-mate confirmation from the captain.
    Local and remote mates go in the same list; the command owns the transport, the profile each replacement runs on, and the wait.
 
-   It asks every listed mate first to write down the open work it holds only in its conversation, and restarts one only after that mate's own answer comes back.
-   A mate that is mid-turn queues the request behind that turn.
-   That is the whole point of the step, so do not work around it: it is what keeps a captain call the mate had formed but never registered from being lost with the conversation.
-   Its header owns the request, the bound, and the two knobs that change them.
+   The command's [header](../../../bin/fm-secondmate-restart.sh) owns durable-checkpoint restart, quiet-session eligibility, and the optional cooperative conversation sweep.
+   Default restart does not require a mate response; the replacement reconciles durable records at startup.
 
    Read its per-mate lines and its closing `summary:` line as the outcome:
    - `restarted: <id>` - that mate is now genuinely running the current instructions and launch-time settings.
@@ -104,6 +102,6 @@ This touches only the firstmate repo and its own worktrees, never anything under
   It is the same sanctioned self-write as the fleet sync.
 - **Nothing with work in it is disrupted.**
   A local or remote second mate gets a tracked-files fast-forward only when its own checkout is safe to advance, and a mate whose home was skipped is not restarted either.
-  A restart replaces that mate's agent in the same home and endpoint after its open work is written down; it is never a teardown and never forced.
+  A restart replaces that mate's agent in the same home and endpoint after the control plane checkpoints its durable records; it is never a teardown and never resets or removes unlanded work.
   Its crewmates keep running in their own endpoints, and every durable record - backlog, held captain calls, unread status, unhandled instructions - is re-presented to the replacement at startup.
   A restart refused before it is attempted leaves that mate on the re-read path; once a relaunch is attempted, any failed or ambiguous result is reported as unknown rather than attributed to either incarnation.

@@ -4,10 +4,13 @@
 #
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
-#        fm-control.sh <task-id> relaunch [--reason <class>] [--harness <name>] [--model <name>]
+#        fm-control.sh <task-id> relaunch [--quiet] [--reason <class>] [--harness <name>] [--model <name>]
 #                                         [--effort <level>] [--account <id>]
 #                                         [--priority <1-99>]
 #                                         (--note <text> | --note-file <path>)
+# --quiet: secondmate-only fresh session; requires idle and an empty composer at
+# the stop boundary, never interrupts a turn. The durable checkpoint is written
+# before stopping; all local changes, child work and inbox records stay in place.
 # --reason: capability | infra | usage-limit | captain | unknown.
 # Omitted reason records unknown, never inferred from the free-text note.
 # Successful replacements append history (fm-task-history.sh owns its format);
@@ -227,6 +230,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-account-lib.sh
@@ -322,6 +327,7 @@ NOTE=
 NOTE_SET=0
 PRIORITY=
 PRIORITY_SET=0
+QUIET=0
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -346,6 +352,7 @@ for control_arg in "$@"; do
     continue
   fi
   case "$control_arg" in
+    --quiet) QUIET=1 ;;
     --reason) control_want_value=reason ;;
     --reason=*) RELAUNCH_REASON=${control_arg#--reason=}; REASON_SET=1 ;;
     --harness) control_want_value=harness ;;
@@ -376,8 +383,8 @@ fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    && [ "$PRIORITY_SET" = 0 ] && [ "$ACCOUNT_SET" = 0 ] && [ "$REASON_SET" = 0 ] \
-    || die "--harness, --model, --effort, --account, --priority, --reason, and --note apply to 'relaunch' only"
+    && [ "$PRIORITY_SET" = 0 ] && [ "$ACCOUNT_SET" = 0 ] && [ "$REASON_SET" = 0 ] && [ "$QUIET" = 0 ] \
+    || die "--quiet, --harness, --model, --effort, --account, --priority, --reason, and --note apply to 'relaunch' only"
 fi
 case "$RELAUNCH_REASON" in
   capability|infra|usage-limit|captain|unknown) ;;
@@ -788,7 +795,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
+  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog rec line
   require_state_verified_backend exit
   fm_control_backend_exit_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, whose T3 Orchestrator V2 tools have no session stop, so 'exit' cannot stop its agent; 'interrupt' ends the running turn and teardown archives the thread"
@@ -836,8 +843,14 @@ do_exit() {
       esac
       ;;
   esac
+  # Recheck at the actual stop boundary, after admission/checkpoint work.
+  verdict=$(busy_verdict)
+  if [ "$QUIET" = 1 ]; then
+    [ "$KIND" = secondmate ] || die '--quiet is secondmate-only'
+    [ "${verdict%% *}" = idle ] || die "quiet restart deferred: task $ID is not proven idle"
+  fi
   # A busy agent is interrupted first before the exit command is submitted.
-  case "$(busy_verdict)" in
+  case "$verdict" in
     busy*)
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
@@ -868,6 +881,21 @@ do_exit() {
     dialog=$(cat "$FM_COMPOSER_DIALOG_SINK")
     refuse_blocking_prompt "$dialog"
   fi
+  # A doorbell left typed in a new-session composer is recoverable without
+  # asking the mate to submit it. Only an exact durable inbox doorbell may be
+  # cleared, and the record itself stays unread for the replacement to drain.
+  if [ "$composer_state" = pending ] && [ "$KIND" = secondmate ] && [ "$QUIET" = 0 ]; then
+    for rec in "$STATE/$ID.inbox"/*.msg; do
+      [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+      line=$(fm_task_inbox_doorbell_line "$rec") || continue
+      if fm_task_inbox_composer_holds "$BACKEND" "$T" "$line" "$LABEL"; then
+        fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
+          || die "could not clear task $ID's durable doorbell"
+        composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) || composer_state=unknown
+        break
+      fi
+    done
+  fi
   case "$composer_state" in
     empty) ;;
     pending)
@@ -888,6 +916,10 @@ do_exit() {
   # interacting with the typed submit verification. A Ctrl-C over leftover
   # composer text only clears it, so Ctrl-U clears the composer first and one
   # more Ctrl-C follows if the agent is still alive.
+  if [ "$QUIET" = 1 ]; then
+    verdict=$(busy_verdict)
+    [ "${verdict%% *}" = idle ] || die "quiet restart deferred: task $ID is no longer proven idle"
+  fi
   case "$cmd" in
     C-c)
       fm_backend_send_key "$BACKEND" "$T" C-u "$LABEL" \
@@ -1174,7 +1206,7 @@ resolve_relaunch_profile() {
 # refuses outright when any of it cannot be established.
 CHECKPOINT_LINES=()
 safe_checkpoint() {
-  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta
+  local wt_real wt_top wt_top_real head head_ref head_ref_status status_output dirty children marker child_meta checkpoint
   CHECKPOINT_LINES=()
   [ -n "$WT" ] || die "task $ID has no recorded worktree; refusing to relaunch without a recorded local copy to preserve"
   [ -d "$WT" ] || die "task $ID's recorded worktree $WT is missing; refusing to relaunch and lose track of its work"
@@ -1230,7 +1262,29 @@ safe_checkpoint() {
       fi
       children=$((children + 1))
     done
-    CHECKPOINT_LINES+=("children=$children")
+    # Script-owned recovery inventory, containing references, never file bodies
+    # or credentials. The checkpoint is write-ahead and survives a failed stop.
+    # No child record, worktree, commit, draft, or pending instruction is moved.
+    [ ! -L "$WT/state/.secondmate-restart-checkpoint" ] || die 'recovery inventory is a symlink'
+    if [ -e "$WT/state/.secondmate-restart-checkpoint" ] && [ ! -f "$WT/state/.secondmate-restart-checkpoint" ]; then
+      die 'recovery inventory is not a regular file'
+    fi
+    checkpoint=$(mktemp "$WT/state/.secondmate-restart-checkpoint.XXXXXX") \
+      || die 'could not persist secondmate recovery inventory'
+    if ! {
+      printf 'head=%s\ndirty=%s\nchildren=%s\n' "$head" "$dirty" "$children"
+      printf 'Recovery: reconcile state/*.meta, state/*.inbox, state/*.status, data/charter.md, data/goals and data/backlog.md before starting new work.\n'
+      printf 'Existing harness session history and all unlanded work remain in place; no conversation sweep was required.\n'
+      for child_meta in "$WT/state"/*.meta; do
+        [ -f "$child_meta" ] || continue
+        printf 'record=%s\n' "${child_meta##*/}"
+      done
+    } > "$checkpoint"; then
+      die 'could not write secondmate recovery inventory'
+    fi
+    mv -f -- "$checkpoint" "$WT/state/.secondmate-restart-checkpoint" \
+      || die 'could not publish secondmate recovery inventory'
+    CHECKPOINT_LINES+=("children=$children" "recovery_inventory=$WT/state/.secondmate-restart-checkpoint")
   fi
 }
 
@@ -1276,6 +1330,7 @@ do_relaunch() {
   local dispatch_gate_brief dispatch_gate_account dispatch_gate_out token_seat token_store token_env
   local -a spawn_args admission_args relaunch_account_stores quota_gate_args dispatch_gate_args
 
+  [ "$QUIET" = 0 ] || [ "$KIND" = secondmate ] || die '--quiet is secondmate-only'
   require_state_verified_backend relaunch
   fm_control_backend_relaunch_supported "$BACKEND" \
     || die "task $ID runs on the $BACKEND backend, where a thread keeps its conversation and a new turn or provider change continues the same agent, so no fresh replacement can be launched into its endpoint; 'interrupt' ends its turn, and a fresh task needs a teardown and a new dispatch"

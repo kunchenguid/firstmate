@@ -1469,6 +1469,10 @@ if [ "$REEMIT" -eq 1 ]; then
 else
   section "NEXT STEP"
   print_next_step
+  if [ -f "$FM_HOME/.fm-secondmate-home" ] && [ -f "$STATE/.secondmate-restart-checkpoint" ] \
+    && [ ! -L "$STATE/.secondmate-restart-checkpoint" ]; then
+    printf '\nFresh-session recovery: read state/.secondmate-restart-checkpoint, then reconcile the durable records it names before dispatching new work.\n'
+  fi
 fi
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then

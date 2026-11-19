@@ -939,7 +939,7 @@ The guard submits no prompt and spends no tokens, so it runs by default wherever
 
 ## Secondmate busy contract
 
-Live no-prompt guard refreshed 2026-11-03 with Claude Code 2.1.317, OpenCode 1.19.5, Pi 0.86.1, and codex-cli 0.166.0.
+Live no-prompt guard refreshed 2026-11-18 with Claude Code 2.1.327, OpenCode 1.19.5, Pi 0.86.1, and codex-cli 0.166.0.
 The separate Claude Stop-hook probe below dates to 2026-09-22.
 
 A tmux-backed secondmate's active-turn gate reads the parent home's semantic busy record.
@@ -979,11 +979,11 @@ bash bin/fm-test-run.sh tests/fm-secondmate-busy-contract-live-e2e.test.sh
 ```
 
 ```text
-# claude 2.1.317 (Claude Code): real process stayed up; pane tail classify=busy fm-spawn
-ok - claude 2.1.317 (Claude Code): a tmux secondmate spawn arms a busy verdict the active-turn gate can see
+# claude 2.1.327 (Claude Code): real process stayed up; pane tail classify=busy fm-spawn
+ok - claude 2.1.327 (Claude Code): a tmux secondmate spawn arms a busy verdict the active-turn gate can see
 # opencode 1.19.5: real process stayed up; pane tail classify=busy fm-spawn
 ok - opencode 1.19.5: a tmux secondmate spawn arms a busy verdict the active-turn gate can see
-# pi 0.86.1: real process stayed up; pane tail classify=unknown launch-prompt
+# pi 0.86.1: real process stayed up; pane tail classify=busy fm-spawn
 ok - pi 0.86.1: a tmux secondmate spawn arms a busy verdict the active-turn gate can see
 # skip: pi-signed is not installed on this machine, so its secondmate busy contract is unverified here
 # skip: omp is not installed on this machine, so its secondmate busy contract is unverified here
@@ -993,8 +993,8 @@ ok - codex codex-cli 0.166.0: secondmate spawn stays unarmed and does not emit a
 ok - secondmate busy contract live guard checked every installed harness
 ```
 
-Pi's real parked pane classified `unknown launch-prompt`.
-That is the launch-prompt backstop: the same spawn's record classified `busy fm-spawn` for a non-prompt mid-turn tail, which is what the active-turn gate reads while a turn is in progress.
+Pi's real parked pane classified `busy fm-spawn` in this sample.
+The active-turn gate reads that semantic record rather than inferring idleness from an empty composer.
 
 ## Codex hook trust
 

@@ -1030,7 +1030,7 @@ test_goal_idle_health() (
   mkdir -p "$w/state/mate.inbox" "$w/bin"
   # shellcheck disable=SC2030 # This fixture deliberately owns a subshell home.
   export FM_HOME=$w STATE=$w/state FM_SM_HEALTH_DIR=$w/bin
-  export FM_HEALTH_TEST_CALLS=$w/calls
+  export FM_HEALTH_TEST_CALLS=$w/calls FM_SECONDMATE_FRESH_SECS=0
   fm_write_meta "$STATE/mate.meta" kind=secondmate window=s:fm-mate backend=tmux harness=pi
   printf 'working [at=1]: ready\n' > "$STATE/mate.status"
   rows=$'goal\titem\tmate\t-\t0'
@@ -1090,6 +1090,30 @@ test_goal_idle_health() (
   fm_secondmate_health_observe "$id" "$rows" 9800
   [ "$(wc -l < "$w/calls" | tr -d ' ')" = 3 ] || fail 'declared wait was interrupted'
   pass 'goal health: 30m ring, second-miss confirmed restart, no repeats, progress reset and fail-closed runtime/composer guards'
+
+  # No startable goal is required for proactive fresh sessions. Time makes an
+  # idle session eligible but never overrides busy, unknown, drafts or waits.
+  export FM_SECONDMATE_FRESH_SECS=100
+  printf 'working [at=4]: ready\n' > "$STATE/mate.status"
+  composer=empty
+  fm_secondmate_health_observe "$id" '' 10000
+  busy=busy
+  fm_secondmate_health_observe "$id" '' 10100
+  busy=unknown
+  fm_secondmate_health_observe "$id" '' 10101
+  busy=idle; composer=pending
+  fm_secondmate_health_observe "$id" '' 10102
+  composer=unknown
+  fm_secondmate_health_observe "$id" '' 10103
+  [ "$(wc -l < "$w/calls" | tr -d ' ')" = 3 ] || fail 'fresh restart ignored safety signals'
+  composer=empty
+  fm_secondmate_health_observe "$id" '' 10104
+  fm_secondmate_health_observe "$id" '' 10105
+  [ "$(grep -c fm-secondmate-restart.sh "$w/calls")" = 2 ] || fail 'fresh restart did not run exactly once at quiet moment'
+  printf 'paused [at=5]: wait\n' > "$STATE/mate.status"
+  fm_secondmate_health_observe "$id" '' 10300
+  [ "$(grep -c fm-secondmate-restart.sh "$w/calls")" = 2 ] || fail 'fresh restart interrupted declared wait'
+  pass 'fresh sessions: goal-independent, clock bounded, idle and empty only, no repeat, waits preserved'
 )
 test_goal_idle_health
 

@@ -33,12 +33,14 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
 
 RESTART="$ROOT/bin/fm-secondmate-restart.sh"
+# Retain coverage of the optional cooperative sweep alongside durable default.
+export FM_SECONDMATE_RESTART_MODE=cooperative
 
 fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-restart)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 't3_fake_stop; rm -rf -- "$TMP_ROOT"' EXIT
+trap 't3_fake_stop; fm_test_remove_tree "$TMP_ROOT"' EXIT
 
 # A session-provider stub that models the two things this pass depends on: the
 # harness exit command stops the agent, a launch brief starts the replacement,
@@ -104,6 +106,7 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ "$payload" = C-u ]; then rm -f "$D/composer"; fi
     fi
     exit 0 ;;
   display-message)
@@ -121,7 +124,15 @@ case "${1:-}" in
       prev=$a
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    if [ -f "$D/composer" ]; then
+      content=$(cat "$D/composer")
+      border=${content//?/─}
+      printf '╭─%s─╮\n│ %s │\n╰─%s─╯\n' "$border" "$content" "$border"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
@@ -810,7 +821,7 @@ test_unpublished_worker_result_is_accounted_for() {
   driver=$!
   result_dir=
   i=0
-  while [ "$i" -lt 200 ]; do
+  while [ "$i" -lt 2000 ]; do
     result_dir=$(find "$dir/home/state" -maxdepth 1 -type d -name '.secondmate-restart.*' -print -quit)
     [ -e "$dir/fake/remote-relaunch-start" ] && [ -n "$result_dir" ] && break
     /bin/sleep 0.01
@@ -1012,6 +1023,119 @@ w = { tokens: [],
   pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
 }
 
+test_durable_default_needs_no_answer() {
+  local dir out rc before
+  dir=$(new_case durable-default)
+  add_local_mate "$dir" sm1
+  printf 'unlanded draft\n' > "$dir/sm1-home/draft.txt"
+  printf 'kind=ship\nworktree=/still-running\n' > "$dir/sm1-home/state/child.meta"
+  mkdir -p "$dir/sm1-home/state/child.inbox"
+  printf 'unread instruction\n' > "$dir/sm1-home/state/child.inbox/001.msg"
+  before=$(git -C "$dir/sm1-home" rev-parse HEAD)
+  out=$(FM_SECONDMATE_RESTART_MODE=durable run_restart "$dir" sm1); rc=$?
+  expect_code 0 "$rc" "durable restart must not wait for an unresponsive mate: $out"
+  assert_contains "$out" 'restarted: sm1' 'durable restart did not complete'
+  assert_absent "$dir/home/state/pending-replies" 'durable restart must not create a reply expectation'
+  [ "$(cat "$dir/sm1-home/draft.txt")" = 'unlanded draft' ] || fail 'draft changed'
+  [ "$(git -C "$dir/sm1-home" rev-parse HEAD)" = "$before" ] || fail 'HEAD changed'
+  [ -f "$dir/sm1-home/state/child.inbox/001.msg" ] || fail 'unread child work lost'
+  grep -q 'record=child.meta' "$dir/sm1-home/state/.secondmate-restart-checkpoint" || fail 'child not inventoried before restart'
+  grep -q 'recovery_inventory=' "$dir/home/state/sm1.control-relaunch" || fail 'checkpoint not journalled'
+  pass 'durable default: no model cooperation, durable inventory, unlanded work and child inbox preserved'
+}
+
+test_quiet_restart_is_fail_closed() {
+  local dir out rc gen
+  dir=$(new_case quiet-default)
+  add_local_mate "$dir" sm1
+  out=$(FM_SECONDMATE_RESTART_MODE=durable run_restart "$dir" --quiet sm1); rc=$?
+  # The fake pane supplies no semantic idle proof. Absence of a spinner alone
+  # cannot authorize proactively dropping an agent conversation.
+  expect_code 3 "$rc" "quiet restart must refuse unproven idle: $out"
+  ! grep -qx exit "$dir/fake/literal" || fail 'quiet restart stopped an unproven-idle agent'
+  pass 'quiet restart: unknown busy state leaves agent untouched'
+
+  dir=$(new_case quiet-idle)
+  add_local_mate "$dir" sm1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" sm1 --state idle --source fm-spawn --event seed)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/sm1.meta"
+  out=$(FM_SECONDMATE_RESTART_MODE=durable run_restart "$dir" --quiet sm1); rc=$?
+  expect_code 0 "$rc" "proven idle with empty composer should refresh: $out"
+  assert_contains "$out" 'restarted: sm1' 'quiet idle restart did not complete'
+  ! grep -qx Escape "$dir/fake/keys" || fail 'quiet restart interrupted a turn'
+  pass 'quiet restart: positive semantic idle and empty composer refresh without interrupt'
+
+  dir=$(new_case quiet-busy)
+  add_local_mate "$dir" sm1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" sm1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/sm1.meta"
+  out=$(FM_SECONDMATE_RESTART_MODE=durable run_restart "$dir" --quiet sm1); rc=$?
+  expect_code 3 "$rc" "semantic busy must defer quiet restart: $out"
+  [ ! -s "$dir/fake/keys" ] || fail 'quiet busy restart sent a key'
+  [ ! -s "$dir/fake/literal" ] || fail 'quiet busy restart sent text'
+  pass 'quiet restart: busy turn receives no input'
+}
+
+test_durable_pending_doorbell() {
+  local dir out rc line
+  dir=$(new_case pending-doorbell)
+  add_local_mate "$dir" sm1
+  mkdir -p "$dir/home/state/sm1.inbox"
+  printf 'schema=fm-task-inbox.v1\n--\nrecover me\n' > "$dir/home/state/sm1.inbox/001.msg"
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  line=$(fm_task_inbox_doorbell_line "$dir/home/state/sm1.inbox/001.msg")
+  printf '%s' "$line" > "$dir/fake/composer"
+  out=$(FM_SECONDMATE_RESTART_MODE=durable run_restart "$dir" sm1); rc=$?
+  expect_code 0 "$rc" "exact durable doorbell should be recoverable: $out"
+  [ -f "$dir/home/state/sm1.inbox/001.msg" ] || fail 'restart consumed unread doorbell record'
+  assert_grep 'C-u' "$dir/fake/keys" 'doorbell was not cleared'
+
+  dir=$(new_case pending-user-draft)
+  add_local_mate "$dir" sm1
+  printf 'unrelated user draft' > "$dir/fake/composer"
+  out=$(FM_SECONDMATE_RESTART_MODE=durable run_restart "$dir" sm1); rc=$?
+  expect_code 3 "$rc" "unrelated draft must refuse: $out"
+  [ "$(cat "$dir/fake/composer")" = 'unrelated user draft' ] || fail 'user draft changed'
+  ! grep -qx exit "$dir/fake/literal" || fail 'agent stopped over unrelated draft'
+  pass 'new-session composer: own unsent doorbell recovered, unrelated draft untouched'
+}
+
+test_durable_restart_bound() {
+  local dir out rc before
+  dir=$(new_case durable-bound)
+  setup_remote_case "$dir" sm1 slow-relaunch
+  before=$(cat "$dir/home/state/sm1.meta")
+  out=$(FM_SECONDMATE_RESTART_MODE=durable FM_SECONDMATE_RESTART_WAIT=1 run_restart "$dir" sm1); rc=$?
+  expect_code 3 "$rc" "bounded restart must report unknown rather than hang: $out"
+  assert_contains "$out" 'control transaction exceeded 1s' 'hard bound was not reported'
+  [ "$(cat "$dir/home/state/sm1.meta")" = "$before" ] || fail 'timed out remote route changed'
+  pass 'durable restart: hard control bound returns unknown and preserves route'
+}
+
+test_durable_checkpoint_refuses_unsafe_destinations() {
+  local dir out rc shape
+  for shape in symlink directory; do
+    dir=$(new_case "checkpoint-$shape")
+    add_local_mate "$dir" sm1
+    if [ "$shape" = symlink ]; then
+      printf 'keep sentinel\n' > "$dir/sentinel"
+      ln -s "$dir/sentinel" "$dir/sm1-home/state/.secondmate-restart-checkpoint"
+    else
+      mkdir "$dir/sm1-home/state/.secondmate-restart-checkpoint"
+    fi
+    out=$(FM_SECONDMATE_RESTART_MODE=durable run_restart "$dir" sm1); rc=$?
+    expect_code 3 "$rc" "unsafe checkpoint destination must refuse: $out"
+    ! grep -qx exit "$dir/fake/literal" || fail 'agent stopped without checkpoint'
+    [ "$shape" != symlink ] || [ "$(cat "$dir/sentinel")" = 'keep sentinel' ] || fail 'checkpoint followed symlink'
+  done
+  pass 'durable checkpoint: unsafe destination refuses before any agent input'
+}
+
+test_durable_default_needs_no_answer
+test_durable_checkpoint_refuses_unsafe_destinations
+test_durable_restart_bound
+test_durable_pending_doorbell
+test_quiet_restart_is_fail_closed
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check

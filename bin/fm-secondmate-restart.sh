@@ -2,7 +2,7 @@
 # Restart second mates onto the current instruction surface and launch-time
 # wiring, persisting their open records first.
 #
-# Usage: fm-secondmate-restart.sh <secondmate-id>... [--help]
+# Usage: fm-secondmate-restart.sh [--quiet] <secondmate-id>... [--help]
 #
 # This is the executable half of /updatefirstmate's reload step. A running agent
 # holds AGENTS.md and every skill it has loaded frozen from launch, and no
@@ -16,8 +16,12 @@
 # not derivable from a git diff, so an unchanged tracked surface does not mean
 # the running agent is already on the current behavior.
 #
-# The cost of that guarantee is the conversation, which is why this command runs
-# in two phases and why the first one is a GATE, not a courtesy:
+# Default mode uses the control transaction's durable checkpoint, not a mate
+# response. It inventories the home before stopping and never resets, stashes,
+# cleans, or removes work. --quiet refuses busy/unknown agents and nonempty
+# composers, allowing a caller to request a fresh session before compaction.
+# FM_SECONDMATE_RESTART_MODE=cooperative retains the optional conversation sweep:
+# the following two-phase answer gate applies ONLY in that mode.
 #
 #   A. PERSIST. Every mate is asked, in one marked request, to durably record the
 #      open work it holds only in conversation - a task for each unfiled open
@@ -60,7 +64,9 @@
 # capability on its own argv rather than trusting a caller's list.
 #
 # Environment knobs:
-#   FM_SECONDMATE_PERSIST_WAIT  seconds to wait for one mate's persist answer (900)
+#   FM_SECONDMATE_RESTART_MODE durable (default) or cooperative (optional sweep)
+#   FM_SECONDMATE_RESTART_WAIT hard bound per control transaction in seconds (300)
+#   FM_SECONDMATE_PERSIST_WAIT  cooperative persist-answer bound in seconds (30)
 #   FM_SECONDMATE_PERSIST_POLL  seconds between checks of that answer (5)
 #
 # Exit status: 0 every named mate restarted; 3 at least one was nudged or left
@@ -72,7 +78,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  awk 'NR == 1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
 }
 
 case "${1:-}" in
@@ -94,8 +100,16 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-PERSIST_WAIT=${FM_SECONDMATE_PERSIST_WAIT:-900}
+RESTART_MODE=${FM_SECONDMATE_RESTART_MODE:-durable}
+case "$RESTART_MODE" in durable|cooperative) ;; *) echo 'error: invalid FM_SECONDMATE_RESTART_MODE' >&2; exit 2 ;; esac
+QUIET=0
+RESTART_WAIT=${FM_SECONDMATE_RESTART_WAIT:-300}
+case "$RESTART_WAIT" in ''|0*|*[!0-9]*) echo 'error: FM_SECONDMATE_RESTART_WAIT must be a positive integer' >&2; exit 2 ;; esac
+[ "${#RESTART_WAIT}" -le 6 ] || { echo 'error: FM_SECONDMATE_RESTART_WAIT is too large' >&2; exit 2; }
+PERSIST_WAIT=${FM_SECONDMATE_PERSIST_WAIT:-30}
 PERSIST_POLL=${FM_SECONDMATE_PERSIST_POLL:-5}
 case "$PERSIST_WAIT" in ''|*[!0-9]*) echo "error: FM_SECONDMATE_PERSIST_WAIT must be a non-negative integer: $PERSIST_WAIT" >&2; exit 2 ;; esac
 case "$PERSIST_POLL" in ''|*[!0-9]*|0) echo "error: FM_SECONDMATE_PERSIST_POLL must be a positive integer: $PERSIST_POLL" >&2; exit 2 ;; esac
@@ -103,6 +117,7 @@ case "$PERSIST_POLL" in ''|*[!0-9]*|0) echo "error: FM_SECONDMATE_PERSIST_POLL m
 IDS=()
 for arg in "$@"; do
   case "$arg" in
+    --quiet) QUIET=1; continue ;;
     -*) echo "error: unexpected argument '$arg'" >&2; usage >&2; exit 2 ;;
   esac
   # /updatefirstmate's action line names each mate by its fm-<id> selector; the
@@ -139,6 +154,9 @@ unreached_count=0
 # readable line with its "error: " prefix dropped. A refusal's own words are the
 # most useful thing this report can carry, and its first line is often blank.
 first_reported_line() {  # <text>
+  local error
+  error=$(printf '%s\n' "$1" | sed -n '/^error: /{s/^error: //;p;q;}')
+  if [ -n "$error" ]; then printf '%s\n' "$error"; return; fi
   printf '%s\n' "$1" | sed -n '/./{s/^error: //;s/[[:space:]]\{1,\}/ /g;p;q;}'
 }
 
@@ -146,6 +164,10 @@ first_reported_line() {  # <text>
 # plainly which it was. A nudge is a partial reload and is never reported as more.
 fall_back_to_nudge() {  # <id> <reason>
   local id=$1 reason=$2 out
+  if [ "$QUIET" = 1 ]; then
+    report_unreached "$id" "quiet restart deferred: $reason"
+    return
+  fi
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
     nudged_count=$((nudged_count + 1))
@@ -164,15 +186,18 @@ report_unreached() {  # <id> <reason>
 
 restart_mate() {  # <array-index>
   local i=$1 id restart_out restart_rc restart_reason ran_on
+  local -a quiet_args
+  quiet_args=()
+  [ "$QUIET" = 0 ] || quiet_args=(--quiet)
   id=${IDS[$i]}
   if [ "${PLACEMENT[i]}" = remote ]; then
-    restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    restart_out=$(fm_run_timed "$RESTART_WAIT" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-remote-secondmate-relaunch.sh" \
       "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
     restart_rc=$?
   else
-    restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
+    restart_out=$(fm_run_timed "$RESTART_WAIT" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch ${quiet_args[@]+"${quiet_args[@]}"} 2>&1)
     restart_rc=$?
   fi
   if [ "$restart_rc" -eq 0 ]; then
@@ -186,6 +211,10 @@ restart_mate() {  # <array-index>
     return
   fi
 
+  if fm_timed_out "$restart_rc"; then
+    report_unreached "$id" "the restart outcome is unknown: control transaction exceeded ${RESTART_WAIT}s; durable records and unlanded work remain in place"
+    return
+  fi
   restart_reason=$(first_reported_line "$restart_out")
   [ -n "$restart_reason" ] || restart_reason="the restart failed without a reported reason"
   report_unreached "$id" "the restart outcome is unknown: $restart_reason"
@@ -305,6 +334,16 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     fi
   fi
 
+  if [ "$QUIET" = 1 ] && [ "${PLACEMENT[i]}" = remote ]; then
+    REASON[i]='quiet restart requires host-local idle proof; run --quiet on the owning host'
+    i=$((i + 1))
+    continue
+  fi
+  if [ "$RESTART_MODE" = durable ]; then
+    PLAN[i]=durable-ready
+    i=$((i + 1))
+    continue
+  fi
   if ! corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" \
     "$FM_SECONDMATE_PERSIST_REQUEST"); then
     REASON[i]="its answer about the open work cannot be tracked, so a clean reload could not be proven"
@@ -336,7 +375,9 @@ pending_count=0
 restart_active_count=0
 i=0
 while [ "$i" -lt "${#IDS[@]}" ]; do
-  if [ "${PLAN[i]}" = persisted-pending ]; then
+  if [ "${PLAN[i]}" = durable-ready ]; then
+    launch_restart "$i"
+  elif [ "${PLAN[i]}" = persisted-pending ]; then
     pending_count=$((pending_count + 1))
   else
     fall_back_to_nudge "${IDS[$i]}" "${REASON[i]}"

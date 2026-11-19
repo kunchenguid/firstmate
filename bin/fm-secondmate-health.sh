@@ -5,14 +5,15 @@
 # locks shared with bootstrap/dead-endpoint recovery. No foreign home is read
 # or changed. Each mate has an independent job so a persist wait blocks no
 # sibling. Existing inbox supervision handles unread steers and unsent own
-# doorbells; this sweep supplies the missing goal-idle trigger.
+# doorbells; the health library owns goal-idle and quiet fresh-session clocks.
 # FM_SECONDMATE_HEALTH_SECS defaults to 1800 per missed interval.
-# Restart confirmation and its bounded wait belong to fm-secondmate-restart.sh.
+# FM_SECONDMATE_FRESH_SECS defaults to 2700; 0 disables proactive fresh sessions.
+# The durable checkpoint and hard control bound belong to fm-secondmate-restart.sh.
 # Local backends delegate proof to existing busy/composer/control adapters;
 # remote mates retain their pending-reply/liveness paths, not guessed idleness.
 set -u
 case "${1:-}" in
-  --help|-h) sed -n '2,12s/^# \{0,1\}//p' "$0"; exit 0 ;;
+  --help|-h) sed -n '2,13s/^# \{0,1\}//p' "$0"; exit 0 ;;
   '') ;;
   *) echo 'usage: FM_HOME=<parent> fm-secondmate-health.sh [--help]' >&2; exit 2 ;;
 esac
