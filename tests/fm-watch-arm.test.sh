@@ -840,14 +840,13 @@ test_markerless_legacy_queue_is_recovered_on_arm() {
 }
 
 test_idle_lavish_source_stays_quiet_until_result() {
-  local dir home state fakebin source trigger first_out idle_out i
+  local dir home state fakebin source trigger idle_out i
   dir=$(make_case idle-lavish-source)
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
   source="$dir/lavish-source.sh"
   trigger="$dir/result-ready"
-  first_out="$dir/first-arm.out"
   idle_out="$dir/idle-arm.out"
   mkdir -p "$home/data"
   cat > "$source" <<'SH'
@@ -879,14 +878,10 @@ SH
     || fail "could not start the Lavish fixture source"
   printf 'pending:downtime:idle-lavish.1.fixture\n' > "$state/.watcher-down"
 
-  FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
-  wait_for_exit "$ARM_PID" 80 || fail "the first recovery arm did not surface"
-  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
-    || fail "the pending recovery generation did not get its first announcement"
+  # An empty pending generation no longer spends a synthetic mate turn.
+  FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
   [ ! -s "$state/.wake-queue" ] \
     || fail "the idle Lavish source produced a wake before any result"
-
-  FM_ROOT_OVERRIDE="$ROOT" start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
   i=0
   while [ "$i" -lt 30 ] && is_live_non_zombie "$ARM_PID"; do
     sleep 0.1
@@ -913,26 +908,22 @@ SH
 }
 
 test_append_wakes_live_announced_watcher() {
-  local dir home state fakebin first_out idle_out
+  local dir home state fakebin idle_out
   dir=$(make_case append-after-empty-recovery)
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
-  first_out="$dir/first-arm.out"
   idle_out="$dir/idle-arm.out"
   mkdir -p "$home/data"
   printf 'pending:downtime:append-after-empty.fixture\n' > "$state/.watcher-down"
 
-  start_rearm_arm "$home" "$state" "$fakebin" "$first_out"
-  wait_for_exit "$ARM_PID" 80 || fail "the initial empty recovery did not surface"
-  grep -F 'check: rearm-resurface' "$first_out" >/dev/null \
-    || fail "the initial empty recovery was not announced"
-  [ ! -s "$state/.wake-queue" ] \
-    || fail "the empty recovery unexpectedly queued durable work"
-
   start_rearm_arm "$home" "$state" "$fakebin" "$idle_out"
   is_live_non_zombie "$ARM_PID" \
-    || fail "the announced empty recovery did not leave a live watcher"
+    || fail "the empty recovery did not leave a live watcher"
+  ! grep -F 'check: rearm-resurface' "$idle_out" >/dev/null \
+    || fail "the initial empty recovery spent a mate turn"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the empty recovery unexpectedly queued durable work"
   append_wake "$state" check inbox:fixture 'check: captain inbox note fixture' \
     || fail "the generic producer could not append its wake"
   wait_for_exit "$ARM_PID" 80 \
@@ -947,7 +938,7 @@ test_append_wakes_live_announced_watcher() {
 test_append_wakes_handling_successor() {
   local phase=$1 seq_state=${2:-intact} repeat=${3:-fresh}
   local dir home state fakebin predecessor successor generation watcher_pid pair sequence
-  local new_key=inbox:second new_payload='check: captain inbox note second' datebin real_date inherited_row
+  local new_key=inbox:second new_payload='check: captain inbox note second' datebin real_date inherited_row inherited_epoch
   dir=$(make_case "append-handling-$phase-$seq_state-$repeat")
   home="$dir/home"
   state="$dir/state"
@@ -990,10 +981,13 @@ test_append_wakes_handling_successor() {
     datebin="$dir/datebin"
     mkdir -p "$datebin"
     real_date=$(command -v date)
+    # Expand the ANSI-C tab delimiter in shell syntax, not inside a heredoc:
+    # heredoc expansion would treat it literally and return the entire row.
+    inherited_epoch=${inherited_row%%$'\t'*}
     cat > "$datebin/date" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = +%s ]; then
-  printf '%s\n' "${inherited_row%%$'\t'*}"
+  printf '%s\n' "$inherited_epoch"
 else
   exec "$real_date" "\$@"
 fi
@@ -1003,7 +997,7 @@ SH
   PATH="${datebin:+$datebin:}$PATH" append_wake "$state" check "$new_key" "$new_payload"
   if [ "$repeat" = identical ]; then
     [ "$(head -n 1 "$state/.wake-queue")" = "$inherited_row" ] \
-      || fail "re-append was not byte-identical to the inherited row"
+      || fail "re-append was not byte-identical: expected [$inherited_row], got [$(head -n 1 "$state/.wake-queue")]"
   fi
   if [ "$phase" = before-ack ]; then
     FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation"

@@ -232,6 +232,9 @@ The first recovery marks that generation announced, and later empty-queue arms l
 A non-successor watcher start checks the durable queue and recovery marker under their locks.
 If an announced-but-unacknowledged episode has an empty queue, the arm leaves that generation announced, making repeated empty-queue arms idempotent while a long-poll source is merely alive.
 If a durable row arrived after the announcement, the arm opens a fresh pending downtime generation so buried work still resurfaces once.
+Before delivery, the watcher logs the carried row sequence, kind and key without payloads in its bounded triage log.
+A wholly eligible attended-host row set resurfaces as a signal through the existing [branch eligibility and guarded claim](pi-supervision-branch.md) path; mixed or unsafe sets retain the check route.
+An empty set with no durable open decisions skips the turn and keeps supervision alive, except that known watcher failures and invalid recovery markers remain actionable check wakes.
 A Codex foreground checkpoint skips the announced-episode reopen transition, so an already-announced generation stays announced while the checkpoint continues its bounded supervision.
 Its ordinary arm check still announces a never-announced generation, including one made pending by a durable queue append during the checkpoint.
 

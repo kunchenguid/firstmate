@@ -784,6 +784,10 @@ quiet_pass_through_successor() {  # <home>
 
 
 park_after_stop() {  # <home>
+  # This fixture needs an actual main-owned close, not an empty recovery turn
+  # (now suppressed) or routine leftover rows the side session may handle.
+  FM_HOME="$1" bash -c '. "$1"; fm_wake_append check fixture-stop "check: fixture stop recovery"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" || fail 'fixture: could not queue stop recovery'
   rm -f "$1/host.rc"
   : > "$1/park.go"
   wait_until_deadline 60 host_exited "$1" || fail "the watcher's downtime resurface did not reach main: $(cat "$1/host.out")"

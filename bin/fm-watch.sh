@@ -4259,7 +4259,8 @@ watcher_cleanup() {
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
+      && { [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ] \
+        || [ "${FM_WATCH_RESURFACED:-0}" = 1 ]; }; then
       transition=release-lock-existing
     fi
   fi
@@ -4319,8 +4320,17 @@ startup_lock_failed() {
   exit 1
 }
 WATCHER_RECOVERY_PENDING=0
+WATCHER_RECOVERY_FAILURE=0
+if [ "${FM_WATCH_RECOVERY_FAILURE:-0}" = 1 ]; then
+  WATCHER_RECOVERY_FAILURE=1
+fi
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
+  WATCHER_RECOVERY_FAILURE=1
+fi
+if { [ -e "$WATCHER_DOWNTIME_MARKER" ] || [ -L "$WATCHER_DOWNTIME_MARKER" ]; } \
+  && ! fm_recovery_marker_read "$WATCHER_DOWNTIME_MARKER"; then
+  WATCHER_RECOVERY_FAILURE=1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
   && [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ]; then
@@ -4513,6 +4523,49 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# Preflight only: the supervision host still owns the claim and its guards.
+# Hold the queue lock across classification so the row log and verdict describe
+# the same carried set. Failures (including unavailable Node) remain check wakes.
+resurface_wake() {
+  local verdict='' line reason='check: rearm-resurface' file open
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+  if verdict=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-branch-dispatch.mjs" resurface 2>/dev/null); then
+    while IFS= read -r line; do
+      case "$line" in
+        row=*) triage_log "rearm-resurface ${line}" ;;
+        reason=*) reason=${line#reason=} ;;
+      esac
+    done <<< "$verdict"
+  else
+    triage_log 'rearm-resurface preflight failed; retaining check route'
+  fi
+  # An empty queue is not enough: a durable open decision can predate the
+  # downtime and have no new append to rescue it. Reuse the owning fold rather
+  # than guessing from the last status line (which may be a routine update).
+  if [ "$reason" = empty ]; then
+    for file in "$STATE"/*.status; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      if [ ! -f "$file" ] || [ ! -r "$file" ] || [ -L "$file" ] \
+        || ! open=$(status_open_decisions_incremental "$file") || [ -n "$open" ]; then
+        reason='check: rearm-resurface'
+        break
+      fi
+    done
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
+  # A positively recovered dead watcher is itself actionable, even with no rows.
+  if [ "${WATCHER_RECOVERY_FAILURE:-0}" -eq 1 ]; then
+    reason='check: rearm-resurface'
+  fi
+  triage_log "rearm-resurface route=$reason"
+  if [ "$reason" = empty ]; then
+    WATCHER_RECOVERY_PENDING=0
+    return 0
+  fi
+  FM_WATCH_RESURFACED=1
+  wake "$reason"
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -4526,7 +4579,8 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
     [ "$FM_RECOVERY_MARKER_QUEUED" = 1 ] || return 0
-    wake "check: rearm-resurface"
+    resurface_wake
+    return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -4535,7 +4589,7 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  wake "check: rearm-resurface"
+  resurface_wake
 }
 
 # The signal section of one poll cycle, callable more than once per cycle.

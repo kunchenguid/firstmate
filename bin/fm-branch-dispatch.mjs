@@ -21,6 +21,12 @@
 //                       task or on fleet is in scope
 //     --heartbeat marks a heartbeat wake; --afk applies the away-posture
 //     collapse (docs/pi-supervision-branch.md "Postures").
+//   fm-branch-dispatch.mjs resurface
+//     Under the caller's wake-queue lock, print reason=signal: <keys> only
+//     when every unread row passes attended-host eligibility, reason=empty
+//     when there are no rows, otherwise reason=check: rearm-resurface.
+//     row=<JSON [sequence, kind, key]> records the carried rows without payloads.
+//     This is a preflight, not a grant; the host rechecks scope before claiming.
 //   fm-branch-dispatch.mjs offer [--afk]
 //     Read one actionable close's reason line from stdin and print
 //     branchOfferForWake's verdict: eligible=0|1 (whether the branch may take
@@ -40,7 +46,7 @@
 // repository's own state/. Exit 0 on success, 2 on invalid use, 3 when a
 // wake-prompt --mirror-file cannot be read.
 
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -49,7 +55,7 @@ const dispatch = await import(pathToFileURL(path.join(root, ".pi", "extensions",
 
 function usage() {
   process.stderr.write(
-    "usage: fm-branch-dispatch.mjs scope [--heartbeat] [--afk] | offer [--afk] | wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>]]\n",
+    "usage: fm-branch-dispatch.mjs scope [--heartbeat] [--afk] | resurface | offer [--afk] | wake-prompt --report <surface> [--mirror-file <path>] [--away [--readback-file <path>]]\n",
   );
   process.exit(2);
 }
@@ -91,6 +97,37 @@ if (command === "scope") {
     else usage();
   }
   process.stdout.write(scopeLines(dispatch.scopeForUnreadWake(stateDir(), heartbeat, afk), heartbeat));
+} else if (command === "resurface") {
+  if (args.length) usage();
+  let reason = "check: rearm-resurface";
+  let rows = [];
+  try {
+    const state = stateDir();
+    const file = path.join(state, ".wake-queue");
+    let queue = "";
+    try {
+      if (!lstatSync(file).isFile()) throw new Error("unsafe queue");
+      queue = readFileSync(file, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    rows = queue.split(/\r?\n/).filter(Boolean).map((line) => line.split("\t"));
+    if (!rows.length) {
+      reason = "empty";
+    } else {
+      const scope = dispatch.scopeForUnreadWake(state, false, false, true);
+      const eligible = new Set(scope.eligibleSeqs);
+      if (!scope.corrupted && rows.every((row) => eligible.has(row[1]))
+          && new Set(rows.map((row) => row[1])).size === rows.length
+          && readFileSync(file, "utf8") === queue) {
+        reason = `signal: ${[...new Set(rows.map((row) => row[3]))].join(" ")}`;
+      }
+    }
+  } catch {
+    // Missing runtime support, unreadable metadata and malformed queues stay main-owned.
+  }
+  for (const row of rows) process.stdout.write(`row=${JSON.stringify(row.slice(1, 4))}\n`);
+  process.stdout.write(`reason=${reason}\n`);
 } else if (command === "offer") {
   let afk = false;
   for (const arg of args) {

@@ -305,6 +305,80 @@ test_handling_successor_resurfaces_a_row_appended_during_startup() {
   pass "a handling successor resurfaces a row appended during startup"
 }
 
+# Exercise the real watcher preflight and delivery, not source-text assertions.
+test_resurface_preflight() {
+  local variant dir state home out pid i expected log
+  for variant in routine stale mixed decision held unknown malformed failed-marker failed-empty no-runtime empty-decision empty; do
+    dir=$(make_case "preflight-$variant")
+    state="$dir/state"; home="$dir/home"; out="$dir/watch.out"
+    mkdir -p "$home/data"
+    printf 'project=/project\nwindow=fm-demo\n' > "$state/demo.meta"
+    printf 'working: ordinary work\n' > "$state/demo.status"
+    printf 'pending:downtime:preflight.1.aaa\n' > "$state/.watcher-down"
+    chmod 600 "$state/.watcher-down"
+    printf '1\t1\tsignal\tdemo.status\tsignal: demo.status\n' > "$state/.wake-queue"
+    printf '1\n' > "$state/.wake-queue.seq"
+    expected='check: rearm-resurface'
+    case "$variant" in
+      routine) expected='signal: demo.status' ;;
+      stale)
+        printf '1\t1\tstale\tfm-demo\tstale: fm-demo\n' > "$state/.wake-queue"
+        expected='signal: fm-demo'
+        ;;
+      mixed) printf '1\t2\tcheck\tinbox:captain\tcheck: captain inbox\n' >> "$state/.wake-queue" ;;
+      decision) printf 'needs-decision [key=choice]: choose\n' > "$state/demo.status" ;;
+      held) printf 'captain-held: awaiting captain\n' > "$state/demo.status" ;;
+      unknown) rm "$state/demo.meta" ;;
+      malformed) printf 'broken\n' > "$state/.wake-queue" ;;
+      failed-marker|failed-empty)
+        printf 'invalid-marker\n' > "$state/.watcher-down"
+        [ "$variant" != failed-empty ] || : > "$state/.wake-queue"
+        ;;
+      no-runtime)
+        printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/node"
+        chmod +x "$dir/fakebin/node"
+        ;;
+      empty-decision)
+        : > "$state/.wake-queue"
+        printf 'needs-decision [key=choice]: choose\nworking: later routine update\n' > "$state/demo.status"
+        ;;
+      empty) : > "$state/.wake-queue" ;;
+    esac
+    PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+      FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+      "$WATCH" > "$out" 2>&1 &
+    pid=$!
+    log="$state/.watch-triage.log"
+    # A no-work preflight must leave the watcher alive. Wait for its log rather
+    # than a guessed startup duration, then stop our own fixture process.
+    if [ "$variant" = empty ]; then
+      i=0
+      while [ "$i" -lt 200 ] && ! grep -q 'rearm-resurface route=empty' "$log" 2>/dev/null; do
+        sleep 0.1; i=$((i + 1))
+      done
+      grep -q 'rearm-resurface route=empty' "$log" 2>/dev/null \
+        || { kill "$pid" 2>/dev/null || true; fail "empty preflight did not run: $(cat "$out")"; }
+      kill -0 "$pid" 2>/dev/null || fail 'empty preflight spent a watcher turn'
+      ! grep -E '^(check|signal):' "$out" >/dev/null || fail 'empty recovery woke the mate'
+      kill "$pid" 2>/dev/null || true
+    else
+      wait_for_exit "$pid" 300 || { kill "$pid" 2>/dev/null || true; fail "$variant preflight did not deliver"; }
+      grep -Fx "$expected" "$out" >/dev/null || fail "$variant wrong route: $(cat "$out")"
+      if [ "$variant" = routine ]; then
+        grep -F 'row=["1","signal","demo.status"]' "$log" >/dev/null || fail 'missing carried-row evidence'
+        FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-dispatch.mjs" offer <<< "$expected" \
+          | grep -qx 'eligible=1' || fail 'routine resurface cannot be offered to the side session'
+      fi
+      if [ "$variant" != failed-empty ] && [ "$variant" != empty-decision ]; then
+        [ -s "$state/.wake-queue" ] || fail "$variant preflight consumed rows without a grant"
+      fi
+    fi
+    wait "$pid" 2>/dev/null || true
+  done
+  pass 'resurface preflight logs carried rows, offers only wholly routine queues, and skips empty turns'
+}
+
+test_resurface_preflight
 test_handling_successor_does_not_go_blind
 test_handling_successor_resurfaces_a_row_appended_during_startup
 test_unacknowledged_recovery_is_announced_once_per_generation

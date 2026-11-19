@@ -205,7 +205,7 @@ test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
   pass "an announced recovery is not reannounced by the next foreground checkpoint"
 }
 
-test_never_announced_recovery_is_announced_once() {
+test_empty_never_announced_recovery_skips_the_turn() {
   local home out err status
   home=$(make_home pending-recovery)
   out="$home/out.txt"
@@ -216,12 +216,14 @@ test_never_announced_recovery_is_announced_once() {
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
     "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
 
-  expect_code 0 "$status" "pending recovery checkpoint exit"
-  [ "$(grep -c '^check: rearm-resurface$' "$out" || true)" -eq 1 ] \
-    || fail "never-announced recovery did not surface exactly once: $(cat "$out")"
+  expect_code 124 "$status" "empty pending recovery checkpoint exit"
+  assert_contains "$(cat "$out")" 'checkpoint: no actionable wake within 5s' \
+    'empty recovery did not continue supervising'
+  assert_not_contains "$(cat "$out")" 'check: rearm-resurface' \
+    'empty recovery spent a mate turn'
   [ "$(cat "$home/state/.watcher-down")" = 'announced:downtime:unreported.1.aaa' ] \
     || fail "never-announced recovery did not retain its announced generation"
-  pass "a never-announced recovery still surfaces once from a foreground checkpoint"
+  pass "an empty never-announced recovery skips the mate turn from a foreground checkpoint"
 }
 
 test_queue_append_during_checkpoint_still_resurfaces() {
@@ -425,7 +427,7 @@ test_gnu_timeout_runs_the_watcher_bound
 test_non_gnu_timeout_uses_gnu_gtimeout
 test_non_gnu_timeout_falls_back_to_perl_before_escalating
 test_announced_recovery_is_not_reannounced_by_next_checkpoint
-test_never_announced_recovery_is_announced_once
+test_empty_never_announced_recovery_skips_the_turn
 test_queue_append_during_checkpoint_still_resurfaces
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment

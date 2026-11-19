@@ -366,6 +366,9 @@ clear_stale_recorded_watcher_lock() {
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
+  # Preserve the failure as actionable work before discarding its lock evidence;
+  # a later healthy watcher must not mistake this for an empty routine episode.
+  fm_wake_append check watcher-lock-recovery 'check: stale watcher lock recovery' || return 1
   fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
 }
 
@@ -700,6 +703,10 @@ take_over_cycle() {  # <watcher-pid> <identity>
       "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
     cycle_log_append unknown unknown taken-over none
   else
+    # The old watcher may have failed rather than obeyed our stop. Its owner
+    # already reports that failure; this successor must retain recovery's check
+    # route even if the failed cycle left no durable task rows.
+    export FM_WATCH_RECOVERY_FAILURE=1
     cycle_log_append unknown unknown taken-over-unconfirmed-stop none
   fi
   return 0
@@ -792,7 +799,9 @@ trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
-child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
+# Keep the diagnostic buffer outside the watched state/home: teardown may
+# rename or remove those paths while the child is writing its final reason.
+child_out=$(mktemp "${TMPDIR:-/tmp}/fm-watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
