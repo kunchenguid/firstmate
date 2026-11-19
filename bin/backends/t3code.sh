@@ -135,6 +135,8 @@ fm_backend_t3code_thread_create() {  # <project-id> <title> <branch> <worktree> 
   local -a args=(launch --project "$project_id" --title "$title" --model-selection "$selection")
   [ -z "$branch" ] || args+=(--branch "$branch")
   [ -z "$worktree" ] || args+=(--worktree "$worktree")
+  # Spawned from inside a T3 thread (the captain's): T3 shows the new thread as delegated from it.
+  [ -z "${T3CODE_THREAD_ID:-}" ] || args+=(--delegated-from "$T3CODE_THREAD_ID")
   out=$(fm_backend_t3code_mcp "${args[@]}") && rc=0 || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   printf '%s' "$out" | fm_backend_t3code_json_get threadId || return 1

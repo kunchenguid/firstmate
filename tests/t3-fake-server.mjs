@@ -65,6 +65,9 @@ const ALL_TOOLS = [
   "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond",
   "orchestrator_capabilities", "t3_environment_read",
 ];
+// T3 0.1 lists these two in place of t3_thread_configuration and the three t3_pending_request_* tools.
+const CURRENT_GENERATION = ["t3_thread_configure", "t3_pending_request"];
+const CURRENT_TOOLS = [...ALL_TOOLS.filter((n) => !/^t3_thread_configuration$|^t3_pending_request_/.test(n)), ...CURRENT_GENERATION];
 const ACTIVE = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted", "rolled_back"]);
 const select = (id, values) => ({ id, label: id, type: "select", options: values.map((v) => ({ id: v, label: v })) });
@@ -186,6 +189,10 @@ function listItem(x) {
 
 // Returns [result, changed].
 async function callTool(w, name, a) {
+  // T3 0.1 names map onto the same handlers: configure reads like configuration, and a pending-request action
+  // selects list, read or respond.
+  if (name === "t3_thread_configure") name = "t3_thread_configuration";
+  else if (name === "t3_pending_request") name = `t3_pending_request_${a.action}`;
   const fail = (w.failTools ?? {})[name];
   if (fail) return [err(fail.code, fail.message), false];
   const threads = (w.threads = w.threads ?? {});
@@ -363,7 +370,7 @@ async function mcp(req, res) {
     res.writeHead(202);
     return res.end();
   } else if (msg.method === "tools/list") {
-    result = { tools: (w.tools ?? ALL_TOOLS).map((name) => ({ name, inputSchema: { type: "object" } })) };
+    result = { tools: (w.tools ?? (w.toolGeneration === "current" ? CURRENT_TOOLS : ALL_TOOLS)).map((name) => ({ name, inputSchema: { type: "object" } })) };
   } else if (msg.method === "tools/call") {
     let changed = settle(w);
     let mutated;

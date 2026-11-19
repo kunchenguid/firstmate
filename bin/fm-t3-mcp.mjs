@@ -42,6 +42,7 @@
 //     then checked against that model's descriptors. Exit 4 refuses.
 //   fm-t3-mcp.mjs launch --project <id> --title <title> --model-selection <json>
 //       [--worktree <abs-path>] [--branch <name>] [--message-file <file>]
+//       [--delegated-from <thread-id>]
 //     t3_thread_launch at runtimeMode full-access. With --worktree the
 //     workspace strategy is existing_worktree; without it, root (the project's
 //     own checkout). Reads the thread and its t3_thread_configuration back and
@@ -53,7 +54,10 @@
 //     catch-all orchestration_error can follow a created thread, so it exits
 //     1 as well. A transport or unexpected failure of the
 //     gate, before t3_thread_launch is requested, exits 8: no thread was
-//     launched. Without --message-file the thread is created idle.
+//     launched. Without --message-file the thread is created idle. With
+//     --delegated-from, the thread carries T3's delegatedFrom link to that
+//     thread (the captain's own T3 thread), so T3 Code shows the crew as
+//     delegated from it; a parent that cannot be read only drops the link.
 //   fm-t3-mcp.mjs send --thread <id> --message-file <file> --client-request-id <id>
 //     t3_thread_send mode auto: start an idle thread's next turn or steer the
 //     running one. T3 derives the message and command ids from the client
@@ -127,7 +131,8 @@
 // with FM_HOME defaulting to this repository.
 //
 // The capability gate (every verb, login included) runs tools/list and refuses
-// unless all of REQUIRED_TOOLS and t3_environment_read are present, then reads
+// unless all of REQUIRED_TOOLS, one complete TOOL_GENERATIONS set, and
+// t3_environment_read are present, then reads
 // t3_environment_read and refuses unless its environmentId equals the one
 // recorded at sign-in, so a different T3 on the same origin is never driven
 // with this credential.
@@ -167,14 +172,18 @@ export const REQUIRED_TOOLS = [
   "t3_thread_interrupt",
   "t3_thread_organize",
   "t3_thread_list",
-  "t3_thread_configuration",
   "t3_project_list",
   "t3_project_create",
-  "t3_pending_request_list",
-  "t3_pending_request_read",
-  "t3_pending_request_respond",
   "orchestrator_capabilities",
 ];
+// T3 0.1 folded the thread-configuration and pending-request tools into
+// t3_thread_configure and t3_pending_request (with an action), keeping their
+// arguments and replies. Either complete generation passes the gate; every
+// later call uses the generation the server lists.
+export const TOOL_GENERATIONS = {
+  current: ["t3_thread_configure", "t3_pending_request"],
+  legacy: ["t3_thread_configuration", "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond"],
+};
 const ENVIRONMENT_TOOL = "t3_environment_read";
 const EXPIRY_WARN_DAYS = 5;
 const DAY_MS = 86_400_000;
@@ -486,13 +495,21 @@ function toolError(data, content) {
   };
 }
 
+// A thread's provider, model and modes, in the tool generation the gate found.
+const threadConfiguration = (session, threadId) =>
+  session.toolGeneration === "legacy" ? session.call("t3_thread_configuration", { threadId }) : session.call("t3_thread_configure", { threadId });
+// One pending-request action (list, read or respond), in the gate's tool generation.
+const pendingRequest = (session, action, args) =>
+  session.toolGeneration === "legacy" ? session.call(`t3_pending_request_${action}`, args) : session.call("t3_pending_request", { action, ...args });
+
 // The capability gate: required tools present, environment id unchanged.
 export async function gate(session, cred) {
   const server = await session.open();
   const listed = await session.rpc("tools/list", {});
   const names = new Set((listed?.tools ?? []).map((t) => t.name));
   const version = server?.serverInfo?.version ?? null;
-  const missing = REQUIRED_TOOLS.filter((t) => !names.has(t));
+  const generation = Object.keys(TOOL_GENERATIONS).find((g) => TOOL_GENERATIONS[g].every((t) => names.has(t)));
+  const missing = [...REQUIRED_TOOLS.filter((t) => !names.has(t)), ...(generation ? [] : TOOL_GENERATIONS.current.filter((t) => !names.has(t)))];
   if (missing.length) {
     throw new Refusal(
       "capability_gate",
@@ -501,6 +518,7 @@ export async function gate(session, cred) {
       { serverVersion: version, missing },
     );
   }
+  session.toolGeneration = generation;
   if (!names.has(ENVIRONMENT_TOOL)) {
     throw new Refusal("capability_gate", `T3 ${version} lacks ${ENVIRONMENT_TOOL}, so its identity cannot be verified`, 4, { serverVersion: version });
   }
@@ -833,6 +851,19 @@ function bindingProblems(t, config, selection, worktree) {
   return problems;
 }
 
+// T3's delegatedFrom link to the thread that spawned this one, titled as T3
+// shows it. Only a link: an unreadable parent launches the thread without it.
+async function delegatedFrom(session, g, threadId) {
+  if (!threadId) return {};
+  try {
+    const parent = threadOf(await session.call("t3_thread_read", { threadId, limit: 1, runLimit: 1 }));
+    return { delegatedFrom: { environmentId: g.environmentId, threadId, title: parent.title || threadId } };
+  } catch (err) {
+    process.stderr.write(`fm-t3-mcp: warning: launching without a delegatedFrom link, since thread ${threadId} could not be read (${err?.message ?? err})\n`);
+    return {};
+  }
+}
+
 async function launch(flags) {
   const worktree = flags.worktree;
   if (worktree !== undefined && !path.isAbsolute(worktree)) usage("--worktree must be an absolute path");
@@ -857,6 +888,7 @@ async function launch(flags) {
     interactionMode: "default",
     workspaceStrategy,
     ...(message ? { message } : {}),
+    ...(await delegatedFrom(session, g, flags["delegated-from"])),
   };
   let out;
   try {
@@ -874,7 +906,7 @@ async function launch(flags) {
   let config;
   try {
     t = threadOf(await session.call("t3_thread_read", { threadId: out.threadId, limit: 1, runLimit: 1 }));
-    config = await session.call("t3_thread_configuration", { threadId: out.threadId });
+    config = await threadConfiguration(session, out.threadId);
   } catch (e) {
     const archived = await archiveLaunched();
     throw new Refusal(
@@ -1045,7 +1077,7 @@ function threadOf(out) {
 async function pendingOf(session, threadId, t) {
   const count = t.pendingRequestCount ?? 0;
   if (!count) return { questions: [], approvals: 0, approvalIds: [] };
-  const listed = await session.call("t3_pending_request_list", { threadId });
+  const listed = await pendingRequest(session, "list", { threadId });
   const ids = [...new Set(listed?.requestIds ?? [])].sort();
   const approvals = Math.max(0, count - ids.length);
   if (!approvals) return { questions: ids, approvals, approvalIds: [] };
@@ -1066,7 +1098,7 @@ async function requests(flags) {
   const pending = await pendingOf(session, threadId, t);
   const questions = [];
   for (const requestId of pending.questions) {
-    const q = await session.call("t3_pending_request_read", { threadId, requestId });
+    const q = await pendingRequest(session, "read", { threadId, requestId });
     questions.push({ requestId, questions: q?.questions ?? [] });
   }
   return { ok: true, threadId, pendingRequestCount: t.pendingRequestCount ?? 0, questions, approvals: pending.approvals, signature: pendingSignature(pending) };
@@ -1084,7 +1116,7 @@ async function respond(flags) {
   }
   if (!answers || typeof answers !== "object" || Array.isArray(answers)) usage("--answers-file must hold a JSON object keyed by question id");
   const { session } = await verifiedSession(flags);
-  await session.call("t3_pending_request_respond", { threadId, requestId, answers });
+  await pendingRequest(session, "respond", { threadId, requestId, answers });
   return { ok: true, threadId, requestId };
 }
 

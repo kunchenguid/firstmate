@@ -212,6 +212,23 @@ process.exit(live.length === 1 && live[0].id === process.env.FM_T3_ID ? 0 : 1);
   pass "fm-t3-mcp projects: matched by real path, deleted ones skipped, a failed create resolves to a registered project, project-read returns the default model"
 }
 
+test_launch_links_delegated_from() {
+  local project parent call
+  fresh_case launch-delegated
+  mcp project-ensure --root "$TMP_ROOT/proj"
+  project=$(field "$OUT" projectId)
+  t3_fake_set 'w.threads = { "thread-captain": { threadId: "thread-captain", projectId: "p", title: "Firstmate captain", status: "running", activeRunId: "run-c", archived: false, worktreePath: null, items: [], runs: [{ runId: "run-c", ordinal: 1, status: "running" }] } }'
+  mcp launch --project "$project" --title fm-a --model-selection "$SEL" --worktree "$WT" --delegated-from thread-captain
+  expect_code 0 "$RC" "a launch from the captain's thread: $ERR"
+  call=$(t3_fake_calls t3_thread_launch | tail -1)
+  assert_equals '{"environmentId":"env-fake-1","threadId":"thread-captain","title":"Firstmate captain"}' "$(field "$call" delegatedFrom)" "the crew links back to the captain's thread by its title"
+  mcp launch --project "$project" --title fm-b --model-selection "$SEL" --worktree "$WT" --delegated-from thread-gone
+  expect_code 0 "$RC" "an unreadable parent only drops the link: $ERR"
+  assert_contains "$ERR" "without a delegatedFrom link" "the dropped link is reported"
+  assert_equals "" "$(field "$(t3_fake_calls t3_thread_launch | tail -1)" delegatedFrom)" "no link to a thread that could not be read"
+  pass "fm-t3-mcp launch: --delegated-from links the crew to the captain's T3 thread, and never blocks the launch"
+}
+
 test_launch_binds_workspace() {
   local project call
   fresh_case launch
@@ -593,6 +610,29 @@ test_requests_and_respond() {
   pass "fm-t3-mcp requests/respond: questions are read and answered by id; approvals are counted, never answered"
 }
 
+test_current_tool_generation() {
+  fresh_case current-tools
+  t3_fake_set 'w.toolGeneration = "current"; w.threads = { "thread-q": { threadId: "thread-q", projectId: "p", status: "running", activeRunId: "run-q", archived: false, worktreePath: null, items: [],
+    runs: [{ runId: "run-q", ordinal: 1, status: "running" }],
+    runtimeRequests: [{ id: "req-question", kind: "user_input", status: "pending", questions: [{ id: "q1", header: "Pick", question: "Which?", options: [{ label: "a", description: "A" }] }] }] } }'
+  mcp status
+  expect_code 0 "$RC" "a T3 0.1 server lists t3_thread_configure and t3_pending_request instead of the older tools: $ERR"
+  mcp requests --thread thread-q
+  expect_code 0 "$RC" "requests: $ERR"
+  assert_equals Which? "$(field "$OUT" questions.0.questions.0.question)" "the question is read through t3_pending_request"
+  assert_equals read "$(field "$(t3_fake_calls t3_pending_request | sed -n 2p)" action)" "list, then read, go through the one pending-request tool"
+  printf '{"q1":"a"}' > "$TMP_ROOT/answers"
+  mcp respond --thread thread-q --request req-question --answers-file "$TMP_ROOT/answers"
+  expect_code 0 "$RC" "respond: $ERR"
+  assert_equals respond "$(field "$(t3_fake_calls t3_pending_request | tail -1)" action)" "the answer is a respond action"
+  assert_equals "" "$(t3_fake_calls t3_pending_request_respond)" "no call goes to a tool the server does not list"
+  t3_fake_set 'w.tools = ["t3_thread_launch","t3_thread_send","t3_thread_read","t3_thread_wait","t3_thread_interrupt","t3_thread_organize","t3_thread_list","t3_thread_configure","t3_project_list","t3_project_create","orchestrator_capabilities","t3_environment_read"]'
+  mcp status
+  expect_code 4 "$RC" "a server with only half of a generation is refused"
+  assert_contains "$ERR" "t3_pending_request" "the refusal names the missing current tool"
+  pass "fm-t3-mcp: a T3 0.1 server passes the gate and its renamed configuration and pending-request tools are used"
+}
+
 test_watch_is_event_driven_and_bounded() {
   local start elapsed sig ender
   fresh_case watch
@@ -810,6 +850,7 @@ test_expiry_and_permissions
 test_revoked_credential_refused
 test_projects_by_real_path
 test_launch_binds_workspace
+test_launch_links_delegated_from
 test_launch_refusals
 test_send_state_capture_interrupt_archive
 test_thread_for_root
@@ -822,6 +863,7 @@ test_thread_for_root_pages_and_forks
 test_resolve_selection_uses_t3_catalog
 test_launch_reads_back_full_configuration
 test_requests_and_respond
+test_current_tool_generation
 test_watch_is_event_driven_and_bounded
 test_watch_reports_failed_waits_not_timeout
 test_helper_runs_through_symlinked_path
