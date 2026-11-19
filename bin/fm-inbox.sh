@@ -24,7 +24,19 @@
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list  [--all]
-#   fm-inbox.sh drain [--ack <id>...] [--all]
+#   fm-inbox.sh drain [--all]
+#   fm-inbox.sh drain --filed <task-id>[,...] --ack <id>...
+#   fm-inbox.sh drain --no-actions --ack <id>...
+#
+# Acknowledging. `--ack` retires a record into its handled/ directory. A
+# captain note (the state/inbox/ queue) may only be retired by naming the backlog
+# rows its work became (`--filed`), or by stating on the record that it needs no
+# work (`--no-actions`); either is appended to the handled copy as a `filed=`
+# line, so "was this note laned?" is answerable from disk forever. The measured
+# failure behind that gate: of six captain notes, one became a backlog row and
+# five disappeared through a bare ack, because a bare ack is an `mv` that cannot
+# fail and asks nothing. Automated notes keep the bare ack - a polling record is
+# telemetry, not an assignment.
 #
 # Source classes. Every note is filed under the class of the thing that wrote it,
 # and the class decides which queue it lands in. Separating the two is what keeps
@@ -462,20 +474,52 @@ cmd_drain() {
     show_all=1
     shift
   fi
+  # The gate is read before --ack, so the flag order is flags first, ids last.
+  local filed="" no_actions=0 id dir acked stamp
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --filed)
+        [ "$#" -ge 2 ] || die "--filed needs at least one backlog task id"
+        # A task id is never empty and never begins with a dash, so an empty or
+        # flag-shaped value means the caller forgot the ids rather than naming one.
+        case "$2" in
+          ''|-*) die "--filed needs at least one backlog task id" ;;
+        esac
+        filed=$2
+        shift 2 ;;
+      --no-actions) no_actions=1; shift ;;
+      *) break ;;
+    esac
+  done
   if [ "${1:-}" = "--ack" ]; then
     shift
-    [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
-    local id dir acked
+    [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain [--filed <task-id>[,...] | --no-actions] --ack <id>..."
     for id in "$@"; do
       # An id is a bare file name in one of the two queues; a path would let a
       # typo reach outside them.
       case "$id" in
         ''|*/*|*..*) die "not a note id: $id" ;;
       esac
+      # Everything in the captain queue was written by the captain or by the
+      # captain's own voice, so closing one must name what its work became.
+      if [ -f "$INBOX/$id.note" ] && [ -z "$filed" ] && [ "$no_actions" -eq 0 ]; then
+        die "note $id is a captain note: file its work first, then ack with --filed <task-id>[,...], or state --no-actions if it needs no work"
+      fi
+      stamp=""
+      if [ -n "$filed" ]; then
+        stamp="filed=$filed"
+      elif [ "$no_actions" -eq 1 ]; then
+        stamp="filed=none:--no-actions"
+      fi
       acked=0
       for dir in "$INBOX" "$INBOX_AUTO"; do
         [ -f "$dir/$id.note" ] || continue
         mkdir -p "$dir/handled"
+        # Only the captain's queue is stamped: an automated record is telemetry,
+        # so it retires exactly as it did before this gate existed.
+        if [ -n "$stamp" ] && [ "$dir" = "$INBOX" ]; then
+          printf '%s\n' "$stamp" >>"$dir/$id.note"
+        fi
         mv "$dir/$id.note" "$dir/handled/$id.note"
         printf 'acked %s\n' "$id"
         acked=1
@@ -486,7 +530,8 @@ cmd_drain() {
     return 0
   fi
   if [ "$show_all" -eq 1 ]; then cmd_list --all; else cmd_list; fi
-  printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
+  printf '\nAck a captain note with: fm-inbox.sh drain --filed <task-id>[,...] --ack <id>...  (or --no-actions)\n'
+  printf 'Ack an automated note with: fm-inbox.sh drain --ack <id>...\n'
 }
 
 # ---------------------------------------------------------------- dispatch
