@@ -6,9 +6,10 @@
 # (a lock directory plus a rename). A writable state/ inside the sandbox is the
 # escape the sandbox exists to prevent: it holds every other worker's inbox and
 # extension, which run unsandboxed. So a sandboxed worker's extension writes one
-# small JSON file per edge into state/<id>.sbx/events/ (the only state/ path the
-# sandbox may write) and this relay, running on the HOST as the sandbox
-# wrapper's --host-helper child, validates each file and applies the edge.
+# small JSON file per edge into state/<id>.sbx/events/ (bound writable beside
+# only the task's own status, turn-ended and inbox paths) and this relay,
+# running on the HOST as the sandbox wrapper's --host-helper child, validates
+# each file and applies the edge.
 #
 # Trust boundary: the relay authenticates the INCARNATION, never the claim. The
 # busy gen is fixed by bin/fm-spawn.sh in the helper's command line (host side)

@@ -414,7 +414,7 @@
 #   in that wrapper profile whatever the config maps; --sandbox off waives a
 #   mapped profile for one spawn unless config/sandbox says enforce=strict. A
 #   secondmate is never sandboxed and refuses the flag. The wrapper
-#   (<wrapper> --profile <name> --host-helper <helper> <binds> -- <agent>)
+#   (<wrapper> --profile <name> <binds> --host-helper <helper> -- <agent>)
 #   prefixes ONLY the agent segment, at the one seam after placeholder
 #   substitution, so the OSC reporter, the FM_TASK_INBOX export, and the
 #   launch-env-allowlist layer stay outside it and compose unchanged. Only the

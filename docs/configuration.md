@@ -2032,7 +2032,7 @@ Firstmate generates `state/<id>.sbx/relay-helper` for it, so the contract holds 
 ### Busy relay
 
 The omp busy extension cannot run `bin/fm-busy-event.sh` inside the sandbox, because that needs a writable `state/`, which would let the worker rewrite other workers' inboxes and extensions.
-A sandboxed extension instead writes one small JSON file per turn edge into `state/<id>.sbx/events/`, the only writable path under `state/`, and `bin/fm-sandbox-relay.sh` applies it on the host through `bin/fm-busy-event.sh`.
+A sandboxed extension instead writes one small JSON file per turn edge into `state/<id>.sbx/events/`, one of the few task-own `state/` paths it may write, and `bin/fm-sandbox-relay.sh` applies it on the host through `bin/fm-busy-event.sh`.
 The busy gen is fixed on the helper's command line at spawn, never read from a file, so a worker from a superseded incarnation cannot move its replacement's record.
 The relay drops, counts in `state/<id>.sbx/relay.log`, and never applies an event that is malformed, over 512 bytes, not a regular file, beyond the per-second or per-pass cap, or refused by the writer.
 It ends with the wrapper, when teardown removes the spool, or when the task is re-armed.
