@@ -963,7 +963,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   # caller's own.
   _fm_status_unstamped "$line" unstamped
   if [[ $unstamped =~ $FM_HOLD_RETRACTION_ERE ]]; then
-    printf '%s' "$open"
+    _fm_decision_fold_emit "$open" "$out"
     return 0
   fi
   # Declaration guard. A transition's verb ends at a colon, or - in the colonless
