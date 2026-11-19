@@ -856,7 +856,7 @@ The file is a home-local site choice and is not inherited by secondmate homes; `
 ## Lane capacity (config/lane-capacity)
 
 The optional local, gitignored `config/lane-capacity` file says how many ship and scout lanes this home should run at once, and when it should stop taking more.
-`bin/fm-capacity.sh` reads it to report how many lanes are open for queued work, alongside running lanes, 1-minute load against logical cores, free memory, and free disk.
+`bin/fm-capacity.sh` reads it to report how many lanes are open for queued work, alongside running lanes, load, the measured cpu busy share and cpu pressure of the last minute, free memory, and free disk.
 With the file absent nothing changes: the report prints counts and host figures only, never invents a target, never advises holding dispatch, and nothing is published; a malformed value is reported as invalid rather than guessed.
 Persistent secondmates hold no lane.
 The file is a per-machine choice and is not inherited by secondmate homes, so each home owns its own numbers.
@@ -888,6 +888,11 @@ A pressure file is any producer of the `lookout.beat` 1.x shape, read by its own
 `quota-provider` makes the script reach the network through `quota-axi`, bounded to five seconds.
 The three GitHub limits make a spawn read the project's GitHub origin through `gh-axi` (see Spawn admission below); `0` turns one of them off.
 
+The cpu limit holds on measured saturation, not on load average: a start is held only when the busy share of the cpus over the last minute is above 90% (under a tenth of the cores idle) and `/proc/pressure/cpu`'s `some` `avg60` is at or over 40%, or when the 1-minute load is above 3 per logical core, a runaway brake that still stops a fork storm.
+Either measurement admitting on its own admits the start, and an unreadable one (a kernel without pressure stall information, a mac, a sample younger than ten seconds or older than two minutes) never holds.
+The busy share comes from `/proc/stat` deltas against the sample `bin/fm-capacity.sh` cached on its previous run (`state/.cpu-stat-sample`), so the window tracks the last minute without waiting inside a spawn.
+The earlier rule, holding at one load per core, is gone: load average counts runnable threads rather than busy cpus, so it held starts while cores sat idle.
+
 While the file exists, the watcher runs `bin/fm-capacity.sh --publish` detached at most every 30 seconds, writing this home's lane facts to `state/lane-capacity.json`: its lanes, its cap and limits, its machine's pressure and boots, its watcher's freshness, and its own admission verdict.
 Publishing is best-effort and never changes what the watcher does.
 `bin/fm-capacity.sh --admit` is the check of the same verdict that a fresh ship or scout spawn makes (see Spawn admission below): it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
@@ -912,6 +917,8 @@ The verdict is the lane cap and the host limits above, plus three inputs only a 
 - Available memory, which is the AVAILABLE column of `free -m` (`MemAvailable`), never the free one.
   A low free percentage alone never holds a start while 8 GB or more is available.
 
+Among the host limits the verdict applies, the cpu limit is the measured saturation hold the Lane capacity section above owns in full: busy share and cpu pressure decide it, a load average at the core count alone no longer holds a start, and only its runaway brake above 3 per logical core still reads load.
+
 An input that cannot be read (no `jq`, no `gh-axi`, a timeout, an unreadable table) warns on stderr and admits, so a broken probe never stops the fleet.
 A hold is a spawn deferral like the load guard's: nothing is created, the backlog item stays queued, one `deferred:` line names every reason, and the exit status is 75.
 
@@ -930,6 +937,7 @@ The scripts' headers own the queue record, the retry bounds, and the command for
 A held spawn launches nothing, creates no record, leaves the backlog item queued, prints one `deferred:` line naming the load, the cores and the limit, and exits 75, so Firstmate dispatches the item again once the load drops.
 A relaunch, a restart of a task that already has a record, and a secondmate launch are not held, and an unknown load admits.
 A `max-load1` line in this file replaces the default with its raw limit, holding at or over that value on this machine's own load; the cap and the other limits do not affect the guard.
+This guard is the only load-average hold left: the admission verdict's cpu limit measures idle cpu and cpu pressure instead and keeps only a runaway brake above 3 per logical core (see Lane capacity above).
 
 A merge-gating PR review scout explicitly launched with `--scout --merge-review` uses a separate reserved allowance instead of the CPU-load and lane/fleet admission holds above.
 Use this marker for independent G3 gate reviewers and other scouts reviewing a PR, never for ordinary investigation or implementation; neither task ids nor brief prose classify a start.

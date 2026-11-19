@@ -14,7 +14,8 @@
 #
 # It reads this home's state/*.meta, the optional config/lane-capacity, the
 # pressure files and reserve flags that file names, and the host's own probes.
-# It never spawns, locks, or changes anything; --publish writes its one file.
+# It never spawns or locks; besides --publish's document its only write is
+# the hidden cpu sample cache the cpu probe below refreshes, best-effort.
 # It is network-free unless config/lane-capacity names a quota-provider.
 # docs/configuration.md "Lane capacity" owns the config/lane-capacity format
 # (the cap on its first line, then optional keyed lines); with the file absent
@@ -40,7 +41,11 @@
 # With a target, free_lanes is target minus lanes (never below 0), unless a
 # constraint holds, in which case free_lanes=0 and reason names every
 # constraint, comma-separated, in this order:
-#   cpu       probe basis: 1-minute load average >= logical cores
+#   cpu       probe basis: cpu saturation over the last minute - the busy
+#             share from /proc/stat deltas above 90% AND /proc/pressure/cpu
+#             some avg60 at or over 40% - or the runaway brake, load1 above
+#             3 per logical core; either measure alone, or an unreadable
+#             one, admits
 #   memory    probe basis: free-memory percentage < 10; or, with min-avail-gb
 #             set, available memory minus min-avail-gb is under the 1 GB a
 #             default lane needs
@@ -74,6 +79,20 @@
 # systems read /proc/loadavg, /proc/meminfo (MemAvailable/MemTotal),
 # /proc/uptime, /proc/stat btime and /proc/sys/kernel/random/boot_id; cores
 # come from getconf with a sysctl fallback; disk comes from df -Pk.
+#
+# The cpu constraint measures idle cpu, not load average (load counts
+# runnable threads, so a fork-heavy host reads saturated while cpus idle):
+# the busy share of the cpu aggregate over the window since this home's
+# previous capacity run, from /proc/stat deltas against the sample cache
+# state/.cpu-stat-sample (its mtime is the sample time; a 10-120 s old
+# sample serves, and one past 60 s is refreshed, so the window tracks the
+# last minute without waiting inside a spawn), together with
+# /proc/pressure/cpu some avg60. A hold needs both legs saturated: busy
+# share above 90% (under a tenth of the cores idle) and pressure some avg60
+# at or over 40%. Either leg admitting, or being unreadable (a young or
+# stale sample, a kernel without PSI, a mac), admits; load1 above 3 per
+# logical core still holds as a runaway brake so a fork storm stops
+# admission. FM_CPU_PROC_DIR replaces /proc for these two reads, for tests.
 #
 # --json prints one fm-lane-capacity.v1 object (needs jq):
 #   schema, generated_epoch (this host's clock), home ("main", or the id in
@@ -170,6 +189,12 @@ QUOTA_TIMEOUT=5
 BOOTS_KEPT=10
 LOAD_GUARD_PER_CORE=2
 ADMIT_RAM_ENOUGH_GB=8
+CPU_BUSY_MIN_WINDOW_S=10
+CPU_BUSY_MAX_WINDOW_S=120
+CPU_BUSY_REFRESH_S=60
+CPU_BUSY_MAX_PCT=90
+CPU_PSI_SOME_MAX_PCT=40
+CPU_BRAKE_PER_CORE=3
 
 mode=report
 ADMIT_PROJECT=
@@ -528,9 +553,70 @@ $pressure_files
 EOF
 
 probe_cpu=0 probe_mem=0 probe_disk=0
-if [ "$load1" != unknown ] && [ "$cores" != unknown ] &&
-  awk -v l="$load1" -v c="$cores" 'BEGIN{exit !(l >= c)}'; then
+cpu_why=
+cpu_busy='' cpu_busy_window='' cpu_psi=''
+# The runaway brake: load1 above CPU_BRAKE_PER_CORE per logical core holds
+# whatever the idle measures say, so a fork storm still stops admission.
+if [ "$load1" != unknown ] && [ "$cores" != unknown ]; then
+  brake=$((cores * CPU_BRAKE_PER_CORE))
+  if num_lt "$brake" "$load1"; then
+    probe_cpu=1
+    cpu_why="load $load1 on $cores cores, above the runaway brake of $CPU_BRAKE_PER_CORE per core ($brake)"
+  fi
+fi
+# Saturation: the busy share from /proc/stat deltas against the sample an
+# earlier capacity run cached, plus /proc/pressure/cpu some avg60. A hold
+# needs both legs over their thresholds; one unreadable or healthy leg
+# admits. FM_CPU_PROC_DIR replaces /proc for these two reads, for tests.
+cpu_stat=/proc/stat
+cpu_psi_file=/proc/pressure/cpu
+if [ -n "${FM_CPU_PROC_DIR:-}" ] && [ -d "${FM_CPU_PROC_DIR%/}" ]; then
+  cpu_stat=${FM_CPU_PROC_DIR%/}/stat
+  cpu_psi_file=${FM_CPU_PROC_DIR%/}/pressure/cpu
+fi
+cpu_sample=$STATE/.cpu-stat-sample
+cpu_write_sample() {  # <total> <idle>: refresh the sample cache, best-effort
+  local tmp
+  [ -d "$STATE" ] || return 0
+  tmp=$(mktemp "$STATE/.cpu-stat-sample.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s %s\n' "$1" "$2" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$cpu_sample" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp"
+}
+cpu_ticks=$(awk '/^cpu /{printf "%.0f %.0f", $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9, $5 + $6; exit}' "$cpu_stat" 2>/dev/null)
+cpu_total=${cpu_ticks%% *}
+cpu_idle=${cpu_ticks#* }
+cpu_psi=$(awk '$1 == "some" {for (i = 2; i <= NF; i++) if ($i ~ /^avg60=/) {sub(/^avg60=/, "", $i); print $i; exit}}' "$cpu_psi_file" 2>/dev/null)
+is_num "$cpu_psi" || cpu_psi=
+if is_uint "$cpu_total" && is_uint "$cpu_idle"; then
+  cpu_refresh=1 cpu_age=
+  if [ -f "$cpu_sample" ] && [ ! -L "$cpu_sample" ] && m=$(file_mtime "$cpu_sample"); then
+    cpu_age=$((now - m))
+    [ "$cpu_age" -ge 0 ] || cpu_age=0
+    # A sample younger than the minimum window stays so its window can grow.
+    [ "$cpu_age" -ge "$CPU_BUSY_MIN_WINDOW_S" ] || cpu_refresh=0
+  fi
+  if [ "$cpu_refresh" -eq 1 ] && [ -f "$cpu_sample" ] && [ ! -L "$cpu_sample" ] &&
+    { IFS=' ' read -r p_total p_idle < "$cpu_sample"; } 2>/dev/null &&
+    is_uint "$p_total" && is_uint "$p_idle" &&
+    [ "$p_total" -le "$cpu_total" ] && [ "$p_idle" -le "$cpu_idle" ] &&
+    [ "$((cpu_total - p_total))" -gt 0 ] &&
+    [ "$cpu_age" -ge "$CPU_BUSY_MIN_WINDOW_S" ] && [ "$cpu_age" -le "$CPU_BUSY_MAX_WINDOW_S" ]; then
+    cpu_busy=$(awk -v dt="$((cpu_total - p_total))" -v di="$((cpu_idle - p_idle))" \
+      'BEGIN{printf "%.0f", (dt - di) / dt * 100}')
+    cpu_busy_window=$cpu_age
+    # A sample within the window keeps serving; an older one is replaced.
+    [ "$cpu_age" -gt "$CPU_BUSY_REFRESH_S" ] || cpu_refresh=0
+  fi
+  if [ "$cpu_refresh" -eq 1 ]; then
+    cpu_write_sample "$cpu_total" "$cpu_idle"
+  fi
+fi
+if [ "$probe_cpu" -eq 0 ] && [ -n "$cpu_busy" ] && [ -n "$cpu_psi" ] &&
+  num_lt "$CPU_BUSY_MAX_PCT" "$cpu_busy" && ! num_lt "$cpu_psi" "$CPU_PSI_SOME_MAX_PCT"; then
   probe_cpu=1
+  cpu_why="busy $cpu_busy% of the cpus over the last $cpu_busy_window s and cpu pressure some avg60 $(awk -v p="$cpu_psi" 'BEGIN{printf "%g", p}')%"
 fi
 [ "$mem_free_pct" != unknown ] && [ "$mem_free_pct" -lt "$MEM_FREE_MIN_PCT" ] && probe_mem=1
 # Memory is not a lane limit while plenty is available: a percentage under the
@@ -551,7 +637,7 @@ elif [ "$load1" != unknown ] || [ "$mem_free_pct" != unknown ] || [ "$disk_free_
     runq_per_core=$(awk -v l="$load1" -v c="$cores" 'BEGIN{printf "%.2f", l / c}')
   fi
   disks=$probe_disks
-  [ "$probe_cpu" -eq 0 ] || { level=warn; add_why "load $load1 on $cores cores"; }
+  [ "$probe_cpu" -eq 0 ] || { level=warn; add_why "$cpu_why"; }
   [ "$probe_mem" -eq 0 ] || { level=warn; add_why "memory $mem_free_pct% free"; }
   [ "$probe_disk" -eq 0 ] || { level=warn; add_why "disk $disk_free_mb MB free"; }
 fi
@@ -585,7 +671,7 @@ add_constraint() {  # <name> <reason> [published reason, default the reason]
 "
 }
 if [ "$basis" = probe ]; then
-  [ "$probe_cpu" -eq 0 ] || add_constraint cpu "cpu: load $load1 on $cores cores"
+  [ "$probe_cpu" -eq 0 ] || add_constraint cpu "cpu: $cpu_why"
   [ "$probe_mem" -eq 0 ] || add_constraint memory "memory: $mem_free_pct% free"
   [ "$probe_disk" -eq 0 ] || add_constraint disk "disk: $disk_free_mb MB free"
 fi
@@ -708,7 +794,10 @@ if [ "$mode" = report ]; then
   [ "$secondmates" -eq 0 ] || echo "Secondmates: $secondmates (hold no lane)."
   mem_text="${mem_free_pct}%"; [ "$mem_free_pct" != unknown ] || mem_text=unknown
   disk_text="$disk_free_mb MB"; [ "$disk_free_mb" != unknown ] || disk_text=unknown
-  echo "Host: load $load1 on $cores cores, memory free $mem_text, disk free $disk_text."
+  host_cpu=
+  [ -z "$cpu_busy" ] || host_cpu="$host_cpu, cpu busy $cpu_busy% over $cpu_busy_window s"
+  [ -z "$cpu_psi" ] || host_cpu="$host_cpu, cpu pressure some avg60 $(awk -v p="$cpu_psi" 'BEGIN{printf "%g", p}')%"
+  echo "Host: load $load1 on $cores cores$host_cpu, memory free $mem_text, disk free $disk_text."
   if [ -n "$pressure_files" ]; then
     why_text=$(printf '%s' "$why" | paste -sd ';' - | sed 's/;/; /g')
     echo "Pressure: $level from $basis${why_text:+ ($why_text)}."

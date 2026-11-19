@@ -78,7 +78,7 @@ test_no_target_prints_counts_only() {
 test_no_target_never_prints_constrained_line() {
   local home fakebin out rc
   home=$(make_home no-target-constrained 1 0)
-  fakebin=$(make_probes "$TMP_ROOT/p-no-target-constrained" 9.50 9 8 1048576)
+  fakebin=$(make_probes "$TMP_ROOT/p-no-target-constrained" 25.00 9 8 1048576)
   out=$(run_capacity "$home" "$fakebin"); rc=$?
   expect_code 0 "$rc" "absent target on a constrained host"
   assert_contains "$out" 'free_lanes=unknown reason=no-target '     "constrained host without a target must still report no-target"
@@ -110,17 +110,89 @@ test_host_constraints_close_lanes() {
   local home fakebin out
   home=$(make_home constrained 1 0)
   printf '6\n' > "$home/config/lane-capacity"
-  fakebin=$(make_probes "$TMP_ROOT/p-cpu" 8.00 60 8 20971520)
+  fakebin=$(make_probes "$TMP_ROOT/p-cpu" 25.00 60 8 20971520)
   out=$(run_capacity "$home" "$fakebin")
-  assert_contains "$out" 'free_lanes=0 reason=cpu ' "load at core count must constrain"
-  fakebin=$(make_probes "$TMP_ROOT/p-all" 9.50 9 8 1048576)
+  assert_contains "$out" 'free_lanes=0 reason=cpu ' "load above the runaway brake must constrain"
+  fakebin=$(make_probes "$TMP_ROOT/p-all" 30.00 9 8 1048576)
   out=$(run_capacity "$home" "$fakebin")
   assert_contains "$out" 'free_lanes=0 reason=cpu,memory,disk ' "every constraint must be named"
   assert_contains "$out" 'Constrained: cpu,memory,disk' "human summary must name constraints"
-  fakebin=$(make_probes "$TMP_ROOT/p-edge" 7.99 10 8 5242880)
+  fakebin=$(make_probes "$TMP_ROOT/p-edge" 23.99 10 8 5242880)
   out=$(run_capacity "$home" "$fakebin")
   assert_contains "$out" 'free_lanes=5 reason=ok ' "values just inside thresholds must not constrain"
-  pass "cpu, memory, and disk pressure close every lane and are named"
+  pass "the cpu runaway brake, memory, and disk pressure close every lane and are named"
+}
+
+# make_cpu_proc <dir> <user> <system> <idle> <psi-avg60>: a fake /proc for the
+# cpu probes (FM_CPU_PROC_DIR): /proc/stat cpu counters and /proc/pressure/cpu.
+make_cpu_proc() {
+  mkdir -p "$1/pressure"
+  printf 'cpu %s 0 %s %s 0 0 0 0 0\nintr 0\nctxt 0\n' "$2" "$3" "$4" > "$1/stat"
+  printf 'some avg10=%s avg60=%s avg300=%s total=1000000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' "$5" "$5" "$5" > "$1/pressure/cpu"
+}
+
+# cpu_case <home> <fakebin> <procdir> <busy-pct> <psi-avg60>: seed the home's
+# cpu sample cache from base counters, then advance the fake /proc by a 61 s
+# window (800 ticks/s on the 8 fake cores) at <busy-pct> and age the cache to
+# 55 s, so the next capacity run measures that busy share with that pressure.
+cpu_case() {
+  local home=$1 fakebin=$2 proc=$3 busy=$4 psi=$5 dt=48800 idle_delta busy_delta
+  rm -f "$home/state/.cpu-stat-sample"
+  make_cpu_proc "$proc" 1000000 1000000 1000000 "$psi"
+  FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" >/dev/null
+  idle_delta=$((dt * (100 - busy) / 100))
+  busy_delta=$((dt - idle_delta))
+  make_cpu_proc "$proc" "$((1000000 + busy_delta))" 1000000 "$((1000000 + idle_delta))" "$psi"
+  fm_touch_epoch "$(( $(date +%s) - 55 ))" "$home/state/.cpu-stat-sample"
+}
+
+test_admission_uses_idle_cpu_not_load_average() {
+  local home fakebin proc out rc
+  home=$(make_home idle-cpu 1 0)
+  printf '4\n' > "$home/config/lane-capacity"
+  # Load 20 on 8 cores held every start under the old one-per-core rule; the
+  # runaway brake admits it while the idle measures are healthy or unreadable.
+  fakebin=$(make_probes "$TMP_ROOT/p-idle" 20.00 60 8 20971520)
+  out=$(run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 0 "$rc" "admit at 2.5 load per core without idle measures"
+  out=$(run_capacity_jq "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=3 reason=ok ' "a load above the core count must no longer hold"
+  # Saturation holds only when both legs agree: busy 93% and pressure avg60 45%.
+  proc=$TMP_ROOT/proc-sat
+  cpu_case "$home" "$fakebin" "$proc" 93 45.00
+  assert_present "$home/state/.cpu-stat-sample" "the probe must cache its /proc/stat sample"
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 75 "$rc" "measured saturation holds"
+  assert_contains "$out" 'cpu: busy 93% of the cpus over the last 5' "the hold must name the busy share"
+  assert_contains "$out" 'cpu pressure some avg60 45%' "the hold must name the pressure"
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin")
+  assert_contains "$out" 'free_lanes=0 reason=cpu ' "the report must name the cpu constraint"
+  assert_contains "$out" 'Host: load 20.00 on 8 cores, cpu busy 93% over 5' "the report must show the busy share"
+  # Either leg alone admits: pressure low, or busy share low.
+  cpu_case "$home" "$fakebin" "$proc" 93 30.00
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 0 "$rc" "a healthy pressure leg admits a busy host"
+  cpu_case "$home" "$fakebin" "$proc" 80 60.00
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 0 "$rc" "a healthy busy leg admits a pressured host"
+  # An unreadable busy leg admits: no sample yet, and a sample gone stale.
+  rm -f "$home/state/.cpu-stat-sample"
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 0 "$rc" "pressure alone with no busy sample must admit"
+  cpu_case "$home" "$fakebin" "$proc" 93 45.00
+  fm_touch_epoch "$(( $(date +%s) - 300 ))" "$home/state/.cpu-stat-sample"
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 0 "$rc" "pressure alone with a stale busy sample must admit"
+  # The runaway brake: load above 3 per core holds even with idle cpu measured.
+  fakebin=$(make_probes "$TMP_ROOT/p-idle-brake" 25.00 60 8 20971520)
+  cpu_case "$home" "$fakebin" "$proc" 80 30.00
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 75 "$rc" "load above 3 per core must hold"
+  assert_contains "$out" 'cpu: load 25.00 on 8 cores, above the runaway brake of 3 per core (24)' "the brake hold must name its limit"
+  fakebin=$(make_probes "$TMP_ROOT/p-idle-brake-edge" 24.00 60 8 20971520)
+  out=$(FM_CPU_PROC_DIR="$proc" run_capacity_jq "$home" "$fakebin" --admit); rc=$?
+  expect_code 0 "$rc" "load at exactly 3 per core admits"
+  pass "admission follows measured idle cpu and pressure, with a 3-per-core runaway brake"
 }
 
 test_unavailable_probes_degrade() {
@@ -244,11 +316,11 @@ test_fresh_beat_replaces_probes() {
   local home fakebin out doc
   home=$(make_home beat 1 0)
   # Probes say constrained on load; a fresh ok beat replaces them.
-  fakebin=$(make_probes "$TMP_ROOT/p-beat" 9.00 60 8 20971520)
+  fakebin=$(make_probes "$TMP_ROOT/p-beat" 25.00 60 8 20971520)
   write_beat "$home/beat.json" ok 13.5 25.2 0.29 24.7 false
   printf '4\npressure-file %s\n' "$home/beat.json" > "$home/config/lane-capacity"
   out=$(run_capacity_jq "$home" "$fakebin")
-  assert_contains "$out" 'capacity: free_lanes=3 reason=ok lanes=1 target=4 secondmates=0 load1=9.00 cores=8 ' \
+  assert_contains "$out" 'capacity: free_lanes=3 reason=ok lanes=1 target=4 secondmates=0 load1=25.00 cores=8 ' \
     "a fresh ok beat must replace the raw load probe"
   assert_contains "$out" 'Pressure: ok from beat.' "the summary must name the beat basis"
   doc=$(capacity_doc "$home" "$fakebin")
@@ -561,6 +633,7 @@ test_no_target_prints_counts_only
 test_no_target_never_prints_constrained_line
 test_target_yields_open_lanes_and_full
 test_host_constraints_close_lanes
+test_admission_uses_idle_cpu_not_load_average
 test_unavailable_probes_degrade
 test_invalid_target_is_reported
 test_config_keys_parse_and_refuse_guessing
