@@ -197,10 +197,14 @@
 # and this runner still decides nothing about them. Some sources carry the
 # captain's answer to a captain-held task. What such an answer MEANS is owned
 # once, by bin/fm-captain-hold.sh's keyed-answer intake, and reaching it must not
-# depend on an agent remembering. So after capture, a bound source
+# depend on an agent remembering. After capture, a bound source
 # has its result passed to
 # `bin/fm-procevent-<adapter>.sh answers <result-file>`, and whatever that prints
-# is piped straight into that one intake. The adapter reports only what the
+# reaches that one intake. For an owner-task capture, publish_result first
+# freezes the intake's validated rows in a private owner-answers sidecar and
+# includes them in the existing idempotent inbox record (source/sequence/key).
+# Only durable enqueue permits closure; failures retain the capture and wake.
+# The adapter reports only what the
 # captain chose; the intake owns every rule about what happens next. This runner
 # names no adapter, parses no result, and knows no decision rule, so a future
 # built-in source needs nothing here beyond an `answers` command and a binding.
@@ -477,16 +481,19 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
 # source, an adapter with no `answers` command, and a failure on either side all
 # leave the capture untouched and still announced, because this never
 # acknowledges anything (see the keyed-answer note in the header).
-feed_keyed_answers() {  # <adapter> <source-id> <result-file>
+feed_keyed_answers() {  # <adapter> <source-id> <result-file> [prepared-rows]
   local adapter=$1 id=$2 result=$3 script origin seq
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
-  "$script" answers "$result" 2>/dev/null \
-    | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
-        --source "the captured result $id sequence $seq" >/dev/null 2>&1
+  if [ "$#" -ge 4 ]; then
+    printf '%s\n' "$4"
+  else
+    "$script" answers "$result" 2>/dev/null
+  fi | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
+    --source "the captured result $id sequence $seq" >/dev/null 2>&1
 }
 
 feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
@@ -890,6 +897,7 @@ cmd_register_extension() {
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
   local ring_backend ring_target ring_meta inbox_dir handled_dir pre_existing existing new_record
+  local answer_rows='' answer_origin='' answer_script answer_cache answer_tmp
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
   fm_procevent_source_id_valid "$id" || return 1
@@ -917,6 +925,47 @@ publish_result() {  # <result-file>
         unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
         message="Lavish review feedback is captured for task $owner_task at $result. Read it with bin/fm-procevent-lavish.sh read $result, apply the round, and re-arm the board with the reply."
       fi
+      # Freeze validated rows with this capture before delivery. Re-publication
+      # must keep identical inbox bytes even after closure or a lifecycle change.
+      # The hold intake remains the only validator and rechecks guards at close.
+      answer_cache="${result%.result}.owner-answers"
+      if [ -f "$answer_cache" ] && [ ! -L "$answer_cache" ]; then
+        answer_rows=$(cat "$answer_cache")
+      elif [ ! -e "$answer_cache" ] && [ ! -L "$answer_cache" ]; then
+        answer_origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null || true)
+        answer_script=$(adapter_script "$adapter")
+        if [ -n "$answer_origin" ] && [ -f "$answer_script" ] && [ ! -L "$answer_script" ]; then
+          answer_rows=$(set -o pipefail
+            "$answer_script" answers "$result" 2>/dev/null \
+              | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$answer_origin" --prepare \
+                --source "the captured result $id sequence $seq" 2>/dev/null) || {
+            fm_procevent_source_lock_release "$id"
+            fm_wake_append check "procevent:$id:$seq" "check: $line"
+            return 1
+          }
+        fi
+        answer_tmp=$(umask 077; mktemp "${answer_cache}.XXXXXX") || {
+          fm_procevent_source_lock_release "$id"
+          fm_wake_append check "procevent:$id:$seq" "check: $line"
+          return 1
+        }
+        if ! { printf '%s' "$answer_rows" > "$answer_tmp" && mv -f -- "$answer_tmp" "$answer_cache"; }; then
+          rm -f -- "$answer_tmp"
+          fm_procevent_source_lock_release "$id"
+          fm_wake_append check "procevent:$id:$seq" "check: $line"
+          return 1
+        fi
+      else
+        fm_procevent_source_lock_release "$id"
+        fm_wake_append check "procevent:$id:$seq" "check: $line"
+        return 1
+      fi
+      if [ -n "$answer_rows" ]; then
+        message="$message
+
+Captain answers (source $id sequence $seq; each row is key, answer, label, optional mode/lifecycle):
+$answer_rows"
+      fi
       # Snapshot the records that already exist (active and handled) before
       # the idempotent write, so a dedup match - including one already
       # acknowledged in handled/ - is never treated as new. Only a write
@@ -938,6 +987,13 @@ $pre_existing
 EOF
       fi
       fm_procevent_source_lock_release "$id"
+      if [ "$status" -eq 0 ]; then
+        # Answerer-closes, like fm-send --resolve-key: durable enqueue is
+        # delivery, not the best-effort ring. Replay uses the same intake.
+        [ -z "$answer_rows" ] || feed_keyed_answers "$adapter" "$id" "$result" "$answer_rows" || true
+      else
+        fm_wake_append check "procevent:$id:$seq" "check: $line" || true
+      fi
       # The inbox still owns the round. A deliberately exited host also needs
       # firstmate to launch a fresh agent; never acknowledge on its behalf.
       if [ -f "$STATE/$owner_task.page-host-parked" ]; then
@@ -1462,7 +1518,8 @@ EOF
     && feed_reconcile_requests "$adapter" "$id" "$durable"; then
     printf 'reconciles-fed: %s\n' "$id"
   fi
-  if [ "$extension_owner" -eq 0 ] \
+  # Owner-task answers close only at publish_result's durable inbox boundary.
+  if [ "$extension_owner" -eq 0 ] && [ -z "$task_owner" ] \
     && feed_keyed_answers "$adapter" "$id" "$durable"; then
     printf 'answers-fed: %s\n' "$id"
   fi

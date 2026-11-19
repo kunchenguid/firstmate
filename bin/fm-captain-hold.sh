@@ -23,12 +23,14 @@
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
 #     --category <category> [--context-file <path>]
-#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release] [--expected-lifecycle <identity>]
+#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release] [--expected-lifecycle <identity>] [--check-only]
 #   fm-captain-hold.sh answer <task-id> --deadline-default
 #   fm-captain-hold.sh defaults-due
 #   fm-captain-hold.sh stop-clock <task-id> --source <provenance>
 #   fm-captain-hold.sh contexts   (pure canonical-backlog JSON codec on stdin)
-#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
+#   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance> [--prepare]   (keyed answers on stdin)
+#     --prepare emits only validated rows without closing; --check-only validates
+#     one answer without recording it. Delivery callers must recheck at closure.
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
 #   fm-captain-hold.sh unbind <source-id>
@@ -1747,7 +1749,7 @@ prepare_deadline_default() {  # <task-id>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 deadline_default=0 show state hold_kind body outcome recorded_mode occurrence expected='' requested_mode='done'
+  local id=${1:-} decision_file='' release=0 deadline_default=0 show state hold_kind body outcome recorded_mode occurrence expected='' requested_mode='done' check_only=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -1756,6 +1758,7 @@ command_answer() {
       --release) release=1 ;;
       --expected-lifecycle) [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--expected-lifecycle requires an identity"; shift; expected=$1 ;;
       --deadline-default) deadline_default=1 ;;
+      --check-only) check_only=1 ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -1806,6 +1809,7 @@ command_answer() {
         || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay"
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
+      [ "$check_only" = 0 ] || return 0
       remove_interrupted_answer_stamp "$id"
       if [ "$recorded_mode" = repaired ]; then
         publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "answered (repaired)"
@@ -1821,6 +1825,7 @@ command_answer() {
     # this really was the captain's item rather than ordinary finished work.
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
+    [ "$check_only" = 0 ] || return 0
     write_resolution_record "$id" repaired "$body"
     remove_interrupted_answer_stamp "$id"
     task_show "$id" || fail "task $id disappeared while recording the answer"
@@ -1849,6 +1854,7 @@ command_answer() {
         answered|routed) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
         *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
       esac
+      [ "$check_only" = 0 ] || return 0
       if ! close_answered "$id" "$release"; then
         fail "could not close answered captain-held task $id"
       fi
@@ -1857,6 +1863,7 @@ command_answer() {
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
+    [ "$check_only" = 0 ] || return 0
     write_resolution_record "$id" "$outcome" "$body"
     if ! close_answered "$id" "$release"; then
       fail "could not close answered captain-held task $id"
@@ -1878,6 +1885,7 @@ command_answer() {
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
+    [ "$check_only" = 0 ] || return 0
     remove_interrupted_answer_stamp "$id"
     publish_parent_resolution_then_retire "$id" $((occurrence - 1)) released
     printf 'released: %s\n' "$id"
@@ -1984,11 +1992,12 @@ sanitize_reconcile_provenance() {
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
-  local resolve_rc expected guard_args=()
+  local resolve_rc expected prepare=0 report_fd=1 guard_args=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
       --any-origin) origin=$BINDING_ANY ;;
+      --prepare) prepare=1; report_fd=2 ;;
       --*) usage >&2; exit 2 ;;
       *)
         [ -z "$origin" ] || { usage >&2; exit 2; }
@@ -2025,7 +2034,7 @@ command_answers() {
     [ -n "$answer" ] || continue
     label=$(sanitize_field "${label:-}")
     if [ "$answer" = "$RECONCILE_VALUE" ]; then
-      printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key"
+      printf 'refused: %s (reconcile requests require a bound captured source)\n' "$key" >&"$report_fd"
       skipped=$((skipped + 1))
       continue
     fi
@@ -2034,13 +2043,13 @@ command_answers() {
       ''|done) : ;;
       release) release_flag=--release ;;
       *)
-        printf 'skipped: %s (unknown close mode %s)\n' "$key" "$(sanitize_field "$mode")"
+        printf 'skipped: %s (unknown close mode %s)\n' "$key" "$(sanitize_field "$mode")" >&"$report_fd"
         skipped=$((skipped + 1))
         continue
         ;;
     esac
     if [ "$release_flag" = --release ] && ! release_attended; then
-      printf 'refused: %s (%s)\n' "$key" "$RELEASE_AWAY_REASON"
+      printf 'refused: %s (%s)\n' "$key" "$RELEASE_AWAY_REASON" >&"$report_fd"
       skipped=$((skipped + 1))
       continue
     fi
@@ -2049,7 +2058,7 @@ command_answers() {
     id=${id%% *}
     if [ "$resolve_rc" = 2 ]; then
       reason=$(tr -d '\n' < "$err")
-      printf 'skipped: %s (migrated-hold scan refused%s)\n' "$key" "${reason:+: $reason}"
+      printf 'skipped: %s (migrated-hold scan refused%s)\n' "$key" "${reason:+: $reason}" >&"$report_fd"
       skipped=$((skipped + 1))
       continue
     fi
@@ -2060,7 +2069,7 @@ command_answers() {
       # must not be spent as a skip.
       [ "$resolve_rc" -ne 124 ] \
         || fail "the backlog backend exceeded its read bound resolving $key"
-      printf 'skipped: %s (no captain-held task with that id)\n' "$key"
+      printf 'skipped: %s (no captain-held task with that id)\n' "$key" >&"$report_fd"
       skipped=$((skipped + 1))
       continue
     fi
@@ -2079,7 +2088,7 @@ command_answers() {
     if [ -n "$legacy_key" ]; then
       legacy_digest=$(sha256_text "$(legacy_keyed_decision_text "$source" "$legacy_key" "$answer" "$label")")
     fi
-    task_show "$id" || { printf 'skipped: %s (absent)\n' "$id"; skipped=$((skipped + 1)); continue; }
+    task_show "$id" || { printf 'skipped: %s (absent)\n' "$id" >&"$report_fd"; skipped=$((skipped + 1)); continue; }
     show=$TASK_SHOW_OUTPUT
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
@@ -2094,6 +2103,11 @@ command_answers() {
           && closed_answer_replay_mode_compatible "$recorded_mode" "$body"; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
+        if [ "$prepare" = 1 ]; then
+          printf '%s\n' "$row"
+          closed=$((closed + 1))
+          continue
+        fi
         occurrence=$(resolution_record_count "$body")
         case "$recorded_mode" in
           repaired) publish_parent_resolution_then_retire "$id" "$occurrence" "answered (repaired)" ;;
@@ -2106,17 +2120,23 @@ command_answers() {
       fi
     fi
     if [ "$state" = "done" ] && [ -z "$expected" ]; then
-      printf 'skipped: %s (already closed)\n' "$id"
+      printf 'skipped: %s (already closed)\n' "$id" >&"$report_fd"
       skipped=$((skipped + 1))
       continue
     fi
     if [ "$hold_kind" != captain ] && [ -z "$expected" ]; then
-      printf 'skipped: %s (not held for the captain)\n' "$id"
+      printf 'skipped: %s (not held for the captain)\n' "$id" >&"$report_fd"
       skipped=$((skipped + 1))
       continue
     fi
+    [ "$prepare" = 0 ] || guard_args+=(--check-only)
     # shellcheck disable=SC2086  # release_flag is empty or a single literal flag.
     if "$0" answer "$id" --decision-file "$tmp" $release_flag ${guard_args[@]+"${guard_args[@]}"} </dev/null >/dev/null 2>"$err"; then
+      if [ "$prepare" = 1 ]; then
+        printf '%s\n' "$row"
+        closed=$((closed + 1))
+        continue
+      fi
       # A parent-channel delivery problem is reported on stderr by the answer
       # path even when the close succeeded; keep it visible.
       [ ! -s "$err" ] || cat "$err" >&2
@@ -2124,11 +2144,12 @@ command_answers() {
       closed=$((closed + 1))
     else
       reason=$(tr -d '\n' < "$err" | sed 's/^fm-captain-hold: //')
-      printf 'skipped: %s (%s)\n' "$id" "$reason"
+      printf 'skipped: %s (%s)\n' "$id" "$reason" >&"$report_fd"
       skipped=$((skipped + 1))
     fi
   done
   rm -f -- "$tmp" "$err"
+  [ "$prepare" = 0 ] || return 0
   printf 'answers: closed=%s skipped=%s\n' "$closed" "$skipped"
   [ "$skipped" -eq 0 ]
 }

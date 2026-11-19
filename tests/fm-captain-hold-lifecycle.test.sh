@@ -1839,6 +1839,79 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
 # fixture channel that knows nothing about captain holds: task-id keys close at
 # answer time, a card-declared release mode frees held work, freeform prose can
 # forge nothing, and a replayed capture is idempotent.
+test_owner_answers_enqueue_before_close() {
+  local home result show out count
+  home=$(make_home owner-answer-route)
+  run_captain "$home" hold owner-call --title "Owner call" \
+    --category captain-only-fact --reason "captain choice pending" --repo sample >/dev/null
+  run_captain "$home" bind owner-src >/dev/null
+  mkdir -p "$home/state/procevent-inbox"
+  chmod 0700 "$home/state/procevent-inbox"
+  result="$home/state/procevent-inbox/owner-src.1.result"
+  cat > "$result" <<'EOF'
+session:
+  status: feedback
+  session_ended: true
+prompts[2]{uid,prompt,selector,tag,text}:
+  "1","Owner answer\n\nContext data:\n{\n  \"question\": \"owner-call\",\n  \"answer\": \"ship-it\"\n}","form#owner",choice,"Ship it"
+  "2","Unknown answer\n\nContext data:\n{\n  \"question\": \"unknown-call\",\n  \"answer\": \"never-deliver\"\n}","form#unknown",choice,"Unknown"
+EOF
+  printf 'lavish\n' > "${result%.result}.adapter"
+  printf 'owner-worker\n' > "${result%.result}.owner-task"
+  chmod 0600 "$result" "${result%.result}.adapter" "${result%.result}.owner-task"
+
+  out=$(run_lavish "$home" answers "$result" | run_captain "$home" answers --prepare \
+    --source "the captured result owner-src sequence 1" 2>/dev/null)
+  assert_contains "$out" "owner-call" "preparation lost a known key"
+  assert_not_contains "$out" "unknown-call" "preparation emitted an unknown key"
+  show=$(tasks_in "$home" show owner-call --full)
+  assert_contains "$show" "held: yes" "preparing rows closed the decision"
+  out=$(printf 'owner-call\tstale\tStale\tdone\t2000-01-01T00:00:00Z#0\n' \
+    | run_captain "$home" answers --prepare --source "stale capture" 2>/dev/null)
+  [ -z "$out" ] || fail "preparation accepted a stale lifecycle"
+
+  # A non-directory inbox forces durable enqueue to fail, independent of uid.
+  printf 'not a directory\n' > "$home/state/owner-worker.inbox"
+  run_procevent "$home" reconcile >/dev/null 2>&1 || true
+  show=$(tasks_in "$home" show owner-call --full)
+  assert_contains "$show" "held: yes" "failed enqueue closed the decision"
+  assert_present "$home/state/.wake-queue" "failed enqueue lost the fallback wake"
+  assert_absent "${result%.result}.handled" "failed enqueue consumed the capture"
+  rm "$home/state/owner-worker.inbox"
+
+  run_procevent "$home" reconcile >/dev/null || fail "owner delivery reconcile failed"
+  assert_present "$home/state/owner-worker.inbox/001.msg" "answer never reached the owner"
+  out=$(cat "$home/state/owner-worker.inbox/001.msg")
+  assert_contains "$out" "source owner-src sequence 1" "answer lost its retry identity"
+  assert_contains "$out" "owner-call" "owner record lacks the answer key"
+  assert_contains "$out" "ship-it" "owner record lacks the actual answer"
+  assert_not_contains "$out" "never-deliver" "unknown answer reached the owner"
+  show=$(tasks_in "$home" show owner-call --full)
+  assert_contains "$show" "state: done" "durable delivery did not close the decision"
+  # A once-unknown key becoming real must not be closed by a replay: it was
+  # never part of this capture's validated, durably delivered answer set.
+  run_captain "$home" hold unknown-call --title "New call" \
+    --category captain-only-fact --reason "new choice pending" --repo sample >/dev/null
+  run_procevent "$home" reconcile >/dev/null || fail "answer replay failed"
+  show=$(tasks_in "$home" show unknown-call --full)
+  assert_contains "$show" "held: yes" "replay closed a key absent from the delivered rows"
+  count=$(find "$home/state/owner-worker.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "answer retry duplicated the owner record"
+  mv "$home/state/owner-worker.inbox/001.msg" "$home/state/owner-worker.inbox/handled/001.msg"
+  run_procevent "$home" reconcile >/dev/null || fail "handled answer replay failed"
+  assert_absent "$home/state/owner-worker.inbox/002.msg" "handled answer was delivered again"
+
+  # The same structured row on an unbound source must feed no answer.
+  cp "$result" "$home/state/procevent-inbox/unbound-src.1.result"
+  printf 'lavish\n' > "$home/state/procevent-inbox/unbound-src.1.adapter"
+  printf 'unbound-worker\n' > "$home/state/procevent-inbox/unbound-src.1.owner-task"
+  chmod 0600 "$home/state/procevent-inbox/unbound-src.1."*
+  run_procevent "$home" reconcile >/dev/null || fail "unbound publication failed"
+  out=$(cat "$home/state/unbound-worker.inbox/001.msg")
+  assert_not_contains "$out" "ship-it" "unbound source fed an answer"
+  pass "owner answers enqueue once before closure, retry safely, and retain failure wakes"
+}
+
 test_bound_channel_answers_close_at_answer_time() {
   local home id sid artifact result out show rc
   home=$(make_home channel-answer-closure)
@@ -2726,7 +2799,7 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows) printf '%s\n' fm-sample-chat-review; exit 0 ;;
 esac
 exit 0
 SH
@@ -6038,6 +6111,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
+test_owner_answers_enqueue_before_close
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests
