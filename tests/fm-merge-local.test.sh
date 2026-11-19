@@ -308,7 +308,36 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
+test_stale_worker_copy_at_base_tip_does_not_latch() {
+  local reason rc=0
+  make_case stale-copy
+  git -C "$WT" reset -q --hard "$BASE"
+  reason=$(record_done) || rc=$?
+  [ "$rc" -eq 1 ] || fail 'done at the base tip was accepted'
+  assert_contains "$reason" 'no commits beyond the base branch' 'the premature-done refusal did not say why'
+  assert_no_regex '^local_done_head=' "$META" 'a base-tip done latched a head'
+  git -C "$WT" reset -q --hard "$X"
+  record_done || fail 'a later done carrying the real commit was refused'
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'the real head was not latched'
+  land >/dev/null || fail "latched real head did not land: $(land 2>&1)"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'landing did not use X'
+  pass 'a done at the base tip refuses without latching, and a later real head latches and lands'
+}
+
+test_unresolvable_base_does_not_block_reachable_done() {
+  make_case unavailable-base
+  printf 'base_branch=does-not-exist\n' >> "$META"
+  git -C "$WT" reset -q --hard "$X"
+  git -C "$PROJ" merge-base --is-ancestor "$X" refs/heads/fm/local-task \
+    || fail 'the worker head was not reachable outside the worktree'
+  record_done || fail 'an unresolvable base blocked a reachable done'
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'the reachable head was not latched'
+  pass 'an unresolvable base does not block a reachable done head from latching'
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_stale_worker_copy_at_base_tip_does_not_latch \
+  test_unresolvable_base_does_not_block_reachable_done

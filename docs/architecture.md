@@ -423,7 +423,8 @@ Each task's mode and `yolo` merge posture are firstmate's decision at intake.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
 `bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered into a generated ship brief, the ship instructions a promoted scout receives, and that scout's own `brief.md` so a later relaunch reads the same contract, so a promoted worker cannot be handed a weaker contract than a briefed one.
-It also owns the named-head reachability gate that refuses a ship `done:` while that head exists only in the worker's disposable copy, testing the named head rather than whether some branch moved.
+It also owns the named-head gates that refuse a ship `done:` while that head exists only in the worker's disposable copy, testing the named head rather than whether some branch moved, and that refuse an unlatched local-only head at or behind the task's recorded base branch (or the default branch when none was recorded).
+An unresolved base does not block that local-only readiness check, and an already latched head remains subject to the existing pin comparison instead.
 Its header owns local-only readiness pinning, and the [`fm-merge-local.sh` header](../bin/fm-merge-local.sh) owns landing checks and recovery.
 `bin/fm-crew-state.sh`, `bin/fm-pr-check.sh`, and the secondmate ledger-first publisher call that same gate before treating a ship `done:` as ready.
 It is also the one owner of the no-mistakes `--intent` contract those workers follow.
