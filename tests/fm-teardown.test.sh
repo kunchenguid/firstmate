@@ -42,6 +42,9 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) GitLab MR merged by squash or train, main moved on, MR head unfetched,
+#        config/park-on-review or config/auto-land present -> ALLOW; open MR -> REFUSE;
+#        neither flag -> REFUSE without a glab read, as before the opt-in
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -911,6 +914,26 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# A merge-time cleanup request belongs to the detached cleanup that runs this
+# teardown: only that cleanup removes it, after its outcome report is saved, so
+# a cleanup that dies mid-teardown is still retried by the next park tick.
+test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup() {
+  local case_dir wt_head rc
+  case_dir=$(make_case keep-cleanup-request)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "merged work"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  printf 'pr=https://github.com/example/repo/pull/7\n' > "$case_dir/state/task-x1.review-park-land"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "keep-cleanup-request: teardown should succeed when work is merged into local main"
+  assert_present "$case_dir/state/task-x1.review-park-land" "teardown removed the merge cleanup request its cleanup still owns"
+  pass "teardown leaves a merge cleanup request for the detached cleanup that owns it"
+}
+
 # Send the task branch's commits to <target> on origin from a separate clone, so
 # the task copy's tracking refs do not show them. Args: case_dir target
 land_task_commits_from_other_clone() {
@@ -1468,6 +1491,83 @@ test_squash_merged_forgejo_pr_allows_when_main_moved_on() {
       || fail "forgejo-merged-$merged: teardown did not read the Forgejo pull request through tea"
   done
   pass "teardown proves a Forgejo task landed from the merged pull request when the content check is inconclusive"
+}
+
+add_glab_mr_for_head() {
+  local case_dir=$1 state=$2 head=$3
+  cat > "$case_dir/fakebin/glab" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$case_dir/glab.log"
+[ "\${1:-} \${2:-}" = "mr view" ] || exit 1
+printf '{"state":"%s","sha":"%s","squash_commit_sha":"%s"}\n' '$state' '$head' 0000000000000000000000000000000000000001
+SH
+  chmod +x "$case_dir/fakebin/glab"
+}
+
+# A GitLab merge request squash-merged (or merged by a merge train) lands a
+# commit on main that is not the MR head, and main then moved on over the same
+# lines, so the content check is inconclusive. The MR's own head is published
+# only as refs/merge-requests/<n>/head, which this copy never fetched. With
+# config/park-on-review or config/auto-land present, teardown must read the MR
+# through glab, fetch that ref, and accept the merged record; the same history
+# with the MR still open refuses. With neither flag the merged MR is never read
+# through glab and teardown refuses on the inconclusive content check.
+test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
+  local case_dir rc local_head pr_head tmp scenario state expected
+  for scenario in merged:park-on-review merged:auto-land opened:park-on-review merged:; do
+    state=${scenario%%:*}
+    case_dir=$(make_case "gitlab-mr-$state-${scenario#*:}")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    tmp="$case_dir/_pipeline"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    git -C "$tmp" fetch -q "$case_dir/wt" "fm/task-x1:fm/task-x1"
+    git -C "$tmp" checkout -q fm/task-x1
+    printf '%s\n' pipeline > "$tmp/fix.txt"
+    git -C "$tmp" add -- fix.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "no-mistakes fix"
+    pr_head=$(git -C "$tmp" rev-parse HEAD)
+    git -C "$tmp" push -q origin "HEAD:refs/merge-requests/7/head"
+    git -C "$tmp" checkout -q main
+    printf '%s\n' reworded > "$tmp/feature.txt"
+    git -C "$tmp" add -- feature.txt
+    git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash then main rewords"
+    git -C "$tmp" push -q origin main
+    rm -rf "$tmp"
+    ! git -C "$case_dir/wt" cat-file -e "$pr_head^{commit}" 2>/dev/null \
+      || fail "gitlab-mr-$state: test setup bug, the MR head is already local"
+    printf '%s\n' 'pr=https://gitlab.example.com/team/sub/repo/-/merge_requests/7' \
+      >> "$case_dir/state/task-x1.meta"
+    add_gh_axi_error "$case_dir"
+    add_glab_mr_for_head "$case_dir" "$state" "$pr_head"
+    [ -z "${scenario#*:}" ] || : > "$case_dir/config/${scenario#*:}"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    if [ -z "${scenario#*:}" ]; then
+      expect_code 1 "$rc" "gitlab-mr-no-flag: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+      [ ! -e "$case_dir/glab.log" ] || fail "gitlab-mr-no-flag: teardown read the merge request through glab without an opt-in flag"
+      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-no-flag: no REFUSED line in stderr"
+      assert_refusal_retained_task_state "$case_dir" gitlab-mr-no-flag "$local_head"
+      continue
+    fi
+    expected=1
+    [ "$state" != merged ] || expected=0
+    expect_code "$expected" "$rc" "gitlab-mr-$scenario: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    grep -qF -- 'mr view 7 -R https://gitlab.example.com/team/sub/repo -F json' "$case_dir/glab.log" \
+      || fail "gitlab-mr-$scenario: teardown did not read the merge request through glab"
+    if [ "$state" = merged ]; then
+      ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
+    else
+      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-opened: no REFUSED line in stderr"
+      assert_refusal_retained_task_state "$case_dir" gitlab-mr-opened "$local_head"
+    fi
+  done
+  pass "teardown proves a squash- or train-merged GitLab MR landed from the MR head only with an opt-in flag, and refuses an open one"
 }
 
 test_squash_merged_same_file_different_content_refuses() {
@@ -5839,6 +5939,40 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
 
+# An orphan status log archived by record hygiene must survive status-archive
+# retention: the prune counts 30 days from archive time, not the log's last write.
+test_record_hygiene_archive_survives_status_archive_prune() {
+  local case_dir rc=0
+  case_dir=$(make_case record-hygiene-archive-retention)
+  write_meta "$case_dir" local-only ship
+  touch "$case_dir/config/status-archive"
+  printf 'done: complete\n' > "$case_dir/state/task-x1.status"
+  printf 'failed [at=1]: orphan from a lost task\n' > "$case_dir/state/orphan-x2.status"
+  touch -t 200001010000 "$case_dir/state/orphan-x2.status"
+  FM_TEST_LIB_SOURCED=1 bash -c '
+    SCRIPT_DIR="$1/bin"; STATE="$2/state"; DATA="$2/data"
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$SCRIPT_DIR/fm-classify-lib.sh"
+    # shellcheck source=bin/fm-tasks-axi-lib.sh
+    . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh"
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+    # shellcheck source=bin/fm-record-hygiene-lib.sh
+    . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+    record_hygiene_report
+  ' _ "$ROOT" "$case_dir" > "$case_dir/hygiene.out" 2>&1 || fail "record hygiene archive pass failed: $(cat "$case_dir/hygiene.out")"
+  assert_present "$case_dir/data/orphan-x2/status.log" "record hygiene did not archive the orphan status log"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "status-archive teardown after record hygiene: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/data/task-x1/status.log" "status-archive teardown did not archive its own task"
+  assert_present "$case_dir/data/orphan-x2/status.log" "teardown pruned a status log record hygiene just archived"
+  pass "a status log archived by record hygiene survives the next status-archive teardown"
+}
+
 # Archive coverage uses the real teardown entry point over isolated homes.
 test_status_archive_opt_in() {
   local case_dir rc mode
@@ -6437,6 +6571,7 @@ test_hidden_untracked_work_refuses_before_return
 test_content_fallback_git_capability_boundary
 test_work_written_at_reap_boundary_is_preserved
 test_status_archive_opt_in
+test_record_hygiene_archive_survives_status_archive_prune
 test_record_export_config_absent_never_reads_the_exporter
 test_record_export_unopted_symlinked_config_does_not_block_teardown
 test_record_export_archives_before_teardown_or_preserves_sources_on_failure
@@ -6463,6 +6598,7 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed
 test_refreshed_refs_still_refuse_unreachable_commits
@@ -6513,6 +6649,7 @@ test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
+test_squash_merged_gitlab_mr_allows_when_main_moved_on
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses
 test_squash_merged_stale_local_refuses_when_forge_unreachable

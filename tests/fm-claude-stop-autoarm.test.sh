@@ -32,6 +32,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-omp-process-lib.sh" "$dir/bin/fm-omp-process-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
@@ -1966,6 +1967,59 @@ test_superseded_owner_goes_silent_and_never_double_translates() {
   pass "auto-arm: a superseded owner goes silent - one supersession episode, one translation, no held mutex"
 }
 
+# Claude delivers a hook's exit-2 rewake to the session that launched it. When
+# Claude continues the conversation under a new session id (a backgrounded
+# session resumes with --fork-session), the conversation keeps running under
+# the same front-end process that holds the session lock, so an owner claimed
+# by the earlier session stays alive, open, and reachable by descent. The
+# continued session's firings must not defer to it, because its close could
+# only wake the abandoned session. A firing from the claim's own session still
+# defers, and the earlier owner goes silent.
+test_open_claim_from_an_earlier_session_is_superseded() {
+  local dir a_out b_out b_status c_out c_status a_status count
+  dir=$(make_primary_dir "$TMP_ROOT/earlier-session-claim")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" blocking-actionable
+  a_out="$dir/state/a.out"
+  # One fake harness holds the lock for the whole scenario, as the front-end
+  # does across the fork; each firing names its Claude session in the payload.
+  FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    fire() { printf "%s\n" "{\"session_id\":\"$2\",\"stop_hook_active\":false}" | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$FM_HOME/state/$1.out" 2>&1; echo $? > "$FM_HOME/state/$1.rc"; }
+    fire a sess-before-fork &
+    a_pid=$!
+    i=0
+    while ! grep -q "outcome=arming" "$FM_HOME/state/.claude-autoarm-epoch" 2>/dev/null || [ ! -e "$FM_HOME/state/arm-ran" ]; do
+      [ "$i" -lt 50 ] || { echo "owner A never published its arming claim" > "$FM_HOME/state/scenario-fail"; exit 1; }
+      sleep 0.1; i=$((i + 1))
+    done
+    fire b sess-before-fork
+    cp "$FM_HOME/state/arm-ran" "$FM_HOME/state/arm-ran.after-b"
+    kill -0 "$a_pid" 2>/dev/null || { echo "owner A finished before the session change could be exercised" > "$FM_HOME/state/scenario-fail"; exit 1; }
+    fire c sess-after-fork
+    wait "$a_pid"
+  '
+  [ ! -e "$dir/state/scenario-fail" ] || fail "$(cat "$dir/state/scenario-fail")"
+  b_status=$(cat "$dir/state/b.rc"); b_out=$(cat "$dir/state/b.out")
+  c_status=$(cat "$dir/state/c.rc"); c_out=$(cat "$dir/state/c.out")
+  a_status=$(cat "$dir/state/a.rc")
+  expect_code 0 "$b_status" "a firing from the claim's own session must still defer to its open claim"
+  [ -z "$b_out" ] || fail "same-session deferring firing produced output: $b_out"
+  count=$(wc -l < "$dir/state/arm-ran.after-b" | tr -d ' ')
+  [ "$count" -eq 1 ] || fail "same-session deferring firing must not arm, saw $count arms"
+  expect_code 2 "$c_status" "a firing from the continued session must take over and translate its own close"
+  assert_contains "$c_out" "firstmate watcher wake" "the continued session's generation must carry the rewake banner"
+  expect_code 0 "$a_status" "the earlier session's owner must exit 0 instead of translating into the abandoned session"
+  [ ! -s "$a_out" ] || fail "the earlier session's owner emitted output after losing its generation: $(cat "$a_out")"
+  [ "$(epoch_field "$dir" epoch)" = 2 ] || fail "expected the continued session's generation on the ledger: $(epoch_field "$dir" epoch)"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "the continued session's outcome was overwritten: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" claude_session)" = sess-after-fork ] \
+    || fail "the rewake entry must name the continued session it wakes: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  count=$(wc -l < "$dir/state/arm-ran" | tr -d ' ')
+  [ "$count" -eq 2 ] || fail "expected exactly the earlier owner's and the continued session's arms, saw $count"
+  pass "auto-arm: a claim from an earlier Claude session no longer defers the continued session's firings"
+}
+
 test_need_vanished_mid_cycle_closes_quietly() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/vanished")
@@ -2387,6 +2441,7 @@ test_recycled_bridge_claim_stays_open_on_session_id_match
 test_identityless_ledger_never_defers
 test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
+test_open_claim_from_an_earlier_session_is_superseded
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
 test_active_in_marked_secondmate_home

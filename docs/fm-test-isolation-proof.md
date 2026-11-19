@@ -35,6 +35,7 @@ This record owns concurrent isolation evidence for the portable parallel candida
 - `tests/fm-grok-harness.test.sh`
 - `tests/fm-herdr-lab.test.sh`
 - `tests/fm-lint.test.sh`
+- `tests/fm-park.test.sh`
 - `tests/fm-pi-primary-types.test.sh`
 - `tests/fm-pr-merge.test.sh`
 - `tests/fm-review-diff.test.sh`
@@ -90,6 +91,14 @@ The backend suite spawns real tasks, and `fm-spawn.sh` creates each task's `/tmp
 - Separately, two concurrent copies of the backend suite plus the helper suite passed twice, and each suite passed beside `tests/fm-busy-state.test.sh`.
 
 `docs/fm-test-isolation-proof.json` still holds the 2026-08-20 portable-pool artifact; a clean 26-candidate artifact needs a Linux run with Bash 5 and tmux.
+
+## 2026-11-10: Review parking suite added
+
+`tests/fm-park.test.sh` keeps all state under `fm_test_tmproot` and drives a fake tmux binary, so it shares no global state.
+
+- Command: `bin/fm-test-isolation-proof.sh --jobs 4 --json <path>` on macOS arm64 with Bash 5.3 and tmux, run under `caffeinate -i`
+- Result: `FM_ISOLATION_SUMMARY total=27 failed=0 concurrency=4 duration_ms=1372646`
+- `tests/fm-park.test.sh` exit 0 (188248 ms).
 
 ## Family concurrency proofs
 
