@@ -20,6 +20,9 @@
 # "ontrain" while the merge request has a merge-train car, and a degraded
 # train=dropped line once the car is gone from a still-open merge request; the
 # watcher wakes on a drop only after it saw the car on the train.
+# --snapshot uses the same validated GitHub/GitLab reads for explicit follows
+# (bin/fm-pr-follow.sh), returning forge JSON instead of a task wake line.
+# It requires config/pr-follow and returns 3 when the read is unavailable.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -31,7 +34,13 @@ unknown=0
 degraded_enabled=0
 poll_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
 [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-degraded-watch" ] && degraded_enabled=1
-if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
+snapshot=0
+if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ] || [ "$1" = --snapshot ]; }; then
+  if [ "$1" = --snapshot ]; then
+    [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-follow" ] || exit 3
+    snapshot=1
+    unknown=3
+  fi
   [ "$1" != --baseline ] || unknown=3
   provider=$2
   url=$3
@@ -91,6 +100,10 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
+    if [ "$snapshot" = 1 ]; then
+      GH_HOST=$host gh pr view "$url" --json state,headRefOid,statusCheckRollup,reviewDecision 2>/dev/null || exit 3
+      exit 0
+    fi
     if [ "$degraded_enabled" != 1 ]; then
       result=$(GH_HOST=$host gh pr view "$url" --json state --jq '.state' 2>/dev/null) || exit $unknown
       [ "$result" = MERGED ] && printf '%s\n' merged
@@ -181,6 +194,10 @@ case "$provider" in
     done
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
+    if [ "$snapshot" = 1 ]; then
+      GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null || exit 3
+      exit 0
+    fi
     if [ "$degraded_enabled" != 1 ]; then
       raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
       state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
