@@ -358,6 +358,10 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
+#   When dibs task scopes are on, every ship or scout also launches with
+#   DIBS_TASK and DIBS_SCOPE exported and its durably leased worktree adopted
+#   into that scope; bin/fm-dibs-lib.sh owns the opt-in and the contract, and a
+#   dibs failure in an opted-in home refuses the spawn.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch (or uses --base-branch, described
@@ -990,6 +994,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-omp-profile-lib.sh
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
+# shellcheck source=bin/fm-dibs-lib.sh
+. "$SCRIPT_DIR/fm-dibs-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -7532,6 +7538,14 @@ fi
 "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
+# The dibs task scope (bin/fm-dibs-lib.sh owns the contract) is owned by the
+# task record published above, so it starts only now and rejoins on relaunch.
+FM_DIBS_SCOPE=
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  fm_dibs_scope_start "$STATE" "$ID" || exit 1
+  fm_dibs_adopt_worktree "$FM_DIBS_SCOPE" "$STATE" "$ID" "$WT" "$PROJ_ABS" || exit 1
+fi
+
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -7840,6 +7854,9 @@ fi
 # kill switch below it is an export statement, so it survives a compound raw
 # launch and the launch-env-allowlist `env -i` wrapper.
 LAUNCH="export FM_TASK_INBOX=$(shell_quote "$STATE_REAL/$ID.inbox"); $LAUNCH"
+if [ -n "$FM_DIBS_SCOPE" ]; then
+  LAUNCH="export DIBS_TASK=$(shell_quote "$ID") DIBS_SCOPE=$(shell_quote "$FM_DIBS_SCOPE"); $LAUNCH"
+fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 # When the live-harness gate has exported DISABLE_AUTOUPDATER into this spawn's
 # own environment, carry it into the launch command text so Claude Code's
@@ -7896,6 +7913,9 @@ if [ "$BACKEND" = t3code ]; then
   fi
   if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     T3CODE_ENV+=("FM_TASK_ID=$ID" "FM_HOME=$FM_HOME")
+  fi
+  if [ -n "$FM_DIBS_SCOPE" ]; then
+    T3CODE_ENV+=("DIBS_TASK=$ID" "DIBS_SCOPE=$FM_DIBS_SCOPE")
   fi
   if [ -n "$SPAWN_TRACEPARENT" ] && spawn_record_traceparent; then
     T3CODE_ENV+=("TRACEPARENT=$SPAWN_TRACEPARENT")

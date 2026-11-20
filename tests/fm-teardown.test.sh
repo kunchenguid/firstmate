@@ -1138,6 +1138,69 @@ test_reachable_work_needs_no_fetch() {
   pass "work the tracking refs already show adds no network call"
 }
 
+# A dibs task scope (bin/fm-dibs-lib.sh) is released and ended by a teardown
+# that proceeds, against a real dibs with scratch state and config.
+test_dibs_scope_ends_with_teardown() {
+  local case_dir rc key
+  if ! command -v dibs >/dev/null 2>&1; then
+    pass "SKIP dibs scope teardown: dibs is not installed"
+    return 0
+  fi
+  case_dir=$(make_case dibs-scope-end)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt pushed
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  mkdir -p "$case_dir/xdg/dibs" "$case_dir/dibs"
+  printf '{"scopes":true,"exec_owner":true,"lease_policies":true,"consumer_contract":true}\n' >"$case_dir/xdg/dibs/config.json"
+  (
+    # shellcheck disable=SC2030 # the scratch dibs environment stays in this case.
+    export XDG_CONFIG_HOME="$case_dir/xdg" DIBS_STATE="$case_dir/dibs"
+    unset DIBS_SCOPES DIBS_EXEC_OWNER DIBS_LEASE_POLICIES DIBS_CONSUMER_CONTRACT
+    # shellcheck source=bin/fm-dibs-lib.sh
+    . "$ROOT/bin/fm-dibs-lib.sh"
+    fm_dibs_scope_start "$case_dir/state" task-x1 || fail "dibs-scope-end: scope start failed"
+    dibs create --owner "scope:$FM_DIBS_SCOPE" --resources lab --json >/dev/null || fail "dibs-scope-end: member create failed"
+    set +e
+    run_teardown "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code 0 "$rc" "dibs-scope-end: landed work with a releasable scope member should be torn down: $(cat "$case_dir/stderr")"
+    key=$(fm_dibs_scope_key "$case_dir/state" task-x1)
+    [ "$(dibs scope show --key "$key" --json | jq -r '.reason // empty')" = not_found ] \
+      || fail "dibs-scope-end: the task scope outlived teardown"
+    [ "$(dibs ls --json | jq -r 'if type == "array" then length else (.leases // []) | length end')" = 0 ] \
+      || fail "dibs-scope-end: a scope member outlived teardown"
+  ) || exit 1
+  pass "teardown releases the task's dibs scope members and ends its scope"
+}
+
+# A scope member dibs retains refuses teardown before anything is erased.
+test_retained_dibs_member_refuses_teardown() {
+  local case_dir rc head
+  case_dir=$(make_case dibs-retained)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt pushed
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  cat >"$case_dir/fakebin/dibs" <<'SH'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+  'scope show') echo '{"id":"abc123","count":1,"records":[{"id":"lab1","resource":{"adapter":"compose"}}]}' ;;
+  release*) echo '{"reason":"resource_busy"}'; exit 3 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/dibs"
+  set +e
+  run_teardown "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "dibs-retained: a retained scope member must refuse teardown"
+  assert_contains "$(cat "$case_dir/stderr")" "REFUSED: task task-x1's dibs scope abc123 still holds lease lab1" \
+    "dibs-retained: the refusal must name the retained lease"
+  assert_refusal_retained_task_state "$case_dir" dibs-retained "$head"
+  pass "a dibs scope member that dibs retains refuses teardown with every record intact"
+}
+
 test_hung_fetch_is_bounded_and_refuses() {
   local case_dir rc started elapsed
   case_dir=$(make_case hung-fetch)
@@ -6607,6 +6670,8 @@ test_edit_saved_during_refresh_refuses
 test_no_remote_project_refuses_without_fetching
 test_refresh_never_prunes_a_dropped_branch
 test_reachable_work_needs_no_fetch
+test_dibs_scope_ends_with_teardown
+test_retained_dibs_member_refuses_teardown
 test_hung_fetch_is_bounded_and_refuses
 test_gate_remote_is_not_refreshed_into_landed
 test_no_mistakes_origin_remote_allows

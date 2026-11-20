@@ -91,6 +91,11 @@ unset HERDR_ENV HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID HERDR_SOCKET_PATH 
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Turn dibs task scopes off over any operator's dibs config, so a fixture spawn
+# never starts a scope in the operator's live dibs ledger
+# (bin/fm-dibs-lib.sh); tests/fm-dibs-lib.test.sh opts its own scratch state in.
+export DIBS_SCOPES=0
+
 # Clear the Rex block identity an operator's terminal exports. Run directly
 # inside a Rex block, the suite would otherwise auto-detect the rex backend
 # (bin/fm-backend.sh's fm_backend_detect) and place fixture tasks into the
