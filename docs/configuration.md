@@ -1203,6 +1203,18 @@ The flag is per home and is not inherited by secondmate homes, which keep their 
 Only its presence is read, at each fresh spawn, review, and promotion.
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the [`fm-review-diff.sh` header](../bin/fm-review-diff.sh) owns the review anchor.
 
+## Dibs task scopes (config/dibs-scopes)
+
+The optional local, gitignored `config/dibs-scopes` presence flag opts this home into giving every ship and scout one dibs task scope, so the labs, clusters, jobs, and worktrees a worker leases share one owner that lives exactly as long as the task record.
+With the flag absent, spawn and teardown never call dibs.
+With it present, the integration also needs the `dibs` CLI on PATH and dibs scopes turned on in dibs's own user config; without the CLI nothing changes, and with scopes off spawn and teardown run only a read-only `dibs scope show` probe and otherwise behave as they do without the flag.
+An opted-in home with scopes on also needs dibs `exec_owner` and `lease_policies` on and jq on PATH; failures refuse the spawn, with missing-setting diagnostics where the cause is identified.
+A spawned worker starts with `DIBS_TASK` and `DIBS_SCOPE` exported, so tools it runs can lease with `--owner scope:$DIBS_SCOPE`.
+Teardown releases the scope's members before it returns the task worktree, refuses while dibs retains one, and ends the scope after the return.
+Only its presence is read, at each spawn and teardown.
+The flag is a home-local preference and is not inherited by secondmate homes.
+The [`fm-dibs-lib.sh` header](../bin/fm-dibs-lib.sh) owns the contract: the scope key, the task-record owner, worktree adoption, and the two-phase teardown.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.

@@ -84,6 +84,10 @@
 # for the common case where there is no remote at all.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
+# Right after that proof, a ship or scout whose home opts in to dibs task
+# scopes (config/dibs-scopes) releases its scope members and refuses while dibs
+# retains one; the scope itself ends after the worktree return
+# (bin/fm-dibs-lib.sh owns the contract).
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -439,6 +443,8 @@ unset _teardown_source
 # The bounded remote-ref refresh is shared with the done-claim gate.
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-dibs-lib.sh
+. "$SCRIPT_DIR/fm-dibs-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -3969,6 +3975,15 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   validate_worktree_teardown_safety || exit 1
 fi
 
+# Release the task's dibs scope members while every record is still intact,
+# keeping the task worktree for the return below (bin/fm-dibs-lib.sh owns the
+# two-phase contract). A member dibs retains refuses cleanup here.
+if [ "$KIND" != secondmate ] && fm_dibs_home_opted_in "$CONFIG"; then
+  dibs_force=0
+  [ "$FORCE" != "--force" ] || dibs_force=1
+  fm_dibs_release_members "$STATE" "$ID" "${WT:-}" "$dibs_force" || exit 1
+fi
+
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
 # Roll the accepted legacy incarnation's stamp back to the record's exact
 # pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
@@ -4129,6 +4144,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
+fi
+if [ "$KIND" != secondmate ] && fm_dibs_home_opted_in "$CONFIG"; then
+  fm_dibs_scope_end "$STATE" "$ID"
 fi
 
 if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
