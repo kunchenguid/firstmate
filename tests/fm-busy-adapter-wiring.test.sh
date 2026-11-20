@@ -23,7 +23,7 @@ make_spawn_case() {  # <name> <harness> <id>
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini kiro-cli)
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini kiro-cli agy)
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
@@ -965,7 +965,15 @@ case "\${1:-}" in
     esac
     ;;
   capture-pane) printf 'working\n' ;;
-  display-message) printf '0\n' ;;
+  display-message)
+    for a in "\$@"; do
+      case "\$a" in
+        *pane_current_command*) printf 'claude\n'; exit 0 ;;
+        *cursor_y*) printf '0\n'; exit 0 ;;
+      esac
+    done
+    printf '0\n'
+    ;;
   *) exit 0 ;;
 esac
 SH
@@ -1320,6 +1328,66 @@ test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
   pass "codex and grok secondmates stay on their existing verdicts and do not emit a parent turn-end"
 }
 
+run_agy_hook() {  # <hooks.json> <hook-event>
+  local cmd
+  cmd=$(jq -r ".\"fm-crew-busy\"[\"$2\"][0].command" "$1")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "no $2 hook command in $1"
+  sh -c "$cmd"
+}
+
+test_agy_hooks_semantic_lifecycle() {
+  local rec id=busy-agy-1 out state hooks
+  rec=$(make_spawn_case agy-lifecycle agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.agents/plugins/fm-crew-busy/hooks.json"
+  assert_present "$hooks" "agy spawn did not write hooks.json in plugin dir"
+  assert_present "$WT_DIR/.agents/plugins/fm-crew-busy/plugin.json" "agy spawn did not write plugin.json"
+  jq -e . "$hooks" >/dev/null || fail "agy hook settings are not valid JSON"
+  for ev in PreInvocation Stop; do
+    jq -e ".\"fm-crew-busy\"[\"$ev\"]" "$hooks" >/dev/null || fail "agy hook settings lack $ev"
+  done
+
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(run_agy_hook "$hooks" Stop) || fail "Stop hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "Stop must print only a JSON object on stdout, got '$out'"
+  [ "$(printf '%s' "$out" | jq -r '.decision')" = "allow" ] \
+    || fail "Stop hook must emit allow decision"
+  [ -f "$state/$id.turn-ended" ] || fail "Stop no longer touches the notification marker"
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "idle agy-hook" ] || fail "Stop must classify 'idle agy-hook', got '$out'"
+
+  out=$(run_agy_hook "$hooks" PreInvocation) || fail "PreInvocation hook command failed"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "PreInvocation must print only a JSON object on stdout, got '$out'"
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "busy agy-hook" ] || fail "PreInvocation must classify 'busy agy-hook', got '$out'"
+
+  pass "agy hooks open on PreInvocation and close on Stop touching turn-ended"
+}
+
+test_agy_hooks_stale_incarnation_harmless() {
+  local rec id=busy-agy-2 out state hooks
+  rec=$(make_spawn_case agy-stale agy "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "agy spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  hooks="$WT_DIR/.agents/plugins/fm-crew-busy/hooks.json"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_agy_hook "$hooks" Stop >/dev/null \
+    || fail "a stale-gen hook must still exit 0 so agy's lifecycle is never broken"
+  out=$(classify agy "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
+  pass "agy hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
 test_raw_secondmate_launch_writes_no_busy_wiring
 test_secondmate_claude_stop_guard_owns_the_stop_verdict
@@ -1347,6 +1415,8 @@ test_gemini_is_refused_as_a_secondmate
 test_kiro_hooks_semantic_lifecycle
 test_kiro_hooks_stale_incarnation_harmless
 test_raw_kiro_launch_has_no_semantic_wiring
+test_agy_hooks_semantic_lifecycle
+test_agy_hooks_stale_incarnation_harmless
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

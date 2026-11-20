@@ -2106,41 +2106,7 @@ spawn_herdr_presentation_order_lock_acquire() {
 }
 
 clear_relaunch_harness_wiring() {
-  local harness=$1 wt=$2 state=$3 id=$4 kind=${5-} token_path token auth_path path
-  # The wiring arms above match on harness PREFIXES, because a task launched
-  # from a raw command records that command's basename rather than the exact
-  # adapter name. The retirement tables are keyed by the exact adapter, so the
-  # recorded value is resolved to its adapter first; otherwise a task recorded
-  # as, say, `grok-2` would have wiring armed and never retired. An
-  # unrecognized value resolves to no adapter, which is also the case in which
-  # no wiring was armed to begin with.
-  harness=$(fm_control_harness_family "$harness") || harness=
-  token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
-  token=
-  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
-    IFS= read -r token <"$token_path" || [ -n "$token" ] || return 1
-  fi
-  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
-  if [ -n "$auth_path" ]; then
-    rm -f -- "$auth_path" || return 1
-  fi
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    if [ "$harness" = polytoken ]; then
-      case "$path" in
-        "$wt"/*) git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue ;;
-      esac
-    fi
-    rm -f -- "$path" || return 1
-  done <<EOF
-$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$kind")
-EOF
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    rm -rf -- "$path" || return 1
-  done <<EOF
-$(fm_control_harness_wiring_dirs "$harness" "$state" "$id")
-EOF
+  fm_control_clear_harness_wiring "$@"
 }
 
 spawn_herdr_presentation_order_lock_release() {
@@ -6473,7 +6439,7 @@ if [ "$KIND" = secondmate ]; then
   busy_notify_turnend=false
   if [ "$RAW_LAUNCH" -ne 0 ]; then
     case "$HARNESS" in
-    claude* | pi | pi-signed | omp)
+    claude* | pi | pi-signed | omp | agy)
       WIRING_HARNESS=
       if [ -e "$STATE_REAL/$ID.busy-gen" ]; then
         "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --current-gen || {
@@ -6498,7 +6464,7 @@ BUSY_GEN=
     ;;
   esac
   case "$WIRING_HARNESS" in
-  claude* | opencode* | pi | pi-signed | omp)
+  claude* | opencode* | pi | pi-signed | omp | agy)
     # opencode arms on every detected major: OpenCode 2 and the OpenCode 1 /
     # undetected->1.x path both provision a busy-state plugin below that needs
     # this gen, so gating the arm on major >= 2 would leave OpenCode 1 without
@@ -6589,6 +6555,34 @@ BUSY_GEN=
       printf '{%s}\n' "$hooks_json" >"$WT/.claude/settings.local.json"
       exclude_path '.claude/settings.local.json'
     fi
+    ;;
+  agy)
+    # Semantic busy-state hooks (bin/fm-busy-lib.sh): PreInvocation opens a
+    # turn and Stop closes it. Stop keeps the turn-ended NOTIFICATION touch for
+    # the watcher. Every hook command tolerates a refused event (|| true) so a
+    # stale-gen writer can never break agy's own lifecycle, and prints the
+    # JSON object agy's hook contract requires on stdout.
+    # To keep firstmate's hooks separate from any project-tracked .agents/hooks.json,
+    # the hooks are placed in a dedicated, untracked plugin at
+    # .agents/plugins/fm-crew-busy/. Antigravity CLI automatically discovers and
+    # ingests plugins in .agents/plugins/.
+    plugin_dir="$WT/.agents/plugins/fm-crew-busy"
+    mkdir -p "$plugin_dir"
+    busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+    busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source agy-hook"
+    a_preinv="$busy_cmd_prefix busy $busy_suffix --event pre-invocation >/dev/null 2>&1 || true; printf '{}'"
+    stop_turnend=
+    if [ "$busy_notify_turnend" = true ]; then
+      stop_turnend="touch $(shell_quote "$TURNEND"); "
+    fi
+    a_stop="${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop >/dev/null 2>&1 || true; printf '{\"decision\":\"allow\"}\\n'"
+    cat >"$plugin_dir/plugin.json" <<EOF
+{"name":"fm-crew-busy"}
+EOF
+    cat >"$plugin_dir/hooks.json" <<EOF
+{"fm-crew-busy":{"PreInvocation":[{"type":"command","command":"$(json_escape "$a_preinv")"}],"Stop":[{"type":"command","command":"$(json_escape "$a_stop")"}]}}
+EOF
+    exclude_path '.agents/plugins/fm-crew-busy/'
     ;;
   devin)
     if [ "$RAW_LAUNCH" -eq 0 ]; then

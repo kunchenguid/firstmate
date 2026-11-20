@@ -22,8 +22,9 @@
 #      ready on an unregistered path until the dialog has been answered (the
 #      Herdr native-busy-before-dialog race), and fails the spawn with endpoint
 #      cleanup when the brief cannot be confirmed to run in the worktree.
-#   5. agy is a crewmate/scout adapter only: a secondmate launch is refused,
-#      and nothing is armed as busy wiring because no writer could clear it.
+#   5. agy supports primary, secondmate, crewmate, and scout roles: a secondmate
+#      launch is allowed, and crewmates arm semantic busy wiring via
+#      .agents/plugins/fm-crew-busy/.
 #   6. The busy signature is the pinned `esc to cancel` status row alone; the
 #      free-floating `Generating...` word must never read busy on its own.
 #   7. Herdr's registry already tracks agy, and exit detection proves the
@@ -122,7 +123,17 @@ test_agy_claims_no_inherited_launcher_marker() {
   local fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-agent")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' 'bash'; exit 0 ;;
+  *"args="*) printf '%s\n' 'bash'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" AGENT=1 "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -896,22 +907,102 @@ test_agy_secondmate_launch_pre_trusts_home_and_records_meta() {
   pass "fm-spawn: agy secondmate pre-trusts the secondmate home and records kind=secondmate"
 }
 
-test_agy_spawn_arms_no_busy_wiring() {
-  local id rec out rc statedir
-  id="agy-nowiring-z7-$$"
-  rec=$(make_agy_spawn_case nowiring "$id")
+test_agy_spawn_arms_busy_wiring() {
+  local id rec out rc statedir hooks_file stop_cmd preinv_cmd
+  id="agy-wiring-z7-$$"
+  rec=$(make_agy_spawn_case wiring "$id")
   read_agy_spawn_record "$rec"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash-low)
   rc=$?
-  expect_code 0 "$rc" "agy spawn should succeed"
+  expect_code 0 "$rc" "agy spawn should succeed: $out"
   statedir="$HOME_DIR/state"
-  [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
-  for sidecar in "$statedir/$id.agy-"*; do
-    [ -e "$sidecar" ] || continue
-    fail "agy spawn left an adapter sidecar behind: $sidecar"
-  done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  [ -f "$statedir/$id.busy-gen" ] || fail "agy spawn did not arm busy generation"
+  hooks_file="$WT_DIR/.agents/plugins/fm-crew-busy/hooks.json"
+  [ -f "$hooks_file" ] || fail "agy spawn did not write hooks.json in plugin dir"
+  [ -f "$WT_DIR/.agents/plugins/fm-crew-busy/plugin.json" ] || fail "agy spawn did not write plugin.json"
+  jq -e '."fm-crew-busy".Stop' "$hooks_file" >/dev/null \
+    || fail "hooks.json lacks fm-crew-busy Stop hook"
+  jq -e '."fm-crew-busy".PreInvocation' "$hooks_file" >/dev/null \
+    || fail "hooks.json lacks fm-crew-busy PreInvocation hook"
+
+  stop_cmd=$(jq -r '."fm-crew-busy".Stop[0].command' "$hooks_file")
+  preinv_cmd=$(jq -r '."fm-crew-busy".PreInvocation[0].command' "$hooks_file")
+  [ -n "$stop_cmd" ] && [ "$stop_cmd" != "null" ] || fail "no Stop command in hooks.json"
+  [ -n "$preinv_cmd" ] && [ "$preinv_cmd" != "null" ] || fail "no PreInvocation command in hooks.json"
+
+  # Initial classification after spawn
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$statedir")
+  [ "$out" = "busy fm-spawn" ] || fail "initial classification must be busy fm-spawn, got '$out'"
+
+  # Fire Stop hook
+  out=$(eval "$stop_cmd")
+  [ -f "$statedir/$id.turn-ended" ] || fail "Stop hook did not touch turn-ended notification marker"
+  [ "$(printf '%s' "$out" | jq -r '.decision')" = "allow" ] || fail "Stop hook did not emit allow decision"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$statedir")
+  [ "$out" = "idle agy-hook" ] || fail "busy classify after Stop hook must be 'idle agy-hook', got '$out'"
+
+  # Fire PreInvocation hook
+  out=$(eval "$preinv_cmd")
+  [ "$out" = "{}" ] || fail "PreInvocation hook did not emit empty object, got '$out'"
+  out=$(fm_busy_classify tmux fake:w agy "$id" "$statedir")
+  [ "$out" = "busy agy-hook" ] || fail "busy classify after PreInvocation hook must be 'busy agy-hook', got '$out'"
+
+  pass "fm-spawn: agy arms semantic busy wiring and writes hooks.json"
+}
+
+test_agy_composer_classification_and_tmux_identity() {
+  local fakebin out idle_screen tray_screen typed_screen
+  fakebin=$(fm_fakebin "$TMP_ROOT/tmux-id")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '101 200 200 agy\n'
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'#{pane_tty}'*) printf '/dev/pts/42\n' ;;
+  *'#{pane_current_command}'*) printf 'agy\n' ;;
+  *'capture-pane'*) printf '%s\n' "${FAKE_TMUX_PANE:-}" ;;
+  *'#{cursor_y}'*) printf '%s\n' "${FAKE_TMUX_CY:-2}" ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+
+  idle_screen=$'● Turn finished\n────────────────────────\n> \n────────────────────────\n  ? for shortcuts                                        Gemini 4 Argon · high'
+  tray_screen=$'● Turn finished\n────────────────────────\n> \n────────────────────────\n  ● [09:03:38] bin/fm-watch-arm.sh running\n────────────────────────\n  ? for shortcuts                        Gemini 4 Argon · high · 1 task(s) · /tasks'
+  typed_screen=$'● Turn finished\n────────────────────────\n> draft steer\n────────────────────────\n  ? for shortcuts                                        Gemini 4 Argon · high'
+
+  out=$(PATH="$fakebin:$PATH" FAKE_TMUX_PANE="$idle_screen" FAKE_TMUX_CY=2 bash -c '
+    . "$0/bin/fm-tmux-lib.sh"
+    fm_tmux_composer_identity fake:0.0
+  ' "$ROOT")
+  [ "$out" = "$(printf 'agy\tidle')" ] \
+    || fail "fm_tmux_composer_identity must report agy<TAB>idle when idle, got '$out'"
+
+  out=$(PATH="$fakebin:$PATH" FAKE_TMUX_PANE="$idle_screen" FAKE_TMUX_CY=2 bash -c '
+    . "$0/bin/fm-tmux-lib.sh"
+    fm_tmux_composer_state fake:0.0
+  ' "$ROOT")
+  [ "$out" = empty ] \
+    || fail "fm_tmux_composer_state must report empty on an idle agy pane, got '$out'"
+
+  out=$(PATH="$fakebin:$PATH" FAKE_TMUX_PANE="$tray_screen" FAKE_TMUX_CY=2 bash -c '
+    . "$0/bin/fm-tmux-lib.sh"
+    fm_tmux_composer_state fake:0.0
+  ' "$ROOT")
+  [ "$out" = empty ] \
+    || fail "fm_tmux_composer_state must report empty on an idle agy pane with a background-task tray, got '$out'"
+
+  out=$(PATH="$fakebin:$PATH" FAKE_TMUX_PANE="$typed_screen" FAKE_TMUX_CY=2 bash -c '
+    . "$0/bin/fm-tmux-lib.sh"
+    fm_tmux_composer_state fake:0.0
+  ' "$ROOT")
+  [ "$out" = pending ] \
+    || fail "fm_tmux_composer_state must report pending on an agy pane with draft text, got '$out'"
+
+  pass "fm-tmux-lib + fm-composer-lib: agy separated composer classifies empty/pending/unknown with tmux identity"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -943,4 +1034,5 @@ test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_launch_pre_trusts_home_and_records_meta
-test_agy_spawn_arms_no_busy_wiring
+test_agy_spawn_arms_busy_wiring
+test_agy_composer_classification_and_tmux_identity

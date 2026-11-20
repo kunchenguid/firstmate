@@ -3534,7 +3534,7 @@ fm_backend_herdr_proof_lines() {  # <text>
 # live), which that strip dropped, judging a typed /exit unsent. Claude's own
 # ghost suggestion is SGR-2 dim and is still stripped.
 fm_backend_herdr_composer_content() {  # <target>
-  local target=$1 cap caps
+  local target=$1 cap caps identity
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
     caps=$(printf 'styled=1\ncursor=0\nidentity=0')
   elif cap=$(fm_backend_herdr_visible_capture "$target") && [ -n "$cap" ]; then
@@ -3542,7 +3542,8 @@ fm_backend_herdr_composer_content() {  # <target>
   else
     return 1
   fi
-  FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap"
+  identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null || true)
+  FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap" "$identity"
 }
 
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a

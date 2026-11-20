@@ -558,6 +558,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
     devin) printf '%s\n' "$state/$id.devin-config.json" ;;
+    agy)
+      printf '%s\n' "$wt/.agents/plugins/fm-crew-busy/hooks.json"
+      printf '%s\n' "$wt/.agents/plugins/fm-crew-busy/plugin.json"
+      ;;
     # Hermes reaches its private native managed overlay through launch env.
     hermes) printf '%s\n' "$state/$id.hermes-hooks/config.yaml" ;;
     # cortex's lifecycle hooks live in a firstmate-owned plugin directory the
@@ -648,4 +652,150 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
     *) return 0 ;;
   esac
+}
+
+# Clean up Antigravity's isolated plugin wiring (.agents/plugins/fm-crew-busy/)
+# and/or .agents/hooks.json from a worktree. Preserves worker-added or tracked files,
+# prunes only Firstmate's own "fm-crew-busy" hooks, and refuses cleanup (preserving
+# files) if jq is unavailable or JSON is invalid.
+cleanup_worktree_agents_hooks() {  # <wt>
+  local wt=$1 hooks other_keys tmp_hooks head_hooks
+  local plugin_dir p_json p_hooks p_keys p_tmp head_p_hooks
+  [ -d "$wt" ] || return 0
+
+  # Clean up isolated agy plugin wiring if present
+  plugin_dir="$wt/.agents/plugins/fm-crew-busy"
+  if [ -d "$plugin_dir" ]; then
+    p_json="$plugin_dir/plugin.json"
+    if [ -f "$p_json" ]; then
+      if ! git -C "$wt" ls-files --error-unmatch .agents/plugins/fm-crew-busy/plugin.json >/dev/null 2>&1; then
+        if [ "$(tr -d '[:space:]' < "$p_json" 2>/dev/null)" = '{"name":"fm-crew-busy"}' ]; then
+          rm -f "$p_json"
+        fi
+      fi
+    fi
+
+    p_hooks="$plugin_dir/hooks.json"
+    if [ -f "$p_hooks" ]; then
+      if ! command -v jq >/dev/null 2>&1; then
+        echo "warning: jq is missing; preserving $p_hooks without cleanup" >&2
+        return 1
+      fi
+      if ! jq -e . "$p_hooks" >/dev/null 2>&1; then
+        echo "warning: $p_hooks contains invalid JSON; preserving file without cleanup" >&2
+        return 1
+      fi
+      p_tmp="$p_hooks.tmp.$$"
+      if jq 'del(."fm-crew-busy")' "$p_hooks" > "$p_tmp" 2>/dev/null; then
+        mv -f "$p_tmp" "$p_hooks"
+      else
+        rm -f "$p_tmp"
+      fi
+      if git -C "$wt" ls-files --error-unmatch .agents/plugins/fm-crew-busy/hooks.json >/dev/null 2>&1; then
+        head_p_hooks=$(git -C "$wt" show HEAD:.agents/plugins/fm-crew-busy/hooks.json 2>/dev/null || true)
+        if [ -n "$head_p_hooks" ] && \
+           jq -e -n --arg a "$head_p_hooks" --arg b "$(cat "$p_hooks")" '($a | fromjson) == ($b | fromjson)' >/dev/null 2>&1; then
+          git -C "$wt" checkout -- .agents/plugins/fm-crew-busy/hooks.json 2>/dev/null || true
+        fi
+      else
+        p_keys=$(jq 'keys | length' "$p_hooks" 2>/dev/null) || p_keys=""
+        case "$p_keys" in
+          ''|*[!0-9]*)
+            echo "warning: could not determine keys in $p_hooks; preserving file" >&2
+            return 1
+            ;;
+          0)
+            rm -f "$p_hooks"
+            ;;
+        esac
+      fi
+    fi
+
+    rmdir "$plugin_dir" 2>/dev/null || true
+    rmdir "$wt/.agents/plugins" 2>/dev/null || true
+    rmdir "$wt/.agents" 2>/dev/null || true
+  fi
+
+  hooks="$wt/.agents/hooks.json"
+  if [ -f "$hooks" ]; then
+    if ! command -v jq >/dev/null 2>&1; then
+      echo "warning: jq is missing; preserving $hooks without cleanup" >&2
+      return 1
+    fi
+    if ! jq -e . "$hooks" >/dev/null 2>&1; then
+      echo "warning: $hooks contains invalid JSON; preserving file without cleanup" >&2
+      return 1
+    fi
+    tmp_hooks="$hooks.tmp.$$"
+    if jq 'del(."fm-crew-busy")' "$hooks" > "$tmp_hooks" 2>/dev/null; then
+      mv -f "$tmp_hooks" "$hooks"
+    else
+      rm -f "$tmp_hooks"
+    fi
+    if git -C "$wt" ls-files --error-unmatch .agents/hooks.json >/dev/null 2>&1; then
+      git -C "$wt" update-index --no-skip-worktree .agents/hooks.json 2>/dev/null || true
+      head_hooks=$(git -C "$wt" show HEAD:.agents/hooks.json 2>/dev/null || true)
+      if [ -n "$head_hooks" ] && \
+         jq -e -n --arg a "$head_hooks" --arg b "$(cat "$hooks")" '($a | fromjson) == ($b | fromjson)' >/dev/null 2>&1; then
+        git -C "$wt" checkout -- .agents/hooks.json 2>/dev/null || true
+      fi
+    else
+      other_keys=$(jq 'keys | length' "$hooks" 2>/dev/null) || other_keys=""
+      case "$other_keys" in
+        ''|*[!0-9]*)
+          echo "warning: could not determine keys in $hooks; preserving file" >&2
+          return 1
+          ;;
+        0)
+          rm -f "$hooks"
+          rmdir "$wt/.agents" 2>/dev/null || true
+          ;;
+      esac
+    fi
+  fi
+}
+
+# Clear per-task wiring artifacts left behind by a previous incarnation of a harness.
+# For agy, if .agents/hooks.json contains hooks other than fm-crew-busy, it prunes
+# fm-crew-busy rather than removing the entire file.
+fm_control_clear_harness_wiring() {  # <harness> <worktree> <state-dir> <id> [kind]
+  local harness=${1-} wt=${2-} state=${3-} id=${4-} kind=${5-}
+  local token_path token auth_path path
+  harness=$(fm_control_harness_family "$harness") || harness=
+  token_path=$(fm_control_harness_turnend_token_path "$harness" "$state" "$id") || return 1
+  token=
+  if [ -n "$token_path" ] && [ -f "$token_path" ]; then
+    IFS= read -r token <"$token_path" || [ -n "$token" ] || return 1
+  fi
+  auth_path=$(fm_control_harness_turnend_auth_path "$harness" "$token") || return 1
+  if [ -n "$auth_path" ]; then
+    rm -f -- "$auth_path" || return 1
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ "$harness" = polytoken ]; then
+      case "$path" in
+        "$wt"/*) git -C "$wt" ls-files --error-unmatch -- "$path" >/dev/null 2>&1 && continue ;;
+      esac
+    fi
+    if [ "$harness" = agy ]; then
+      case "$path" in
+        "$wt/.agents/"*)
+          continue
+          ;;
+      esac
+    fi
+    rm -f -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_paths "$harness" "$wt" "$state" "$id" "$kind")
+EOF
+  if [ "$harness" = agy ] && [ -n "$wt" ]; then
+    cleanup_worktree_agents_hooks "$wt" || return 1
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -rf -- "$path" || return 1
+  done <<EOF
+$(fm_control_harness_wiring_dirs "$harness" "$state" "$id")
+EOF
 }

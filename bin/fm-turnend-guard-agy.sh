@@ -110,6 +110,48 @@ if ! fm_supervision_needed "$STATE" "$GRACE"; then
   allow_stop
 fi
 
+# Active task predicate: only active execution or unresolved decisions justify a blocking park.
+# Tasks whose workers are idle or terminal (e.g. waiting for PR review) are handled by
+# background PR polls and do not lock an interactive session behind a blocking Stop hook.
+fm_has_active_tasks() {
+  local state=$1 meta id b_state last_verb
+  for meta in "$state"/*.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    if [ -f "$state/$id.busy-state" ]; then
+      b_state=$(sed -n 's/.*state=\([a-z]*\).*/\1/p' "$state/$id.busy-state" 2>/dev/null || true)
+      [ "$b_state" = "busy" ] && return 0
+    fi
+    if [ -f "$state/$id.status" ]; then
+      last_verb=$(grep -E '^[[:space:]]*(done|failed|needs-decision|blocked|paused|working)' "$state/$id.status" 2>/dev/null | tail -1 | awk '{print $1}')
+      case "$last_verb" in
+        done|failed) continue ;;
+      esac
+    fi
+    return 0
+  done
+  return 1
+}
+
+park_captain_input_pending() {
+  local pane session_id
+  command -v herdr >/dev/null 2>&1 || return 1
+  session_id=$(printf '%s' "$PAYLOAD" | jq -r '.conversationId // .sessionId // empty' 2>/dev/null || true)
+  pane=$(herdr pane list 2>/dev/null | jq -r --arg cid "$session_id" --arg cwd "$FM_HOME" '
+    .result.panes[] | select(($cid != "" and .agent_session.value == $cid) or (.cwd == $cwd and .foreground_cwd == $cwd)) | .pane_id
+  ' 2>/dev/null | head -1)
+  [ -n "$pane" ] || return 1
+  herdr pane read "$pane" 2>/dev/null | tail -10 | grep -Eq 'Press up to edit queued messages|▸ '
+}
+
+# Antigravity CLI park requires active in-flight work or active Relay watch.
+# Background checks (e.g. contributions poll, PR merge polls) and idle/done tasks
+# do not lock an interactive session behind a blocking Stop hook, provided no wakes are pending.
+if [ ! -s "$STATE/.wake-queue" ] && { [ "${FM_SUP_IN_FLIGHT:-0}" -eq 0 ] || ! fm_has_active_tasks "$STATE"; } && [ ! -f "$STATE/x-watch.check.sh" ]; then
+  rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
+  allow_stop
+fi
+
 mkdir -p "$STATE" 2>/dev/null || true
 PARK_OWNER_FILE="$STATE/.agy-park-owner"
 PARK_OWNER="$$:$(date +%s):${RANDOM:-0}"
@@ -148,7 +190,7 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   while kill -0 "$ARM_PID" 2>/dev/null; do
     # Stand down when a newer Stop claimed the baton, the session lock moved,
     # or away mode started and its daemon now owns the watcher.
-    if ! park_still_ours || ! fm_session_lock_owned_by_self "$STATE" || [ -e "$STATE/.afk" ]; then
+    if ! park_still_ours || ! fm_session_lock_owned_by_self "$STATE" || [ -e "$STATE/.afk" ] || park_captain_input_pending; then
       allow_stop
     fi
     if [ "$PARK_TIMEOUT" -gt 0 ] && [ "$waited" -ge "$PARK_TIMEOUT" ]; then
@@ -194,12 +236,6 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
   ARM_OUT=
 done
 
-# The need may have vanished while parked: nothing left to supervise.
-if ! fm_supervision_needed "$STATE" "$GRACE"; then
-  rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
-  allow_stop
-fi
-
 if [ "$ACTIONABLE" -eq 1 ]; then
   if [ "$HOST_MODE" -eq 1 ]; then
     WAKE=$(awk '/^supervision-host:/ { print; next } /^(signal:|stale:|check:|heartbeat)/ && shown++ < 8' "$ARM_OUT" 2>/dev/null)
@@ -211,6 +247,17 @@ if [ "$ACTIONABLE" -eq 1 ]; then
 $WAKE
 
 Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This Stop hook owns watcher continuity: when the handling turn ends, the next needed cycle parks automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake."
+fi
+
+# The need may have vanished while parked: nothing left to supervise.
+if ! fm_supervision_needed "$STATE" "$GRACE"; then
+  rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
+  allow_stop
+fi
+
+if [ ! -s "$STATE/.wake-queue" ] && { [ "${FM_SUP_IN_FLIGHT:-0}" -eq 0 ] || ! fm_has_active_tasks "$STATE"; } && [ ! -f "$STATE/x-watch.check.sh" ]; then
+  rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
+  allow_stop
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then

@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12), separated `>` composer and background-task tray classification plus crewmate busy hooks were verified on `agy 1.4.5` (2026-10-22), and primary/secondmate Stop-hook supervision was verified on `agy 1.4.9` (2026-10-30) |
+| Verified | 2026-09-10 (refreshed 2026-10-22 on `agy 1.4.5` and 2026-10-30 on `agy 1.4.9`) |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
@@ -112,6 +112,7 @@ No busy phase without the status row was observed live; every captured mid-turn 
 `fm_busy_classify` reports `unknown agy-regex` when the token is absent, because a long turn can scroll the marker out of the captured tail.
 The signature is hardcoded with no environment override, so a stray variable can never change worker-state classification.
 Herdr's own registry agreed throughout: `agent get` reported `agent_status=working` mid-turn and `idle` after, so on Herdr the native verdict carries busy with no new code.
+For crewmate and scout spawns, `bin/fm-spawn.sh` also arms a per-task busy generation and installs `PreInvocation` and `Stop` hooks (`agy-hook`) into `$WT/.agents/plugins/fm-crew-busy/`, leaving any project-tracked `.agents/hooks.json` untouched and excluded via `.git/info/exclude`, while `tests/fm-agy-crew-turnend.test.sh` and `tests/fm-busy-adapter-wiring.test.sh` verify the hook lifecycle and cleanup.
 
 ## Interrupt and exit
 
@@ -135,14 +136,17 @@ Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
 agy is included in the session-lock name vocabulary in `bin/fm-session-lock-lib.sh` (`FM_HARNESS_RE` and `FM_HARNESS_NAMES`), recognizing an agy ancestor process as a verified session-lock holder.
 
-## Composer: unknown by design
+## Composer: identity-gated separated `>` pair
 
-Byte-level capture of the idle pane shows a bare unstyled `>` between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
-The shared classifier reads that bare `>` as `unknown` under the dead-shell rule, never `empty`.
-Steering still confirms delivery: the Herdr submit core leads with the native `idle`-to-`working` transition, which agy performs, and the delivery footer regex covers the tmux path.
+Byte-level capture of the idle pane shows a leading `>` row between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
+When one or more background `run_command` tasks are active, `agy` renders a `─`-bounded task tray (`  ● [HH:MM:SS] <cmd> running`) immediately below the composer's bottom `─` rule and above `? for shortcuts` (verified live on `agy 1.4.5`).
+Because a bare `>` row is a shell prompt glyph under the dead-shell rule, `bin/fm-composer-lib.sh` classifies `agy`'s composer through the shared separated-pair identity+structure conjunction (`_fm_composer_pi_verdict`, backed by Herdr's `agent get` and `fm_tmux_composer_identity` in `bin/fm-tmux-lib.sh`).
+An `agy` identity with a valid `>`-led separator pair (preserving that pair above any immediately adjacent `● [HH:MM:SS] ... running` task-tray block) reads `empty` when `idle` or `done` with no text after `>`, `pending` when draft text follows `>` or continues on wrapped rows inside the pair, and `unknown` when `working` or when identity or the separator pair is absent.
+This allows `fm-watch.sh`'s away-mode injector and `fm-task-inbox.sh`'s steering doorbell to prove an idle `agy` primary, secondmate, or worker composer `empty` (with or without active background tasks) while refusing dead shells, bare `>` prompts, and half-typed drafts (`pending`).
+Because `agy` exposes no out-of-band composer-buffer RPC, reading the `─`-bounded `>` composer row and `● [HH:MM:SS] <cmd> running` background-task tray from the rendered pane is recorded as pinned rendered-surface adapter debt against `agy 1.4.5`.
+Steering also confirms delivery through the native `idle`-to-`working` transition on Herdr and the delivery footer regex on tmux.
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
-`tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
-This is the cursor precedent, not a gap to patch in shared code.
+`tests/fm-send-agy-confirm.test.sh` pins the raised default, and `tests/fm-agy-harness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-task-inbox.test.sh` pin the separated composer classification, doorbell identity passing, and Herdr transition path.
 
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 
@@ -174,5 +178,7 @@ Run the portable suite and the live guard after any agy upgrade, because the pro
 
 ```
 bin/fm-test-run.sh tests/fm-agy-harness.test.sh
+bin/fm-test-run.sh tests/fm-agy-crew-turnend.test.sh
+bin/fm-test-run.sh tests/fm-agy-primary.test.sh
 FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
 ```
