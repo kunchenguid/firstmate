@@ -168,9 +168,10 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --
-# Claude's unnamed composer must also prove itself cursorless: Claude Code
-# 2.1.327+ sessions burn a fast-mode badge (`↯ /fast`) into its top rule, and a
-# cursorless `unknown` there refuses every Herdr doorbell to the worker.
+# Claude's unnamed composer must also prove itself cursorless: a cursorless
+# `unknown` there refuses every Herdr doorbell to the worker. The plain arm
+# reads whatever the operator's own settings render; the claude-fast arm below
+# forces the fast-mode badge shape.
 for h in claude codex opencode pi grok kimi muse; do
   if command -v "$h" >/dev/null 2>&1; then
     if [ "$h" = claude ]; then
@@ -189,6 +190,15 @@ if command -v claude >/dev/null 2>&1; then
   CMX_REQUIRE_CURSORLESS_EMPTY=1 check_harness_idle_empty claude-named claude -n fm-cmx-named
 else
   note "harness absent, not verified here: claude-named"
+fi
+# Fast mode (`"fastMode": true` in Claude Code settings) makes Claude Code
+# 2.1.327+ burn a `↯ /fast` badge into the unnamed composer's top rule; with it
+# off the rule stays solid. Force it on so the badge shape is proven whatever
+# the operator's own settings say.
+if command -v claude >/dev/null 2>&1; then
+  CMX_REQUIRE_CURSORLESS_EMPTY=1 check_harness_idle_empty claude-fast claude --settings '{"fastMode":true}'
+else
+  note "harness absent, not verified here: claude-fast"
 fi
 
 # --- 2. The strict blank-row posture, live ----------------------------------

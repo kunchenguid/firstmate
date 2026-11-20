@@ -1242,9 +1242,11 @@ test_matrix_claude_titled_top_rule() {
 }
 
 test_matrix_claude_fast_badge_top_rule() {
-  # Claude Code 2.1.327-2.1.329 sessions started from 2026-11-20 burn a
-  # fast-mode badge into an unnamed composer's TOP rule (captured live through
-  # Herdr 0.9.0 at 119 columns): `───…─── ↯ /fast ─` while idle and
+  # Claude Code 2.1.327-2.1.329 sessions started with fast mode enabled
+  # (`"fastMode": true` in Claude Code settings; with it off the rule stays
+  # solid) burn a fast-mode badge into an unnamed composer's TOP rule
+  # (captured live through Herdr 0.9.0 at 119 columns): `───…─── ↯ /fast ─`
+  # while idle and
   # `───…─── ↯ ─` once text is typed, the `↯` (U+21AF) in truecolor orange and
   # `/fast` dim. The rule no longer opened the separator pair, the closing rule
   # read as an unmatched separator, and every cursorless read was `unknown`, so

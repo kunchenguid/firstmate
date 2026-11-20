@@ -981,10 +981,11 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # _fm_composer_titled_bottom_ok holds; any other glyph leaves residue, and the
 # verdict stays `unknown`, the safe direction.
 # The one non-ASCII exception is Claude Code's single-column fast-mode badge
-# `↯` (U+21AF), which it burns into the same top rule of an unnamed session as
-# `── ↯ /fast ─` while idle and `── ↯ ─` once text is typed (verified live
-# 2026-11-20 on Claude Code 2.1.327, 2.1.328 and 2.1.329 under Herdr 0.9.0 and
-# tmux; sessions started before that rendering keep a solid rule). It is
+# `↯` (U+21AF), which a session started with fast mode enabled (`"fastMode":
+# true` in Claude Code settings) burns into the same top rule of an unnamed
+# session as `── ↯ /fast ─` while idle and `── ↯ ─` once text is typed
+# (verified live 2026-11-20 on Claude Code 2.1.327, 2.1.328 and 2.1.329 under
+# Herdr 0.9.0 and tmux; with fast mode off the rule stays solid). It is
 # mapped to one column like a title character; the width proof still decides.
 _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
   local row=$1 expected=$2 spaces
