@@ -23,27 +23,38 @@
 #       /pulls/ segment names the number, never an earlier one
 #   (k) pr= forgejo URL with no remote pull ref -> offline fallback to a
 #       recorded pr_head=
-#   (l) without config/spawn-base-primary-checkout, mode=local-only on a
+#   (l) GitLab MR URL with the home opt-in config/gitlab-mr-head -> fetch
+#       refs/merge-requests/<iid>/head and diff that
+#   (m) GitLab MR URL + stale recorded pr_head=, opted in -> the fetched
+#       merge-request head wins, so a review never lags a published fix
+#   (n) GitLab MR URL whose source branch was deleted from the origin, opted
+#       in -> the merge request's own head ref still supplies the content
+#   (o) GitLab MR URL + unreachable remote, opted in -> recorded pr_head= is
+#       the offline fallback, exactly as on GitHub
+#   (p) GitLab MR URL whose head ref is absent, opted in -> local branch + warning
+#   (q) GitLab MR URL without the opt-in -> unchanged main behaviour: the
+#       recorded-head fallback or the local branch + warning, never a fetch
+#   (r) without config/spawn-base-primary-checkout, mode=local-only on a
 #       project whose local default branch leads origin -> base stays
 #       origin/<default>, the unchanged default
 # With config/spawn-base-primary-checkout:
-#   (m) mode=local-only or a scout planted on a local default branch that leads
+#   (s) mode=local-only or a scout planted on a local default branch that leads
 #       origin -> base is the local default, so the review shows only the
 #       task's own work and no local landing
-#   (n) the same state with a publishing mode -> base stays origin/<default>,
+#   (t) the same state with a publishing mode -> base stays origin/<default>,
 #       so the review shows everything its pull request would carry
-#   (o) a local-only branch rebased onto an advanced local default, which its
+#   (u) a local-only branch rebased onto an advanced local default, which its
 #       definition of done orders, then the default advances again -> base
 #       follows the branch and no other task's landing appears
-#   (p) a local default that trails origin, task planted on origin's tip ->
+#   (v) a local default that trails origin, task planted on origin's tip ->
 #       base stays origin/<default>
-#   (q) diverged local default and origin -> base is the one the task was
+#   (w) diverged local default and origin -> base is the one the task was
 #       planted on
-#   (r) a local default that already contains the branch -> empty review that
+#   (x) a local default that already contains the branch -> empty review that
 #       says why
-#   (s) a branch merging both diverged default branches -> the unrelated merge
+#   (y) a branch merging both diverged default branches -> the unrelated merge
 #       bases are reported rather than picked silently
-#   (t) meta records base_branch= -> base stays origin/<base_branch>
+#   (z) meta records base_branch= -> base stays origin/<base_branch>
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -98,6 +109,15 @@ stale_and_pr_commits() {
   PR_SHA=$(git -C "$case_dir/wt" rev-parse HEAD)
 
   git -C "$case_dir/wt" checkout -q fm/task-x1
+}
+
+# A home opts in to reading a GitLab merge request's published head with the
+# same presence-based config file the real home uses; without it the GitLab
+# path must stay exactly as it is on upstream main.
+enable_gitlab_mr_head() {
+  local case_dir=$1
+  mkdir -p "$case_dir/config"
+  : > "$case_dir/config/gitlab-mr-head"
 }
 
 run_review_diff() {
@@ -380,6 +400,162 @@ test_forgejo_pr_url_falls_back_to_recorded_head() {
   pass "fm-review-diff falls back to a recorded Forgejo pr_head when the pull ref cannot be fetched"
 }
 
+# The GitLab twin of stale_and_pr_commits: a stale local ship branch and a
+# pipeline fix published under the merge request's own head ref, which is how a
+# GitLab instance serves the current published head. MR_SHA is that published
+# head.
+stale_and_mr_commits() {
+  local case_dir=$1 iid=$2
+  printf 'stale-local\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "stale local branch"
+
+  git -C "$case_dir/wt" checkout -q -b mr-head-tmp
+  printf 'mr-fixed\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "pipeline fix on MR"
+  MR_SHA=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin "mr-head-tmp:refs/merge-requests/$iid/head"
+
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+}
+
+test_gitlab_merge_request_head_is_fetched() {
+  local case_dir out
+  case_dir=$(make_case gitlab-mr-head)
+  enable_gitlab_mr_head "$case_dir"
+  stale_and_mr_commits "$case_dir" 7
+  write_task_meta "$case_dir" "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-mr-head: diff should use the published merge request head"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-mr-head: diff must not use the stale local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-mr-head: fetch of refs/merge-requests/<iid>/head should succeed"
+  pass "fm-review-diff fetches refs/merge-requests/<iid>/head for a GitLab merge request"
+}
+
+test_gitlab_stale_recorded_head_loses_to_fetched_head() {
+  local case_dir out stale_sha
+  case_dir=$(make_case gitlab-stale-recorded)
+  enable_gitlab_mr_head "$case_dir"
+  stale_and_mr_commits "$case_dir" 7
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  write_task_meta "$case_dir" \
+    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
+    "pr_head=$stale_sha"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-stale-recorded: diff must show the fetched merge request head, not the recorded stale SHA"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-stale-recorded: diff must not use the stale local/recorded content"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-stale-recorded: fetch of refs/merge-requests/<iid>/head should succeed"
+  [ "$stale_sha" != "$MR_SHA" ] || fail "gitlab-stale-recorded: fixture did not diverge recorded vs published head"
+  pass "fm-review-diff prefers a freshly fetched merge request head over a stale recorded pr_head="
+}
+
+test_gitlab_deleted_source_branch_still_reviews_published_head() {
+  local case_dir out
+  case_dir=$(make_case gitlab-deleted-source)
+  enable_gitlab_mr_head "$case_dir"
+  stale_and_mr_commits "$case_dir" 9
+  # A merge request whose source branch was published and then deleted, as a
+  # completed cleanup leaves it; the merge request's own head ref outlives that,
+  # which is what keeps the review on the published content instead of the
+  # worker copy.
+  git -C "$case_dir/wt" push -q origin "mr-head-tmp:refs/heads/mr-source"
+  git -C "$case_dir/wt" push -q origin --delete mr-source
+  [ -z "$(git -C "$case_dir/wt" ls-remote --heads origin mr-source)" ] \
+    || fail "gitlab-deleted-source: the fixture's source branch is still published"
+  write_task_meta "$case_dir" "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/9"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-deleted-source: the published head must still be reviewed after the source branch is deleted"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-deleted-source: diff must not fall back to the local branch"
+  assert_not_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable' \
+    "gitlab-deleted-source: the merge request's own head ref should still resolve"
+  pass "fm-review-diff reviews a GitLab merge request whose source branch was deleted"
+}
+
+test_gitlab_unreachable_remote_falls_back_to_recorded_head() {
+  local case_dir out
+  case_dir=$(make_case gitlab-offline-recorded)
+  enable_gitlab_mr_head "$case_dir"
+  stale_and_mr_commits "$case_dir" 7
+  git -C "$case_dir/wt" remote remove origin
+  write_task_meta "$case_dir" \
+    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
+    "pr_head=$MR_SHA"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-offline-recorded: the recorded published head is the offline fallback"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-offline-recorded: diff must not use the stale local branch"
+  pass "fm-review-diff falls back to a recorded merge request head when the remote is unreachable"
+}
+
+test_gitlab_missing_head_ref_falls_back_with_warning() {
+  local case_dir out
+  case_dir=$(make_case gitlab-missing-ref)
+  enable_gitlab_mr_head "$case_dir"
+  stale_and_mr_commits "$case_dir" 7
+  # No ref for this merge request exists on the remote, and no head was recorded,
+  # so the review must warn and diff the local branch rather than invent a head.
+  write_task_meta "$case_dir" "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/8"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable; diff may lag the open PR' \
+    "gitlab-missing-ref: a missing merge request head must warn"
+  assert_contains "$out" '+stale-local' \
+    "gitlab-missing-ref: the local branch is the documented fallback"
+  assert_not_contains "$out" '+mr-fixed' \
+    "gitlab-missing-ref: another merge request's published head must never be reviewed"
+  pass "fm-review-diff warns and diffs the local branch when a merge request head ref is absent"
+}
+
+# Without the home opt-in, a GitLab merge request must take exactly the path it
+# takes on upstream main: no merge-request head fetch at all, so the recorded
+# head when one exists, otherwise the local branch with the same warning.
+test_gitlab_unopted_path_keeps_main_fallbacks() {
+  local case_dir out
+  case_dir=$(make_case gitlab-unopted)
+  stale_and_mr_commits "$case_dir" 7
+
+  write_task_meta "$case_dir" "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7"
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  assert_contains "$(cat "$case_dir/stderr")" 'warning: PR head unavailable; diff may lag the open PR' \
+    "gitlab-unopted: an unopted GitLab review must warn exactly as main does"
+  assert_contains "$out" '+stale-local' \
+    "gitlab-unopted: the local branch is the unopted fallback"
+  assert_not_contains "$out" '+mr-fixed' \
+    "gitlab-unopted: an unopted review must not read the merge request head"
+  git -C "$case_dir/wt" rev-parse --verify -q refs/fm-review/mr/7/head >/dev/null 2>&1 \
+    && fail "gitlab-unopted: the merge request head was fetched without the opt-in"
+
+  # Main's recorded-head fallback still applies when a task carries one.
+  write_task_meta "$case_dir" \
+    "pr=https://gitlab.example/group/subgroup/project/-/merge_requests/7" \
+    "pr_head=$MR_SHA"
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  assert_contains "$out" '+mr-fixed' \
+    "gitlab-unopted: a recorded pr_head is still the unopted fallback"
+  assert_not_contains "$out" 'stale-local' \
+    "gitlab-unopted: a recorded head outranks the local branch, as on main"
+  pass "fm-review-diff keeps main's GitLab fallbacks when the home has not opted in"
+}
+
 # Without the opt-in a remote-backed project keeps the origin/<default> anchor
 # whatever the task's delivery, as before.
 test_default_review_stays_on_origin_without_the_opt_in() {
@@ -582,6 +758,12 @@ test_recorded_base_branch_is_the_review_base
 test_forgejo_pr_url_fetches_pull_head
 test_forgejo_repo_named_pulls_resolves_by_last_segment
 test_forgejo_pr_url_falls_back_to_recorded_head
+test_gitlab_merge_request_head_is_fetched
+test_gitlab_stale_recorded_head_loses_to_fetched_head
+test_gitlab_deleted_source_branch_still_reviews_published_head
+test_gitlab_unreachable_remote_falls_back_to_recorded_head
+test_gitlab_missing_head_ref_falls_back_with_warning
+test_gitlab_unopted_path_keeps_main_fallbacks
 test_default_review_stays_on_origin_without_the_opt_in
 test_opted_in_local_landing_reviews_against_the_local_default
 test_opted_in_publishing_mode_stays_on_origin
