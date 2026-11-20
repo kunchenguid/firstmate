@@ -408,6 +408,28 @@ jq -e . "$HOME_DIR/state/home-summary.json" >/dev/null \
   || fail "killing the writer exposed invalid JSON at the ledger path"
 cmp -s "$TMP_ROOT/prior-ledger.json" "$HOME_DIR/state/home-summary.json" \
   || fail "killing the writer replaced the prior complete ledger"
+# The killed worker never ran its cleanup, so its temporary files stay behind
+# until the state sweep, once their writer's pid is gone, reclaims them.
+stranded=0
+for tmp in "$HOME_DIR/state/.home-summary.json."* "$HOME_DIR/state/.home-summary-error."*; do
+  [ -f "$tmp" ] || continue
+  stranded=$((stranded + 1))
+  name=${tmp##*/}
+  name=${name#.home-summary.json.}
+  name=${name#.home-summary-error.}
+  writer_pid=${name%%.*}
+  i=0
+  while kill -0 "$writer_pid" 2>/dev/null && [ "$i" -lt 200 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+done
+[ "$stranded" -ge 1 ] || fail "the killed worker stranded no temporary file"
+FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c '. "$1"; fm_state_reap_orphans "$2"' \
+  _ "$ROOT/bin/fm-wake-lib.sh" "$HOME_DIR/state" || fail "the state sweep failed"
+for tmp in "$HOME_DIR/state/.home-summary.json."* "$HOME_DIR/state/.home-summary-error."*; do
+  [ ! -e "$tmp" ] || fail "the state sweep kept the killed worker's temporary file $tmp"
+done
 
 # Observe the ledger continuously through one successful replacement. Every read
 # must parse, and the final document must be the newly computed complete summary.
@@ -435,7 +457,7 @@ jq -e --arg now "$NOW_THREE" --argjson epoch "$EPOCH_THREE" '
   .generated == $now and .generated_epoch == $epoch
 ' "$HOME_DIR/state/home-summary.json" >/dev/null \
   || fail "the successful replacement did not publish the new complete document"
-pass "writer kill and replacement preserve an atomic JSON ledger"
+pass "writer kill and replacement preserve an atomic JSON ledger; the sweep reclaims stranded temporaries"
 
 # Best-effort mode is the contract used by every lifecycle trigger. A failed
 # producer records the failure and returns success without touching the ledger.

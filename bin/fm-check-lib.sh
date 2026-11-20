@@ -46,13 +46,13 @@ fm_custom_check_registered() {
 }
 
 fm_custom_check_snapshot_prepare() {
-  local state=$1 id=$2 check hash state_device
+  local state=$1 id=$2 check hash state_device owner_pid=${BASHPID:-$$}
   fm_custom_check_snapshot_cleanup
   check="$state/$id.check.sh"
   fm_custom_check_trust_read "$state" "$id" || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
   fm_pr_private_file_valid "$check" 700 "$state_device" || return 1
-  FM_CUSTOM_CHECK_SNAPSHOT=$(mktemp "$state/.fm-custom-check.XXXXXX") || return 1
+  FM_CUSTOM_CHECK_SNAPSHOT=$(mktemp "$state/.fm-custom-check.$owner_pid.XXXXXX") || return 1
   cp "$check" "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
   chmod 0600 "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
   [ -f "$FM_CUSTOM_CHECK_SNAPSHOT" ] && [ ! -L "$FM_CUSTOM_CHECK_SNAPSHOT" ] \

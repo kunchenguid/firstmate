@@ -1218,6 +1218,36 @@ EOF
   pass "status tail is bounded to the configured line count, with the full log path always printed"
 }
 
+# A locked start reclaims the state litter killed processes leave behind: an
+# unpublished lock staging directory and a per-process temporary file whose
+# owning pid is dead go, while the same shapes owned by a live pid stay.
+test_locked_start_reaps_dead_process_litter() {
+  local rec root home fakebin dead
+  rec=$(new_world reap-litter)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  dead=$(dead_pid)
+  mkdir "$home/state/.meta-demo.lock.owner.$dead.AbCdEf" \
+    "$home/state/.meta-demo.lock.owner.$$.AbCdEf"
+  : > "$home/state/.watch-arm-output.$dead.AbCdEf"
+  : > "$home/state/.watch-arm-output.$$.AbCdEf"
+
+  run_session_start "$home" "$root" "$fakebin:$BASE_PATH" >/dev/null
+
+  [ ! -e "$home/state/.meta-demo.lock.owner.$dead.AbCdEf" ] \
+    || fail "a locked start kept a dead acquirer's lock staging directory"
+  [ ! -e "$home/state/.watch-arm-output.$dead.AbCdEf" ] \
+    || fail "a locked start kept a dead process's temporary file"
+  [ -d "$home/state/.meta-demo.lock.owner.$$.AbCdEf" ] \
+    || fail "a locked start removed a live acquirer's lock staging directory"
+  [ -f "$home/state/.watch-arm-output.$$.AbCdEf" ] \
+    || fail "a locked start removed a live process's temporary file"
+  pass "a locked start reaps dead-process state litter and keeps live-owned entries"
+}
+
 # A crewmate writes its own status lines, so nothing upstream bounds their
 # length: an observed one ran 865 characters. The tail is a wake-EVENT view
 # whose full log path is printed beside it, so a long line is cut, marked, and
@@ -3203,6 +3233,7 @@ test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
 test_status_tail_bounding
+test_locked_start_reaps_dead_process_litter
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
