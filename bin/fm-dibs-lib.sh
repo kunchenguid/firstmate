@@ -7,13 +7,16 @@
 # exactly as long as the task, so nothing a finished or abandoned task held is
 # left running without an owner dibs can prove dead.
 #
-# OPT-IN. A home opts in through dibs itself, never through Firstmate config:
-# the `dibs` CLI is on PATH and its user config turns scopes on ("scopes": true
-# or DIBS_SCOPES=1), which `dibs scope show` reports without changing anything.
-# Without dibs, or with scopes off, every function here returns success having
-# run nothing but that read, so such a home spawns and tears down as before.
-# An opted-in home also needs exec_owner and lease_policies on and jq on PATH;
-# anything less refuses the spawn and names what is missing.
+# OPT-IN. A home opts in with the local, gitignored config/dibs-scopes presence
+# flag (docs/configuration.md "Dibs task scopes"), which secondmate homes do
+# not inherit. Without the flag, spawn and teardown never call dibs at all.
+# With it, the integration also needs the `dibs` CLI on PATH and its user
+# config turning scopes on ("scopes": true or DIBS_SCOPES=1), which
+# `dibs scope show` reports without changing anything; without dibs, or with
+# scopes off, every function here returns success having run nothing but that
+# read. An opted-in home with scopes on also needs exec_owner and
+# lease_policies on and jq on PATH; anything less refuses the spawn and names
+# what is missing.
 #
 # CONTRACT.
 #   - Key: fm-<first 16 hex of sha256(physical state dir)>-<task-id>, so equal
@@ -22,9 +25,11 @@
 #     alive exactly while the task record exists - through worker exits,
 #     relaunches, and supervisor outages - and its owner reads dead once
 #     teardown removes the record or an aborted spawn rolls it back, so dibs
-#     sweep reclaims anything the scope still holds. The scope must be
-#     owner-bound (lease_policies on); a time-bound scope would expire under a
-#     live task, so spawn refuses one.
+#     sweep reclaims anything the scope still holds. The path is single-quoted
+#     for the /bin/sh that runs exec owners, with every embedded single quote
+#     escaped, so spaces, quotes, $, backticks, and newlines in a home path stay
+#     literal. The scope must be owner-bound (lease_policies on); a time-bound
+#     scope would expire under a live task, so spawn refuses one.
 #   - Spawn, after the task record is published: fm_dibs_scope_start starts
 #     the scope, or rejoins it on relaunch (same key and owner), and sets
 #     FM_DIBS_SCOPE for the DIBS_TASK=<task-id> and DIBS_SCOPE=<scope id>
@@ -46,14 +51,24 @@
 #     the owner and dibs sweep finishes it.
 # shellcheck shell=bash
 
-# Physical path of a state directory, the identity both key and owner use.
+# Whether this home opted in to dibs task scopes; the flag is the only switch.
+fm_dibs_home_opted_in() {  # <config-dir>
+  [ -e "$1/dibs-scopes" ]
+}
+
+# Set FM_DIBS_STATE_REAL to the physical path of a state directory, the
+# identity both key and owner use. A variable rather than stdout, so a path
+# ending in a newline survives intact.
 fm_dibs_state_real() {  # <state-dir>
-  (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P)
+  FM_DIBS_STATE_REAL=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P && printf x) || return 1
+  FM_DIBS_STATE_REAL=${FM_DIBS_STATE_REAL%x}
+  FM_DIBS_STATE_REAL=${FM_DIBS_STATE_REAL%$'\n'}
 }
 
 fm_dibs_scope_key() {  # <state-dir> <task-id>
   local real hash
-  real=$(fm_dibs_state_real "$1") || return 1
+  fm_dibs_state_real "$1" || return 1
+  real=$FM_DIBS_STATE_REAL
   if command -v shasum >/dev/null 2>&1; then
     hash=$(printf '%s' "$real" | shasum -a 256 | cut -c1-16)
   elif command -v sha256sum >/dev/null 2>&1; then
@@ -68,10 +83,9 @@ fm_dibs_scope_key() {  # <state-dir> <task-id>
 }
 
 fm_dibs_scope_owner() {  # <state-dir> <task-id>
-  local real meta
-  real=$(fm_dibs_state_real "$1") || return 1
-  meta="$real/$2.meta"
-  # dibs runs an exec owner with /bin/sh, so the path is single-quoted.
+  local meta
+  fm_dibs_state_real "$1" || return 1
+  meta="$FM_DIBS_STATE_REAL/$2.meta"
   printf "exec:test -e '%s'\n" "${meta//\'/\'\\\'\'}"
 }
 

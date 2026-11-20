@@ -358,10 +358,11 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
-#   When dibs task scopes are on, every ship or scout also launches with
-#   DIBS_TASK and DIBS_SCOPE exported and its durably leased worktree adopted
-#   into that scope; bin/fm-dibs-lib.sh owns the opt-in and the contract, and a
-#   dibs failure in an opted-in home refuses the spawn.
+#   When this home opts in to dibs task scopes (config/dibs-scopes) and dibs
+#   scopes are on, every ship or scout also launches with DIBS_TASK and
+#   DIBS_SCOPE exported and its durably leased worktree adopted into that
+#   scope; bin/fm-dibs-lib.sh owns the opt-in and the contract, and a dibs
+#   failure in an opted-in home refuses the spawn.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch (or uses --base-branch, described
@@ -7541,7 +7542,7 @@ fi
 # The dibs task scope (bin/fm-dibs-lib.sh owns the contract) is owned by the
 # task record published above, so it starts only now and rejoins on relaunch.
 FM_DIBS_SCOPE=
-if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && fm_dibs_home_opted_in "$CONFIG"; then
   fm_dibs_scope_start "$STATE" "$ID" || exit 1
   fm_dibs_adopt_worktree "$FM_DIBS_SCOPE" "$STATE" "$ID" "$WT" "$PROJ_ABS" || exit 1
 fi

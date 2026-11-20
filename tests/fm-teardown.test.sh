@@ -1148,6 +1148,7 @@ test_dibs_scope_ends_with_teardown() {
   fi
   case_dir=$(make_case dibs-scope-end)
   write_meta "$case_dir" no-mistakes ship
+  : >"$case_dir/config/dibs-scopes"
   wt_commit_file "$case_dir" feature.txt pushed
   git -C "$case_dir/wt" push -q origin fm/task-x1
   mkdir -p "$case_dir/xdg/dibs" "$case_dir/dibs"
@@ -1179,6 +1180,7 @@ test_retained_dibs_member_refuses_teardown() {
   local case_dir rc head
   case_dir=$(make_case dibs-retained)
   write_meta "$case_dir" no-mistakes ship
+  : >"$case_dir/config/dibs-scopes"
   wt_commit_file "$case_dir" feature.txt pushed
   git -C "$case_dir/wt" push -q origin fm/task-x1
   head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -1199,6 +1201,28 @@ SH
     "dibs-retained: the refusal must name the retained lease"
   assert_refusal_retained_task_state "$case_dir" dibs-retained "$head"
   pass "a dibs scope member that dibs retains refuses teardown with every record intact"
+}
+
+# Without the config/dibs-scopes opt-in, teardown never calls dibs at all.
+test_dibs_flag_absent_never_calls_dibs() {
+  local case_dir rc
+  case_dir=$(make_case dibs-flag-absent)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt pushed
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  cat >"$case_dir/fakebin/dibs" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >>'$case_dir/dibs-called'
+exit 99
+SH
+  chmod +x "$case_dir/fakebin/dibs"
+  set +e
+  run_teardown "$case_dir" >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "dibs-flag-absent: landed work must tear down without the opt-in: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/dibs-called" ] || fail "dibs-flag-absent: teardown called dibs without config/dibs-scopes: $(cat "$case_dir/dibs-called")"
+  pass "teardown without config/dibs-scopes never calls dibs"
 }
 
 test_hung_fetch_is_bounded_and_refuses() {
@@ -6672,6 +6696,7 @@ test_refresh_never_prunes_a_dropped_branch
 test_reachable_work_needs_no_fetch
 test_dibs_scope_ends_with_teardown
 test_retained_dibs_member_refuses_teardown
+test_dibs_flag_absent_never_calls_dibs
 test_hung_fetch_is_bounded_and_refuses
 test_gate_remote_is_not_refreshed_into_landed
 test_no_mistakes_origin_remote_allows

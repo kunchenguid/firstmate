@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-dibs-lib.test.sh - the optional dibs task scope (bin/fm-dibs-lib.sh):
-# a home without dibs or with scopes off is untouched, a retained member
-# refuses teardown, and - where dibs and treehouse are installed - the real
+# a home without the config/dibs-scopes flag never calls dibs during a real
+# spawn, an opted-in home without dibs or with scopes off is untouched, a
+# retained member refuses teardown, the exec owner keeps any state path
+# literal, and - where dibs and treehouse are installed - the real
 # spawn-to-teardown lifecycle against a scratch dibs state and treehouse pool,
 # plus a real bin/fm-spawn.sh run whose emitted launch is executed.
 # Each case scopes its environment to a subshell on purpose.
@@ -32,6 +34,78 @@ exit 0
 SH
   chmod +x "$fakebin/dibs"
   printf '%s:%s\n' "$fakebin" "$PATH"
+}
+
+# A dibs that must never run: any call leaves a marker and fails.
+tripwire_dibs() {  # <fakebin> <marker>
+  cat >"$1/dibs" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >>'$2'
+exit 99
+SH
+  chmod +x "$1/dibs"
+}
+
+test_flag_absent_spawn_never_calls_dibs() {
+  local dir="$TMP/noflag" home proj fakebin out
+  home="$dir/home" proj="$dir/project"
+  fakebin=$(fm_test_make_spawn_fakebin "$dir/fake")
+  tripwire_dibs "$fakebin" "$dir/dibs-called"
+  fm_test_spawn_home "$home" codex
+  fm_git_worktree "$proj" "$dir/wt" wt-noflag
+  fm_test_spawn_brief "$home" noflag1
+  [ ! -e "$home/config/dibs-scopes" ] || fail "the fixture home must start without the opt-in flag"
+  (
+    unset DIBS_SCOPES
+    out=$(fm_test_run_spawn "$home" "$dir/wt" "$fakebin" noflag1 "$proj" --mode no-mistakes --yolo off)
+    expect_code 0 "$?" "a spawn without config/dibs-scopes must succeed even though dibs fails: $out"
+    [ ! -e "$dir/dibs-called" ] || fail "a home without config/dibs-scopes called dibs: $(cat "$dir/dibs-called")"
+  ) || exit 1
+  pass "a home without config/dibs-scopes spawns without ever calling dibs"
+}
+
+# The exec owner is run by /bin/sh, so every character a home path can contain
+# must stay literal: spaces, both quotes, $, backticks, command substitution,
+# and newlines, including one that ends the state directory's own name.
+test_owner_quotes_any_state_path() {
+  local dir="$TMP/quote" base state owner key
+  base="$dir/home it's \"q\" \$HOME \`touch $dir/pwned-bt\` \$(touch $dir/pwned-cs)
+nl"
+  for state in "$base/state" "$base/st
+"; do
+    mkdir -p "$state"
+    : >"$state/t1.meta"
+    owner=$(fm_dibs_scope_owner "$state" t1) || fail "no owner for a path with special characters"
+    case "$owner" in exec:*) ;; *) fail "owner lost its exec: prefix: $owner" ;; esac
+    /bin/sh -c "${owner#exec:}" || fail "the owner reads dead while the task record exists: $owner"
+    mv "$state/t1.meta" "$state/t1.meta.gone"
+    if /bin/sh -c "${owner#exec:}"; then
+      fail "the owner reads alive after the task record is gone: $owner"
+    fi
+    key=$(fm_dibs_scope_key "$state" t1) || fail "no key for a path with special characters"
+    case "$key" in fm-[0-9a-f]*-t1) ;; *) fail "malformed key: $key" ;; esac
+  done
+  [ "$(fm_dibs_scope_key "$base/state" t1)" != "$(fm_dibs_scope_key "$base/st
+" t1)" ] || fail "distinct state paths must give distinct keys"
+  [ ! -e "$dir/pwned-bt" ] && [ ! -e "$dir/pwned-cs" ] || fail "the state path was executed by the owner probe"
+  if command -v dibs >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    mkdir -p "$dir/xdg/dibs" "$dir/dibs"
+    printf '{"scopes":true,"exec_owner":true,"lease_policies":true}\n' >"$dir/xdg/dibs/config.json"
+    (
+      export XDG_CONFIG_HOME="$dir/xdg" DIBS_STATE="$dir/dibs"
+      unset DIBS_SCOPES DIBS_EXEC_OWNER DIBS_LEASE_POLICIES DIBS_CONSUMER_CONTRACT
+      state="$base/state"
+      mv "$state/t1.meta.gone" "$state/t1.meta"
+      fm_dibs_scope_start "$state" t1 || fail "real dibs refused a scope for a path with special characters"
+      [ "$(dibs scope show "$FM_DIBS_SCOPE" --json | jq -r .scope.liveness)" = alive ] ||
+        fail "real dibs reads the owner dead while the task record exists"
+      mv "$state/t1.meta" "$state/t1.meta.gone"
+      [ "$(dibs scope show "$FM_DIBS_SCOPE" --json | jq -r .scope.liveness)" = dead ] ||
+        fail "real dibs reads the owner alive after the task record is gone"
+    ) || exit 1
+    [ ! -e "$dir/pwned-bt" ] && [ ! -e "$dir/pwned-cs" ] || fail "real dibs executed the state path"
+  fi
+  pass "the exec owner keeps spaces, quotes, \$, backticks, and newlines in the state path literal"
 }
 
 test_without_dibs_nothing_runs() {
@@ -153,6 +227,7 @@ test_spawn_exports_scope_and_refuses_time_bound() {
   home="$dir/home" proj="$dir/project" launchlog="$dir/launch.log" panelog="$dir/pane.log"
   fakebin=$(fm_test_make_spawn_fakebin "$dir/fake")
   fm_test_spawn_home "$home" codex
+  : >"$home/config/dibs-scopes"
   fm_git_worktree "$proj" "$dir/wt-a" wt-dibs-a
   git -C "$proj" worktree add --quiet -b wt-dibs-b "$dir/wt-b"
   fm_test_spawn_brief "$home" dibs-a1
@@ -191,6 +266,8 @@ $(cat "$launchlog")") || fail "the emitted launch failed to run"
 }
 
 fm_test_run \
+  test_flag_absent_spawn_never_calls_dibs \
+  test_owner_quotes_any_state_path \
   test_spawn_exports_scope_and_refuses_time_bound \
   test_without_dibs_nothing_runs \
   test_scopes_off_only_reads \
