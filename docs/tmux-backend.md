@@ -94,7 +94,7 @@ The supervisor guard selects only the detected primary harness's signature rathe
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
 It types a message and retries Enter only until the composer clears.
-A harness whose TUI drops a burst before submission is the one exception, and its burst is verified against the composer's own text before Enter, so a replay can only ever add text to a composer that provably holds nothing of it.
+A harness whose TUI drops a burst before submission is the one exception, and its burst is verified against the composer's own text before Enter: each replay is authorised by a read taken immediately before it, so a replay can only ever add text to a composer that provably holds nothing of ours at that moment, and a late echo or a fragment refuses the submit instead.
 Only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary local `fm-send.sh` text steer and every remote text steer no longer ride this verified submit at all: they become durable steering-inbox records plus best-effort constant doorbell lines (`bin/fm-task-inbox-lib.sh`).

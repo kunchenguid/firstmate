@@ -14,8 +14,9 @@
 #      the brief arrives as a typed absolute pointer only after a readiness
 #      gate, then a delivery-confirmation gate that requires the pinned busy
 #      footer. The launch pins WINTERMOLT_NO_FALLBACK=1 and carries
-#      WINTERMOLT_MODEL from the model axis, never a provider-prefixed id, and
-#      an effort request is recorded but omitted (no such setting exists).
+#      WINTERMOLT_MODEL from the model axis exactly as given, a slash-namespaced
+#      gateway id included, and an effort request is recorded but omitted (no
+#      such setting exists).
 #   4. wintermolt is a crewmate/scout adapter on tmux only: a secondmate launch
 #      and any other backend are refused, and nothing is armed as busy wiring
 #      because no writer could ever clear it.
@@ -234,8 +235,9 @@ wm_fake_draft_rows() {  # <inner-width> <text>
 # produces) and leaves any other state alone; `idle`, `busy`, `draft`, and
 # `stale` are the renders those reads must tell apart. A literal burst models
 # what the live TUI does with it: FM_FAKE_WM_SWALLOW=N drops the first N bursts,
-# FM_FAKE_WM_LOSE=1 drops every burst, and FM_FAKE_WM_TRUNCATE=N keeps only the
-# tail of burst N.
+# FM_FAKE_WM_LOSE=1 drops every burst, FM_FAKE_WM_TRUNCATE=N keeps only the
+# tail of burst N, and FM_FAKE_WM_DEFER_ECHO=N echoes burst 1 only after N more
+# pane reads.
 make_wintermolt_pane_fakebin() {  # <dir>
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -307,6 +309,17 @@ case "\${1:-}" in
     esac
     exit 0 ;;
   capture-pane)
+    if [ -f "\${FM_FAKE_WM_STATE:?}.deferred" ]; then
+      left=\$(cat "\${FM_FAKE_WM_STATE:?}.deferred-reads")
+      left=\$((left - 1))
+      if [ "\$left" -le 0 ]; then
+        draft="\$(cat "\${FM_FAKE_WM_STATE:?}.deferred")\$draft"
+        printf '%s' "\$draft" > "\$draft_file"
+        rm -f "\${FM_FAKE_WM_STATE:?}.deferred" "\${FM_FAKE_WM_STATE:?}.deferred-reads"
+      else
+        printf '%s\n' "\$left" > "\${FM_FAKE_WM_STATE:?}.deferred-reads"
+      fi
+    fi
     if [ -f "\${FM_FAKE_WM_STATE:?}.delay" ]; then
       left=\$(cat "\${FM_FAKE_WM_STATE:?}.delay")
       left=\$((left - 1))
@@ -325,6 +338,13 @@ case "\${1:-}" in
       printf '%s\n' "\$bursts" > "\$bursts_file"
       if [ "\${FM_FAKE_WM_LOSE:-0}" = 1 ] \
          || [ "\$bursts" -le "\${FM_FAKE_WM_SWALLOW:-0}" ]; then
+        exit 0
+      fi
+      if [ "\$bursts" = 1 ] && [ "\${FM_FAKE_WM_DEFER_ECHO:-0}" -gt 0 ]; then
+        # The TUI accepted the bytes but echoes them only after a few more
+        # reads, the settling window a single stale read can be fooled by.
+        printf '%s' "\$payload" > "\${FM_FAKE_WM_STATE:?}.deferred"
+        printf '%s\n' "\${FM_FAKE_WM_DEFER_ECHO}" > "\${FM_FAKE_WM_STATE:?}.deferred-reads"
         exit 0
       fi
       if [ "\${FM_FAKE_WM_TRUNCATE:-0}" -ge "\$bursts" ] \
@@ -407,7 +427,8 @@ test_wintermolt_steer_confirmation_uses_the_busy_transition() {
   state="$case_dir/wm.state"
   submit() {  # <pre-state> <post-enter-state>
     printf '%s\n' "$1" > "$state"
-    rm -f "$state.draft" "$state.bursts" "$state.delay"
+    rm -f "$state.draft" "$state.bursts" "$state.delay" \
+      "$state.deferred" "$state.deferred-reads"
     PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_AFTER="$2" \
       FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
       fm_tmux_submit_core win 'steer text' 2 0.05 0.05
@@ -472,6 +493,29 @@ test_wintermolt_slow_footer_still_confirms_the_steer() {
   [ "$(cat "$state")" = busy ] \
     || fail "the slow footer should have rendered busy, pane state read '$(cat "$state")'"
   pass "fm-tmux-lib: a slow wintermolt footer still confirms the steer"
+}
+
+test_wintermolt_late_echo_is_not_replayed() {
+  local case_dir fakebin state verdict bursts
+  case_dir="$TMP_ROOT/submit-late-echo"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # The TUI takes the burst and echoes it a couple of reads later. One read
+  # taken after the settle cannot prove nothing landed, so the replay is
+  # authorised only by a read taken immediately before it - here that read sees
+  # the echo, and the text is never written twice.
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_DEFER_ECHO=2 \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
+  [ "$verdict" = empty ] \
+    || fail "a burst the TUI echoes late must submit normally, got '$verdict'"
+  bursts=$(cat "$state.bursts")
+  [ "$bursts" = 1 ] \
+    || fail "an echoing burst must never be replayed, got $bursts bursts"
+  [ "$(cat "$state")" = busy ] \
+    || fail "the late echo should still have been submitted, pane state read '$(cat "$state")'"
+  pass "fm-tmux-lib: a wintermolt burst the TUI echoes late is never replayed"
 }
 
 test_wintermolt_burst_that_never_lands_does_not_confirm() {
@@ -870,17 +914,26 @@ test_wintermolt_launch_pins_the_env_contract_and_delivers_the_pointer() {
   pass "fm-spawn: wintermolt launch pins the env contract and confirms pointer delivery"
 }
 
-test_wintermolt_refuses_a_provider_prefixed_model() {
-  local id rec out rc
+test_wintermolt_accepts_a_slash_namespaced_model_id() {
+  local id rec out rc launch meta
   id="wm-model-z2-$$"
-  rec=$(make_wintermolt_spawn_case model-refusal "$id")
+  rec=$(make_wintermolt_spawn_case model-slash "$id")
   read_wintermolt_spawn_record "$rec"
+  # An OpenAI-compatible gateway names its own models, and those names carry a
+  # slash (OpenRouter's anthropic/claude-sonnet-4, LiteLLM's openai/gpt-4o, a
+  # vLLM repo id). The id is the backend's, never a firstmate provider prefix,
+  # so it is accepted and carried verbatim.
   out=$(run_wintermolt_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
-    --model provider/deepseek-v4.1-flash-1017)
+    --model anthropic/claude-sonnet-4)
   rc=$?
-  expect_code 1 "$rc" "a provider-prefixed model must refuse the spawn"
-  assert_contains "$out" "provider-prefixed" "the refusal must name the provider-prefix mistake"
-  pass "fm-spawn: wintermolt refuses a provider-prefixed model"
+  expect_code 0 "$rc" "a slash-namespaced wintermolt model id must launch: $out"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "WINTERMOLT_MODEL='anthropic/claude-sonnet-4'" \
+    "the model id must reach the launch unchanged"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'model=anthropic/claude-sonnet-4' "$meta" \
+    "the recorded model must be the id as given"
+  pass "fm-spawn: wintermolt accepts a slash-namespaced backend model id verbatim"
 }
 
 test_wintermolt_refuses_a_secondmate_and_other_backends() {
@@ -957,6 +1010,7 @@ test_wintermolt_submit_busy_read_resolves_its_own_signature
 test_wintermolt_steer_confirmation_uses_the_busy_transition
 test_wintermolt_swallowed_burst_is_retyped_before_submit
 test_wintermolt_slow_footer_still_confirms_the_steer
+test_wintermolt_late_echo_is_not_replayed
 test_wintermolt_burst_that_never_lands_does_not_confirm
 test_wintermolt_truncated_burst_is_never_submitted
 test_wintermolt_busy_classification_reads_only_the_last_row
@@ -966,7 +1020,7 @@ test_wintermolt_draft_and_busy_rows_stay_pending
 test_wintermolt_footer_furniture_bounds_the_box
 test_wintermolt_idle_placeholder_is_fleet_wide
 test_wintermolt_launch_pins_the_env_contract_and_delivers_the_pointer
-test_wintermolt_refuses_a_provider_prefixed_model
+test_wintermolt_accepts_a_slash_namespaced_model_id
 test_wintermolt_refuses_a_secondmate_and_other_backends
 test_wintermolt_spawn_fails_loudly_when_the_tui_never_becomes_ready
 test_wintermolt_xhigh_effort_is_recorded_but_omitted

@@ -3369,21 +3369,14 @@ if [ "$HARNESS" = wintermolt ] && [ "$BACKEND" != tmux ]; then
   exit 1
 fi
 if [ "$HARNESS" = wintermolt ]; then
-  # Wintermolt has no provider namespace of its own: the model id goes to the
-  # selected backend as-is, and the backend plus its URL/key variables are the
-  # operator's wintermolt environment (WINTERMOLT_BACKEND and the chosen
-  # backend's own variables, see references/harness/wintermolt.md). A
-  # provider-prefixed model is therefore a configuration mistake that would
-  # be sent to the provider verbatim and fail the first turn, so it is refused
-  # here rather than launched.
-  if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
-    case "$MODEL" in
-      */*)
-        echo "error: wintermolt takes a bare model id for the selected backend (WINTERMOLT_BACKEND and the backend's own URL/key environment), never a provider-prefixed one; pass '<id>' with the backend environment set, or omit --model" >&2
-        exit 1
-        ;;
-    esac
-  fi
+  # The model id goes to the selected backend exactly as given: wintermolt has
+  # no provider namespace of its own, and an OpenAI-compatible endpoint names
+  # its models however its gateway does (OpenRouter's
+  # `anthropic/claude-sonnet-4`, LiteLLM's `openai/gpt-4o`, a vLLM repo id),
+  # so a slash is the backend's own id and never a firstmate provider prefix.
+  # The backend plus its URL/key variables are the operator's wintermolt
+  # environment (WINTERMOLT_BACKEND and the chosen backend's own variables, see
+  # references/harness/wintermolt.md).
   # Effort follows the record-and-omit contract for a harness with no verified
   # interactive effort flag: wintermolt exposes no reasoning or effort setting
   # at all, only a model id, so a requested effort is recorded but not passed.
@@ -3822,8 +3815,8 @@ model_flag_for_harness() {
   # wintermolt has no model flag: the model rides the WINTERMOLT_MODEL
   # environment variable of the selected backend (docs/BACKENDS.md at the
   # verified revision), and the launch template places this assignment in
-  # its env prefix ahead of the binary. A provider-prefixed value was already
-  # refused at validation, so what lands here is a bare id.
+  # its env prefix ahead of the binary. The id is passed exactly as given,
+  # including a gateway-namespaced one.
   wintermolt)
     printf -- 'WINTERMOLT_MODEL=%s ' "$(shell_quote "$model")"
     ;;

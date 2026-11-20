@@ -330,15 +330,18 @@ fm_pane_is_busy() {  # <target> [harness]
 # [text-verified] wintermolt's TUI drops or truncates a literal burst typed
 # while its input loop is still settling (verified live, 0.7.0), and the empty
 # composer such a burst leaves behind is indistinguishable from a submitted
-# turn, so its submit verifies the typed text BEFORE Enter: the burst is
-# replayed while the composer still holds exactly what it held before typing
-# (positive proof nothing of ours landed, so no duplicate is possible), and a
-# composer holding anything else - a truncated burst, or someone else's draft -
-# is refused as `send-failed` rather than submitted or replayed onto. The
-# verification needs a composer the classifier can read before typing (empty or
-# pending); an unreadable one keeps the unchanged path, and no other harness
-# gets this step. FM_WINTERMOLT_SUBMIT_ATTEMPTS bounds the bursts, the same
-# variable the spawn gate's own swallow retry uses.
+# turn, so its submit verifies the typed text BEFORE Enter. A burst is replayed
+# only after a fresh read taken immediately before that write still shows the
+# composer holding exactly what it held before typing - the speed of the TUI's
+# own echo is the whole question, so one earlier read may never authorise a
+# later write. A composer holding anything else - a truncated burst, a late
+# echo, or someone else's draft - is refused as `send-failed` rather than
+# submitted or replayed onto, because an unconfirmed delivery is strictly
+# better than the same text sent twice. The verification needs a composer the
+# classifier can read before typing (empty or pending); an unreadable one keeps
+# the unchanged path, and no other harness gets this step.
+# FM_WINTERMOLT_SUBMIT_ATTEMPTS bounds the bursts, the same variable the spawn
+# gate's own swallow retry uses.
 # Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
@@ -526,6 +529,14 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
       attempts=$((attempts + 1))
       [ "$attempts" -lt "$max_attempts" ] || { printf 'send-failed'; return 0; }
       sleep "$sleep_s"
+      # The replay is authorised by a read taken here, at the write, because
+      # the echo may have landed while this loop waited.
+      typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text")
+      [ "$typed" = held ] && break
+      if [ "$typed" != nothing ]; then
+        printf 'send-failed'
+        return 0
+      fi
       continue
     fi
     # A render can trail the keys by a moment; content that is still neither
