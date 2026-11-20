@@ -28,7 +28,12 @@
 #      plus a de-emphasized palette run) and the keybind/status footer row
 #      below it; the placeholder reads empty only through the wintermolt-scoped
 #      rule, a draft with the same words stays pending, and the busy
-#      `working…` row stays pending.
+#      `working…` row stays pending/unproven.
+#   7. A submitted steer is confirmed by the idle-to-busy transition read
+#      through that anchored footer: an idle pane that goes busy across our
+#      Enter confirms, while a pane already busy, an idle footer under
+#      conversation output ending in the busy word, and a draft that stays
+#      pending never do.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -204,8 +209,11 @@ test_wintermolt_busy_signatures_are_harness_scoped() {
 
 # The submit cores read the pane through tmux and the anchored wintermolt
 # process name. The fake below serves the real classifier both of those, so the
-# resolution under test is the shipped one: the styled box plus footer, the
-# cursor parked on the footer row, and the pane's foreground process.
+# reads under test are the shipped ones: the styled box plus footer, the cursor
+# parked on the footer row, and the pane's foreground process. `Enter` moves an
+# idle pane to FM_FAKE_WM_AFTER (the render a submitted steer produces) and
+# leaves any other state alone; `idle`, `busy`, `draft`, and `stale` are the
+# renders those reads must tell apart.
 make_wintermolt_pane_fakebin() {  # <dir>
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -214,20 +222,28 @@ make_wintermolt_pane_fakebin() {  # <dir>
 set -u
 state=\$(cat "\${FM_FAKE_WM_STATE:?}" 2>/dev/null || printf 'idle')
 styled=
-for arg in "\$@"; do [ "\$arg" = "-e" ] && styled=1; done
+mode=key
+previous=
+for arg in "\$@"; do
+  [ "\$arg" = "-e" ] && styled=1
+  [ "\$previous" = "-l" ] && mode=literal
+  previous=\$arg
+done
 screen() {
   if [ -n "\$styled" ]; then
     case "\$state" in
       idle) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_IDLE_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      draft) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_DRAFT_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      # The pane rendering its working row while its footer still reads idle,
+      # under conversation output that ends in the busy word.
+      stale) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$(wm_inner_plain '  still working')" "$WM_BOTTOM" "$WM_TOP" "$WM_BUSY_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
       *) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_BUSY_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
     esac
   else
     case "\$state" in
       idle) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  Type a message, or /help')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
-      # The pane rendering its working row while its footer still reads idle:
-      # the state that tells the wintermolt footer apart from any other
-      # harness's busy wording.
-      stale) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      draft) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  draft text never sent')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      stale) printf 'conversation\n%s\n%s\n%s\n%s\n' "still working" "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
       *) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
     esac
   fi
@@ -241,7 +257,11 @@ case "\${1:-}" in
     esac
     exit 0 ;;
   capture-pane) screen; exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    if [ "\$mode" = key ] && [ "\$previous" = Enter ] && [ "\$state" = idle ]; then
+      printf '%s\n' "\${FM_FAKE_WM_AFTER:-busy}" > "\${FM_FAKE_WM_STATE:?}"
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -290,6 +310,40 @@ test_wintermolt_submit_busy_read_resolves_its_own_signature() {
   [ -z "$busy_harness" ] \
     || fail "a non-wintermolt pane must keep the harness-less union, got '$busy_harness'"
   pass "fm-tmux-lib: a wintermolt submit resolves the wintermolt busy signature"
+}
+
+test_wintermolt_steer_confirmation_uses_the_busy_transition() {
+  local case_dir fakebin state verdict
+  case_dir="$TMP_ROOT/submit-transition"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  submit() {  # <pre-state> <post-enter-state>
+    printf '%s\n' "$1" > "$state"
+    PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_AFTER="$2" \
+      fm_tmux_submit_core win 'steer text' 2 0.05 0.05
+  }
+  verdict=$(submit idle busy)
+  [ "$verdict" = empty ] \
+    || fail "a steer that turns an idle wintermolt worker busy must confirm delivery, got '$verdict'"
+  # The busy row replaced the composer, so the composer read alone is
+  # pending-unproven; only the idle-before-typing baseline plus the anchored
+  # footer may confirm it.
+  verdict=$(submit busy busy)
+  [ "$verdict" = pending-unproven ] \
+    || fail "a pane already busy before typing must not confirm the submit, got '$verdict'"
+  verdict=$(submit idle stale)
+  [ "$verdict" = pending-unproven ] \
+    || fail "conversation output ending in the busy word over an idle footer must not confirm a submit, got '$verdict'"
+  verdict=$(submit idle draft)
+  [ "$verdict" = pending ] \
+    || fail "a proven pending draft that stays pending must stay unconfirmed, got '$verdict'"
+  # The transition evidence is harness-scoped: the harness-less union never
+  # confirms an unproven composer, even with the baseline.
+  printf 'busy\n' > "$state"
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" fm_tmux_submit_enter_core win 2 0.05 1 '')
+  [ "$verdict" = pending-unproven ] \
+    || fail "the harness-less union must not confirm an unproven composer, got '$verdict'"
+  pass "fm-tmux-lib: a wintermolt steer confirms through the idle-to-busy transition"
 }
 
 test_wintermolt_busy_classification_reads_only_the_last_row() {
@@ -715,6 +769,7 @@ test_wintermolt_control_mechanics_are_the_verified_ones
 test_wintermolt_busy_tail_needs_the_pinned_footer_row
 test_wintermolt_busy_signatures_are_harness_scoped
 test_wintermolt_submit_busy_read_resolves_its_own_signature
+test_wintermolt_steer_confirmation_uses_the_busy_transition
 test_wintermolt_busy_classification_reads_only_the_last_row
 test_wintermolt_classify_reads_the_rendered_tail
 test_wintermolt_idle_composer_reads_empty_only_through_the_scope

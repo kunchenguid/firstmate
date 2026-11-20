@@ -332,7 +332,7 @@ fm_pane_is_busy() {  # <target> [harness]
 # composer still reads "pending", the submit core falls back to
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
-# a genuine swallow. Pending-unproven receives the same Enter retry budget but
+# a genuine swallow. Pending-unproven receives the same Enter retry budget and
 # never reaches this exception.
 # Turn-started confirmation (the strict blank-row posture's counterpart): a
 # harness whose mid-turn screen the classifier cannot positively identify (pi
@@ -346,14 +346,35 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
+# A composer the classifier refuses to prove is not outside that evidence: a
+# harness that renders its own working line in the composer box (wintermolt's
+# `working…` row) reads `pending-unproven`, never `pending`, so the queue
+# exception above can never fire for it. The same idle baseline plus the same
+# harness-scoped busy read confirm that submit, and only for a pane whose own
+# busy signature is anchored ([busy-harness] below): a harness-less union match
+# is not transition evidence for any harness, and without the baseline an
+# unproven read stays unproven.
 # [busy-harness] scopes every busy read to one harness signature; the submit
 # core passes polytoken for a pane whose composer identity is polytoken (its
 # `Running for` row is outside the harness-less union), wintermolt for a pane
 # whose foreground process is wintermolt (only its own pinned footer row may
 # acknowledge that pane; the union reaches it only by borrowing another
 # harness's wording from the working row), and nothing otherwise.
+# fm_tmux_submit_busy_confirm: poll the submit's busy read across the retry
+# budget, because a turn takes a beat to render; 0 only when the pane proves it
+# is busy under the signature the caller scoped.
+fm_tmux_submit_busy_confirm() {  # <target> <retries> <enter-sleep> [busy-harness]
+  local target=$1 retries=$2 sleep_s=$3 busy_harness=${4:-} j=0
+  while [ "$j" -lt "$retries" ]; do
+    fm_pane_is_busy "$target" "$busy_harness" && return 0
+    j=$((j + 1))
+    [ "$j" -ge "$retries" ] || sleep "$sleep_s"
+  done
+  return 1
+}
+
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 j state busy_state
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 state busy_state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -366,16 +387,10 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     case "$state" in
       pending|pending-unproven) ;;
       unknown)
-        if [ "$baseline_idle" = 1 ]; then
-          j=0
-          while [ "$j" -lt "$retries" ]; do
-            if fm_pane_is_busy "$target" "$busy_harness"; then
-              printf 'empty'
-              return 0
-            fi
-            j=$((j + 1))
-            [ "$j" -ge "$retries" ] || sleep "$sleep_s"
-          done
+        if [ "$baseline_idle" = 1 ] \
+           && fm_tmux_submit_busy_confirm "$target" "$retries" "$sleep_s" "$busy_harness"; then
+          printf 'empty'
+          return 0
         fi
         printf 'unknown'
         return 0
@@ -385,6 +400,14 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
+  # A composer the classifier refused to prove (wintermolt's working row)
+  # confirms through the turn-started transition, never through the
+  # harness-less union.
+  if [ "$state" = pending-unproven ] && [ "$baseline_idle" = 1 ] && [ -n "$busy_harness" ] \
+     && fm_tmux_submit_busy_confirm "$target" "$retries" "$sleep_s" "$busy_harness"; then
+    printf 'empty'
+    return 0
+  fi
   if [ "$state" != pending ]; then
     printf '%s' "$state"
     return 0

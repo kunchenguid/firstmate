@@ -35,6 +35,7 @@ Established in that run, on the real binary:
 
 - The composer box is the shared rounded bordered shape; the idle placeholder `Type a message, or /help` renders as a reverse-video cursor cell on the first character plus one de-emphasized palette run (`38;5;8`), which the ghost stripper cannot reach (a palette index outside the fixed 232-255 ramp), so the pane reads `empty` only through the wintermolt-scoped rule in `bin/fm-composer-lib.sh`.
 - A typed draft renders the opposite shape (default-foreground text, cursor cell after it) and reads `pending`; the busy row `working… (Esc stops, Ctrl+C quits)` shares the placeholder's cursor-cell shape and reads `pending-unproven` (the `…` defeats the ASCII geometry proof), never `empty`.
+- That busy-row verdict is why a submitted steer is confirmed by the transition, not by the composer: the pre-typing read is `empty`, the pane's own `Esc stop` footer then reads busy, and the shared submit core's idle-to-busy proof (`bin/fm-tmux-lib.sh`) accepts the submit on that harness-scoped busy read alone. The composer read is never consulted for the confirmation, so the busy row's `pending-unproven` is expected and harmless there.
 - The pane foreground is exactly `wintermolt`; a bash tool subprocess is its direct child and inherits no identity variable, only backend-config variables, so detection is anchored ancestry alone.
 - One Escape stops a running turn; one `/quit` exits to the pane shell.
 
