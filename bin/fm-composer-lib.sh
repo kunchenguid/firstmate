@@ -124,12 +124,13 @@
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
 # nothing.
 #
-# COVERAGE: this is exercised for the bordered box and the pi separator pair,
-# the two shapes claude 2.x renders. The opencode left bar is wired in for the
-# same treatment but is UNEXERCISED - every left-bar row this repo records
-# leads with plain text, and opencode's own prompt character is `>`, a SHELL
-# glyph deliberately outside the agent set, so no opencode shape recorded here
-# can prove a left-bar envelope and open a zone under it.
+# COVERAGE: tests/fm-composer-lib.test.sh exercises bordered boxes, solid
+# separator pairs, and titled/badge envelopes; the latter are pinned by
+# test_matrix_claude_titled_envelope_lower_candidates. The opencode left bar
+# is wired in for the same treatment but is UNEXERCISED - every left-bar row
+# this repo records leads with plain text, and opencode's own prompt character
+# is `>`, a SHELL glyph deliberately outside the agent set, so no opencode
+# shape recorded here can prove a left-bar envelope and open a zone under it.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -977,16 +978,12 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # The row must OPEN with the same 8-column dash run the strict separator
 # requires. Width is proven by comparing canonical space strings, never by
 # `${#row}`, which counts characters under UTF-8 and bytes under LC_ALL=C
-# (issue #1988). Title text is ASCII-printable only, the same boundary
-# _fm_composer_titled_bottom_ok holds; any other glyph leaves residue, and the
-# verdict stays `unknown`, the safe direction.
-# The one non-ASCII exception is Claude Code's single-column fast-mode badge
-# `↯` (U+21AF), which a session started with fast mode enabled (`"fastMode":
-# true` in Claude Code settings) burns into the same top rule of an unnamed
-# session as `── ↯ /fast ─` while idle and `── ↯ ─` once text is typed
-# (verified live 2026-11-20 on Claude Code 2.1.327, 2.1.328 and 2.1.329 under
-# Herdr 0.9.0 and tmux; with fast mode off the rule stays solid). It is
-# mapped to one column like a title character; the width proof still decides.
+# (issue #1988). Title text is ASCII-printable, with one non-ASCII exception:
+# Claude Code's single-column fast-mode badge `↯` (U+21AF) maps to one space
+# before the width comparison. Every other non-ASCII title glyph leaves
+# residue and refuses proof. The dated captures and refresh commands live in
+# docs/verification/runtime-backends.md, "claude fast-mode badge top rule
+# through Herdr".
 _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
   local row=$1 expected=$2 spaces
   case "$row" in
@@ -2006,19 +2003,19 @@ _fm_composer_bare_is_popup_selection() {  # <plain-screen> <screen> <styled> <ro
 }
 
 # _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its
-# own titled composer: a titled rule directly above it and the screen's only
-# unmatched separator below it, which is that composer's closing rule. Only
+# own titled composer: a width-proven titled rule directly above it and the
+# scan's last solid separator below it, which is its closing rule. Only
 # the draft's own wrapped continuation rows - indented, non-blank, edge-free,
 # the rows the bare wrap walk extracts - may sit between the glyph row and that
 # closing rule (a typed doorbell wraps on a 120-column Claude pane).
 #
-# The cursorless staleness rule reads an unmatched separator BELOW a candidate
-# as proof the candidate is scrollback. A titled top rule never opens the
-# separator pair, so the composer's own closing rule becomes that unmatched
-# separator and a genuinely idle composer read `unknown`. Adjacency above and
-# an unbroken continuation run below keep the staleness rule intact everywhere
-# else: a glyph stranded in scrollback has transcript rows, not its own rules,
-# around it.
+# The scan records this local proof before lower footer or popup candidates
+# can replace the glyph row. It remains valid when an earlier transcript rule
+# pairs with the same closing separator: footer selection prefers the local
+# envelope's glyph over that broader pair's glyph. Without an earlier pair,
+# the proof also exempts this composer from unmatched-separator staleness.
+# Adjacency above and an unbroken continuation run below keep a glyph stranded
+# across transcript rows from receiving that exemption.
 _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
   local plain=$1 row=$2 above below next raw
   [ "$row" -ge 1 ] || return 1
