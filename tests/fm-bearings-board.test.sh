@@ -370,7 +370,7 @@ test_registration_cannot_consume_before_any_origin_binding() {
 EOF
   fm_write_meta "$home/state/$origin.meta" "project=$home/projects/sample" "kind=scout"
   run_decisions "$home" hold "$origin" "$key" \
-    --title "Choose the order proof" --reason "captain choice pending" --repo sample >/dev/null \
+    --title "Choose the order proof" --class product-or-scope-expansion --reason "captain choice pending" --repo sample >/dev/null \
     || fail "could not create the order-proof captain hold"
 
   write_valid_payload "$data"

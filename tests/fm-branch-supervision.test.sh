@@ -50,8 +50,18 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
   case "$out_a" in
-    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Set silent true for a task-level routine outcome only when it says the worker is still busy, nothing new has happened since the last outcome, and no action was taken."*"Any routine outcome reporting an action, state change, or new result stays rendered; captain outcomes are never silent."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
+    *"- the finished result of work the captain requested, even when that result is healthy;"*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Set silent true for a task-level routine outcome only when it says the worker is still busy, nothing new has happened since the last outcome, and no action was taken."*"Any routine outcome reporting an action, state change, or new result stays rendered; main and captain outcomes are never silent."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
+  esac
+  # 31 October 2026: most captain outcomes meant "main must act", and that
+  # framing reached the captain as his own question. Main-must-act is verdict
+  # main; captain is reserved for the captain-hold classes.
+  case "$out_a" in
+    *"Verdict captain is reserved for a call that is the captain's own, in one of the captain-hold classes"*"Verdict main is for anything MAIN must act on that is not such a call"*"A doubt about whose call something is goes to MAIN as main, never to the captain as captain."*"also report verdict main for anything MAIN must act on to move the work forward"*) ;;
+    *) fail "branch prompt still routes main-must-act outcomes to the captain verdict" ;;
+  esac
+  case "$out_a" in
+    *"When genuinely in doubt, choose captain"*|*"also report verdict captain for anything MAIN must act on"*) fail "branch prompt still says doubt or main-must-act is a captain verdict" ;;
   esac
   case "$out_a" in
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;

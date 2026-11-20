@@ -1,7 +1,7 @@
 // Firstmate supervision notes for the Claude Code mod, kept free of the engine.
 //
 // Pi renders each supervision outcome in the transcript: a sailboat note for a visible
-// routine outcome and a sequence-keyed anchor entry for a captain outcome
+// routine outcome and a sequence-keyed anchor entry for a main or captain outcome
 // (.pi/extensions/fm-branch-supervision.ts). This module owns the same lines for
 // Claude Code, read from the display tail copy of the one outcome store
 // (bin/fm-branch-outcome.sh owns every file format read here) and from the supervision
@@ -26,7 +26,7 @@ export type OutcomeRow = {
   readonly seq: number;
   readonly epoch: number;
   readonly task: string;
-  readonly verdict: "routine" | "captain";
+  readonly verdict: "routine" | "main" | "captain";
   readonly summary: string;
   readonly silent: boolean;
 };
@@ -42,7 +42,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | undefined {
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return undefined;
   if (typeof row.epoch !== "number" || !Number.isSafeInteger(row.epoch) || row.epoch < 0) return undefined;
   if (typeof row.task !== "string" || row.task === "") return undefined;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return undefined;
+  if (row.verdict !== "routine" && row.verdict !== "main" && row.verdict !== "captain") return undefined;
   if (typeof row.summary !== "string" || row.summary === "") return undefined;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return undefined;
   const silent = row.silent === true;
@@ -76,13 +76,13 @@ export function parseOutcomeMarker(text: string | undefined): number {
 export function outcomeNoteLine(row: OutcomeRow): string | undefined {
   if (row.silent) return undefined;
   const summary = row.summary.replace(/\s*\n\s*/g, " ");
-  return row.verdict === "captain"
-    ? `${BRANCH_NOTE_ANCHOR} [seq ${row.seq}] ${row.task}: ${summary}`
-    : `${BRANCH_NOTE_BOAT} ${row.task}: ${summary}`;
+  if (row.verdict === "routine") return `${BRANCH_NOTE_BOAT} ${row.task}: ${summary}`;
+  const forMain = row.verdict === "main" ? " [firstmate to act, not a captain call]" : "";
+  return `${BRANCH_NOTE_ANCHOR} [seq ${row.seq}]${forMain} ${row.task}: ${summary}`;
 }
 
 /**
- * The session-start replay, as Pi's startup replay presents the store: every captain row
+ * The session-start replay, as Pi's startup replay presents the store: every main or captain row
  * main has not acknowledged as processed and every unread visible routine row, bounded
  * to the newest few with one line counting any that were left out. Rows through
  * `shownThrough` are already in this session's restored transcript and are skipped,
@@ -96,7 +96,7 @@ export function replayOutcomeNotes(
 ): string[] {
   const shown = shownThrough > (rows[rows.length - 1]?.seq ?? 0) ? 0 : shownThrough;
   const due = rows.filter(
-    (row) => row.seq > shown && (row.verdict === "captain" ? row.seq > processed : row.seq > cursor),
+    (row) => row.seq > shown && (row.verdict !== "routine" ? row.seq > processed : row.seq > cursor),
   );
   const lines = due.map(outcomeNoteLine).filter((line): line is string => line !== undefined);
   if (lines.length <= BRANCH_NOTES_REPLAY_LIMIT) return lines;

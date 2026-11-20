@@ -4,6 +4,8 @@ Maintainer-verification record for the guarantee in [`secondmate-parent-channel.
 Refresh it by rerunning the fixture below after changing any publisher named in `bin/fm-parent-channel-lib.sh`.
 This run predates emission-time stamping, so each published line below is the payload without its stamp: a rerun now writes the same bytes with an `[at=<epoch>]` tag closing the head, as in `done [key=child-outcome-child-done-05b032a1] [at=<epoch>]: child ...`.
 [`bin/fm-classify-lib.sh`](../../bin/fm-classify-lib.sh) owns that tag's syntax; nothing this record proves about delivery depends on it.
+This run also predates typed captain calls, so its Step 3 hold carries no class: a rerun now needs `--class <class>` on that `hold` command, as in `bin/fm-captain-hold.sh hold child-call --title 'Pick the rollout window' --class <class> --reason 'rollout window choice pending' --repo alpha`.
+[`bin/fm-captain-hold.sh`](../../bin/fm-captain-hold.sh) owns the class list; nothing this record proves about delivery depends on it.
 
 ## What was run
 

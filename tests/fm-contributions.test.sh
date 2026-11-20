@@ -2039,10 +2039,10 @@ test_forge_settles_only_declared_holds() {
     for action in close release; do
       id="question-$action"
       with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" 'Decide this PR' --pr https://github.com/o/r/pull/8 >/dev/null || fail 'add failed'
-      with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason 'Decide this PR' >/dev/null || fail 'hold failed'
+      with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id" --class merge-or-landing-outside-authority --reason 'Decide this PR' >/dev/null || fail 'hold failed'
       with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy "$id" https://github.com/o/r/pull/8 terminal "$action" >/dev/null || fail 'policy failed'
     done
-    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Unrelated unfinished work' >/dev/null || fail 'unrelated hold failed'
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class product-or-scope-expansion --reason 'Unrelated unfinished work' >/dev/null || fail 'unrelated hold failed'
     with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add bystander 'Work without a captain hold' --pr https://github.com/o/r/pull/8 >/dev/null || fail 'bystander add failed'
     printf '%s\n' "$mode" > "$home/forge/state"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'terminal poll failed'
@@ -2078,11 +2078,11 @@ test_forge_hold_policy_guards() {
     forge_home "$home"
     touch "$home/config/hold-pr-settle"
     with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --pr https://github.com/o/r/pull/8 >/dev/null || fail 'link failed'
-    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Decide the PR' >/dev/null || fail 'hold failed'
+    with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Decide the PR' >/dev/null || fail 'hold failed'
     with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
     case "$mode" in
       disabled) rm "$home/config/hold-pr-settle" ;;
-      reheld) with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Another question about this work' >/dev/null || fail 'rehold failed' ;;
+      reheld) with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class product-or-scope-expansion --reason 'Another question about this work' >/dev/null || fail 'rehold failed' ;;
     esac
     if [ "$mode" = unmatched ]; then printf 'closed\n'; else printf 'merged\n'; fi > "$home/forge/state"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'guard poll failed'
@@ -2108,7 +2108,7 @@ test_forge_hold_settlement_retry() {
   home=$(new_home hold-settlement-retry)
   forge_home "$home"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
   # Retaining a finished worker's deliverable must not invalidate its question.
   with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show delivery --full | sed -n 's/^  body: //p' | jq -r . > "$home/body.txt"
@@ -2142,7 +2142,7 @@ test_forge_hold_settlement_rejects_uncertain_evidence() {
   home=$(new_home hold-uncertain)
   forge_home "$home"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 terminal close >/dev/null || fail 'policy failed'
   mutate_record "$home" delivery '.records[0].observation.state="merged" | .records[0].error="forge unavailable"'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" settle-pr delivery https://github.com/o/r/pull/8 || fail 'uncertain evidence command failed'
@@ -2164,7 +2164,7 @@ test_forge_release_waits_for_an_attended_session() {
   home=$(new_home hold-away-release)
   forge_home "$home"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged release >/dev/null || fail 'policy failed'
   with_home "$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'watch the fleet' >/dev/null || fail 'could not enter away posture'
   printf 'merged\n' > "$home/forge/state"
@@ -2197,7 +2197,7 @@ test_forge_release_waits_for_the_away_record_lock() {
   home=$(new_home hold-away-lock)
   forge_home "$home"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged release >/dev/null || fail 'policy failed'
   # An away entry in progress holds this lock before its record exists.
   hold_lock "$home" "$home/state/.afk-contract.lock"
@@ -2223,7 +2223,7 @@ test_forge_policy_survives_a_follow_up_pr_link() {
   home=$(new_home hold-follow-up-link)
   forge_home "$home"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
   with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --pr https://github.com/o/r/pull/10 >/dev/null || fail 'follow-up link failed'
   printf 'merged\n' > "$home/forge/state"
@@ -2258,12 +2258,12 @@ test_late_linked_hold_gets_its_own_closed_event_once() {
   forge_home "$home"
   rm "$home/state/delivery.meta"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Rework or drop?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class product-or-scope-expansion --reason 'Rework or drop?' >/dev/null || fail 'hold failed'
   printf 'closed\n' > "$home/forge/state"
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'closing poll failed'
   [ "$(closed_event_tasks "$home")" = '["delivery"]' ] || fail 'the first held owner was not told about the closure'
   with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add late 'Second question on the PR' --pr https://github.com/o/r/pull/8 >/dev/null || fail 'late add failed'
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold late --reason 'Reopen it?' >/dev/null || fail 'late hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold late --class product-or-scope-expansion --reason 'Reopen it?' >/dev/null || fail 'late hold failed'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'late-owner poll failed'
   [ "$(closed_event_tasks "$home")" = '["delivery","late"]' ] || fail 'a hold linked after the closure inherited the report of the first owner'
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'repeat poll failed'
@@ -2277,7 +2277,7 @@ test_forge_settlement_defers_while_the_task_is_busy() {
   home=$(new_home hold-busy-task)
   forge_home "$home"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Merge this PR?' >/dev/null || fail 'hold failed'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 merged close >/dev/null || fail 'policy failed'
   # A captain answer in progress holds the task control lock.
   hold_lock "$home" "$home/state/.control-delivery.lock"
@@ -2305,7 +2305,7 @@ test_settled_task_gets_no_closed_event_for_its_other_pr() {
   forge_home "$home"
   rm "$home/state/delivery.meta"
   touch "$home/config/hold-pr-settle"
-  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --reason 'Decide this PR' >/dev/null || fail 'hold failed'
+  with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold delivery --class merge-or-landing-outside-authority --reason 'Decide this PR' >/dev/null || fail 'hold failed'
   with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy delivery https://github.com/o/r/pull/8 terminal close >/dev/null || fail 'policy failed'
   with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" update delivery --pr https://github.com/o/r/pull/9 >/dev/null || fail 'second link failed'
   # Retain both closures first, so the enabled poll settles them in URL order.
