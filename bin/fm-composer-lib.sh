@@ -1092,7 +1092,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       FM_COMPOSER_SCAN_BARE_RULE_ROW=-1
-      if [ -z "$cy" ] && [ "$pi_open" -lt 0 ] \
+      if [ -z "$cy" ] \
          && _fm_composer_bare_rule_sandwich "$pane" "$FM_COMPOSER_SCAN_BARE_ROW"; then
         FM_COMPOSER_SCAN_BARE_RULE_ROW=$FM_COMPOSER_SCAN_BARE_ROW
       fi
@@ -1941,7 +1941,7 @@ _fm_composer_locate_footer_zone() {  # <plain>
     proof=$FM_COMPOSER_SCAN_PI_GLYPH
   fi
   if [ "$FM_COMPOSER_SCAN_BARE_RULE_ROW" -ge 0 ] \
-     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$FM_COMPOSER_FOOTER_AFTER" ]; then
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -ge "$FM_COMPOSER_FOOTER_AFTER" ]; then
     FM_COMPOSER_FOOTER_AFTER=$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR
     FM_COMPOSER_FOOTER_GLYPH=$FM_COMPOSER_SCAN_BARE_RULE_ROW
     trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
@@ -2038,6 +2038,7 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
   _fm_composer_pi_separator_row "$below" || return 1
   above=$(_fm_composer_screen_row "$((row - 1))" "$plain")
   fm_composer_normalize_trim_var above
+  _fm_composer_pi_separator_row "$above" && return 1
   _fm_composer_titled_rule_row "$above" "${below//─/ }"
 }
 

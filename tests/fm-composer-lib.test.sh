@@ -1298,40 +1298,46 @@ test_matrix_claude_fast_badge_top_rule() {
 }
 
 test_matrix_claude_titled_envelope_lower_candidates() {
-  local prefix bottom top footer screen wrapped popup stranded caps want out claude_idle
+  local prefix bottom top typed_top footer screen wrapped popup stranded caps want out claude_idle transcript popup_footer
   claude_idle=$(printf 'claude\tidle')
   prefix=$(printf '─%.0s' $(seq 1 22))
   bottom="${prefix}──────────"
   footer=$'\n  → repo git:(main)\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
   for top in "${prefix} ↯ /fast ─" "${prefix} Andrew ──"; do
+    typed_top=$top
+    [ "$top" != "${prefix} ↯ /fast ─" ] || typed_top="${prefix}────── ↯ ─"
     screen="$top"$'\n❯'"$NBSP"$'\n'"$bottom$footer"
-    wrapped="$top"$'\n❯ fix the login\n  bug\n'"$bottom$footer"
-    popup="$top"$'\n❯ /exit\n'"$bottom"$'\n  ❯ /exit    Exit the CLI\n    /context    Visualize context'
+    wrapped="$typed_top"$'\n❯ fix the login\n  bug\n'"$bottom$footer"
     stranded="$top"$'\n❯'"$NBSP"$'\n'"$bottom"$'\nlater transcript output\n'"$bottom"
     for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
       want=pending
       [ "$caps" != "$CAPS_PLAIN" ] || want=unknown
-      assert_screen "titled/badge idle under a statusline" empty "$caps" "$screen"
-      out=$(fm_composer_extract_selected_content "$caps" "$screen")
-      [ -z "$out" ] || fail "an idle titled/badge composer must not extract its footer, got '$out'"
-      assert_screen "titled/badge wrapped draft under a statusline" "$want" "$caps" "$wrapped"
-      out=$(fm_composer_extract_selected_content "$caps" "$wrapped")
-      [ "$out" = 'fix the login bug' ] || fail "the wrapped draft must exclude its footer, got '$out'"
-      assert_screen "titled/badge slash popup" "$want" "$caps" "$popup"
-      out=$(fm_composer_extract_selected_content "$caps" "$popup")
-      [ "$out" = /exit ] || fail "the typed command must exclude its popup, got '$out'"
-      out=$(LC_ALL=C fm_composer_extract_selected_content "$caps" "$popup")
-      [ "$out" = /exit ] || fail "the typed command must exclude its popup under LC_ALL=C, got '$out'"
+      for transcript in '' "$bottom"$'\n❯ old prompt\nresponse text\n'; do
+        assert_screen "titled/badge idle under a statusline" empty "$caps" "$transcript$screen" '' "$claude_idle"
+        out=$(fm_composer_extract_selected_content "$caps" "$transcript$screen")
+        [ -z "$out" ] || fail "an idle titled/badge composer must not extract its footer or transcript, got '$out'"
+        assert_screen "titled/badge wrapped draft under a statusline" "$want" "$caps" "$transcript$wrapped" '' "$claude_idle"
+        out=$(fm_composer_extract_selected_content "$caps" "$transcript$wrapped")
+        [ "$out" = 'fix the login bug' ] || fail "the wrapped draft must exclude its footer and transcript, got '$out'"
+        for popup_footer in '' "$footer"; do
+          popup="$transcript$typed_top"$'\n❯ /exit\n'"$bottom$popup_footer"$'\n  ❯ /exit    Exit the CLI\n    /context    Visualize context'
+          assert_screen "titled/badge slash popup" "$want" "$caps" "$popup" '' "$claude_idle"
+          out=$(fm_composer_extract_selected_content "$caps" "$popup")
+          [ "$out" = /exit ] || fail "the typed command must exclude its popup and transcript, got '$out'"
+          out=$(LC_ALL=C fm_composer_extract_selected_content "$caps" "$popup")
+          [ "$out" = /exit ] || fail "the typed command must exclude its popup and transcript under LC_ALL=C, got '$out'"
+        done
+        assert_screen "titled/badge lower live draft keeps winning" "$want" "$caps" \
+          "$transcript$screen"$'\n❯ my typed draft' '' "$claude_idle"
+        out=$(fm_composer_extract_selected_content "$caps" "$transcript$screen"$'\n❯ my typed draft')
+        [ "$out" = 'my typed draft' ] || fail "the lower live draft must remain selected, got '$out'"
+        out=$(fm_composer_extract_selected_content "$caps" \
+          "$transcript$top"$'\n❯'"$NBSP"$'\n'"$bottom"$'\n  ❯ /exit    Exit the CLI')
+        [ "$out" = '/exit Exit the CLI' ] || fail "an empty envelope must not demote a popup-shaped draft, got '$out'"
+      done
       assert_screen "titled/badge sandwich stranded above transcript" unknown "$caps" "$stranded" '' "$claude_idle"
       assert_screen "titled/badge sandwich crossing transcript" unknown "$caps" \
         "$top"$'\n❯'"$NBSP"$'\nlater transcript output\n'"$bottom"
-      assert_screen "titled/badge lower live draft keeps winning" "$want" "$caps" \
-        "$screen"$'\n❯ my typed draft'
-      out=$(fm_composer_extract_selected_content "$caps" "$screen"$'\n❯ my typed draft')
-      [ "$out" = 'my typed draft' ] || fail "the lower live draft must remain selected, got '$out'"
-      out=$(fm_composer_extract_selected_content "$caps" \
-        "$top"$'\n❯'"$NBSP"$'\n'"$bottom"$'\n  ❯ /exit    Exit the CLI')
-      [ "$out" = '/exit Exit the CLI' ] || fail "an empty envelope must not demote a popup-shaped draft, got '$out'"
     done
   done
   pass "matrix: titled/badge envelopes prove footer and popup ownership before candidate selection"
