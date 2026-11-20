@@ -334,12 +334,14 @@ fm_pane_is_busy() {  # <target> [harness]
 # only after a fresh read taken immediately before that write still shows the
 # composer holding exactly what it held before typing - the speed of the TUI's
 # own echo is the whole question, so one earlier read may never authorise a
-# later write. A composer holding anything else - a truncated burst, a late
-# echo, or someone else's draft - is refused as `send-failed` rather than
-# submitted or replayed onto, because an unconfirmed delivery is strictly
-# better than the same text sent twice. The verification needs a composer the
-# classifier can read before typing (empty or pending); an unreadable one keeps
-# the unchanged path, and no other harness gets this step.
+# later write. Every burst is judged that way, the last permitted one included,
+# so a slow echo is never reported as a failed delivery. A composer holding
+# anything else - a truncated burst, a late echo, or someone else's draft - is
+# refused as `send-failed` rather than submitted or replayed onto, because an
+# unconfirmed delivery is strictly better than the same text sent twice. The
+# verification needs a composer the classifier can read before typing (empty or
+# pending); an unreadable one keeps the unchanged path, and no other harness
+# gets this step.
 # FM_WINTERMOLT_SUBMIT_ATTEMPTS bounds the bursts, the same variable the spawn
 # gate's own swallow retry uses.
 # Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
@@ -526,17 +528,18 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
     typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text")
     [ "$typed" = held ] && break
     if [ "$typed" = nothing ]; then
-      attempts=$((attempts + 1))
-      [ "$attempts" -lt "$max_attempts" ] || { printf 'send-failed'; return 0; }
       sleep "$sleep_s"
-      # The replay is authorised by a read taken here, at the write, because
-      # the echo may have landed while this loop waited.
+      # Every burst, the last permitted one included, is judged by a read taken
+      # here rather than by the one above, because the echo may have landed
+      # while this loop waited.
       typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text")
       [ "$typed" = held ] && break
       if [ "$typed" != nothing ]; then
         printf 'send-failed'
         return 0
       fi
+      attempts=$((attempts + 1))
+      [ "$attempts" -lt "$max_attempts" ] || { printf 'send-failed'; return 0; }
       continue
     fi
     # A render can trail the keys by a moment; content that is still neither

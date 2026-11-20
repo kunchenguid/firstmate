@@ -236,8 +236,8 @@ wm_fake_draft_rows() {  # <inner-width> <text>
 # `stale` are the renders those reads must tell apart. A literal burst models
 # what the live TUI does with it: FM_FAKE_WM_SWALLOW=N drops the first N bursts,
 # FM_FAKE_WM_LOSE=1 drops every burst, FM_FAKE_WM_TRUNCATE=N keeps only the
-# tail of burst N, and FM_FAKE_WM_DEFER_ECHO=N echoes burst 1 only after N more
-# pane reads.
+# tail of burst N, and FM_FAKE_WM_DEFER_BURST=N echoes burst N only after
+# FM_FAKE_WM_DEFER_READS more pane reads.
 make_wintermolt_pane_fakebin() {  # <dir>
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -340,11 +340,11 @@ case "\${1:-}" in
          || [ "\$bursts" -le "\${FM_FAKE_WM_SWALLOW:-0}" ]; then
         exit 0
       fi
-      if [ "\$bursts" = 1 ] && [ "\${FM_FAKE_WM_DEFER_ECHO:-0}" -gt 0 ]; then
+      if [ "\$bursts" = "\${FM_FAKE_WM_DEFER_BURST:-0}" ]; then
         # The TUI accepted the bytes but echoes them only after a few more
         # reads, the settling window a single stale read can be fooled by.
         printf '%s' "\$payload" > "\${FM_FAKE_WM_STATE:?}.deferred"
-        printf '%s\n' "\${FM_FAKE_WM_DEFER_ECHO}" > "\${FM_FAKE_WM_STATE:?}.deferred-reads"
+        printf '%s\n' "\${FM_FAKE_WM_DEFER_READS:-2}" > "\${FM_FAKE_WM_STATE:?}.deferred-reads"
         exit 0
       fi
       if [ "\${FM_FAKE_WM_TRUNCATE:-0}" -ge "\$bursts" ] \
@@ -505,7 +505,8 @@ test_wintermolt_late_echo_is_not_replayed() {
   # taken after the settle cannot prove nothing landed, so the replay is
   # authorised only by a read taken immediately before it - here that read sees
   # the echo, and the text is never written twice.
-  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_DEFER_ECHO=2 \
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" \
+    FM_FAKE_WM_DEFER_BURST=1 FM_FAKE_WM_DEFER_READS=2 \
     FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
     fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
   [ "$verdict" = empty ] \
@@ -516,6 +517,29 @@ test_wintermolt_late_echo_is_not_replayed() {
   [ "$(cat "$state")" = busy ] \
     || fail "the late echo should still have been submitted, pane state read '$(cat "$state")'"
   pass "fm-tmux-lib: a wintermolt burst the TUI echoes late is never replayed"
+}
+
+test_wintermolt_last_permitted_burst_gets_the_grace_read() {
+  local case_dir fakebin state verdict bursts
+  case_dir="$TMP_ROOT/submit-last-burst"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # The swallow budget's last burst lands but echoes after the single read
+  # taken at the settle, so only the same grace re-read every earlier burst
+  # gets can see it. It must submit, not report a failed delivery.
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_SWALLOW=1 \
+    FM_FAKE_WM_DEFER_BURST=2 FM_FAKE_WM_DEFER_READS=2 FM_WINTERMOLT_SUBMIT_ATTEMPTS=2 \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
+  [ "$verdict" = empty ] \
+    || fail "the last permitted burst that lands must submit, got '$verdict'"
+  bursts=$(cat "$state.bursts")
+  [ "$bursts" = 2 ] \
+    || fail "the burst budget must stay at its configured count, got $bursts bursts"
+  [ "$(cat "$state")" = busy ] \
+    || fail "the last burst should have been submitted, pane state read '$(cat "$state")'"
+  pass "fm-tmux-lib: the last permitted wintermolt burst is judged by the grace re-read"
 }
 
 test_wintermolt_burst_that_never_lands_does_not_confirm() {
@@ -1011,6 +1035,7 @@ test_wintermolt_steer_confirmation_uses_the_busy_transition
 test_wintermolt_swallowed_burst_is_retyped_before_submit
 test_wintermolt_slow_footer_still_confirms_the_steer
 test_wintermolt_late_echo_is_not_replayed
+test_wintermolt_last_permitted_burst_gets_the_grace_read
 test_wintermolt_burst_that_never_lands_does_not_confirm
 test_wintermolt_truncated_burst_is_never_submitted
 test_wintermolt_busy_classification_reads_only_the_last_row
