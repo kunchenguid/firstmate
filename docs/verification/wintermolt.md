@@ -55,9 +55,22 @@ provider), driving the shipped `fm_backend_send_text_submit` - the exact call
   8 characters by default, spaced `FM_WINTERMOLT_TYPE_INTERVAL`) behind tmux's
   own `--` end-of-flags marker, because a chunk can begin with `-` wherever the
   text happens to break; every other pane keeps the one-shot write.
-- With that, a steer submitted at the first ready frame and a steer submitted on
-  a settled TUI both returned `empty`, and the stub recorded exactly one model
-  request carrying the whole message each time.
+- The composer is one row that scrolls horizontally: a wholly landed draft
+  wider than the row shows only its tail. Measured on 0.7.0, 80 columns showed
+  73 characters, 60 columns showed 53, and the box chrome is 7 columns, so a
+  full row is `pane_width - 7` characters.
+- A head-truncated write renders the same tail as a scrolled full draft, so a
+  suffix is only accepted as proof when the burst was written in the
+  TUI-safe chunks above and the visible run fills the row (the shipped read
+  allows `pane_width - 10`, three columns of slack over the measured chrome).
+  A shorter run is still refused, so a truncated short message is never read
+  as the tail of a long one.
+- With that, a 132-character brief pointer submitted at the first ready frame,
+  and a 113-character steer and a 51-character steer submitted on a settled
+  TUI, all returned `empty` at 80 columns. The stub received the whole message
+  in every request, with one user message per request; the TUI's own
+  empty-reply retry against the stub produced the second request, carrying the
+  identical message, not a second send.
 - The busy footer rendered 0.03s after Enter, far inside the 60 x 0.5s budget the
   spawn gate already grants the same verdict.
 - The burst is verified against the composer's own text before Enter, because a
@@ -100,12 +113,13 @@ only; `tests/fm-control.test.sh` covers the other two.
 ## Spawn lane re-run (2026-11-21, wintermolt 0.7.0, tmux 3.8)
 
 Re-run of the same `bin/fm-spawn.sh` lane in a lab home against a local
-OpenAI-compatible stub. The backend environment has to be present where the tmux
-session is started, because a new window inherits the tmux server's environment
-and not the spawning process's; with `WINTERMOLT_BACKEND`, `WINTERMOLT_OPENAI_URL`,
-the backend key, `WINTERMOLT_MODEL`, and `WINTERMOLT_NO_FALLBACK` exported there,
-the launch, the readiness gate, the brief-pointer submit, and the delivery gate
-all passed:
+OpenAI-compatible stub, on an 80-column tmux session. The backend environment
+has to be present where the tmux session is started, because a new window
+inherits the tmux server's environment and not the spawning process's; with
+`WINTERMOLT_BACKEND`, `WINTERMOLT_OPENAI_URL`, the backend key,
+`WINTERMOLT_MODEL`, and `WINTERMOLT_NO_FALLBACK` exported there, the launch, the
+readiness gate, the 96-character brief-pointer submit, and the delivery gate all
+passed at that width:
 
 ```text
 spawned labwm1 harness=wintermolt kind=ship mode=local-only yolo=on window=primary:fm-labwm1 worktree=...
@@ -117,10 +131,14 @@ spawned labwm1 harness=wintermolt kind=ship mode=local-only yolo=on window=prima
 EXIT=0
 ```
 
-One model request carrying the whole pointer once, and a busy footer on the same
-pane: the brief arrived. The same lane against a tmux server without that
-backend environment starts the TUI on its own default backend (`ollama` in its
-footer), so a lane run there measures the stub, not the adapter.
+The stub received the whole pointer, and the same pane showed the `Esc stop`
+footer with its `working…` composer: the brief arrived. This width is the point
+of the re-run: before the scroll-tail proof, the same lane at 80 columns refused
+the pointer because only its tail was visible, so the earlier claim that the
+lane passed held only on a pane wide enough to show the whole pointer. The same
+lane against a tmux server without that backend environment starts the TUI on
+its own default backend (`ollama` in its footer), so a lane run there measures
+the stub, not the adapter.
 
 ## Non-interactive backend surface (2026-11-20)
 

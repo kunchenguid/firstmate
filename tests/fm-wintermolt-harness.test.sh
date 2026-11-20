@@ -286,6 +286,20 @@ composer_text() {
   elif [ "\$state" = draft ]; then printf '%s' 'draft text never sent'
   fi
 }
+# The real composer holds the whole draft but shows only the tail once the
+# draft outgrows its single row. FM_FAKE_WM_SCROLL is that row's character
+# capacity: the fixture renders (and counts rows for) only the visible tail,
+# while the submitted text stays the whole draft.
+composer_render() {
+  local text kept
+  text=\$(composer_text)
+  if [ "\${FM_FAKE_WM_SCROLL:-0}" -gt 0 ] && [ "\${#text}" -gt "\${FM_FAKE_WM_SCROLL:-0}" ]; then
+    kept=\${FM_FAKE_WM_SCROLL:-0}
+    printf '%s' "\${text: \$((\${#text} - kept))}"
+  else
+    printf '%s' "\$text"
+  fi
+}
 draft_row_count() {
   local text=\$1 n
   [ -n "\$text" ] || { printf '1'; return 0; }
@@ -298,7 +312,7 @@ inner_plain() {
 }
 screen() {
   local text
-  text=\$(composer_text)
+  text=\$(composer_render)
   if [ -n "\$styled" ]; then
     case "\$state" in
       # The pane rendering its working row while its footer still reads idle,
@@ -325,7 +339,8 @@ screen() {
 case "\${1:-}" in
   display-message)
     case "\$*" in
-      *'#{cursor_y}'*) printf '%s\n' "\$((5 + \$(draft_row_count "\$(composer_text)")))"; exit 0 ;;
+      *'#{cursor_y}'*) printf '%s\n' "\$((5 + \$(draft_row_count "\$(composer_render)")))"; exit 0 ;;
+      *'#{pane_width}'*) [ -n "\${FM_FAKE_WM_PANE_WIDTH:-}" ] && printf '%s\n' "\$FM_FAKE_WM_PANE_WIDTH"; exit 0 ;;
       *'#{pane_tty}'*) printf '/dev/ttys99999'; exit 0 ;;
       *'#{pane_current_command}'*) printf '%s' "\${FM_FAKE_WM_COMMAND:-wintermolt}"; exit 0 ;;
     esac
@@ -606,7 +621,10 @@ test_wintermolt_truncated_burst_is_never_submitted() {
   # Live, the TUI kept only the tail of the burst and the submit reported a
   # confirmed steer for the fragment. A composer holding a fragment is neither
   # ours nor untouched, so it is never replayed onto and never submitted.
+  # A pane width is passed too: the scroll-tail proof must never accept a
+  # short fragment as the visible end of a long draft.
   verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_TRUNCATE=1 \
+    FM_FAKE_WM_PANE_WIDTH=80 \
     FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
     fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
   [ "$verdict" = send-failed ] \
@@ -645,6 +663,34 @@ test_wintermolt_long_steer_is_typed_in_chunks_that_land() {
   [ "$(cat "$state.bursts")" = 1 ] \
     || fail "a landed chunked burst must never be replayed, got $(cat "$state.bursts") bursts"
   pass "fm-tmux-lib: a long wintermolt steer is typed in chunks the TUI keeps"
+}
+
+test_wintermolt_scrolled_composer_confirms_the_whole_steer() {
+  local case_dir fakebin state verdict text submitted
+  case_dir="$TMP_ROOT/submit-scrolled"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # Live, the composer is one row that scrolls horizontally: a wholly landed
+  # long message shows only its tail. The exact comparison read that tail as
+  # foreign content and refused the submit after it had already landed, so
+  # `bin/fm-send.sh` exited 1 and the operator's resend was the duplicate.
+  # The row's measured capacity turns the tail into proof, and the model still
+  # receives the whole message exactly once.
+  text='Read the brief at /tmp/wm/launch-brief.md and follow it exactly.'
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" \
+    FM_FAKE_WM_SCROLL=30 FM_FAKE_WM_PANE_WIDTH=40 \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    FM_WINTERMOLT_TYPE_INTERVAL=0 \
+    fm_tmux_submit_core win "$text" 2 0.05 0.05)
+  [ "$verdict" = empty ] \
+    || fail "a long steer a scrolling composer shows only the tail of must submit, got '$verdict'"
+  submitted=$(cat "$state.submitted")
+  [ "$submitted" = "$text" ] \
+    || fail "the model must receive the whole message, got '$submitted'"
+  [ "$(wc -l < "$state.submitted" | tr -d ' ')" = 1 ] \
+    || fail "the message must be submitted exactly once, got $(cat "$state.submitted")"
+  pass "fm-tmux-lib: a long steer the scrolled composer shows only the tail of still submits whole"
 }
 
 test_wintermolt_busy_classification_reads_only_the_last_row() {
@@ -1105,6 +1151,7 @@ test_wintermolt_last_permitted_burst_gets_the_grace_read
 test_wintermolt_burst_that_never_lands_does_not_confirm
 test_wintermolt_truncated_burst_is_never_submitted
 test_wintermolt_long_steer_is_typed_in_chunks_that_land
+test_wintermolt_scrolled_composer_confirms_the_whole_steer
 test_wintermolt_busy_classification_reads_only_the_last_row
 test_wintermolt_classify_reads_the_rendered_tail
 test_wintermolt_idle_composer_reads_empty_only_through_the_scope

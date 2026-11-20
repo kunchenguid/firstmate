@@ -472,25 +472,56 @@ fm_tmux_composer_text() {  # <target>
   fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$pane"
 }
 
+# fm_tmux_composer_scroll_capacity: a proven lower bound on how many typed
+# characters the wintermolt composer shows at once. Its box spans the pane and
+# keeps its chrome (borders, indent, cursor cell, padding) around one
+# horizontally scrolling row - measured live as 7 columns, so 10 is the
+# conservative allowance: a row showing at least pane_width - 10 characters is
+# provably full, whatever that chrome grows to. Fails when the pane width is
+# unreadable, which keeps the exact comparison below for every caller that
+# cannot measure it.
+fm_tmux_composer_scroll_capacity() {  # <target>
+  local width
+  width=$(tmux display-message -p -t "$1" '#{pane_width}' 2>/dev/null) || return 1
+  case "$width" in ''|*[!0-9]*) return 1 ;; esac
+  width=$((width - 10))
+  [ "$width" -gt 0 ] || return 1
+  printf '%s' "$width"
+}
+
 # fm_tmux_submit_typed_state: what a wintermolt composer holds against the
 # burst just typed - `held` when it holds exactly the pre-typing content plus
 # <text>, `nothing` when it still holds only the pre-typing content (the burst
 # never landed, so replaying it cannot duplicate anything), and `other` for
 # content that is neither. Line wrapping is ignored, because the composer
 # re-wraps what was typed rather than changing it.
-fm_tmux_submit_typed_state() {  # <target> <before> <text>
-  local held before_n expect_n
+#
+# <scroll-capacity>, when the caller can prove one, covers the composer's
+# other shape: a single row that scrolls horizontally once a draft outgrows it,
+# so a wholly landed long draft shows only its tail. A visible run that fills
+# at least that much of the row and is a suffix of the expected text landed
+# whole, with its head scrolled out of view. A shorter run is never accepted
+# this way - a truncated write is the same shape as a scroll tail, so only a
+# provably full row may stand in for the whole draft, and the text is still
+# reported unconfirmed rather than risk submitting a fragment.
+fm_tmux_submit_typed_state() {  # <target> <before> <text> [scroll-capacity]
+  local held visible='' before_n expect_n capacity=${4:-0}
   # An empty verdict is the classifier's own positive proof that nothing is
   # held; the raw row it reads there is the harness's idle placeholder, not a
   # draft.
   case "$(fm_tmux_composer_state "$1")" in
     empty) held='' ;;
-    *) held=$(fm_tmux_composer_text "$1") || { printf 'other'; return 0; } ;;
+    *) visible=$(fm_tmux_composer_text "$1") || { printf 'other'; return 0; }
+       held=$visible ;;
   esac
   held=$(printf '%s' "$held" | tr -d '[:space:]')
   before_n=$(printf '%s' "$2" | tr -d '[:space:]')
   expect_n=$(printf '%s%s' "$2" "$3" | tr -d '[:space:]')
   if [ -n "$expect_n" ] && [ "$held" = "$expect_n" ]; then
+    printf 'held'
+  elif [ "$capacity" -gt 0 ] && [ "${#expect_n}" -gt "${#held}" ] \
+       && [ "${#visible}" -ge "$capacity" ] \
+       && case "$expect_n" in *"$held") true ;; *) false ;; esac; then
     printf 'held'
   elif [ "$held" = "$before_n" ]; then
     printf 'nothing'
@@ -525,7 +556,7 @@ fm_tmux_type_literal() {  # <target> <text> [chunk]
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err busy_harness
-  local before='' verify=0 attempts=0 max_attempts typed chunk=0
+  local before='' verify=0 attempts=0 max_attempts typed chunk=0 scroll_cap=0
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
@@ -544,6 +575,13 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   fi
   max_attempts=${FM_WINTERMOLT_SUBMIT_ATTEMPTS:-3}
   [ "$busy_harness" != wintermolt ] || chunk=${FM_WINTERMOLT_TYPE_CHUNK:-8}
+  # The scrolling-composer tail read belongs to the chunked write it exists
+  # for. A one-shot write can lose its head, and a head-truncated long message
+  # renders exactly like a scrolled one, so an unchunked burst keeps the exact
+  # comparison and only reports a long draft unconfirmed.
+  if [ "$busy_harness" = wintermolt ] && [ "$chunk" -gt 0 ]; then
+    scroll_cap=$(fm_tmux_composer_scroll_capacity "$target") || scroll_cap=0
+  fi
   while :; do
     # A failed literal send replays tmux's stderr (for example "command too
     # long") so the caller can log why nothing was typed.
@@ -554,14 +592,14 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
     fi
     sleep "$settle"
     [ "$verify" = 1 ] || break
-    typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text")
+    typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text" "$scroll_cap")
     [ "$typed" = held ] && break
     if [ "$typed" = nothing ]; then
       sleep "$sleep_s"
       # Every burst, the last permitted one included, is judged by a read taken
       # here rather than by the one above, because the echo may have landed
       # while this loop waited.
-      typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text")
+      typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text" "$scroll_cap")
       [ "$typed" = held ] && break
       if [ "$typed" != nothing ]; then
         printf 'send-failed'
@@ -574,7 +612,7 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
     # A render can trail the keys by a moment; content that is still neither
     # ours nor the pre-typing read after that grace is not a burst to replay.
     sleep "$sleep_s"
-    [ "$(fm_tmux_submit_typed_state "$target" "$before" "$text")" = held ] && break
+    [ "$(fm_tmux_submit_typed_state "$target" "$before" "$text" "$scroll_cap")" = held ] && break
     printf 'send-failed'
     return 0
   done
