@@ -460,8 +460,8 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
 # the backend has no literal-send primitive, or the clear fails, the ring still
 # defers as before and sets FM_TASK_INBOX_RING_NOTE. After a ring that left
 # our own doorbell unsubmitted, that doorbell is cleared before the draft is
-# restored so the two never run together; a failed restore is reported, with
-# the captured text, in the note.
+# restored so the two never run together; a failed restore is reported in
+# the note, which never carries the draft text.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} rc=0 held line
   fm_task_inbox_ring_core "$@" || rc=$?
@@ -487,7 +487,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
     FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring and restored"
   else
     # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
-    FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring but could not be restored: $held"
+    FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring but could not be restored"
   fi
   return "$rc"
 }
