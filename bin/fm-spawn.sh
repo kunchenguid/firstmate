@@ -3259,11 +3259,15 @@ case "$ARG3" in
 esac
 
 case "$DISPATCH_OVERRIDE" in *[![:print:]]*) echo 'error: --dispatch-override must be a printable reason' >&2; exit 1 ;; esac
+[ "$DISPATCH_OVERRIDE" != default ] || { echo 'error: --dispatch-override default is reserved for launches that follow the resolved profile; state a reason' >&2; exit 1; }
 DISPATCH_RECORD="$DATA/$ID/dispatch-resolution.json"
-DISPATCH_SNAPSHOT=$(cat -- "$DISPATCH_RECORD" 2>/dev/null) || DISPATCH_SNAPSHOT=
+DISPATCH_SNAPSHOT= DISPATCH_SNAPSHOT_READ=0
+if [ "$RELAUNCH" -eq 0 ] && { [ -e "$CONFIG/fleet-ledger" ] || { [ "$KIND" != secondmate ] && [ -f "$CONFIG/crew-dispatch.json" ]; }; }; then
+  ! DISPATCH_SNAPSHOT=$(cat -- "$DISPATCH_RECORD" 2>/dev/null) || DISPATCH_SNAPSHOT_READ=1
+fi
 LEDGER_OVERRIDE=$DISPATCH_OVERRIDE
 if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-  if [ ! -e "$DISPATCH_RECORD" ]; then
+  if [ "$DISPATCH_SNAPSHOT_READ" -eq 0 ]; then
     echo "error: config/crew-dispatch.json is active and task $ID has no recorded dispatch resolution; run bin/fm-dispatch-resolve.sh $DATA/$ID/brief.md --project <name> first" >&2
     exit 1
   fi

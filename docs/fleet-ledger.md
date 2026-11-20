@@ -39,7 +39,7 @@ Readers must ignore members and events they do not recognize, so later versions 
 `effort` is the requested effort level, or `null` when none was passed.
 `resolution` is the task's saved [typed dispatch resolution](configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) as `{"status", "confidence", "profile"}`, or `null` when the task has none.
 Its `profile` is the profile the resolver chose or, when it abstained, suggested, with `harness`, `model`, and `effort`; it is `null` when it offered none or several.
-`override` is the `--dispatch-override` reason, `"default"` when a clear resolved profile governed the launch, or `null` otherwise.
+`override` is the `--dispatch-override` reason, `"default"` when a clear resolved profile governed the launch (so `default` is not accepted as an override reason), or `null` otherwise.
 Together they let a reader tell whether the routing policy or an override decided a launch.
 A second mate launch carries `null` for `effort`, `resolution`, and `override`.
 
@@ -53,7 +53,7 @@ It is written each time firstmate records a PR for the task, so registering a re
 Example:
 
 ```json
-{"v":1,"ts":1790132857,"event":"task.dispatched","task":"fix-login","kind":"ship","project":"webapp","harness":"claude","model":null,"effort":"high","resolution":{"status":"clear","confidence":0.9,"profile":{"harness":"claude","model":null,"effort":"high"}},"override":null}
+{"v":1,"ts":1790132857,"event":"task.dispatched","task":"fix-login","kind":"ship","project":"webapp","harness":"claude","model":null,"effort":"high","resolution":{"status":"clear","confidence":0.9,"profile":{"harness":"claude","model":null,"effort":"high"}},"override":"default"}
 {"v":1,"ts":1790132870,"event":"task.status","task":"fix-login","state":"working","key":null,"text":" bug reproduced"}
 {"v":1,"ts":1790133400,"event":"task.status","task":"fix-login","state":"done","key":null,"text":" PR https://github.com/acme/webapp/pull/7 checks green"}
 {"v":1,"ts":1790133410,"event":"task.pr_ready","task":"fix-login","pr":"https://github.com/acme/webapp/pull/7"}

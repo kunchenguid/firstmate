@@ -830,12 +830,12 @@ TEXT=$(jq -r '
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 STATUS=$(jq -r '.status' <<<"$RESULT") || emit_error "status rendering failed"
-PROFILE=$(jq -c 'if .chosen then .chosen.profile | {harness, model: (.model // null), effort: (.effort // null)} else null end' <<<"$RESULT") \
+PROFILE_JQ='def proj: if . then {harness, model: (.model // null), effort: (.effort // null)} else null end;'
+PROFILE=$(jq -c "$PROFILE_JQ"'(.chosen.profile // null) | proj' <<<"$RESULT") \
   || emit_error "profile rendering failed"
 # The suggestion survives an abstention: the one profile the picked rule or
 # default offered, else null when it offered several; a clear run keeps it in profile.
-SUGGESTED=$(jq -c 'if .chosen then null elif (.candidates // [] | length) == 1 then .candidates[0].profile else null end
-  | if . then {harness, model: (.model // null), effort: (.effort // null)} else null end' <<<"$RESULT") \
+SUGGESTED=$(jq -c "$PROFILE_JQ"'(if .chosen then null elif (.candidates // [] | length) == 1 then .candidates[0].profile else null end) | proj' <<<"$RESULT") \
   || emit_error "suggestion rendering failed"
 record_task "$STATUS" "$PROFILE" "$ANSWER_CONFIDENCE" "$SUGGESTED" || emit_error "could not record the dispatch resolution"
 printf '%s\n' "$TEXT"
