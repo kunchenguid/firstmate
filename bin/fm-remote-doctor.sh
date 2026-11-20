@@ -1173,8 +1173,10 @@ write_launch_agent() { # <resolved-login-shell>
 # kickstart never passes -k, because RunAtLoad has already started the freshly
 # bootstrapped job and a forced restart would kill a server that may already
 # hold a mate's pane.
+# fm_remote_job_launchctl_reload and fm_remote_job_launchctl_bootstrap own the
+# bootout/bootstrap sequence, including its bounded settle and EIO retry.
 reload_launch_agent() { # <check-to-report-under>
-  local report=$1 out rc=0
+  local report=$1 out rc=0 bootstrap_failed=0
   [ -f "$LAUNCH_AGENT_PLIST" ] || {
     fix_report "$report" failed "there is no launch agent to load at $LAUNCH_AGENT_PLIST"
     return 1
@@ -1192,8 +1194,13 @@ reload_launch_agent() { # <check-to-report-under>
     return 1
   fi
   authorize_guard_takeover
-  [ "$AUTOMATIC" -eq 1 ] || launchctl bootout "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
-  if ! out=$(launchctl bootstrap "gui/$UID_NUM" "$LAUNCH_AGENT_PLIST" 2>&1); then
+  if [ "$AUTOMATIC" -eq 1 ]; then
+    fm_remote_job_launchctl_bootstrap "$UID_NUM" "$LAUNCH_AGENT_LABEL" "$LAUNCH_AGENT_PLIST" || bootstrap_failed=1
+  else
+    fm_remote_job_launchctl_reload "$UID_NUM" "$LAUNCH_AGENT_LABEL" "$LAUNCH_AGENT_PLIST" || bootstrap_failed=1
+  fi
+  if [ "$bootstrap_failed" -eq 1 ]; then
+    out=$FM_REMOTE_JOB_BOOTSTRAP_OUT
     fix_report "$report" failed "launchctl bootstrap gui/$UID_NUM refused: ${out:-no diagnostic}"
     rc=1
   else
