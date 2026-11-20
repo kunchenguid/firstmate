@@ -41,7 +41,7 @@ Readers must ignore members and events they do not recognize, so later versions 
 Its `profile` is the profile the resolver chose or, when it abstained, suggested, with `harness`, `model`, and `effort`; it is `null` when it offered none or several.
 `override` is the `--dispatch-override` reason, `"default"` when a clear resolved profile governed the launch (so `default` is not accepted as an override reason), or `null` otherwise.
 Together they let a reader tell whether the routing policy or an override decided a launch.
-A second mate launch carries `null` for `effort`, `resolution`, and `override`.
+A remote second mate launch carries `null` for `effort`, `resolution`, and `override`.
 
 `task.pr_ready` members: `pr` is the PR's full URL.
 It is written each time firstmate records a PR for the task, so registering a replacement PR, or the same PR again, writes another record; recording the PR again as part of merging it writes none.
