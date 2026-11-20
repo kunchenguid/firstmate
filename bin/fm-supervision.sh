@@ -5,7 +5,7 @@
 # catches up when it is turned back on.
 #
 # Usage:
-#   fm-supervision.sh off [--reason <text>]
+#   fm-supervision.sh off
 #   fm-supervision.sh on
 #   fm-supervision.sh status
 #
@@ -21,15 +21,15 @@
 #             because a cycle closing at that moment can hand over to a
 #             successor before it reads the marker; the arm owner parked on
 #             that cycle then closes silently instead of re-arming.
-#         The marker records the time and the optional reason.
+#         The marker records the time.
 #         Running off again re-stops anything still running and keeps the
-#         original time and reason.
+#         original time.
 # on      Removes the marker and starts nothing itself: the primary's next turn
 #         end restores the cycle, either through its arm owner or through the
 #         turn-end guard's repair instruction.
-# status  Prints "supervision: on" or "supervision: off since <time>", the
-#         reason when one was recorded, and whether a watcher or an away or
-#         quiet daemon is still running for this home.
+# status  Prints "supervision: on" or "supervision: off since <time>", and
+#         whether a watcher or an away or quiet daemon is still running for
+#         this home.
 #
 # Exit status: 0 on success; 1 when a stop step failed (the marker stays, so
 # nothing re-arms; run off again); 2 on a usage error.
@@ -77,7 +77,7 @@ watcher_running() {
   fm_pid_alive "$pid"
 }
 
-write_marker() {  # <reason>
+write_marker() {
   local tmp
   [ -e "$MARKER" ] && return 0
   mkdir -p "$STATE" || return 1
@@ -85,7 +85,6 @@ write_marker() {  # <reason>
   if ! {
     printf 'since=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf 'since_epoch=%s\n' "$(date +%s)"
-    printf 'reason=%s\n' "$1"
   } > "$tmp" || ! mv -f "$tmp" "$MARKER"; then
     rm -f "$tmp"
     return 1
@@ -97,8 +96,8 @@ marker_field() {  # <name>
 }
 
 switch_off() {
-  local reason=$1 rc=0 attempt out stopped
-  if ! write_marker "$reason"; then
+  local rc=0 attempt out stopped
+  if ! write_marker; then
     echo "error: could not write $MARKER; supervision is unchanged" >&2
     return 1
   fi
@@ -149,12 +148,10 @@ switch_on() {
 }
 
 show_status() {
-  local since reason
+  local since
   if fm_supervision_switched_off "$STATE"; then
     since=$(marker_field since)
-    reason=$(marker_field reason)
     echo "supervision: off since ${since:-an unknown time}"
-    [ -z "$reason" ] || echo "reason: $reason"
   else
     echo "supervision: on"
   fi
@@ -163,19 +160,8 @@ show_status() {
 }
 
 main() {
-  local reason=''
   case "${1:-}" in
-    off)
-      shift
-      while [ "$#" -gt 0 ]; do
-        case "$1" in
-          --reason) [ "$#" -ge 2 ] || { usage >&2; return 2; }; reason=$2; shift 2 ;;
-          *) usage >&2; return 2 ;;
-        esac
-      done
-      reason=$(printf '%s' "$reason" | tr '\n' ' ')
-      switch_off "$reason"
-      ;;
+    off) [ "$#" -eq 1 ] || { usage >&2; return 2; }; switch_off ;;
     on) [ "$#" -eq 1 ] || { usage >&2; return 2; }; switch_on ;;
     status) [ "$#" -eq 1 ] || { usage >&2; return 2; }; show_status ;;
     -h|--help|help) help_text ;;

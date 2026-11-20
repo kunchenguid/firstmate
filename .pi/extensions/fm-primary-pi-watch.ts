@@ -285,14 +285,14 @@ function liveArmChild(owner: SessionGeneration): ChildProcess | null {
   return child;
 }
 
-// The session lock names a local pid or, on Windows, a tagged `win:<pid>`
-// (fm_session_pid_valid in bin/fm-session-lock-lib.sh owns that shape). Native
-// Node on Windows sees Windows pids directly, so a tagged holder is compared
-// and probed by its digits. Any other value is no usable identity, "".
 function supervisionSwitchedOff(): boolean {
   return existsSync(supervisionOffMarker);
 }
 
+// The session lock names a local pid or, on Windows, a tagged `win:<pid>`
+// (fm_session_pid_valid in bin/fm-session-lock-lib.sh owns that shape). Native
+// Node on Windows sees Windows pids directly, so a tagged holder is compared
+// and probed by its digits. Any other value is no usable identity, "".
 function lockHolderPid(lockPid: string): string {
   const tagged = process.platform === "win32" ? /^win:([0-9]+)$/.exec(lockPid) : null;
   const pid = tagged ? tagged[1] : lockPid;

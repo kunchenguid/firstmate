@@ -60,7 +60,7 @@ The operator's off switch is the one state in which no supervisor is expected at
 
 The operator can switch a home's whole background supervision loop off, and back on, with one command each way:
 
-- `bin/fm-supervision.sh off [--reason <text>]`
+- `bin/fm-supervision.sh off`
 - `bin/fm-supervision.sh on`
 
 `bin/fm-supervision.sh status` reports the switch and whether a watcher or an away or quiet daemon is still running for the home.

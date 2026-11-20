@@ -40,7 +40,7 @@ With --repair-line, print one concise repair instruction for guard and hook mess
 --afk-mode only matters when --afk 1 (present); it selects the away-mode vs
 quiet-mode (kunchenguid/firstmate#2356) wording, and defaults to away.
 --supervision-off 1 renders the operator's off switch (bin/fm-supervision.sh)
-as the current state, and the repair line then says to arm nothing.
+as the current state.
 EOF
 }
 
@@ -207,10 +207,6 @@ render_snippet() {  # [snippet]
 repair_line() {
   if [ "$READ_ONLY" -eq 1 ]; then
     printf '%s\n' 'Watcher repair belongs to the session holding the fleet lock; do not drain, arm, or repair from this read-only session.'
-    return 0
-  fi
-  if [ "$SUPERVISION_OFF" -eq 1 ]; then
-    printf '%s\n' 'Supervision is switched off for this home (bin/fm-supervision.sh); arm and repair nothing until bin/fm-supervision.sh on.'
     return 0
   fi
   if [ "$AFK" -eq 1 ]; then

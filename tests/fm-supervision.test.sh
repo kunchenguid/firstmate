@@ -92,18 +92,16 @@ test_off_on_status_and_usage() {
   home=$(make_home basics)
   out=$(switch "$home" status) || fail "status failed on a fresh home"
   assert_contains "$out" "supervision: on" "a fresh home must read on"
-  out=$(switch "$home" off --reason 'stop the loop') || fail "off failed: $out"
+  out=$(switch "$home" off) || fail "off failed: $out"
   assert_contains "$out" "supervision: off" "off must report the new state"
   assert_present "$home/state/.supervision-off"
-  assert_grep 'reason=stop the loop' "$home/state/.supervision-off" "off must record the reason"
   cp "$home/state/.supervision-off" "$TMP_ROOT/first-marker"
   sleep 1
-  switch "$home" off --reason 'another reason' >/dev/null || fail "a second off failed"
+  switch "$home" off >/dev/null || fail "a second off failed"
   cmp -s "$home/state/.supervision-off" "$TMP_ROOT/first-marker" \
-    || fail "a second off must keep the original time and reason"
+    || fail "a second off must keep the original time"
   out=$(switch "$home" status)
   assert_contains "$out" "supervision: off since " "status must report off with its time"
-  assert_contains "$out" "reason: stop the loop" "status must report the recorded reason"
   assert_contains "$out" "watcher: not running" "status must report the watcher"
   out=$(switch "$home" on) || fail "on failed"
   assert_contains "$out" "supervision: on" "on must report the new state"
@@ -114,11 +112,11 @@ test_off_on_status_and_usage() {
   switch "$home" sideways >/dev/null 2>&1 || rc=$?
   expect_code 2 "$rc" "an unknown subcommand must be a usage error"
   rc=0
-  switch "$home" off --reason >/dev/null 2>&1 || rc=$?
-  expect_code 2 "$rc" "--reason without a value must be a usage error"
+  switch "$home" off --reason 'stop the loop' >/dev/null 2>&1 || rc=$?
+  expect_code 2 "$rc" "off must take no arguments"
   out=$(switch "$home" --help) || fail "--help failed"
   assert_contains "$out" "Exit status:" "--help must print the whole header"
-  pass "switch: off records time and reason once, status reports it, on clears it, bad input is a usage error"
+  pass "switch: off records its time once, status reports it, on clears it, bad input is a usage error"
 }
 
 test_off_zeroes_supervision_need() {

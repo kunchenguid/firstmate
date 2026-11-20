@@ -487,7 +487,7 @@ test_switch_off_stands_the_claude_stop_hook_down_and_on_catches_up() {
     start_hook_session "$home"
     turn_end "$home"
     wait_until 150 watcher_live "$home" || fail "$label: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
-    FM_HOME="$home" "$home/bin/fm-supervision.sh" off --reason 'stop the loop' > "$home/off.out" 2>&1 \
+    FM_HOME="$home" "$home/bin/fm-supervision.sh" off > "$home/off.out" 2>&1 \
       || fail "$label: off failed: $(cat "$home/off.out")"
     wait_until 150 hook_exited "$home" || fail "$label: the parked Stop hook never closed after off"
     expect_code 0 "$(cat "$home/hook.rc")" "$label: switching off must close the parked hook silently: $(cat "$home/hook.err")"
