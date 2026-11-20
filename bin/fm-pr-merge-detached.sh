@@ -126,7 +126,7 @@ json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRef
 readout=$(printf '%s' "$json" | jq -r '
   if type == "object" then
     "state=" + ((.state // "") | tostring),
-    "draft=" + ((.isDraft // "") | tostring),
+    "draft=" + (if .isDraft == null then "" else (.isDraft | tostring) end),
     "mergeable=" + ((.mergeable // "") | tostring),
     "merge_state=" + ((.mergeStateStatus // "") | tostring),
     "head=" + ((.headRefOid // "") | tostring)
