@@ -3188,14 +3188,28 @@ fm_backend_herdr_parse_target() {  # <target>
 }
 
 # fm_backend_herdr_target_observable: verify <target> is well-formed and its
-# recorded session server is currently running, WITHOUT autostarting the server.
-# Passive read-only probes (e.g. composer inspection) must stay observable-only
-# and fail fast on inactive or bad targets without starting a new server.
+# recorded session server is currently running, WITHOUT starting or waiting for
+# the server. Every read-only probe - screen capture, the native busy read,
+# composer inspection - gates on this, so reading a task whose session the
+# operator stopped fails at once and leaves the session stopped; only an
+# operation that must reach the worker goes through
+# fm_backend_herdr_target_ready below. A replacement marker in the session
+# directory holds reads off the server just as it holds off
+# fm_backend_herdr_server_ensure's callers, even while the server reports
+# running, but fails the read at once instead of waiting it out.
 fm_backend_herdr_target_observable() {  # <target>
+  local status socket
   fm_backend_herdr_parse_target "$1" || return 1
-  [ "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" = running ]
+  status=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null) || return 1
+  [ "$(printf '%s' "$status" | jq -r '.server.running == true' 2>/dev/null)" = true ] || return 1
+  socket=$(printf '%s' "$status" | jq -r '.server.socket // empty' 2>/dev/null)
+  [ -z "$socket" ] || [ ! -e "$(dirname "$socket")/$FM_BACKEND_HERDR_SERVER_REPLACING_MARKER" ]
 }
 
+# fm_backend_herdr_target_ready: verify <target> is well-formed and start its
+# session server when it is down (fm_backend_herdr_server_ensure). Reserved for
+# operations that must reach the worker: sending text or keys, closing a pane,
+# and spawn-time reads that follow the spawn's own start.
 fm_backend_herdr_target_ready() {  # <target>
   fm_backend_herdr_parse_target "$1" || return 1
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" || return 1
@@ -3284,8 +3298,14 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # instead, so they need no line count at all). Workaround:
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
+#
+# A read, so it never starts a stopped session server
+# (fm_backend_herdr_target_observable): the watcher's stale loop and
+# fm-crew-state.sh capture every recorded task, and starting the session here
+# brought back every session an operator stopped while a task record still
+# named it, with its whole saved layout.
 fm_backend_herdr_capture() {  # <target> <lines>
-  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_target_observable "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
@@ -3821,9 +3841,9 @@ fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
 
 # fm_backend_herdr_agent_status_raw: one `agent get` read, echoing the raw
 # agent_status string (working/idle/done/blocked/...), or empty on any
-# failure. Deliberately skips fm_backend_herdr_target_ready's server-ensure
-# round trip (an extra `status --json` call) that fm_backend_herdr_busy_state
-# pays on every call: fm_backend_herdr_wait_for_working polls this in a tight
+# failure. Deliberately skips the server-running check (an extra `status
+# --json` call) that fm_backend_herdr_busy_state pays on every call through
+# fm_backend_herdr_target_observable: fm_backend_herdr_wait_for_working polls this in a tight
 # loop right after a caller has already parsed the target and confirmed the
 # server is live (e.g. fm_backend_herdr_send_text_submit, immediately after a
 # successful send-text), so re-checking server liveness on every poll would
@@ -3845,9 +3865,11 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # mid-turn, issue #4115) reads `unknown`, never busy, so the recovery classifier
 # cannot report a shell-only pane as working. Only the busy case pays the extra
 # process read; idle and unknown are never trusted as busy by any consumer.
+# A read like capture: a stopped session server reads unknown and stays stopped
+# (fm_backend_herdr_target_observable).
 fm_backend_herdr_busy_state() {  # <target>
   local verdict
-  fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
+  fm_backend_herdr_target_observable "$1" || { printf 'unknown'; return 0; }
   verdict=$(fm_backend_herdr_classify_agent_status \
     "$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")")
   if [ "$verdict" = busy ] \

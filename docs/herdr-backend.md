@@ -654,7 +654,9 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 ### Named server and session routing
 
-The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
+The adapter starts and polls a named server before an operation that must reach the session: creating a task container or tab, sending text or keys, and closing a pane.
+A read never starts one: screen captures, the native busy-state read, and composer inspection check that the server is running and fail at once when it is not.
+So a session an operator stopped stays stopped while task records still name it, and the task's current-state read reports its endpoint as gone.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
 
@@ -804,7 +806,7 @@ No Herdr-specific copy of that protocol exists.
 
 ### Externally managed servers
 
-By default Firstmate starts a session's Herdr server itself, headless, whenever an operation finds it not running.
+By default Firstmate starts a session's Herdr server itself, headless, whenever an operation that must reach the session finds it not running ([reads never do](#named-server-and-session-routing)).
 That is wrong when a service manager, such as a systemd user unit, owns the server.
 During a unit restart or a `server live-handoff`, `status` can briefly report not running, and a server Firstmate started would race the owner and split panes across two servers.
 
@@ -819,6 +821,7 @@ The wait is up to 60 checks half a second apart, 30 seconds in all.
 A replacement marker that clears with no owner marker hands the session back to the default, so Firstmate starts the server if it is still down.
 A replacement marker left behind fails every operation naming its path, so the owner must remove it when the replacement ends.
 Every operation checks the session directory for a replacement marker once, even when the server reports running, so a replacement marker holds callers off the old server as well as the new one.
+Reads make the same checks without the wait: a stopped server, owned or not, or a replacement marker fails a read at once.
 That check reuses the `status` read Firstmate already makes, which reports the socket even while the server is stopped ([verification](verification/runtime-backends.md#session-directory)); a Herdr whose `status` omits the socket cannot carry the markers and keeps the default behavior.
 
 ### Husks after a server restart
@@ -1005,6 +1008,7 @@ tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh
+tests/fm-backend-herdr-passive-read-e2e.test.sh
 tests/fm-herdr-pi-stale-registration-live-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh
