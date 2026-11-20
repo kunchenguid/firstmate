@@ -1710,8 +1710,9 @@ fm_backend_herdr_server_owner_name() {  # <owner-marker>
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
-# NOT auto-start the server, so this must run before any workspace/tab/pane
-# call. The server outlives its launcher and passes its startup environment to
+# NOT auto-start the server, so operations requiring a ready session use this
+# helper; passive probes must not (see fm_backend_herdr_target_observable).
+# The server outlives its launcher and passes its startup environment to
 # every later pane, so remove home, harness identity, and supervision selection
 # inherited from whichever agent happened to start it. Bounded poll for the
 # server to report running.
@@ -3189,8 +3190,8 @@ fm_backend_herdr_parse_target() {  # <target>
 
 # fm_backend_herdr_target_observable: verify <target> is well-formed and its
 # recorded session server is currently running, WITHOUT starting or waiting for
-# the server. Every read-only probe - screen capture, the native busy read,
-# composer inspection - gates on this, so reading a task whose session the
+# the server. Screen capture, the native busy read, and composer inspection
+# gate on this, so reading a task whose session the
 # operator stopped fails at once and leaves the session stopped; only an
 # operation that must reach the worker goes through
 # fm_backend_herdr_target_ready below. A replacement marker in the session

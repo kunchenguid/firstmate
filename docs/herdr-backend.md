@@ -654,8 +654,8 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 ### Named server and session routing
 
-The adapter starts and polls a named server before an operation that must reach the session: creating a task container or tab, sending text or keys, and closing a pane.
-A read never starts one: screen captures, the native busy-state read, and composer inspection check that the server is running and fail at once when it is not.
+The adapter starts and polls a named headless server before an operation that must reach the session: creating a task container or tab, sending text or keys, and closing a pane.
+Passive task reads never start one: screen capture and composer inspection fail at once when the server is not running, and the native busy-state read returns `unknown`.
 So a session an operator stopped stays stopped while task records still name it, and the task's current-state read reports its endpoint as gone.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
@@ -806,11 +806,12 @@ No Herdr-specific copy of that protocol exists.
 
 ### Externally managed servers
 
-By default Firstmate starts a session's Herdr server itself, headless, whenever an operation that must reach the session finds it not running ([reads never do](#named-server-and-session-routing)).
-That is wrong when a service manager, such as a systemd user unit, owns the server.
+An external service manager, such as a systemd user unit, must override the adapter's [default server startup policy](#named-server-and-session-routing).
 During a unit restart or a `server live-handoff`, `status` can briefly report not running, and a server Firstmate started would race the owner and split panes across two servers.
 
-The owner opts out by writing marker files into the session directory, the directory holding the socket that `herdr --session <name> status --json` reports as `.server.socket`:
+The owner opts out by writing marker files into the session directory, the directory holding the socket that `herdr --session <name> status --json` reports as `.server.socket`.
+
+Operations that require a ready server honor these markers as follows:
 
 | Marker | Written by the owner | Firstmate behavior |
 | --- | --- | --- |
@@ -818,11 +819,10 @@ The owner opts out by writing marker files into the session directory, the direc
 | `firstmate-server-replacing` | Only for the duration of a restart or handoff | Never starts or uses a server, even one that reports running; waits a bounded time for the marker to clear and the server to report running, then fails naming the marker |
 
 The wait is up to 60 checks half a second apart, 30 seconds in all.
-A replacement marker that clears with no owner marker hands the session back to the default, so Firstmate starts the server if it is still down.
-A replacement marker left behind fails every operation naming its path, so the owner must remove it when the replacement ends.
-Every operation checks the session directory for a replacement marker once, even when the server reports running, so a replacement marker holds callers off the old server as well as the new one.
-Reads make the same checks without the wait: a stopped server, owned or not, or a replacement marker fails a read at once.
-That check reuses the `status` read Firstmate already makes, which reports the socket even while the server is stopped ([verification](verification/runtime-backends.md#session-directory)); a Herdr whose `status` omits the socket cannot carry the markers and keeps the default behavior.
+A replacement marker that clears with no owner marker hands those operations back to the default startup policy.
+A replacement marker left behind makes those operations fail naming its path, so the owner must remove it when the replacement ends.
+Passive task reads reject a replacement marker immediately, even while the server reports running.
+Both paths reuse the `status` read Firstmate already makes, which reports the socket even while the server is stopped ([verification](verification/runtime-backends.md#session-directory)); a Herdr whose `status` omits the socket cannot carry the markers and keeps the default behavior.
 
 ### Husks after a server restart
 
