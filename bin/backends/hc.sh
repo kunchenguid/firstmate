@@ -276,9 +276,12 @@ fm_backend_hc_container_ensure() {
 
 # fm_backend_hc_task_name: the hc terminal name for <window-label> (fm-<id>):
 # the task id lowercased, every character outside [a-z0-9_-] turned into `-`,
-# cut to hc's 32-character limit. Empty means no name.
+# cut to hc's 32-character limit. Empty means no name, also when the result is
+# shaped like a terminal address (`t7`), which hc would resolve as a target.
 fm_backend_hc_task_name() {  # <window-label>
-  printf '%s' "${1#fm-}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9_-' '-' | cut -c1-32
+  local name
+  name=$(printf '%s' "${1#fm-}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9_-' '-' | cut -c1-32)
+  fm_backend_hc_address_valid "$name" || printf '%s' "$name"
 }
 
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for
@@ -303,7 +306,7 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   name=$(fm_backend_hc_task_name "$label")
   rc=0
   if [ -n "$name" ]; then
-    out=$(fm_backend_hc_cli "$session" "${args[@]}" --name "$name" 2>&1) || rc=$?
+    out=$(fm_backend_hc_cli "$session" "${args[@]}" "--name=$name" 2>&1) || rc=$?
     if [ "$rc" -ne 0 ] && [ "$(printf '%s' "$out" | jq -r '.error.kind? // empty' 2>/dev/null)" = name_taken ]; then
       name=
     fi

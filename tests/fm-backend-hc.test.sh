@@ -41,7 +41,7 @@ case "$cmd" in
   ls) cat "$D/ls.json" 2>/dev/null || printf '{"terminals":[]}\n' ;;
   run)
     for a in "$@"; do
-      [ "$a" = --name ] && [ -f "$D/run-name.err" ] && { cat "$D/run-name.err" >&2; exit 1; }
+      case "$a" in --name=*) [ -f "$D/run-name.err" ] && { cat "$D/run-name.err" >&2; exit 1; } ;; esac
     done
     cat "$D/run.json"
     ;;
@@ -132,7 +132,7 @@ test_create_task_names_the_terminal_after_the_task_id() {
   printf '{"address":"t9"}\n' > "$D/run.json"
   hc_shell 'fm_backend_hc_create_task fmtest "fm-Fix.Login Bug_2-abcdefghijklmnopqrstuvwxyz" /proj' >/dev/null
   out=$(grep $'\x1frun\x1f' "$D/log")
-  assert_contains "$out" $'--name\x1ffix-login-bug_2-abcdefghijklmnop' "the name is the lowercased task id, other characters as -, cut to 32"
+  assert_contains "$out" '--name=fix-login-bug_2-abcdefghijklmnop' "the name is the lowercased task id, other characters as -, cut to 32"
   : > "$D/log"
   hc_shell 'fm_backend_hc_create_task fmtest fm- /proj' >/dev/null
   assert_not_contains "$(cat "$D/log")" --name "an empty sanitized name must start the terminal unnamed"
@@ -166,7 +166,7 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   tag=$(hometag_of)
   out=$(grep $'\x1frun\x1f' "$D/log")
   for want in HC_SESSION=fmtest --no-parent --outlive-parent --no-notify $'--cwd\x1f/proj' \
-    "firstmate.task=fm-a1" "firstmate.home=$tag" "herdr.space=fm-$tag" "herdr.tab=$tag-fm-a1" $'--name\x1fa1'; do
+    "firstmate.task=fm-a1" "firstmate.home=$tag" "herdr.space=fm-$tag" "herdr.tab=$tag-fm-a1" --name=a1; do
     assert_contains "$out" "$want" "hc run must carry $want"
   done
   printf '{"terminals":[{"address":"t9"}]}\n' > "$D/ls.json"
