@@ -68,7 +68,7 @@
 # on their own for on-demand reads (fm-peek.sh, fm-crew-state.sh).
 
 FM_BACKEND_SCRIPT=${BASH_SOURCE[0]:-$0}
-FM_BACKEND_LIB_DIR="$(cd "$(dirname "$FM_BACKEND_SCRIPT")" && pwd)"
+FM_BACKEND_LIB_DIR="$(d=${FM_BACKEND_SCRIPT%/*}; [ "$d" != "$FM_BACKEND_SCRIPT" ] || d=.; cd "${d:-/}" && pwd)"
 unset FM_BACKEND_SCRIPT
 FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
