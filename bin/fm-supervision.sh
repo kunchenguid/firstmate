@@ -82,10 +82,7 @@ write_marker() {
   [ -e "$MARKER" ] && return 0
   mkdir -p "$STATE" || return 1
   tmp=$(mktemp "$STATE/.supervision-off.XXXXXX") || return 1
-  if ! {
-    printf 'since=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    printf 'since_epoch=%s\n' "$(date +%s)"
-  } > "$tmp" || ! mv -f "$tmp" "$MARKER"; then
+  if ! printf 'since=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$tmp" || ! mv -f "$tmp" "$MARKER"; then
     rm -f "$tmp"
     return 1
   fi

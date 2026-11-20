@@ -455,7 +455,7 @@ test_hook_silent_while_supervision_is_switched_off() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-switched-off")
   : > "$dir/state/task1.meta"
-  printf 'since=2026-01-01T00:00:00Z\nsince_epoch=1767225600\n' > "$dir/state/.supervision-off"
+  printf 'since=2026-01-01T00:00:00Z\n' > "$dir/state/.supervision-off"
   out=$(run_hook "$dir" false); status=$?
   expect_code 0 "$status" "hook must not block while supervision is switched off"
   [ -z "$out" ] || fail "hook produced output while supervision is switched off: $out"

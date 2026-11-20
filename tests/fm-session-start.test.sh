@@ -2790,7 +2790,7 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  printf 'since=2026-01-01T00:00:00Z\nsince_epoch=1767225600\n' > "$home/state/.supervision-off"
+  printf 'since=2026-01-01T00:00:00Z\n' > "$home/state/.supervision-off"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
