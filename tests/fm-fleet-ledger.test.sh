@@ -113,7 +113,7 @@ test_flag_on_records_the_task_lifecycle() {
     || fail "every record must carry v, ts, event, and task: $(cat "$HOME_DIR/state/fleet-ledger.jsonl")"
   rows=$(ledger_rows '[.event, .task] + (del(.v, .ts, .event, .task) | to_entries | map(.value))')
   assert_equals "$(cat <<EOF
-["task.dispatched","$TASK","ship","sample","claude",null]
+["task.dispatched","$TASK","ship","sample","claude",null,null,null,null]
 ["task.status","$TASK","working",null," setup done"]
 ["task.status","$TASK","needs-decision","pick-one"," choose \"a\"\\\\b or c"]
 ["task.status","$TASK","resolved","pick-one"," [key=pick-one]  chose a"]
@@ -127,6 +127,33 @@ EOF
   assert_contains "$LEDGER_AFTER_POLL" '"state":"needs-decision"' "the watcher poll did not record the status lines"
   assert_absent "$HOME_DIR/state/.$TASK.fleet-ledger-offset" "cleanup left the task's ledger offset behind"
   pass "flag on: dispatch, polled status lines, the local merge after its task's pending lines, and cleanup are recorded in order"
+}
+
+test_dispatch_record_carries_effort_resolution_and_override() {
+  local out
+  make_case on-dispatch-fields on
+  # An abstaining resolver: the suggested profile survives in the saved record.
+  printf '%s\n' '{"task":"'"$TASK"'","status":"ambiguous","profile":null,"confidence":0.41,"suggested":{"harness":"codex","model":"gpt-5","effort":"medium"}}' \
+    > "$HOME_DIR/data/$TASK/dispatch-resolution.json"
+  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode local-only --yolo off \
+    --effort high --dispatch-override 'needs a deeper model' 2>&1) || fail "spawn failed: $out"
+  assert_equals '{"effort":"high","resolution":{"status":"ambiguous","confidence":0.41,"profile":{"harness":"codex","model":"gpt-5","effort":"medium"}},"override":"needs a deeper model"}' \
+    "$(jq -c '{effort, resolution, override}' "$HOME_DIR/state/fleet-ledger.jsonl")" \
+    "task.dispatched fields"
+  pass "flag on: task.dispatched carries the effort, the saved resolution with its suggested profile, and the override reason"
+}
+
+test_dispatch_record_marks_a_default_launch() {
+  local out
+  make_case on-dispatch-default on
+  printf '%s\n' '{"rules":[]}' > "$HOME_DIR/config/crew-dispatch.json"
+  printf '%s\n' '{"task":"'"$TASK"'","status":"clear","profile":{"harness":"claude","model":null,"effort":null},"confidence":0.9,"suggested":null}' \
+    > "$HOME_DIR/data/$TASK/dispatch-resolution.json"
+  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode local-only --yolo off --harness claude 2>&1) || fail "spawn failed: $out"
+  assert_equals '{"resolution":{"status":"clear","confidence":0.9,"profile":{"harness":"claude","model":null,"effort":null}},"override":"default"}' \
+    "$(jq -c '{resolution, override}' "$HOME_DIR/state/fleet-ledger.jsonl")" \
+    "default launch"
+  pass "flag on: a launch that used the clear resolved profile records override default"
 }
 
 test_flag_on_records_a_pr_merge_once() {
@@ -289,6 +316,8 @@ test_flag_off_writes_nothing() {
 }
 
 test_flag_on_records_the_task_lifecycle
+test_dispatch_record_carries_effort_resolution_and_override
+test_dispatch_record_marks_a_default_launch
 test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration
 test_worker_status_line_is_recorded_when_written

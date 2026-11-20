@@ -102,9 +102,12 @@
 #   Task record: for <data>/<id>/brief.md, where <data> is FM_DATA_OVERRIDE,
 #   else $FM_HOME/data, every run first removes
 #   <data>/<id>/dispatch-resolution.json, then every outcome except exit 2 writes
-#   {"task", "status" (clear, ambiguous, escalate, error, or off), "profile"}
-#   there; profile holds harness, model, and effort on clear and is null
-#   otherwise. fm-spawn.sh reads it as the task's dispatch decision.
+#   {"task", "status" (clear, ambiguous, escalate, error, or off), "profile",
+#   "confidence", "suggested"} there; profile holds harness, model, and effort
+#   on clear and is null otherwise. confidence is the resolver's answer
+#   confidence, kept on a failure after the answer arrived, and suggested the
+#   one profile it offered when it abstained (null on clear, and when it offered
+#   none or several); confidence is null when no answer was made. fm-spawn.sh reads it as the task's dispatch decision.
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
@@ -169,11 +172,13 @@ OA_BASE=https://api.openai.com
 OA_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
 
+ANSWER_CONFIDENCE=null
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 record_task() {
   [ -n "$TASK_RECORD" ] || return 0
   if ! { jq -cn --arg task "$TASK_ID" --arg status "$1" --argjson profile "${2:-null}" \
-      '{task: $task, status: $status, profile: $profile}' > "$TASK_RECORD.tmp.$$" \
+      --argjson confidence "${3:-null}" --argjson suggested "${4:-null}" \
+      '{task: $task, status: $status, profile: $profile, confidence: $confidence, suggested: $suggested}' > "$TASK_RECORD.tmp.$$" \
       && mv -f -- "$TASK_RECORD.tmp.$$" "$TASK_RECORD"; } 2>/dev/null; then
     rm -f -- "$TASK_RECORD.tmp.$$"
     echo "dispatch-resolve: could not write $TASK_RECORD" >&2
@@ -192,7 +197,7 @@ no_rules() {
 }
 emit_error() {
   local reason=$1
-  record_task error || true
+  record_task error null "$ANSWER_CONFIDENCE" || true
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
   exit 0
@@ -626,6 +631,7 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+ANSWER_CONFIDENCE=$(jq -c '.answers.rule.confidence' "$RESP_FILE") || ANSWER_CONFIDENCE=null
 
 # ---- quota evidence: one quota-axi --json snapshot, skipped entirely under the
 # ---- shared-quota opt-out (a stub keeps the slurpfile contract intact) ---------
@@ -824,8 +830,13 @@ TEXT=$(jq -r '
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 STATUS=$(jq -r '.status' <<<"$RESULT") || emit_error "status rendering failed"
-PROFILE=$(jq -c 'if .chosen then .chosen.profile | {harness, model: (.model // null), effort: (.effort // null)} else null end' <<<"$RESULT") \
+PROFILE_JQ='def proj: if . then {harness, model: (.model // null), effort: (.effort // null)} else null end;'
+PROFILE=$(jq -c "$PROFILE_JQ"'(.chosen.profile // null) | proj' <<<"$RESULT") \
   || emit_error "profile rendering failed"
-record_task "$STATUS" "$PROFILE" || emit_error "could not record the dispatch resolution"
+# The suggestion survives an abstention: the one profile the picked rule or
+# default offered, else null when it offered several; a clear run keeps it in profile.
+SUGGESTED=$(jq -c "$PROFILE_JQ"'(if .chosen then null elif (.candidates // [] | length) == 1 then .candidates[0].profile else null end) | proj' <<<"$RESULT") \
+  || emit_error "suggestion rendering failed"
+record_task "$STATUS" "$PROFILE" "$ANSWER_CONFIDENCE" "$SUGGESTED" || emit_error "could not record the dispatch resolution"
 printf '%s\n' "$TEXT"
 exit 0
