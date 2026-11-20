@@ -53,11 +53,12 @@
 #   check <check>=skip: <why this host is exempt>
 #   check <check>=fixable: <gap --fix can close>
 #   check <check>=human: <gap only a person at that machine can close>
+#   check <check>=note: <fact worth acting on that does not block readiness>
 #   action: <check>: <the exact step to take>
 # Every check line is authoritative for the moment it printed: under --fix it is
 # the state after the repair attempt, so a human gap is never presented as
 # fixed. Any remaining fixable or human gap, and any missing required tool,
-# exits non-zero.
+# exits non-zero; a note never does.
 #
 # --fix is idempotent and closes only automatable gaps. It records the code
 # root that owns the Herdr service, preserves the primary fm-remote session and
@@ -956,6 +957,35 @@ check_launch_agent_loaded() { # <resolved-login-shell>
     "close the login-session gap first; a launch agent can only be bootstrapped into an existing GUI session"
 }
 
+# `herdr machine add` refuses to save a host whose server reports
+# capabilities.detached_server_daemon false, which herdr derives once, at server
+# start, from whether the server leads its own session. Second-mate readiness
+# never needs a saved machine, so this is a note rather than a gap. Its only
+# repair keeps every pane: a live handoff, whose replacement herdr starts as a
+# session leader, held behind the replacement marker that
+# fm_backend_herdr_server_ensure honors; never a stop. On darwin the Aqua launch
+# agent's job owns the server, and launchd keeps its jobs in launchd's own
+# session, so no Firstmate repair applies there.
+check_herdr_detached() {
+  local status detached socket marker
+  status=$(herdr_server_status_json) || return 0
+  detached=$(printf '%s' "$status" | jq -r '.server.capabilities.detached_server_daemon | if type == "boolean" then tostring else empty end' 2>/dev/null) || return 0
+  [ "$detached" = false ] || return 0
+  if [ "$PLATFORM" = darwin ]; then
+    record herdr-detached "note: session $HERDR_SESSION_NAME's server does not lead its own session (detached_server_daemon=false), so herdr machine add refuses this host as a saved SSH machine; second-mate readiness is unaffected" \
+      "none for second mates; launchd keeps the Aqua launch agent's server in its own session, and a live handoff would move the server out of that job, so Firstmate offers no repair here"
+    return 0
+  fi
+  socket=$(printf '%s' "$status" | jq -r '.server.socket // empty' 2>/dev/null) || socket=
+  if [ -n "$socket" ]; then
+    marker="$(dirname "$socket")/$FM_BACKEND_HERDR_SERVER_REPLACING_MARKER"
+  else
+    marker="<session directory>/$FM_BACKEND_HERDR_SERVER_REPLACING_MARKER"
+  fi
+  record herdr-detached "note: session $HERDR_SESSION_NAME's server does not lead its own session (detached_server_daemon=false), so herdr machine add refuses this host as a saved SSH machine; second-mate readiness is unaffected" \
+    "only to save this host in herdr, replace the server by live handoff, which keeps every pane but briefly interrupts herdr clients and is experimental in herdr, never by a stop: touch '$marker' && herdr --session $HERDR_SESSION_NAME server live-handoff; rm -f '$marker'"
+}
+
 check_herdr_server() {
   if ! herdr_cli_available; then
     record herdr-server "human: herdr server status cannot be read without both herdr and jq on the runtime PATH" \
@@ -963,6 +993,7 @@ check_herdr_server() {
     return 0
   fi
   if herdr_server_running; then
+    check_herdr_detached
     if [ -z "$HERDR_OWNER_ROOT" ]; then
       record herdr-server "human: session $HERDR_SESSION_NAME is running but its Firstmate code-root owner cannot be proven; leaving the legacy service untouched" \
         "identify the code root that owns this Herdr service before attempting a repair"
@@ -1385,15 +1416,17 @@ for optional_tool in "${OPTIONAL_TOOLS[@]}"; do
 done
 
 GAPS=()
+ACTIONED=()
 i=0
 while [ "$i" -lt "${#CHECK_NAMES[@]}" ]; do
   printf 'check %s=%s\n' "${CHECK_NAMES[$i]}" "${CHECK_VALUES[$i]}"
   case "${CHECK_VALUES[$i]}" in
-    fixable:*|human:*) GAPS+=("$i") ;;
+    fixable:*|human:*) GAPS+=("$i"); ACTIONED+=("$i") ;;
+    note:*) ACTIONED+=("$i") ;;
   esac
   i=$((i + 1))
 done
-for i in ${GAPS[@]+"${GAPS[@]}"}; do
+for i in ${ACTIONED[@]+"${ACTIONED[@]}"}; do
   [ -z "${CHECK_ACTIONS[$i]}" ] || printf 'action: %s: %s\n' "${CHECK_NAMES[$i]}" "${CHECK_ACTIONS[$i]}"
 done
 
