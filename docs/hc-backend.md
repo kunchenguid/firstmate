@@ -73,7 +73,7 @@ The terminal carries these labels:
 | `herdr.tab` | `<hometag>-fm-<id>` | One Herdr.app tab per task. |
 
 The terminal is also started with `--name`: the task id lowercased, every character outside `a-z0-9_-` turned into `-`, cut to hc's 32-character limit.
-A name shaped like a terminal address (`t7`) is skipped, since hc would resolve it as a target.
+A name shaped like an hc terminal address, `t` followed by lowercase letters or digits (`t8f`, `todo`), is skipped and the task starts unnamed, since hc would resolve it as a target.
 The name is display only, never identity: when a live terminal already holds it, hc answers `name_taken` and the task starts unnamed instead.
 
 ```text
