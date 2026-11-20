@@ -141,6 +141,31 @@ test_scopes_off_only_reads() {
   pass "with dibs scopes off, only the read-only scope probe runs"
 }
 
+test_missing_jq_only_noops_when_scopes_are_off() {
+  local dir="$TMP/nojq" path
+  mkdir -p "$dir/state"
+  path=$(fake_dibs_path "$dir")
+  local fakebin=${path%%:*}
+  ln -s "$(command -v bash)" "$fakebin/bash"
+  ln -s "$(command -v shasum)" "$fakebin/shasum"
+  ln -s "$(command -v cut)" "$fakebin/cut"
+  ln -s "$(command -v grep)" "$fakebin/grep"
+  ln -s "$(command -v cat)" "$fakebin/cat"
+  (
+    PATH="$fakebin" FAKE_DIBS_LOG="$dir/log" FAKE_DIBS_SHOW=2
+    export FAKE_DIBS_LOG FAKE_DIBS_SHOW
+    ! command -v jq >/dev/null 2>&1 || fail "the test PATH unexpectedly finds jq"
+    fm_dibs_release_members "$dir/state" t1 "$dir/wt" 0 || fail "scopes off must remain a no-op without jq"
+    FAKE_DIBS_SHOW=0
+    export FAKE_DIBS_SHOW
+    if fm_dibs_release_members "$dir/state" t1 "$dir/wt" 0 2>"$dir/err"; then
+      fail "an existing scope must refuse teardown without jq"
+    fi
+    grep -q 'jq is not on PATH' "$dir/err" || fail "refusal did not name missing jq: $(cat "$dir/err")"
+  ) || exit 1
+  pass "missing jq is harmless with scopes off and refuses teardown for an existing scope"
+}
+
 test_retained_member_refuses_teardown() {
   local dir="$TMP/retained" path json
   mkdir -p "$dir/state"
@@ -271,5 +296,6 @@ fm_test_run \
   test_spawn_exports_scope_and_refuses_time_bound \
   test_without_dibs_nothing_runs \
   test_scopes_off_only_reads \
+  test_missing_jq_only_noops_when_scopes_are_off \
   test_retained_member_refuses_teardown \
   test_real_dibs_lifecycle

@@ -95,20 +95,20 @@ fm_dibs_scope_owner() {  # <state-dir> <task-id>
 fm_dibs_scope_read() {  # <state-dir> <task-id>
   local key out rc=0 reason
   command -v dibs >/dev/null 2>&1 || return 1
-  # Spawn refuses a scope without jq, so a home without it has none to manage.
-  command -v jq >/dev/null 2>&1 || return 1
   key=$(fm_dibs_scope_key "$1" "$2") || {
     echo "error: could not derive the dibs scope key for $2" >&2
     return 2
   }
   out=$(dibs scope show --key "$key" --json 2>/dev/null) || rc=$?
-  case "$rc" in
-    0)
-      printf '%s\n' "$out"
-      return 0
-      ;;
-    2) return 1 ;;
-  esac
+  [ "$rc" -ne 2 ] || return 1
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is not on PATH, so task $2's dibs scope cannot be read; install jq or turn dibs scopes off" >&2
+    return 2
+  }
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
   reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null || true)
   [ "$reason" != not_found ] || return 1
   echo "error: dibs could not read the scope for task $2 (exit $rc${reason:+, $reason}): $out" >&2
