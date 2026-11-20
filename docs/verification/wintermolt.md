@@ -39,25 +39,37 @@ Established in that run, on the real binary:
 - The pane foreground is exactly `wintermolt`; a bash tool subprocess is its direct child and inherits no identity variable, only backend-config variables, so detection is anchored ancestry alone.
 - One Escape stops a running turn; one `/quit` exits to the pane shell.
 
-## Submit confirmation (not exercised live)
+## Submit confirmation (2026-11-21, wintermolt 0.7.0, tmux 3.8)
 
-The confirmation path a steer actually takes is covered by
-`tests/fm-wintermolt-harness.test.sh`, not by a live run against the shipped
-code:
+Measured on the real TUI on a private tmux socket with a local
+OpenAI-compatible chat-completions stub as the model backend (no external
+provider), driving the shipped `fm_backend_send_text_submit` - the exact call
+`bin/fm-spawn.sh` and `bin/fm-send.sh` make:
 
+- One `send-keys -l` write of a whole message does not land. A 51-character
+  steer reached the composer as its last 31 characters, while the same text
+  written in 8- and 16-character chunks landed whole (composer text exact,
+  typed state `held`) and the identical single write into a pane running `cat`
+  arrived intact - so the loss is the TUI's input handling, not tmux. A
+  wintermolt burst is therefore written in chunks (`FM_WINTERMOLT_TYPE_CHUNK`,
+  8 characters by default, spaced `FM_WINTERMOLT_TYPE_INTERVAL`) behind tmux's
+  own `--` end-of-flags marker, because a chunk can begin with `-` wherever the
+  text happens to break; every other pane keeps the one-shot write.
+- With that, a steer submitted at the first ready frame and a steer submitted on
+  a settled TUI both returned `empty`, and the stub recorded exactly one model
+  request carrying the whole message each time.
+- The busy footer rendered 0.03s after Enter, far inside the 60 x 0.5s budget the
+  spawn gate already grants the same verdict.
 - The burst is verified against the composer's own text before Enter, because a
   literal burst typed while the TUI is still settling its input loop is dropped
   or truncated, and the composer such a burst leaves behind reads exactly like a
   submitted turn. A burst that provably landed nothing is replayed; a composer
-  holding a fragment, or content that is not ours, refuses the submit. This is
-  the behaviour that makes a swallowed first steer survive; it has not been
-  re-measured on the real binary since the check was added.
-- A landed submit is confirmed by the idle-to-busy transition read through the
-  anchored footer alone. The footer's render time after Enter was never measured
-  on this path, so the wait is pinned to the budget the spawn gate already grants
-  the same verdict (`FM_WINTERMOLT_DELIVERY_POLLS` x `FM_WINTERMOLT_POLL_INTERVAL`,
-  60 x 0.5s by default) rather than to a measurement, and a footer slower than
-  that budget would still report the steer unconfirmed.
+  holding a fragment, or content that is not ours, refuses the submit.
+- Not measured live here: a burst the TUI swallows whole and the replay that
+  retypes it (this binary truncated a long whole-message write rather than
+  swallowing it, and the chunked write lands), and the grace re-read that
+  judges the last permitted burst. `tests/fm-wintermolt-harness.test.sh` covers
+  both with a simulated TUI.
 
 ## Lane rehearsal results (2026-11-20, wintermolt 0.7.0)
 
@@ -84,6 +96,31 @@ Only a readable idle footer settles that cancellation claim: a pane that stays
 busy reports `pane-still-working` and one whose capture fails reports
 `pane-unreadable`, both unconfirmed. The lane exercised the cleared-footer case
 only; `tests/fm-control.test.sh` covers the other two.
+
+## Spawn lane re-run (2026-11-21, wintermolt 0.7.0, tmux 3.8)
+
+Re-run of the same `bin/fm-spawn.sh` lane in a lab home against a local
+OpenAI-compatible stub. The backend environment has to be present where the tmux
+session is started, because a new window inherits the tmux server's environment
+and not the spawning process's; with `WINTERMOLT_BACKEND`, `WINTERMOLT_OPENAI_URL`,
+the backend key, `WINTERMOLT_MODEL`, and `WINTERMOLT_NO_FALLBACK` exported there,
+the launch, the readiness gate, the brief-pointer submit, and the delivery gate
+all passed:
+
+```text
+spawned labwm1 harness=wintermolt kind=ship mode=local-only yolo=on window=primary:fm-labwm1 worktree=...
+  > Read the brief at .../data/labwm1/launch-brief.md and follow it exactly.
+  [openai] request: 6899 bytes (~2k tokens est)
+  openai · anthropic/claude-sonnet-4  ⠴ working
+  model: anthropic/claude-sonnet-4
+  user: 'Read the brief at .../data/labwm1/launch-brief.md and follow it exactly.'
+EXIT=0
+```
+
+One model request carrying the whole pointer once, and a busy footer on the same
+pane: the brief arrived. The same lane against a tmux server without that
+backend environment starts the TUI on its own default backend (`ollama` in its
+footer), so a lane run there measures the stub, not the adapter.
 
 ## Non-interactive backend surface (2026-11-20)
 

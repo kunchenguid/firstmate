@@ -330,10 +330,14 @@ fm_pane_is_busy() {  # <target> [harness]
 # [text-verified] wintermolt's TUI drops or truncates a literal burst typed
 # while its input loop is still settling (verified live, 0.7.0), and the empty
 # composer such a burst leaves behind is indistinguishable from a submitted
-# turn, so its submit verifies the typed text BEFORE Enter. A burst is replayed
-# only after a fresh read taken immediately before that write still shows the
-# composer holding exactly what it held before typing - the speed of the TUI's
-# own echo is the whole question, so one earlier read may never authorise a
+# turn, so its submit verifies the typed text BEFORE Enter. Its input loop also
+# loses the head of one large literal write on a settled TUI (verified live on
+# 0.7.0: a 51-character steer arrived as its last 31 characters, while the same
+# text written in 8-character chunks landed whole), so a wintermolt burst is
+# written in chunks the loop keeps and every other pane keeps the one-shot
+# write. A burst is replayed only after a fresh read taken immediately before
+# that write still shows the composer holding exactly what it held before
+# typing - the speed of the TUI's own echo is the whole question, so one earlier read may never authorise a
 # later write. Every burst is judged that way, the last permitted one included,
 # so a slow echo is never reported as a failed delivery. A composer holding
 # anything else - a truncated burst, a late echo, or someone else's draft - is
@@ -495,9 +499,33 @@ fm_tmux_submit_typed_state() {  # <target> <before> <text>
   fi
 }
 
+# fm_tmux_type_literal: write <text> into <target> as literal keys, echoing
+# tmux's own refusal text when a write fails. With <chunk> > 0 the text goes in
+# writes of at most that many characters, spaced by
+# FM_WINTERMOLT_TYPE_INTERVAL: the wintermolt TUI drops the head of one large
+# literal write, and the chunked write is the shape its input loop keeps. Every
+# other caller passes 0 and keeps the single one-shot write.
+fm_tmux_type_literal() {  # <target> <text> [chunk]
+  local target=$1 text=$2 chunk=${3:-0} i=0 n=${#text} err
+  if [ "$chunk" -le 0 ] || [ "$n" -le "$chunk" ]; then
+    err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null) \
+      || { printf '%s' "$err"; return 1; }
+    return 0
+  fi
+  # `--` ends tmux's own flag parsing: a chunk may start with `-` wherever the
+  # text happens to break, and `send-keys -l "-brief"` would be read as a flag.
+  while [ "$i" -lt "$n" ]; do
+    err=$(tmux send-keys -t "$target" -l -- "${text:i:chunk}" 2>&1 >/dev/null) \
+      || { printf '%s' "$err"; return 1; }
+    i=$((i + chunk))
+    if [ "$i" -lt "$n" ]; then sleep "${FM_WINTERMOLT_TYPE_INTERVAL:-0.05}"; fi
+  done
+  return 0
+}
+
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err busy_harness
-  local before='' verify=0 attempts=0 max_attempts typed
+  local before='' verify=0 attempts=0 max_attempts typed chunk=0
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
@@ -515,10 +543,11 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
     esac
   fi
   max_attempts=${FM_WINTERMOLT_SUBMIT_ATTEMPTS:-3}
+  [ "$busy_harness" != wintermolt ] || chunk=${FM_WINTERMOLT_TYPE_CHUNK:-8}
   while :; do
     # A failed literal send replays tmux's stderr (for example "command too
     # long") so the caller can log why nothing was typed.
-    if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
+    if ! err=$(fm_tmux_type_literal "$target" "$text" "$chunk"); then
       [ -z "$err" ] || printf '%s\n' "$err" >&2
       printf 'send-failed'
       return 0

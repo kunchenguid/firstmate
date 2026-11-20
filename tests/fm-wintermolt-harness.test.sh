@@ -218,7 +218,10 @@ wm_fake_draft_rows() {  # <inner-width> <text>
     chunk=${rest:0:$((width - 4))}
     rest=${rest:$((width - 4))}
     if [ -n "$rest" ]; then
-      printf '│\033[39m  %s%*s\n' "$chunk" 2 ''
+      # A wrapped row keeps the box's full inner width: the live TUI re-wraps
+      # what was typed rather than drawing a short row.
+      pad=$((width - 2 - ${#chunk}))
+      printf '│\033[39m  %s%*s\033[38;5;8m│\n' "$chunk" "$pad" ''
     else
       pad=$((width - 3 - ${#chunk}))
       printf '│\033[39m  %s\033[48;5;6m \033[49m%*s\033[38;5;8m│\n' "$chunk" "$pad" ''
@@ -236,8 +239,13 @@ wm_fake_draft_rows() {  # <inner-width> <text>
 # `stale` are the renders those reads must tell apart. A literal burst models
 # what the live TUI does with it: FM_FAKE_WM_SWALLOW=N drops the first N bursts,
 # FM_FAKE_WM_LOSE=1 drops every burst, FM_FAKE_WM_TRUNCATE=N keeps only the
-# tail of burst N, and FM_FAKE_WM_DEFER_BURST=N echoes burst N only after
-# FM_FAKE_WM_DEFER_READS more pane reads.
+# tail of burst N, FM_FAKE_WM_DEFER_BURST=N echoes burst N only after
+# FM_FAKE_WM_DEFER_READS more pane reads, and FM_FAKE_WM_HEAD_DROP=N loses the
+# head of one literal write longer than N characters, the shape a single
+# `send-keys -l` of a whole message takes on the live 0.7.0 input loop. One
+# burst is the run of literal writes between two pane reads, so a text written
+# in chunks is still one burst. The pane records every submitted turn in
+# `<state>.submitted`, what the model would receive.
 make_wintermolt_pane_fakebin() {  # <dir>
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -250,9 +258,23 @@ styled=
 mode=key
 previous=
 payload=
+bad_flag=
+literal_next=0
 for arg in "\$@"; do
   [ "\$arg" = "-e" ] && styled=1
-  if [ "\$previous" = "-l" ]; then mode=literal; payload=\$arg; fi
+  # After -l the next argument is the literal payload; tmux ends flag parsing
+  # only at the double-dash marker, so a payload that still starts with a dash
+  # is refused as an unknown flag exactly as the real command refuses it.
+  if [ "\$literal_next" = 1 ] && [ "\$arg" = "--" ]; then
+    literal_next=2
+  elif [ "\$literal_next" = 1 ]; then
+    case "\$arg" in -?*) bad_flag=\$arg ;; esac
+    mode=literal; payload=\$arg; literal_next=0
+  elif [ "\$literal_next" = 2 ]; then
+    mode=literal; payload=\$arg; literal_next=0
+  elif [ "\$arg" = "-l" ]; then
+    literal_next=1
+  fi
   previous=\$arg
 done
 draft_file="\${FM_FAKE_WM_STATE:?}.draft"
@@ -309,6 +331,8 @@ case "\${1:-}" in
     esac
     exit 0 ;;
   capture-pane)
+    # A read ends the run of literal writes: the next write starts a new burst.
+    rm -f "\${FM_FAKE_WM_STATE:?}.typing"
     if [ -f "\${FM_FAKE_WM_STATE:?}.deferred" ]; then
       left=\$(cat "\${FM_FAKE_WM_STATE:?}.deferred-reads")
       left=\$((left - 1))
@@ -333,9 +357,17 @@ case "\${1:-}" in
     screen; exit 0 ;;
   send-keys)
     if [ "\$mode" = literal ]; then
+      if [ -n "\$bad_flag" ]; then
+        printf 'command send-keys: unknown flag %s\n' "\${bad_flag:0:2}" >&2
+        exit 1
+      fi
+      typing_file="\${FM_FAKE_WM_STATE:?}.typing"
       bursts=\$(cat "\$bursts_file" 2>/dev/null || printf '0')
-      bursts=\$((bursts + 1))
-      printf '%s\n' "\$bursts" > "\$bursts_file"
+      if [ ! -f "\$typing_file" ]; then
+        bursts=\$((bursts + 1))
+        printf '%s\n' "\$bursts" > "\$bursts_file"
+        printf '%s' "\$payload" > "\$typing_file"
+      fi
       if [ "\${FM_FAKE_WM_LOSE:-0}" = 1 ] \
          || [ "\$bursts" -le "\${FM_FAKE_WM_SWALLOW:-0}" ]; then
         exit 0
@@ -343,7 +375,7 @@ case "\${1:-}" in
       if [ "\$bursts" = "\${FM_FAKE_WM_DEFER_BURST:-0}" ]; then
         # The TUI accepted the bytes but echoes them only after a few more
         # reads, the settling window a single stale read can be fooled by.
-        printf '%s' "\$payload" > "\${FM_FAKE_WM_STATE:?}.deferred"
+        printf '%s' "\$payload" >> "\${FM_FAKE_WM_STATE:?}.deferred"
         printf '%s\n' "\${FM_FAKE_WM_DEFER_READS:-2}" > "\${FM_FAKE_WM_STATE:?}.deferred-reads"
         exit 0
       fi
@@ -351,6 +383,10 @@ case "\${1:-}" in
          && [ "\${FM_FAKE_WM_TRUNCATE:-0}" -gt 0 ]; then
         keep=\$(( \${#payload} / 2 ))
         draft=\${payload:\$((\${#payload} - keep))}
+      elif [ "\${FM_FAKE_WM_HEAD_DROP:-0}" -gt 0 ] \
+           && [ "\${#payload}" -gt "\${FM_FAKE_WM_HEAD_DROP}" ]; then
+        # A write the input loop cannot keep whole arrives as its tail.
+        draft=\$draft\${payload:\$((\${#payload} - \${FM_FAKE_WM_HEAD_DROP}))}
       else
         draft=\$draft\$payload
       fi
@@ -358,7 +394,9 @@ case "\${1:-}" in
       exit 0
     fi
     if [ "\$previous" = Enter ] && [ "\$state" = idle ] && [ -n "\$(composer_text)" ]; then
+      printf '%s\n' "\$(composer_text)" >> "\${FM_FAKE_WM_STATE:?}.submitted"
       : > "\$draft_file"
+      rm -f "\${FM_FAKE_WM_STATE:?}.typing"
       if [ "\${FM_FAKE_WM_AFTER_DELAY:-0}" -gt 0 ]; then
         # The working row replaces the composer at once while the footer takes
         # a few more reads to render busy, the slow-footer shape the
@@ -427,8 +465,8 @@ test_wintermolt_steer_confirmation_uses_the_busy_transition() {
   state="$case_dir/wm.state"
   submit() {  # <pre-state> <post-enter-state>
     printf '%s\n' "$1" > "$state"
-    rm -f "$state.draft" "$state.bursts" "$state.delay" \
-      "$state.deferred" "$state.deferred-reads"
+    rm -f "$state.draft" "$state.bursts" "$state.delay" "$state.typing" \
+      "$state.deferred" "$state.deferred-reads" "$state.submitted"
     PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_AFTER="$2" \
       FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
       fm_tmux_submit_core win 'steer text' 2 0.05 0.05
@@ -579,6 +617,34 @@ test_wintermolt_truncated_burst_is_never_submitted() {
   [ "$(cat "$state")" = idle ] \
     || fail "a fragment must never be submitted as a turn, pane state read '$(cat "$state")'"
   pass "fm-tmux-lib: a wintermolt burst the TUI truncates is never submitted as a fragment"
+}
+
+test_wintermolt_long_steer_is_typed_in_chunks_that_land() {
+  local case_dir fakebin state verdict text submitted
+  case_dir="$TMP_ROOT/submit-chunked"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # Live, the 0.7.0 input loop keeps only the tail of one large literal write,
+  # so a whole-message write reached the model as a fragment. The burst is
+  # therefore typed in chunks its loop keeps, and the whole message - once -
+  # is what the model receives. The chunk that starts at offset 32 begins with
+  # `-`, so the write also has to keep tmux from reading it as a flag.
+  text='Read the brief at /tmp/wm/launch-brief.md and follow it exactly.'
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_HEAD_DROP=16 \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    FM_WINTERMOLT_TYPE_INTERVAL=0 \
+    fm_tmux_submit_core win "$text" 2 0.05 0.05)
+  [ "$verdict" = empty ] \
+    || fail "a long steer the TUI keeps only in chunks must submit, got '$verdict'"
+  submitted=$(cat "$state.submitted")
+  [ "$submitted" = "$text" ] \
+    || fail "the model must receive the whole message, got '$submitted'"
+  [ "$(wc -l < "$state.submitted" | tr -d ' ')" = 1 ] \
+    || fail "the message must be submitted exactly once, got $(cat "$state.submitted")"
+  [ "$(cat "$state.bursts")" = 1 ] \
+    || fail "a landed chunked burst must never be replayed, got $(cat "$state.bursts") bursts"
+  pass "fm-tmux-lib: a long wintermolt steer is typed in chunks the TUI keeps"
 }
 
 test_wintermolt_busy_classification_reads_only_the_last_row() {
@@ -1038,6 +1104,7 @@ test_wintermolt_late_echo_is_not_replayed
 test_wintermolt_last_permitted_burst_gets_the_grace_read
 test_wintermolt_burst_that_never_lands_does_not_confirm
 test_wintermolt_truncated_burst_is_never_submitted
+test_wintermolt_long_steer_is_typed_in_chunks_that_land
 test_wintermolt_busy_classification_reads_only_the_last_row
 test_wintermolt_classify_reads_the_rendered_tail
 test_wintermolt_idle_composer_reads_empty_only_through_the_scope
