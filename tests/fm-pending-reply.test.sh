@@ -38,6 +38,9 @@
 #      the decision; a retry while that decision is still open appends nothing
 #  19. A request summary keeps accented letters, drops control characters, and
 #      caps at 120 characters without splitting one under any caller locale
+#  20. A remote observation call is hard-bounded: a peer that accepts the
+#      connection and never answers makes one tick slow, not stalled, and reads
+#      as unknown observation rather than as an idle or gone mate
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1654,6 +1657,47 @@ test_remote_repost_waits_for_the_reply_channel() {
   pass "a remote repost waits for the reply channel and still fires on a real miss"
 }
 
+test_silent_remote_peer_observation_is_bounded() {
+  local home state corr ssh_bin out started elapsed
+  home=$(setup_parent remote-silent-peer)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=5000
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  corr=$(fm_pending_reply_create "$home" "$state" "ios" "status of the iOS build")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+
+  # sshd is up, the remote command never returns: without a bound this
+  # observation call - which the ordinary-supervision poll runs per open
+  # request - would block the whole tick.
+  mkdir -p "$home/data"
+  cat > "$home/data/secondmates.md" <<MDF
+- ios - remote test domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: remote testing; projects: alpha; added 2026-08-02)
+MDF
+  ssh_bin="$TMP_ROOT/silent-peer-ssh"
+  cat > "$ssh_bin" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+exec sleep "${FM_FAKE_SSH_HANG_SECS:-120}"
+SH
+  chmod +x "$ssh_bin"
+
+  started=$(date +%s)
+  out=$(FM_HOME="$home" FM_SSH_BIN="$ssh_bin" FM_FAKE_SSH_HANG_SECS=120 FM_REMOTE_CALL_TIMEOUT=1 \
+    fm_pending_reply_tick "$state" 2>&1) || fail "a bounded observation must still let the tick succeed"
+  elapsed=$(( $(date +%s) - started ))
+
+  [ "$elapsed" -le 30 ] || fail "a silent remote peer must not stall the tick; it took ${elapsed}s"
+  assert_contains "$out" "remote observation on remote-mac timed out after 1s" \
+    "a timed-out observation must name the endpoint and the time actually spent"
+  assert_contains "$out" "reading it as unknown" \
+    "a timed-out observation must read as unknown, never as idle or gone"
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "a timed-out observation must not move the expectation, got $(phase_of "$state" "$corr")"
+  pass "a silent remote peer costs one bound and reads as unknown observation"
+}
+
 test_mirrored_remote_reply_never_triggers_a_repost() {
   local home state corr hook_log
   home=$(setup_parent remote-mirrored-reply)
@@ -2164,6 +2208,7 @@ test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
 test_remote_repost_waits_for_the_reply_channel
+test_silent_remote_peer_observation_is_bounded
 test_mirrored_remote_reply_never_triggers_a_repost
 test_same_basename_self_home_corr_resolves_on_tick
 test_same_basename_reply_resolves_after_recovery_failure

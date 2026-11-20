@@ -245,6 +245,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-remote-call-lib.sh
+. "$SCRIPT_DIR/fm-remote-call-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 
@@ -384,11 +386,21 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # unreachable host or unreadable endpoint is reported as unknown-remote -
 # explicitly NOT proof of death - so a transport blip never reads as a torn
 # down or dead mate; only the remote host's own dead/missing verdict may say
-# the endpoint is actually gone.
+# the endpoint is actually gone. The call itself is bounded by
+# bin/fm-remote-call-lib.sh, so a peer that accepts the connection and then
+# never answers costs one bound here instead of stalling the read that
+# supervises it; that timeout also reads as unknown-remote, naming the endpoint
+# and the time spent.
 if [ -n "$REMOTE_HOST" ]; then
-  if ! REMOTE_STATE=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-on.sh" "$ID" \
-    fm-remote-secondmate-control.sh state "$ID" < /dev/null 2>/dev/null); then
+  REMOTE_TIMED_OUT=0
+  remote_rc=0
+  FM_HOME="$FM_HOME" fm_remote_call "$SCRIPT_DIR/fm-on.sh" "$ID" \
+    fm-remote-secondmate-control.sh state "$ID" || remote_rc=$?
+  if fm_timed_out "$remote_rc"; then
+    REMOTE_TIMED_OUT=1
     REMOTE_STATE=
+  else
+    REMOTE_STATE=$FM_REMOTE_CALL_OUT
   fi
   REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
   case "$REMOTE_STATE" in
@@ -405,7 +417,11 @@ if [ -n "$REMOTE_HOST" ]; then
       emit unknown remote-endpoint "remote endpoint $REMOTE_STATE on $REMOTE_HOST"
       ;;
     '')
-      emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
+      if [ "$REMOTE_TIMED_OUT" = 1 ]; then
+        emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (probe timed out after ${FM_REMOTE_CALL_ELAPSED}s; not proof of death)"
+      else
+        emit unknown remote-endpoint "unknown-remote: $REMOTE_HOST unreachable or endpoint unreadable (not proof of death)"
+      fi
       ;;
     *)
       emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
