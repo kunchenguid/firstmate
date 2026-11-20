@@ -104,6 +104,14 @@
 # "watcher: none running" and exits 0, or exits 1 when the watcher outlived
 # the stop.
 #
+# While supervision is switched off (bin/fm-supervision.sh) every mode that
+# would start or attach a cycle (plain, --restart, --take-over) starts and
+# attaches nothing: it prints
+# "watcher: off - supervision is switched off for this home" and exits 0;
+# --restart still stops the running watcher first, and --stop is unchanged.
+# Arm owners read the same marker before arming, so this is the backstop for
+# an owner that arms on the model's word.
+#
 # An arm whose ground is removed under it exits instead of polling on: when its
 # own script file, the state directory, or an FM_HOME that existed at start no
 # longer exists, it prints
@@ -150,6 +158,8 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
 fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$SCRIPT_DIR/fm-supervision-lib.sh"
 
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
@@ -654,6 +664,11 @@ if [ "$mode" = stop ]; then
   else
     echo "watcher: none running"
   fi
+  exit 0
+fi
+
+if fm_supervision_switched_off "$STATE"; then
+  echo "watcher: off - supervision is switched off for this home; bin/fm-supervision.sh on turns it back on"
   exit 0
 fi
 

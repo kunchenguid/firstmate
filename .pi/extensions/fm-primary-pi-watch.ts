@@ -37,9 +37,14 @@
 // watcher-failure alarm still reach main exactly as attended, because only
 // main can repair supervision itself. Nothing else about delivery or
 // consumption changes.
+//
+// Off switch (docs/turnend-guard.md "Supervision switched off"): while
+// state/.supervision-off exists this extension starts no arm, schedules no
+// retry, and drops a close silently; its wake, if any, stays durable in the
+// queue for the operator's next drain.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -166,6 +171,9 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+// bin/fm-supervision.sh owns this marker (fm_supervision_switched_off).
+const supervisionOffMarker = `${state}/.supervision-off`;
+const supervisionOffMessage = "watcher: off - supervision is switched off for this home; after bin/fm-supervision.sh on, call fm_watch_arm_pi to start the first cycle";
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -275,6 +283,10 @@ function liveArmChild(owner: SessionGeneration): ChildProcess | null {
   const pid = child.pid;
   if (pid === undefined || !pidAlive(String(pid))) return null;
   return child;
+}
+
+function supervisionSwitchedOff(): boolean {
+  return existsSync(supervisionOffMarker);
 }
 
 // The session lock names a local pid or, on Windows, a tagged `win:<pid>`
@@ -1097,7 +1109,7 @@ export default function (pi: ExtensionAPI) {
   async function restoreAfterActionableClose(owner: SessionGeneration, predecessorArmPid: string): Promise<ActionableRestoration> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (!generationIsLive(owner)) return { failure: "" };
+      if (!generationIsLive(owner) || supervisionSwitchedOff()) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
       appendExtensionLog(
@@ -1142,6 +1154,7 @@ export default function (pi: ExtensionAPI) {
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
     if (!generationIsLive(owner) || liveArmChild(owner) || owner.retryTimer) return;
+    if (supervisionSwitchedOff()) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(owner, `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -1154,7 +1167,7 @@ export default function (pi: ExtensionAPI) {
     }
     const timer = setTimeout(() => {
       if (owner.retryTimer === timer) owner.retryTimer = null;
-      if (!generationIsLive(owner)) return;
+      if (!generationIsLive(owner) || supervisionSwitchedOff()) return;
       const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
         surfaceFailure(owner, `watcher: FAILED - Pi extension could not launch a continuity retry\n${result.message}`);
@@ -1175,6 +1188,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     publishGenerationOwner(owner, "active");
+    if (supervisionSwitchedOff()) return { ok: true, message: supervisionOffMessage };
     if (liveArmChild(owner)) {
       return {
         ok: true,
@@ -1239,6 +1253,7 @@ export default function (pi: ExtensionAPI) {
         // scheduled retry with the actionable restoration path once the full
         // line arrives.
         if (settled) {
+          if (supervisionSwitchedOff()) return;
           enqueuePendingActionable(owner, pending);
           if (!generationIsLive(owner)) return;
           if (owner.retryTimer) {
@@ -1268,6 +1283,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      if (supervisionSwitchedOff()) return;
       const classification = classifyClose(stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
@@ -1306,6 +1322,7 @@ export default function (pi: ExtensionAPI) {
       settleReadiness(false);
       releaseChild();
       if (!generationIsLive(owner)) return;
+      if (supervisionSwitchedOff()) return;
       if (owner.restoring || owner.delivering) return;
       scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });

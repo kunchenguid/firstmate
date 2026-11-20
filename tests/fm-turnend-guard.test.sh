@@ -449,6 +449,22 @@ test_hook_blocks_when_unhealthy_in_primary() {
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
 }
 
+# The off switch (bin/fm-supervision.sh): the same unhealthy home stops
+# blocking while supervision is switched off, and blocks again once it is on.
+test_hook_silent_while_supervision_is_switched_off() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-switched-off")
+  : > "$dir/state/task1.meta"
+  printf 'since=2026-01-01T00:00:00Z\n' > "$dir/state/.supervision-off"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "hook must not block while supervision is switched off"
+  [ -z "$out" ] || fail "hook produced output while supervision is switched off: $out"
+  rm -f "$dir/state/.supervision-off"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "fixture: the same home must block once supervision is back on"
+  pass "fm-turnend-guard: silent while supervision is switched off, blocking again once it is on"
+}
+
 test_hook_blocks_from_fm_home_state() {
   local dir home out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home")
@@ -2683,6 +2699,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
+test_hook_silent_while_supervision_is_switched_off
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
 test_hook_x_mode_only_blocks_in_default_mode

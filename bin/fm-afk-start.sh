@@ -3,7 +3,8 @@
 # foreground process when one is not already alive.
 #
 # Usage: fm-afk-start.sh
-#   Sets state/.afk (mode preserved on refresh, see fm_afk_flag_write) unless
+#   Refuses (exit 1, writing nothing) while supervision is switched off
+#   (bin/fm-supervision.sh). Otherwise sets state/.afk (mode preserved on refresh, see fm_afk_flag_write) unless
 #   FM_AFK_STATE_PREPARED=1, checks state/.supervise-daemon.lock, and:
 #     - prints "afk: daemon already running pid=<pid>" then exits 0 when that
 #       lock is held by a live daemon (a REFRESH: no stale-artifact clear);
@@ -41,9 +42,11 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-supervision-lib.sh
+. "$FM_AFK_START_DIR/fm-supervision-lib.sh"
 
 fm_afk_start_usage() {
-  sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # Call only before a fresh daemon can produce state, never on a live refresh:
@@ -147,6 +150,10 @@ fm_afk_start_main() {
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
 
+  if fm_supervision_switched_off "$FM_AFK_STATE"; then
+    echo "afk: supervision is switched off for this home; nothing starts until bin/fm-supervision.sh on" >&2
+    return 1
+  fi
   mkdir -p "$FM_AFK_STATE"
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }

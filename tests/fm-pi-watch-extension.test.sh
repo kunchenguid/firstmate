@@ -3049,6 +3049,83 @@ EOF
   pass "Pi clean empty close triggers a bounded continuity retry"
 }
 
+# The off switch (bin/fm-supervision.sh, docs/turnend-guard.md "Supervision
+# switched off"): a close while the marker exists is dropped without a retry
+# or a prompt, the tool starts no arm and says why, and once the marker is gone
+# the tool starts the first cycle again.
+test_pi_switched_off_starts_no_arm_and_retries_nothing() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-switched-off-root"
+  home="$TMP_ROOT/pi-switched-off-home"
+  log="$TMP_ROOT/pi-switched-off.log"
+  stop="$TMP_ROOT/pi-switched-off.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE.$count" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompts = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {
+    prompts += 1;
+  },
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const arms = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length
+  : 0);
+const off = `${process.env.FM_HOME}/state/.supervision-off`;
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-first", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && arms() < 1; i += 1) await sleep(10);
+if (arms() !== 1) throw new Error(`fixture: the first arm never started (${arms()})`);
+writeFileSync(off, "since=2026-01-01T00:00:00Z\n");
+writeFileSync(`${process.env.FM_STOP_FILE}.1`, "stop\n");
+await sleep(400);
+if (arms() !== 1) throw new Error(`a close while switched off was retried: ${arms()} arms`);
+if (prompts !== 0) throw new Error(`a close while switched off surfaced ${prompts} prompts`);
+const refused = await tool.execute("tool-call-off", {}, undefined, undefined, {});
+const text = refused.content[0]?.text ?? "";
+if (!text.includes("watcher: off - supervision is switched off for this home")) throw new Error(`the tool did not say supervision is off: ${text}`);
+if (refused.details?.ok !== true) throw new Error(`the off answer must not read as a failure: ${JSON.stringify(refused.details)}`);
+await sleep(200);
+if (arms() !== 1) throw new Error(`the tool started an arm while switched off: ${arms()} arms`);
+rmSync(off);
+const resumed = await tool.execute("tool-call-on", {}, undefined, undefined, {});
+if (!resumed.content[0].text.includes("started Pi extension arm child")) throw new Error(`the tool did not start the first cycle after on: ${resumed.content[0].text}`);
+for (let i = 0; i < 250 && arms() < 2; i += 1) await sleep(10);
+if (arms() !== 2) throw new Error(`no arm started after the marker was removed: ${arms()} arms`);
+writeFileSync(`${process.env.FM_STOP_FILE}.2`, "stop\n");
+writeFileSync(off, "since=2026-01-01T00:00:00Z\n");
+await sleep(100);
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi must start no arm and retry nothing while supervision is switched off"
+  [ -z "$out" ] || fail "Pi switched-off test printed output: $out"
+  pass "Pi starts no arm and retries nothing while supervision is switched off, and arms again once it is on"
+}
+
 test_pi_established_empty_close_honors_retry_limit() {
   local repo home plugin log out status
   repo="$TMP_ROOT/pi-established-empty-close-root"
@@ -5981,6 +6058,147 @@ EOF
   pass "OpenCode clean empty close triggers a bounded continuity retry"
 }
 
+# The off switch (bin/fm-supervision.sh, docs/turnend-guard.md "Supervision
+# switched off"): a close while the marker exists is dropped without a retry
+# or a prompt, an idle turn end arms nothing even with X mode on, and once the
+# marker is gone the next idle turn end arms again.
+test_opencode_switched_off_arms_nothing_and_retries_nothing() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-switched-off-root"
+  home="$TMP_ROOT/opencode-switched-off-home"
+  log="$TMP_ROOT/opencode-switched-off.log"
+  stop="$TMP_ROOT/opencode-switched-off.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  : > "$home/config/x-mode.env"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE.$count" ] && [ -e "$0" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = {
+  session: {
+    promptAsync: async () => {
+      prompts += 1;
+    },
+  },
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const arms = () => (existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length
+  : 0);
+const off = `${process.env.FM_HOME}/state/.supervision-off`;
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const idle = () => hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await idle();
+for (let i = 0; i < 250 && arms() < 1; i += 1) await sleep(10);
+if (arms() !== 1) throw new Error(`fixture: the first arm never started (${arms()})`);
+writeFileSync(off, "since=2026-01-01T00:00:00Z\n");
+writeFileSync(`${process.env.FM_STOP_FILE}.1`, "stop\n");
+await sleep(400);
+if (arms() !== 1) throw new Error(`a close while switched off was retried: ${arms()} arms`);
+await idle();
+await sleep(300);
+if (arms() !== 1) throw new Error(`an idle turn end armed while switched off: ${arms()} arms`);
+if (prompts !== 0) throw new Error(`switching off surfaced ${prompts} prompts`);
+rmSync(off);
+await idle();
+for (let i = 0; i < 250 && arms() < 2; i += 1) await sleep(10);
+if (arms() !== 2) throw new Error(`no arm started after the marker was removed: ${arms()} arms`);
+writeFileSync(off, "since=2026-01-01T00:00:00Z\n");
+writeFileSync(`${process.env.FM_STOP_FILE}.2`, "stop\n");
+await sleep(100);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must arm nothing and retry nothing while supervision is switched off"
+  [ -z "$out" ] || fail "OpenCode switched-off test printed output: $out"
+  pass "OpenCode arms nothing and retries nothing while supervision is switched off, and arms again once it is on"
+}
+
+test_opencode_switched_off_during_restoration_reports_no_failure() {
+  local plugin repo home log release out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-off-restore-root"
+  home="$TMP_ROOT/opencode-off-restore-home"
+  log="$TMP_ROOT/opencode-off-restore.log"
+  release="$TMP_ROOT/opencode-off-restore.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -gt 1 ]; then
+  printf 'since=2026-01-01T00:00:00Z\n' > "$FM_HOME/state/.supervision-off"
+  exit 0
+fi
+while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
+printf 'signal: lock handoff\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=3 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts[0].text;
+    },
+  },
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const eventPromise = hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) await sleep(10);
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await eventPromise;
+for (let i = 0; i < 300 && !prompt.includes("lock handoff"); i += 1) await sleep(10);
+await sleep(200);
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (!prompt.includes("lock handoff")) throw new Error(`the actionable wake was not delivered: ${prompt}`);
+if (prompt.includes("FAILED")) throw new Error(`switching off during restoration surfaced a failure: ${prompt}`);
+if (rows.length !== 2) throw new Error(`expected the first arm and one successor, got ${rows.length}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must not report a restoration failure when supervision is switched off mid-restoration"
+  [ -z "$out" ] || fail "OpenCode off-during-restoration test printed output: $out"
+  pass "OpenCode delivers the wake without a failure when supervision is switched off mid-restoration"
+}
+
 test_opencode_established_empty_close_honors_retry_limit() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -6340,6 +6558,7 @@ test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry
 test_pi_late_unretired_close_resumes_supervision
 test_pi_empty_close_retries_instead_of_disappearing
+test_pi_switched_off_starts_no_arm_and_retries_nothing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
@@ -6376,6 +6595,8 @@ test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
+test_opencode_switched_off_arms_nothing_and_retries_nothing
+test_opencode_switched_off_during_restoration_reports_no_failure
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard

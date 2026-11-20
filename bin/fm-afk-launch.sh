@@ -48,6 +48,8 @@
 # daemon to park a present captain's main.
 # On backend=t3code there is no terminal for `start` to create, so only a
 # harness with a tracked native background job can run `start-native` there.
+# While supervision is switched off (bin/fm-supervision.sh), `enter`, `start`,
+# and `start-native` refuse (exit 1) before writing anything.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -996,6 +998,15 @@ fm_afk_launch_main() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   fm_afk_launch_lock_acquire || return 1
+  case "${1:-start}" in
+    enter|start|start-native)
+      if fm_supervision_switched_off "$FM_AFK_LAUNCH_STATE"; then
+        fm_afk_launch_log "supervision is switched off for this home, so away and quiet mode start nothing; switch it back on first with bin/fm-supervision.sh on"
+        fm_afk_launch_lock_release || true
+        trap - EXIT INT TERM
+        return 1
+      fi ;;
+  esac
   case "${1:-start}" in
     enter) shift; fm_afk_launch_enter "$@" ;;
     propose|confirm)

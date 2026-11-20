@@ -122,11 +122,20 @@ async function isPrimaryRoot(root, home) {
 // arm condition set (the turn-end guard decides with the same shared
 // predicate), so this plugin can never disagree with the guard again. Away
 // mode stays a local decline: its daemon owns supervision. X-mode homes arm
-// before their relay poll is registered in the state directory.
+// before their relay poll is registered in the state directory. Switched off
+// (bin/fm-supervision.sh), nothing arms, X mode included.
 function shouldArm(paths) {
+  if (supervisionSwitchedOff(paths)) return false;
   if (existsSync(`${paths.state}/.afk`)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
   return supervisionNeeded(paths);
+}
+
+// bin/fm-supervision.sh owns this marker (fm_supervision_switched_off in
+// bin/fm-supervision-lib.sh). While it exists a closing arm is dropped
+// silently: no retry, no restoration, and its wake stays durable in the queue.
+function supervisionSwitchedOff(paths) {
+  return existsSync(`${paths.state}/.supervision-off`);
 }
 
 // fm_supervision_needed <state-dir> exits 0 exactly when the shared predicate
@@ -366,6 +375,7 @@ function restorationFailure(status) {
 async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
+    if (supervisionSwitchedOff(paths)) return { failure: "" };
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
     if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
     // An actionable line belongs to this arm's close handler.
@@ -386,6 +396,7 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
   if (child || retryTimer) return;
+  if (supervisionSwitchedOff(paths)) return;
   if (!(await sessionOwnsLock(paths))) {
     setArmStatus("failed");
     surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
@@ -400,6 +411,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   setArmStatus("retrying");
   const timer = setTimeout(() => {
     if (retryTimer === timer) retryTimer = null;
+    if (supervisionSwitchedOff(paths)) return;
     void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
       if (["armed", "starting", "wake"].includes(status)) return;
       surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
@@ -469,6 +481,11 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     settled = true;
     resolveClosed();
     releaseChild();
+    if (supervisionSwitchedOff(paths)) {
+      settleReadiness("failed");
+      setArmStatus("off");
+      return;
+    }
     const classification = classifyArmClose(paths, hostMode, stdout, stderr, code, signal);
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
@@ -508,6 +525,10 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     settleReadiness("failed");
+    if (supervisionSwitchedOff(paths)) {
+      setArmStatus("off");
+      return;
+    }
     if (restorationInFlight) {
       setArmStatus("failed");
       return;

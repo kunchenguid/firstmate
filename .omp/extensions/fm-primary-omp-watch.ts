@@ -57,6 +57,11 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+//
+// Off switch (docs/turnend-guard.md "Supervision switched off"): while
+// state/.supervision-off exists this extension starts no arm, schedules no
+// retry, and drops a close silently; its wake, if any, stays durable in the
+// queue for the operator's next drain.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -142,6 +147,9 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const hostScript = `${fmRoot}/bin/fm-supervision-host.sh`;
+// bin/fm-supervision.sh owns this marker (fm_supervision_switched_off).
+const supervisionOffMarker = `${state}/.supervision-off`;
+const supervisionOffMessage = "watcher: off - supervision is switched off for this home; after bin/fm-supervision.sh on, call fm_watch_arm_omp to start the first cycle";
 const marker = `${state}/.omp-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/omp-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -239,6 +247,10 @@ function lockOwnership(): LockOwnership {
     if (!pid || pid === "1") break;
   }
   return pidAlive(lockPid) ? "other" : "missing";
+}
+
+function supervisionSwitchedOff(): boolean {
+  return existsSync(supervisionOffMarker);
 }
 
 function markLoaded(): void {
@@ -885,7 +897,7 @@ export default function (pi: ExtensionAPI) {
   }> {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
-      if (!generationIsLive(owner)) return { failure: "" };
+      if (!generationIsLive(owner) || supervisionSwitchedOff()) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
@@ -912,6 +924,7 @@ export default function (pi: ExtensionAPI) {
 
   function scheduleRetry(owner: SessionGeneration, message: string, predecessorArmPid: string): void {
     if (!generationIsLive(owner) || owner.child || owner.retryTimer) return;
+    if (supervisionSwitchedOff()) return;
     const ownership = lockOwnership();
     if (ownership !== "owned") {
       surfaceFailure(owner, `watcher: FAILED - omp extension cannot restore continuity because this session no longer owns the lock\n${message}`);
@@ -924,7 +937,7 @@ export default function (pi: ExtensionAPI) {
     }
     const timer = setTimeout(() => {
       if (owner.retryTimer === timer) owner.retryTimer = null;
-      if (!generationIsLive(owner)) return;
+      if (!generationIsLive(owner) || supervisionSwitchedOff()) return;
       const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
         surfaceFailure(owner, `watcher: FAILED - omp extension could not launch a continuity retry\n${result.message}`);
@@ -945,6 +958,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     markLoaded();
+    if (supervisionSwitchedOff()) return { ok: true, message: supervisionOffMessage };
     if (owner.child) {
       return {
         ok: true,
@@ -1029,6 +1043,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      if (supervisionSwitchedOff()) return;
       const classification = classifyClose(hostMode, stdout, stderr, code, signal);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
@@ -1059,6 +1074,7 @@ export default function (pi: ExtensionAPI) {
       settleReadiness(false);
       releaseChild();
       if (!generationIsLive(owner)) return;
+      if (supervisionSwitchedOff()) return;
       if (owner.restoring) return;
       scheduleRetry(owner, `watcher: FAILED - omp extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });

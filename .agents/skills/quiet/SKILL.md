@@ -18,6 +18,9 @@ Where a daemon runs, this skill is a thin wrapper.
 The `afk` skill owns the daemon's injection, busy/composer guards, and reliability properties; quiet mode uses that machinery while the captain remains present.
 For captain-held rechecks under quiet, see [architecture](../../../docs/architecture.md).
 
+Quiet mode keeps the background loop running and only changes how often the captain hears from it.
+When the captain wants the loop stopped altogether, use the off switch instead (`AGENTS.md` section 8, `bin/fm-supervision.sh off`).
+
 ## What it does
 
 0. **First check whether quiet mode needs anything here.**

@@ -2780,6 +2780,33 @@ EOF
   pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
 }
 
+# The off switch (bin/fm-supervision.sh): a restarted primary renders the off
+# state in both the supervision block and the next step, so it arms nothing.
+test_next_step_supervision_off_arms_nothing() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-supervision-off)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'since=2026-01-01T00:00:00Z\n' > "$home/state/.supervision-off"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "- Supervision: switched off by the operator" "supervision block did not render the off state"
+  assert_contains "$out" "Supervision is switched off for this home." "next step did not switch to the off guidance"
+  assert_contains "$out" "Only
+bin/fm-supervision.sh on turns it back on." "next step did not name the way back on"
+  assert_not_contains "$out" "This script never starts supervision itself." "off next step fell through to the ordinary guidance"
+
+  rm -f "$home/state/.supervision-off"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "switched off" "an on home rendered the off state"
+
+  pass "next step and the supervision block render the off switch so a restarted primary arms nothing"
+}
+
 # A restart under daemon-backed quiet mode must not read the quiet record as
 # hold-for-return: the captain is present and requested actions proceed, while
 # an away record keeps its hold-for-return line.
@@ -3135,6 +3162,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon
+test_next_step_supervision_off_arms_nothing
 test_quiet_record_digest_holds_nothing_for_a_return
 test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic

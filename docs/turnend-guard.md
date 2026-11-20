@@ -20,6 +20,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | Which sessions are in scope and what counts as supervision need | [Primary scope](#primary-scope) and [supervision need](#supervision-need) |
 | How the turn-end check and the mid-turn pull warning judge watcher health | [Strict watcher check at the turn boundary](#strict-watcher-check-at-the-turn-boundary) and [pull-warning verdict by supervision model](#pull-warning-verdict-by-supervision-model) |
 | Away and quiet mode | [Away and quiet mode daemon ownership](#away-and-quiet-mode-daemon-ownership) |
+| Switching the whole background loop off and back on | [Supervision switched off](#supervision-switched-off) |
 | How long a beacon stays fresh | [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) |
 | How each harness blocks or follows up | [Harness integrations](#harness-integrations) |
 | Claude's Stop auto-arm cooperation, block budget, and fail-open | [Claude cooperative mode](#claude-cooperative-mode) |
@@ -53,6 +54,52 @@ A live identity-matched daemon with a fresh beacon then satisfies that boundary 
 The guard remains a backstop.
 [`watcher-continuity.md`](watcher-continuity.md) owns normal continuity.
 
+The operator's off switch is the one state in which no supervisor is expected at all; see [Supervision switched off](#supervision-switched-off).
+
+## Supervision switched off
+
+The operator can switch a home's whole background supervision loop off, and back on, with one command each way:
+
+- `bin/fm-supervision.sh off`
+- `bin/fm-supervision.sh on`
+
+`bin/fm-supervision.sh status` reports the switch and whether a watcher or an away or quiet daemon is still running for the home.
+The script's header owns the exact mechanics.
+Away and quiet mode change who handles wakes and how often the operator hears about them, but they keep the loop running; this switch stops it.
+
+### What stops while it is off
+
+`off` writes `state/.supervision-off` first, then ends away or quiet mode and its daemon, then stops the home's watcher cycle.
+`fm_supervision_switched_off` in `bin/fm-supervision-lib.sh` is the one predicate every component reads.
+While that marker exists:
+
+- No watcher polls the fleet, so no wake, heartbeat, or stale check runs and nothing is queued.
+- The home has no [supervision need](#supervision-need), so the turn-end guards and the pull warning block nothing, follow nothing up, and show no watcher-down banner, and every re-arm owner that arms on that need arms nothing: the Claude Stop hook, the Codex Stop park, the Cursor and Antigravity parks, and the OpenCode plugin.
+- The Claude Stop hook also closes a cycle it was parked on silently instead of retrying or rewaking the model.
+- The Pi and omp watch extensions start no arm, schedule no retry, and drop a closing arm silently.
+- The supervision host stands down at its start, at every close, and before any successor, so no engine turn runs.
+- `bin/fm-watch-arm.sh` starts and attaches no cycle, and `bin/fm-watch-checkpoint.sh` runs no checkpoint, so a cycle the model arms by its own protocol (Grok, the Codex foreground checkpoint) does not start either.
+- No away or quiet daemon runs: it refuses to start, exits at its next loop pass if one is still alive, and types nothing into the supervisor pane, its shutdown flush included.
+- `/afk` and `/quiet` entry refuse until the switch is back on.
+- Session start and the supervision operating instructions render the off state, so a restarted primary arms nothing either.
+
+A wake that closed a cycle just as it was stopped stays durable in the queue.
+Workers keep running and keep appending their status lines, which stay durable too.
+While the switch is off, the primary reads worker status only when the operator writes, and `bin/fm-wake-drain.sh` presents unread status lines and folds open decisions and blockers straight from the status logs.
+
+### Turning it back on
+
+`on` only removes the marker, and nothing starts from the command itself.
+The primary's next turn end restores the cycle: an arm owner that arms on supervision need re-arms on its own, and on Pi, omp, Grok, and the Codex foreground checkpoint the turn-end guard asks for the repair the supervision instructions name.
+The downtime recorded when `off` stopped the watcher arrives as one recovery wake, and the drain that wake asks for presents every status line written while supervision was off, because the watcher compares each status file against its persisted reported signature rather than against the time it started.
+
+### Off-switch regression coverage
+
+- `tests/fm-supervision.test.sh` covers the switch, the need it zeroes, the real watcher it stops, the arm and checkpoint that start nothing, the refused away and quiet entries and daemon, and a daemon that stops slowly or never.
+- `tests/fm-supervision-host-hook.test.sh` drives the real Claude Stop hook, supervision host, and watcher through off, a turn end while off, and on with its catch-up, for both the host and the plain arm.
+- `tests/fm-pi-watch-extension.test.sh` covers the Pi extension's and the OpenCode plugin's dropped close, refused arm, restoration that ends quietly when switched off mid-wake, and first cycle after on.
+- `tests/fm-turnend-guard.test.sh`, `tests/fm-supervision-instructions.test.sh`, and `tests/fm-session-start.test.sh` cover the guard, the rendered instructions, and session start.
+
 ## Guard predicates
 
 The turn-end guard checks primary scope first, then supervision need, then watcher health.
@@ -79,6 +126,8 @@ These sources also count toward supervision need:
 - Registered `state/procevent/*.source` records require supervision even though they have no task metadata.
 - Every mode treats `state/x-watch.check.sh` as supervision need, so Relay polling remains guarded without an in-flight task.
 - A custom check registered with `bin/fm-check-register.sh` counts the same way, so an operator's home-level poll keeps running after the last task is torn down.
+
+A home whose supervision the operator switched off has no supervision need, whatever else it holds ([Supervision switched off](#supervision-switched-off)).
 
 The default cross-harness mode exits silently with no supervision need.
 

@@ -151,6 +151,22 @@ test_quiet_mode_stanzas() {
   pass "renderer's away/quiet stanzas are mode-aware, default to away, and fall back safely on garbage input"
 }
 
+test_supervision_off_stanza() {
+  local home out harness
+  home="$TMP_ROOT/off-home"
+  mkdir -p "$home/state" "$home/config"
+  for harness in claude codex pi omp opencode cursor grok agy; do
+    out=$(FM_HOME="$home" "$RENDER" --harness "$harness" --supervision-off 1)
+    assert_contains "$out" "- Supervision: switched off by the operator (bin/fm-supervision.sh)" "$harness: the off stanza is missing"
+    assert_contains "$out" "Arm no watcher, start no away or quiet daemon" "$harness: the off stanza lost its arm-nothing rule"
+  done
+  out=$(FM_HOME="$home" "$RENDER" --harness claude --supervision-off 0)
+  assert_not_contains "$out" "switched off" "an on home must not render the off stanza"
+  out=$(FM_HOME="$home" "$RENDER" --harness claude)
+  assert_not_contains "$out" "switched off" "omitting --supervision-off must render supervision as on"
+  pass "renderer: the off switch renders its stanza on every primary"
+}
+
 test_repair_lines() {
   local home out
   home="$TMP_ROOT/repair-home"
@@ -403,6 +419,7 @@ test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
 test_quiet_mode_stanzas
+test_supervision_off_stanza
 test_repair_lines
 test_omp_restart_guidance_depends_on_home_vs_checkout
 test_cross_harness_ordinary_continuation_and_repair_matrix

@@ -468,6 +468,53 @@ test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out() {
 }
 
 
+# The off switch (bin/fm-supervision.sh, docs/turnend-guard.md "Supervision
+# switched off") on a Claude primary, through the real Stop hook, host, and
+# watcher, for both re-arm owners (the host and the plain arm): switching off
+# while the hook is parked ends the cycle without a rewake or a fresh arm, a
+# later turn end arms nothing while a worker keeps writing status, and
+# switching back on re-arms at the next turn end, whose first close reports
+# the status written while supervision was off.
+test_switch_off_stands_the_claude_stop_hook_down_and_on_catches_up() {
+  local owner home label drained
+  for owner in host arm; do
+    home=$(make_primary_home "switch-off-$owner")
+    label="switch off ($owner)"
+    if [ "$owner" = arm ]; then
+      rm -f "$home/config/supervision-host"
+      : > "$home/config/supervision-host-off"
+    fi
+    start_hook_session "$home"
+    turn_end "$home"
+    wait_until 150 watcher_live "$home" || fail "$label: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+    FM_HOME="$home" "$home/bin/fm-supervision.sh" off > "$home/off.out" 2>&1 \
+      || fail "$label: off failed: $(cat "$home/off.out")"
+    wait_until 150 hook_exited "$home" || fail "$label: the parked Stop hook never closed after off"
+    expect_code 0 "$(cat "$home/hook.rc")" "$label: switching off must close the parked hook silently: $(cat "$home/hook.err")"
+    assert_no_grep 'firstmate watcher wake' "$home/hook.err" "$label: switching off must not rewake main"
+    watcher_live "$home" && fail "$label: a watcher is still running after off"
+    assert_grep 'supervision: off' "$home/off.out" "$label: off must report the new state"
+    append_status "$home" 'which export format?' needs-decision
+    turn_end "$home"
+    wait_until 150 hook_exited "$home" || fail "$label: a turn end while off never finished its Stop hook"
+    expect_code 0 "$(cat "$home/hook.rc")" "$label: a turn end while off must stay silent: $(cat "$home/hook.err")"
+    sleep 2
+    watcher_live "$home" && fail "$label: a turn end while off armed a watcher"
+    [ "$(engine_calls "$home")" -eq 0 ] || fail "$label: an engine turn ran while supervision was off"
+    FM_HOME="$home" "$home/bin/fm-supervision.sh" on > "$home/on.out" 2>&1 || fail "$label: on failed: $(cat "$home/on.out")"
+    turn_end "$home"
+    wait_until 250 hook_exited "$home" \
+      || fail "$label: after on, the first cycle never reported the status written while off: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+    assert_rewoke_main "$home" "$label"
+    drained=$(main_drain "$home")
+    assert_contains "$drained" "which export format?" "$label: the catch-up drain must present the status written while off"
+    : > "$home/session.stop"
+    stop_home_processes "$home"
+  done
+  pass "host+hook: switching off ends the parked cycle silently and arms nothing, and switching on catches up at the next turn end"
+}
+
+
 test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
   local home
   home=$(make_primary_home hook-turns-main-only)
@@ -705,6 +752,7 @@ fm_test_run \
   test_claude_stop_hook_rewakes_main_for_an_inbox_note_after_a_handled_wake \
   test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record \
   test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out \
+  test_switch_off_stands_the_claude_stop_hook_down_and_on_catches_up \
   test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn \
   test_successor_left_at_the_turn_survives_the_hook_process_group_teardown \
   test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails \
