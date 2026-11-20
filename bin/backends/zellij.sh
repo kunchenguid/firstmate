@@ -408,7 +408,7 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 fm_backend_zellij_current_path() {  # <target> [expected-label]
   local target=$1 expected_label=${2:-} out line marker_begin="__FM_ZELLIJ_CWD_BEGIN__" marker_end="__FM_ZELLIJ_CWD_END__" in_block=0 chunk="" last=""
   fm_backend_zellij_target_ready "$target" "$expected_label" || return 0
-  fm_backend_zellij_send_text_line "$target" "printf '%s\n' '$marker_begin'; pwd; printf '%s\n' '$marker_end'" "$expected_label" || return 0
+  fm_backend_zellij_send_text_line "$target" "${SPAWN_SHELL_PREFIX-}printf '%s\n' '$marker_begin'; pwd; printf '%s\n' '$marker_end'" "$expected_label" || return 0
   sleep 0.3
   out=$(fm_backend_zellij_capture "$target" 200 "$expected_label") || return 0
   while IFS= read -r line; do
