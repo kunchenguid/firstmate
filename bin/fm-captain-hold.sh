@@ -270,6 +270,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-home-summary-refresh-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-home-summary-refresh-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -398,7 +400,7 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
 # the root's own tasks-axi configuration, exactly like the transition library's
 # mutate path.
 tasks_axi() {
-  local data file root backend
+  local data file root backend status
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
   root=$(fm_backlog_root "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
   backend=$(fm_tasks_axi_backend "$root") || return 2
@@ -408,6 +410,11 @@ tasks_axi() {
   else
     (cd "$root" && tasks-axi "$@")
   fi
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    fm_home_summary_refresh_on_backlog_write_detached
+  fi
+  return "$status"
 }
 
 require_tasks_axi() {
@@ -1288,6 +1295,7 @@ apply_pending_retained_artifact() {  # <task-id>
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
       fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
         || { report_retained_artifact_failure "$id" "$marker"; return 1; }
+      fm_home_summary_refresh_on_backlog_write_detached
       ;;
   esac
 }
