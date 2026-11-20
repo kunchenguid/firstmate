@@ -105,9 +105,9 @@
 #   {"task", "status" (clear, ambiguous, escalate, error, or off), "profile",
 #   "confidence", "suggested"} there; profile holds harness, model, and effort
 #   on clear and is null otherwise. confidence is the resolver's answer
-#   confidence, and suggested the profile it offered even when it abstained
-#   (null when it offered none or several); both are null when no answer was
-#   made. fm-spawn.sh reads it as the task's dispatch decision.
+#   confidence, kept on a failure after the answer arrived, and suggested the
+#   one profile it offered when it abstained (null on clear, and when it offered
+#   none or several); confidence is null when no answer was made. fm-spawn.sh reads it as the task's dispatch decision.
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
@@ -172,6 +172,7 @@ OA_BASE=https://api.openai.com
 OA_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
 
+ANSWER_CONFIDENCE=null
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 record_task() {
   [ -n "$TASK_RECORD" ] || return 0
@@ -196,7 +197,7 @@ no_rules() {
 }
 emit_error() {
   local reason=$1
-  record_task error || true
+  record_task error null "$ANSWER_CONFIDENCE" || true
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
   exit 0
@@ -630,6 +631,7 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+ANSWER_CONFIDENCE=$(jq -c '.answers.rule.confidence' "$RESP_FILE") || ANSWER_CONFIDENCE=null
 
 # ---- quota evidence: one quota-axi --json snapshot, skipped entirely under the
 # ---- shared-quota opt-out (a stub keeps the slurpfile contract intact) ---------
@@ -830,12 +832,11 @@ TEXT=$(jq -r '
 STATUS=$(jq -r '.status' <<<"$RESULT") || emit_error "status rendering failed"
 PROFILE=$(jq -c 'if .chosen then .chosen.profile | {harness, model: (.model // null), effort: (.effort // null)} else null end' <<<"$RESULT") \
   || emit_error "profile rendering failed"
-CONFIDENCE=$(jq -c '.confidence // null' <<<"$RESULT") || emit_error "confidence rendering failed"
-# The suggestion survives an abstention: the chosen profile on clear, else the
-# one profile the picked rule or default offered, else null when it offered several.
-SUGGESTED=$(jq -c 'if .chosen then .chosen.profile elif (.candidates // [] | length) == 1 then .candidates[0].profile else null end
+# The suggestion survives an abstention: the one profile the picked rule or
+# default offered, else null when it offered several; a clear run keeps it in profile.
+SUGGESTED=$(jq -c 'if .chosen then null elif (.candidates // [] | length) == 1 then .candidates[0].profile else null end
   | if . then {harness, model: (.model // null), effort: (.effort // null)} else null end' <<<"$RESULT") \
   || emit_error "suggestion rendering failed"
-record_task "$STATUS" "$PROFILE" "$CONFIDENCE" "$SUGGESTED" || emit_error "could not record the dispatch resolution"
+record_task "$STATUS" "$PROFILE" "$ANSWER_CONFIDENCE" "$SUGGESTED" || emit_error "could not record the dispatch resolution"
 printf '%s\n' "$TEXT"
 exit 0

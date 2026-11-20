@@ -38,8 +38,8 @@ Readers must ignore members and events they do not recognize, so later versions 
 `task.dispatched` members: `kind` is `ship`, `scout`, or `secondmate`; `project` is the project directory name, or `null` for a remote second mate; `harness` names the agent tool; `model` is the requested model, or `null` for the tool's default.
 `effort` is the requested effort level, or `null` when none was passed.
 `resolution` is the task's saved [typed dispatch resolution](configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) as `{"status", "confidence", "profile"}`, or `null` when the task has none.
-Its `profile` is the profile the resolver suggested, with `harness`, `model`, and `effort`; it is kept even when the resolver abstained, and is `null` when it offered none or several.
-`override` is the `--dispatch-override` reason, or `null` when the launch used no override.
+Its `profile` is the profile the resolver chose or, when it abstained, suggested, with `harness`, `model`, and `effort`; it is `null` when it offered none or several.
+`override` is the `--dispatch-override` reason, `"default"` when a clear resolved profile governed the launch, or `null` otherwise.
 Together they let a reader tell whether the routing policy or an override decided a launch.
 A second mate launch carries `null` for `effort`, `resolution`, and `override`.
 

@@ -210,9 +210,9 @@ case "$cmd" in
     rm -f -- "$(offset_path "$2")"
     append task.dispatched "$2" \
       '{kind: ($kind | n), project: ($project | n), harness: ($harness | n), model: ($model | n),
-        effort: ($effort | n), resolution: (try ($resolution | fromjson) catch null), override: ($override | n)}' \
+        effort: ($effort | n), resolution: $resolution, override: ($override | n)}' \
       --arg kind "$3" --arg project "$4" --arg harness "$5" --arg model "$6" \
-      --arg effort "${7:-}" --arg resolution "${8:-null}" --arg override "${9:-}" || rc=1
+      --arg effort "${7:-}" --argjson resolution "${8:-null}" --arg override "${9:-}" || rc=1
     ;;
   pr_ready)
     capture_task "$2" || rc=1

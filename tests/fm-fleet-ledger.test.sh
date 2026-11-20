@@ -143,6 +143,19 @@ test_dispatch_record_carries_effort_resolution_and_override() {
   pass "flag on: task.dispatched carries the effort, the saved resolution with its suggested profile, and the override reason"
 }
 
+test_dispatch_record_marks_a_default_launch() {
+  local out
+  make_case on-dispatch-default on
+  printf '%s\n' '{"rules":[]}' > "$HOME_DIR/config/crew-dispatch.json"
+  printf '%s\n' '{"task":"'"$TASK"'","status":"clear","profile":{"harness":"claude","model":null,"effort":null},"confidence":0.9,"suggested":null}' \
+    > "$HOME_DIR/data/$TASK/dispatch-resolution.json"
+  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode local-only --yolo off --harness claude 2>&1) || fail "spawn failed: $out"
+  assert_equals '{"resolution":{"status":"clear","confidence":0.9,"profile":{"harness":"claude","model":null,"effort":null}},"override":"default"}' \
+    "$(jq -c '{resolution, override}' "$HOME_DIR/state/fleet-ledger.jsonl")" \
+    "default launch"
+  pass "flag on: a launch that used the clear resolved profile records override default"
+}
+
 test_flag_on_records_a_pr_merge_once() {
   local pr_url=https://github.com/acme/sample/pull/7 rows
   make_case on-pr on
@@ -304,6 +317,7 @@ test_flag_off_writes_nothing() {
 
 test_flag_on_records_the_task_lifecycle
 test_dispatch_record_carries_effort_resolution_and_override
+test_dispatch_record_marks_a_default_launch
 test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration
 test_worker_status_line_is_recorded_when_written

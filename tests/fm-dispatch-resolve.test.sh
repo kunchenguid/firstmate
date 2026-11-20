@@ -1378,8 +1378,8 @@ assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-m
 assert_equals '{"task":"pager-fix","status":"clear","profile":{"harness":"cursor","model":"cursor-grok-4.6-medium","effort":null}}' \
   "$(jq -c '{task, status, profile: (.profile | {harness, model, effort})}' "$TASK_RECORD")" \
   "a clear run records the task, status, and the printed profile with an unset effort as null"
-assert_equals '0.9 cursor' "$(jq -r '"\(.confidence) \(.suggested.harness)"' "$TASK_RECORD")" \
-  "a clear run records the answer confidence and the chosen profile as the suggestion"
+assert_equals '0.9 null' "$(jq -r '"\(.confidence) \(.suggested)"' "$TASK_RECORD")" \
+  "a clear run records the answer confidence and keeps the chosen profile in profile only"
 reset_log
 write_response "$RESPONSE" rule_4 0.41
 TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager

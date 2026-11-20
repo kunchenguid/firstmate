@@ -3260,6 +3260,8 @@ esac
 
 case "$DISPATCH_OVERRIDE" in *[![:print:]]*) echo 'error: --dispatch-override must be a printable reason' >&2; exit 1 ;; esac
 DISPATCH_RECORD="$DATA/$ID/dispatch-resolution.json"
+DISPATCH_SNAPSHOT=$(cat -- "$DISPATCH_RECORD" 2>/dev/null) || DISPATCH_SNAPSHOT=
+LEDGER_OVERRIDE=$DISPATCH_OVERRIDE
 if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
   if [ ! -e "$DISPATCH_RECORD" ]; then
     echo "error: config/crew-dispatch.json is active and task $ID has no recorded dispatch resolution; run bin/fm-dispatch-resolve.sh $DATA/$ID/brief.md --project <name> first" >&2
@@ -3268,7 +3270,7 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-disp
   dispatch_fields=$(jq -r --arg id "$ID" '
     select(.task == $id and (.status | IN("clear", "ambiguous", "escalate", "error", "off"))
       and (if .status == "clear" then (.profile.harness | type) == "string" and .profile.harness != "" else true end))
-    | .status, (.profile.harness // ""), (.profile.model // ""), (.profile.effort // "")' "$DISPATCH_RECORD" 2>/dev/null) || dispatch_fields=
+    | .status, (.profile.harness // ""), (.profile.model // ""), (.profile.effort // "")' <<<"$DISPATCH_SNAPSHOT" 2>/dev/null) || dispatch_fields=
   { read -r dispatch_status; read -r selected_harness; read -r selected_model; read -r selected_effort; } <<<"$dispatch_fields" || true
   if [ -z "$dispatch_status" ]; then
     echo "error: malformed dispatch resolution $DISPATCH_RECORD for task $ID; rerun bin/fm-dispatch-resolve.sh $DATA/$ID/brief.md --project <name>" >&2
@@ -3281,6 +3283,7 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" -eq 0 ] && [ -f "$CONFIG/crew-disp
     echo "error: launch flags do not match the clear dispatch selection --harness $selected_harness${selected_model:+ --model $selected_model}${selected_effort:+ --effort $selected_effort} recorded in $DISPATCH_RECORD; pass those flags with no raw launch command, or record this task's override with --dispatch-override <reason>" >&2
     exit 1
   fi
+  [ "$dispatch_status" != clear ] || LEDGER_OVERRIDE=${DISPATCH_OVERRIDE:-default}
 fi
 
 # muse, gemini, devin, commandcode, polytoken, cortex, and kiro are verified as CREWMATE/SCOUT adapters only. A secondmate is
@@ -8312,9 +8315,9 @@ SPAWN_ACCOUNT=
 [ -z "$OMP_PROFILE_PIN" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT omp_profile=$OMP_PROFILE_PIN"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 if [ -e "$CONFIG/fleet-ledger" ] && [ "$RELAUNCH" -eq 0 ]; then
-  # The saved resolution is copied as is; a missing or unreadable record is null.
-  LEDGER_RESOLUTION=$(jq -c --arg id "$ID" 'select(.task == $id) | {status, confidence: (.confidence // null), profile: (.suggested // null)}' "$DISPATCH_RECORD" 2>/dev/null) || LEDGER_RESOLUTION=
-  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" "${EFFORT:-}" "${LEDGER_RESOLUTION:-null}" "$DISPATCH_OVERRIDE" || true
+  # The resolution snapshot read at the dispatch gate is copied; a missing or unreadable record is null.
+  LEDGER_RESOLUTION=$(jq -c --arg id "$ID" 'select(.task == $id) | {status, confidence: (.confidence // null), profile: (.profile // .suggested // null)}' <<<"$DISPATCH_SNAPSHOT" 2>/dev/null) || LEDGER_RESOLUTION=
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" "${EFFORT:-}" "${LEDGER_RESOLUTION:-null}" "$LEDGER_OVERRIDE" || true
 fi
 # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups") tag the
 # new endpoint now rather than at the next watcher poll; off costs one file test.
