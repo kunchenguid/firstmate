@@ -375,7 +375,7 @@ It skips only that prompt; the conditions above are what authorize the merge.
 
 ## Why a recorded head is not the authority
 
-`bin/fm-pr-check.sh` records `pr_head=` for both forges: `gh` exposes a GitHub pull request's head commit as a selectable field, and a GitLab merge request's own head ref supplies the same fact ([above](#the-merge-requests-own-head-ref)).
+`bin/fm-pr-check.sh` records `pr_head=` for GitHub, where `gh` exposes the head commit as a selectable field, and for GitLab in a home that opts in, where the merge request's own head ref supplies the same fact ([above](#the-merge-requests-own-head-ref)).
 The record is optional by design; [architecture.md](architecture.md) owns review fallback and teardown behavior.
 
 The merge path deliberately does not depend on a recorded head.
