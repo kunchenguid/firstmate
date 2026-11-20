@@ -178,6 +178,7 @@ This was the single most consequential finding of this verification pass: a naiv
 
 Read live from `tea api ... /repos/{owner}/{repo}/pulls/{n}` (`state`, `mergeable`, `draft`, `head.sha`) and `tea api ... /repos/{owner}/{repo}/commits/{sha}/status?limit=50&page={p}` (the combined commit status).
 The combined-status endpoint computes its `state` from one page of the latest status per context, so every page is read until an empty one and the head is green only when each non-empty page reads `success`.
+Because `tea api` exits 0 on an HTTP-level failure, a page counts as empty only when it is a combined status whose `statuses` field is present and null or an empty array; an error object without that field reads as `unreadable` and refuses the merge.
 A positive `draft` reading refuses; an instance too old to report the field still refuses a work-in-progress merge server side.
 `tea api` passes a query string through unchanged, because it builds the request URL by plain concatenation onto the login's `/api/v1` base.
 An already-merged pull request is correctly refused for a second merge attempt:
