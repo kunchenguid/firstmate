@@ -277,13 +277,13 @@ fm_backend_hc_container_ensure() {
 # fm_backend_hc_task_name: the hc terminal name for <window-label> (fm-<id>):
 # the task id lowercased, every character outside [a-z0-9_-] turned into `-`,
 # cut to hc's 32-character limit. Empty means no name, also when the result is
-# shaped like a terminal address (`t8f`, `todo`), which hc would resolve as a target,
+# `t` followed by a digit (`t7`, `t8f`), which hc 0.1.21 refuses as id-shaped,
 # or starts with `-` or `_`, which hc 0.1.21 refuses as `invalid_params`.
 fm_backend_hc_task_name() {  # <window-label>
   local name
   name=$(printf '%s' "${1#fm-}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9_-' '-' | cut -c1-32)
-  case $name in [-_]*) return 0 ;; esac
-  fm_backend_hc_address_valid "$name" || printf '%s' "$name"
+  case $name in [-_]*|t[0-9]*) return 0 ;; esac
+  printf '%s' "$name"
 }
 
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for
