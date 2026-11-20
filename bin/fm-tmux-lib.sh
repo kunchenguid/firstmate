@@ -201,6 +201,18 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
+  # Wintermolt parks its terminal cursor below its footer on the keybind row
+  # while drawing its own reverse-video cursor cell in the composer (verified
+  # live, wintermolt 0.7.0: cursor_y names the footer row, never the box), so it
+  # takes the same cursorless reclassification, gated on its own anchored
+  # foreground process name rather than on the verdict alone, and read with the
+  # wintermolt composer scope (FM_COMPOSER_HARNESS) so its palette-dim
+  # placeholder row resolves through the scoped rule in
+  # bin/fm-composer-lib.sh, the same identity-scoped routing hermes takes.
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_wintermolt "$target"; then
+    verdict=$(FM_COMPOSER_HARNESS=wintermolt \
+      fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+  fi
   # Cortex Code parks its terminal cursor in the first column of the blank row
   # under its footer, before and after typing (verified cortex 1.1.104 in
   # tmux), so the cursor row names no composer and the same cursorless read
@@ -220,6 +232,25 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
+}
+
+# fm_tmux_pane_is_wintermolt: true when the pane's FOREGROUND process group
+# contains a process named exactly `wintermolt` (the Zig-compiled single
+# binary's comm, verified live on wintermolt 0.7.0). The foreground scoping
+# (pgid = tpgid) keeps a backgrounded wintermolt out of the verdict, matching
+# fm_tmux_pane_is_cortex above.
+fm_tmux_pane_is_wintermolt() {  # <target>
+  local target=$1 tty pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r _ pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    [ "${comm##*/}" = wintermolt ] && return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
 }
 
 # fm_tmux_pane_is_cortex: true when the pane's FOREGROUND process group contains

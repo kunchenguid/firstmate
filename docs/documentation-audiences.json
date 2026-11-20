@@ -242,6 +242,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/wintermolt.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/muse.md",
       "audience": "agent-runtime"
     },
@@ -583,6 +587,10 @@
     },
     {
       "path": "docs/verification/hermes.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/wintermolt.md",
       "audience": "maintainer-verification"
     },
     {

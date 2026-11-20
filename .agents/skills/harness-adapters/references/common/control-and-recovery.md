@@ -20,6 +20,7 @@ Each supported harness handles its folder-trust gate differently, and the tool r
 For Claude, load `references/harness/claude.md`; its workspace-trust section owns the non-key-answerable gate and spawn-time pre-registration for every spawn kind.
 agy gates every fresh worktree too; the spawn pre-registers it in agy's own store the same way, and a strict post-launch gate answers any dialog that still renders before the spawn reports success.
 Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its own with `--yolo`.
+Wintermolt renders no trust or first-run dialog at all, but its single interrupt key is also its idle quit key, so the control plane requires a proven running turn before pressing it; `references/harness/wintermolt.md` owns that recipe and the busy proof it reads.
 Kiro suppresses its `--trust-all-tools` confirmation modal with a `chat.disableTrustAllConfirmation` setting the spawn seeds into the per-task `KIRO_HOME`; `references/harness/kiro.md` owns that recipe and where the decision persists.
 Grok renders a folder-trust gate in a linked worktree, and `references/harness/grok.md` owns how to verify the worker's real location, answer it, and where the decision persists; the project picker is a separate dialog that stays absent when the spawn starts in a git root.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.

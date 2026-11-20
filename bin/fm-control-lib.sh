@@ -64,7 +64,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes wintermolt
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -96,6 +96,7 @@ fm_control_harness_family() {  # <recorded-harness>
     cortex) printf 'cortex' ;;
     hermes) printf 'hermes' ;;
     kiro) printf 'kiro' ;;
+    wintermolt) printf 'wintermolt' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -120,7 +121,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
     hermes) case "$kind" in ship|scout) ;; *) return 1 ;; esac ;;
-    muse|gemini|rovo|devin|commandcode|polytoken|cortex|kiro) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|devin|commandcode|polytoken|cortex|kiro|wintermolt) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -137,7 +138,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes) printf 'key' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes|wintermolt) printf 'key' ;;
     *) return 1 ;;
   esac
 }
@@ -156,9 +157,15 @@ fm_control_interrupt_transport() {  # <harness>
 # cortex cancels on a single Escape, printing the Interrupted row
 # with an idle composer and firing its Stop hook; an Escape pressed on an idle
 # composer does nothing (verified live, cortex 1.1.104).
+# wintermolt cancels on a single Escape too, and its footer's keybind segment
+# switches from `Esc quit` to `Esc stop` for exactly the turn it cancels
+# (verified live, wintermolt 0.7.0). Unlike every other adapter, the same key
+# QUITS an idle wintermolt TUI outright - a draft does not protect it - so
+# bin/fm-control.sh's interrupt path refuses the verb without a proven running
+# turn rather than pressing blind.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes|wintermolt) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -171,7 +178,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin|hermes) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|wintermolt) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -190,7 +197,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|hermes) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|hermes|wintermolt) ;;
     *) return 1 ;;
   esac
 }
@@ -252,7 +259,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes|wintermolt) ;;
     *) return 1 ;;
   esac
 }
@@ -270,7 +277,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # kiro's stop hook fires on normal completion but, like claude's, not on a
     # manual Escape, and its `Cancelled ...` row is likewise rendered rather than
     # recorded, so fm-control preserves the adapter-owned busy record instead.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes|wintermolt) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -291,7 +298,7 @@ fm_control_exit_command() {  # <harness> [opencode-major]
       esac
       ;;
     claude|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro|hermes) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro|hermes|wintermolt) printf '/quit' ;;
     *) return 1 ;;
   esac
 }

@@ -600,6 +600,8 @@
 #                  generated firstmate-worker facet (the project facet layer)
 #     __KIROBIN__   resolved, kiro-verified executable for a kiro launch
 #     __KIROHOME__  firstmate-owned per-task KIRO_HOME dir (hook agent config + trust setting)
+#     __WINTERMOLTBIN__ resolved, wintermolt-verified executable for a wintermolt launch
+#                  (__MODELFLAG__ carries its WINTERMOLT_MODEL assignment)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
 # parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
@@ -2670,7 +2672,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | commandcode | polytoken | cortex | kiro | hermes | wintermolt)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -3207,6 +3209,28 @@ launch_template() {
   # when a supported effort is requested, since a second --config-override
   # would silently discard the first (confirmed live).
   rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
+  # wintermolt (Wintermolt): a pane-attached full-screen TUI worker with no
+  # initial-prompt argument, so like kimi and rovo it launches BARE and
+  # receives an absolute brief pointer only after the TUI readiness gate below.
+  # The interactive full-screen view is the supervised surface: its pinned
+  # footer row carries the busy/idle verdict (bin/fm-busy-lib.sh) and its
+  # rounded bordered composer is the shared bordered shape (bin/fm-composer-lib.sh).
+  # Backend and provider selection ride wintermolt's own documented environment
+  # (WINTERMOLT_BACKEND plus the chosen backend's URL/key variables, per
+  # wintermolt's docs/BACKENDS.md), inherited from the worker environment;
+  # __MODELFLAG__ carries only WINTERMOLT_MODEL for the selected backend.
+  # WINTERMOLT_NO_FALLBACK=1 is pinned by this launch, never inherited: a
+  # failed request must fail the turn visibly instead of being silently
+  # answered by local Ollama or a cloud fallback, so a supervised lane can
+  # never run on a model nobody selected while looking healthy (verified
+  # live, wintermolt 0.7.0). An unusable backend selection never reaches this
+  # gate at all: wintermolt prints its reason and exits 1 before the first
+  # request, so the pane dies at launch and the readiness gate fails loudly.
+  # wintermolt publishes no harness-identity marker of its own, so the foreign
+  # markers are cleared here as defense in depth, exactly like rovo's; the
+  # cleared set matches the shared outer wrap plus the ones hermes's template
+  # clears.
+  wintermolt) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u AGENT __MODELFLAG__WINTERMOLT_NO_FALLBACK=1 __WINTERMOLTBIN__' ;;
   *) return 1 ;;
   esac
 }
@@ -3304,7 +3328,7 @@ fi
 # kiro has none either: this task verified only crewmate-side launch, busy state,
 # interrupt, exit, and resume on the V2 engine, and docs/supervision-protocols/
 # carries no kiro wake protocol (kiro-cli 2.21.4).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ]; }; then
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = commandcode ] || [ "$HARNESS" = polytoken ] || [ "$HARNESS" = cortex ] || [ "$HARNESS" = kiro ] || [ "$HARNESS" = hermes ] || [ "$HARNESS" = wintermolt ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -3336,6 +3360,35 @@ fi
 
 # Hermes is verified only as a visible tmux worker. Other backends do not
 # yet prove its profile-prefixed composer or native process identity.
+# Wintermolt is verified only as a visible tmux worker: its rendered busy
+# signature lives in the full-screen TUI's pinned footer row, which only a
+# pane capture reads, and its launch is a pane-attached full-screen view with
+# no headless or transcript surface.
+if [ "$HARNESS" = wintermolt ] && [ "$BACKEND" != tmux ]; then
+  echo "error: wintermolt is verified on the tmux backend only; backend=$BACKEND is unsupported" >&2
+  exit 1
+fi
+if [ "$HARNESS" = wintermolt ]; then
+  # Wintermolt has no provider namespace of its own: the model id goes to the
+  # selected backend as-is, and the backend plus its URL/key variables are the
+  # operator's wintermolt environment (WINTERMOLT_BACKEND and the chosen
+  # backend's own variables, see references/harness/wintermolt.md). A
+  # provider-prefixed model is therefore a configuration mistake that would
+  # be sent to the provider verbatim and fail the first turn, so it is refused
+  # here rather than launched.
+  if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+    case "$MODEL" in
+      */*)
+        echo "error: wintermolt takes a bare model id for the selected backend (WINTERMOLT_BACKEND and the backend's own URL/key environment), never a provider-prefixed one; pass '<id>' with the backend environment set, or omit --model" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  # Effort follows the record-and-omit contract for a harness with no verified
+  # interactive effort flag: wintermolt exposes no reasoning or effort setting
+  # at all, only a model id, so a requested effort is recorded but not passed.
+  [ -z "$EFFORT" ] || echo "notice: wintermolt has no reasoning or effort setting; effort=$EFFORT is recorded but not passed" >&2
+fi
 if [ "$HARNESS" = hermes ] && [ "$BACKEND" != tmux ]; then
   echo "error: hermes is verified on the tmux backend only; backend=$BACKEND is unsupported" >&2
   exit 1
@@ -3449,6 +3502,12 @@ agy)
 kiro)
   KIRO_BIN=$(resolve_pi_executable kiro-cli) || {
     echo "error: kiro-cli executable not found on PATH; install Kiro CLI or select a different verified harness" >&2
+    exit 1
+  }
+  ;;
+wintermolt)
+  WINTERMOLT_BIN=$(resolve_pi_executable wintermolt) || {
+    echo "error: wintermolt executable not found on PATH; install Wintermolt or select a different verified harness" >&2
     exit 1
   }
   ;;
@@ -3759,6 +3818,14 @@ model_flag_for_harness() {
   # fallback to the bare model axis.
   polytoken)
     printf -- '--model %s ' "$(shell_quote "${POLYTOKEN_MODEL_REF:-$model}")"
+    ;;
+  # wintermolt has no model flag: the model rides the WINTERMOLT_MODEL
+  # environment variable of the selected backend (docs/BACKENDS.md at the
+  # verified revision), and the launch template places this assignment in
+  # its env prefix ahead of the binary. A provider-prefixed value was already
+  # refused at validation, so what lands here is a bare id.
+  wintermolt)
+    printf -- 'WINTERMOLT_MODEL=%s ' "$(shell_quote "$model")"
     ;;
   esac
 }
@@ -5954,6 +6021,101 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# wintermolt mirrors the kimi/rovo launch-then-send shape: it has no
+# initial-prompt argument, so it launches bare and takes an absolute brief
+# pointer only after a TUI readiness gate, then a delivery-confirmation gate.
+# Readiness is wintermolt's own pinned footer row (`Enter send ... ● ready`
+# with the `Type a message, or /help` composer placeholder above it) or the
+# shared composer classifier's empty verdict; the busy half of the same footer
+# (`Esc stop` / spinner ` working`) is the delivery proof, read through the
+# same rendered-tail busy contract the supervisor uses (bin/fm-busy-lib.sh),
+# so the spawn never reports success on a pane that is not provably working
+# its brief. A backend that cannot be built never reaches this gate: the
+# process exits 1 at startup (verified live, wintermolt 0.7.0), the footer
+# never renders, and the gate fails loudly naming the window.
+wintermolt_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+wintermolt_composer_is_empty() {
+  [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
+}
+
+wintermolt_pane_is_ready() {  # <plain-pane-capture>
+  # The keybind segment of the pinned footer row is the ready signal: it
+  # reads `Esc quit` exactly while the TUI is idle, and it survives the
+  # status-cell truncation a narrow pane applies (at 80 columns the trailing
+  # `● ready` cell is cut to an ellipsis while `Esc quit` stays). The
+  # composer fallback is the shared classifier's empty verdict.
+  printf '%s\n' "$1" | grep -qE 'Enter[[:space:]]+send.*Esc[[:space:]]+quit' \
+    || wintermolt_composer_is_empty
+}
+
+wintermolt_wait_for_ready() {
+  local pane i=0 max=${FM_WINTERMOLT_READY_POLLS:-60} interval=${FM_WINTERMOLT_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(wintermolt_capture)
+    if wintermolt_pane_is_ready "$pane"; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+wintermolt_pane_is_working() {  # <plain-pane-capture>
+  case "$(fm_busy_classify "$BACKEND" "$T" wintermolt "$ID" "$STATE" "$1")" in
+    busy*) return 0 ;;
+  esac
+  return 1
+}
+
+# A delivered pointer leaves its user echo in the transcript box, prefixed by
+# wintermolt's own `> ` user marker (verified live, wintermolt 0.7.0). The echo
+# is submission evidence, not processing evidence: the delivery gate still
+# requires the busy verdict to report success, and uses the echo only to tell
+# a swallowed pointer (nothing echoed, composer empty: safe to retype) from
+# one that was submitted and already ended (echoed: never retype, because the
+# worker already received it and a second copy would duplicate the brief).
+wintermolt_pointer_is_echoed() {  # <plain-pane-capture>
+  printf '%s\n' "$1" | grep -qF '> Read the brief at'
+}
+
+wintermolt_wait_for_delivery() {  # <pointer>
+  local pointer=$1 pane i=0 max=${FM_WINTERMOLT_DELIVERY_POLLS:-60} interval=${FM_WINTERMOLT_POLL_INTERVAL:-0.5}
+  local submits=1 max_submits=${FM_WINTERMOLT_SUBMIT_ATTEMPTS:-3} verdict
+  while [ "$i" -lt "$max" ]; do
+    pane=$(wintermolt_capture)
+    if wintermolt_pane_is_working "$pane"; then
+      return 0
+    fi
+    # The TUI swallows typed keys during its startup window (verified live: a
+    # pointer typed at the first footer frame never reached the composer and
+    # no turn started, the same hazard kimi's submit retries cover). Nothing
+    # echoed plus a provably empty composer is positive proof nothing is
+    # queued, so the pointer is retyped; an echoed pointer is never retyped.
+    if [ "$submits" -lt "$max_submits" ] \
+       && ! wintermolt_pointer_is_echoed "$pane" \
+       && wintermolt_composer_is_empty; then
+      submits=$((submits + 1))
+      verdict=$(fm_backend_send_text_submit \
+        "$BACKEND" "$T" "$pointer" "${FM_WINTERMOLT_SUBMIT_RETRIES:-3}" \
+        "${FM_WINTERMOLT_SUBMIT_SLEEP:-$interval}" 0 "$W") || return 1
+      [ "$verdict" != send-failed ] || return 1
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+wintermolt_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 # polytoken's launch-then-confirm gate, in the same shape as agy's: the brief
 # rides the launch command (--prompt submits it after the TUI attaches), so
 # readiness is positive proof the brief is being processed rather than proof a
@@ -7542,7 +7704,9 @@ sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}"
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL" "$OPENCODE_MAJOR")
-# A pinned Pi launch confines Pi's model lookup to the declared provider.
+# A pinned Pi launch confines Pi's model lookup to the declared provider. Only
+# pi/pi-signed pins carry a provider (bin/fm-worker-account-lib.sh owns that
+# file set), so no other harness's MODELFLAG can receive it.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL" "$OPENCODE_MAJOR") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -7654,6 +7818,9 @@ polytoken)
 kiro)
   LAUNCH=${LAUNCH//__KIROBIN__/"$(shell_quote "$KIRO_BIN")"}
   LAUNCH=${LAUNCH//__KIROHOME__/"$(shell_quote "$STATE_REAL/$ID.kiro-home")"}
+  ;;
+wintermolt)
+  LAUNCH=${LAUNCH//__WINTERMOLTBIN__/"$(shell_quote "$WINTERMOLT_BIN")"}
   ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
@@ -8184,6 +8351,27 @@ if [ "$HARNESS" = rovo ]; then
   fi
   if ! rovo_wait_for_delivery; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = wintermolt ]; then
+  if ! wintermolt_wait_for_ready; then
+    wintermolt_spawn_fail "wintermolt did not show its TUI ready footer before brief delivery in window $T (an unusable WINTERMOLT_BACKEND or missing backend key exits at startup with its reason on the pane)"
+    exit 1
+  fi
+  WINTERMOLT_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  WINTERMOLT_SUBMIT_VERDICT=$(fm_backend_send_text_submit \
+    "$BACKEND" "$T" "$WINTERMOLT_POINTER" "${FM_WINTERMOLT_SUBMIT_RETRIES:-3}" \
+    "${FM_WINTERMOLT_SUBMIT_SLEEP:-${FM_WINTERMOLT_POLL_INTERVAL:-0.5}}" 0 "$W")
+  if [ "$WINTERMOLT_SUBMIT_VERDICT" = send-failed ]; then
+    wintermolt_spawn_fail "wintermolt brief pointer could not be submitted into window $T"
+    exit 1
+  fi
+  # The delivery gate owns the swallow retry: it retypes the pointer while
+  # nothing is echoed and the composer provably holds nothing, and reports
+  # success only on the busy verdict.
+  if ! wintermolt_wait_for_delivery "$WINTERMOLT_POINTER"; then
+    wintermolt_spawn_fail "wintermolt brief pointer delivery was not confirmed in window $T"
     exit 1
   fi
 fi

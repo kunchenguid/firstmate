@@ -257,6 +257,17 @@ fm_composer_kiro_scope() {
   [ "${FM_COMPOSER_HARNESS:-}" = kiro ]
 }
 
+# fm_composer_wintermolt_scope: 0 when the caller has named the pane's harness
+# as wintermolt through FM_COMPOSER_HARNESS, the one input that turns on the
+# wintermolt-only composer rule (the cursor-cell idle placeholder in
+# _fm_composer_classify_rows). A caller that knows its target's recorded
+# harness sets it for its reads, and bin/fm-tmux-lib.sh sets it for the
+# identity-proven wintermolt reclassification; an unset or other value leaves
+# every read exactly as it was before wintermolt existed.
+fm_composer_wintermolt_scope() {
+  [ "${FM_COMPOSER_HARNESS:-}" = wintermolt ]
+}
+
 # fm_composer_strip_ghost: the ONE fleet-wide ANSI-aware extractor of "real typed
 # content" from a captured, styled composer row. Reads the styled line on stdin
 # (from `tmux capture-pane -e`, `herdr pane read --format ansi`, or
@@ -543,6 +554,14 @@ FM_DELIVERY_CURSOR_BUSY_REGEX_DEFAULT='ctrl\+c to stop'
 # acknowledgement. Delivery guard only; recorded worker state comes from the
 # agy-regex fold in bin/fm-busy-lib.sh.
 FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
+# wintermolt (Wintermolt) renders one pinned footer row whose keybind segment
+# changes to `Esc stop` for exactly the turn a submission starts, and whose
+# status cell ends the row with a braille spinner frame plus `working` (the
+# idle row reads `Esc quit` and `● ready`; verified live, wintermolt 0.7.0).
+# Delivery guard only, matched like the busy fold in bin/fm-busy-lib.sh; the
+# conversation area above the footer is never scanned, so echoed worker
+# output containing the word cannot fake an acknowledgement.
+FM_DELIVERY_WINTERMOLT_BUSY_REGEX_DEFAULT='Esc[[:space:]]+stop|[[:space:]]working[[:space:]]*$'
 # polytoken renders a live elapsed row above its composer separators while a
 # turn runs - ` Running for 11.12s`, with a leading space and an unanchored
 # tail of border furniture (verified live, 0.8.19; the turn-end rows are
@@ -586,6 +605,7 @@ fm_busy_lines_match() {  # [harness]
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
+      wintermolt) regex=$FM_DELIVERY_WINTERMOLT_BUSY_REGEX_DEFAULT ;;
       polytoken) regex=$FM_DELIVERY_POLYTOKEN_BUSY_REGEX_DEFAULT ;;
       kiro) regex=$FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;
@@ -600,6 +620,18 @@ fm_busy_lines_match() {  # [harness]
   fi
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
 }
+
+# Wintermolt's full-screen TUI draws one keybind/status row directly below
+# its composer box: ` Enter send  ↑↓ PgUp/PgDn scroll  Esc quit` while idle and
+# `Esc stop` while a turn runs, with the backend · model status cell at the
+# row's right end (verified live, wintermolt 0.7.0). The composer box itself
+# carries no agent glyph, so the glyph-proven footer-zone rule cannot claim
+# this row; without an explicit recognition it reads as unclaimed content and
+# stales the box above it. The signature is anchored to the exact keybind
+# words, which typed input in any harness never renders, and it is consulted
+# only as the boundary BELOW a composer, never as composer content, so the
+# same string typed between a box's borders still reads pending.
+FM_COMPOSER_WINTERMOLT_FOOTER_RE_DEFAULT='^Enter send .*Esc (quit|stop)'
 
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
 # AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
@@ -627,10 +659,15 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # Command Code renders the anchored `Ask your question...`
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
 # bright for the default ghost ceiling, so fm_composer_classify_screen reads its
-# screen with a raised one. kiro's bare `›` composer needs no entry here: see
+# screen with a raised one. Wintermolt's full-screen TUI renders the anchored
+# `Type a message, or /help` inside its rounded bordered composer when idle,
+# and `working… (Esc stops, Ctrl+C quits)` in the same box while a turn runs
+# (verified live, wintermolt 0.7.0); the busy row carries real text, so it
+# reads pending and the doorbell defers on busy rather than empty. kiro's bare
+# `›` composer needs no entry here: see
 # FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$|^Type a message, or /help$'
 
 # KIRO ONLY (fm_composer_kiro_scope): idle placeholders that carry a submit hint
 # typed input never renders, so the whole anchored row proves an empty composer
@@ -1464,6 +1501,24 @@ _fm_composer_row_content() {  # <raw-row> <styled> -> content on stdout
 # and separated shapes: pending beats empty, an unreadable row is unknown, and
 # geometry ambiguity turns pending into pending-unproven and empty into
 # unknown (an ambiguous container is not positive proof).
+# WINTERMOLT ONLY (fm_composer_wintermolt_scope): a styled box row whose plain
+# content matches the anchored idle placeholder, whose raw form opens with the
+# harness's own reverse-video cursor cell on the first character and carries the
+# remaining placeholder text as one de-emphasized palette run (38;5;8, verified
+# live on wintermolt 0.7.0), is the harness's own placeholder and reads empty.
+# The ghost stripper cannot reach a palette index outside the 232-255 ramp, so
+# without this scoped rule the row reads pending and every steer and lifecycle
+# action defers forever. A typed draft renders the opposite shape - default-
+# foreground text with the cursor cell AFTER it - so this match can never read a
+# draft empty, and the busy row (`working… ...`), which shares the cursor-cell
+# shape, is excluded by the idle-placeholder anchor on the plain content.
+_fm_composer_wintermolt_placeholder_row() {  # <raw-styled-row> <plain-content>
+  local raw=$1 plain=$2
+  fm_composer_idle_matches "$plain" \
+    "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive || return 1
+  printf '%s' "$raw" | grep -qE $'\x1b\[[0-9;]*m[[:space:]]*\x1b\[48;[0-9;]*m.\x1b\[38;5;[0-9]+m(\x1b\[49m)?'
+}
+
 _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <last-row>
   local screen=$1 styled=$2 ambiguous=$3 first=$4 last=$5
   local row raw content plain state unknown_seen=0
@@ -1474,6 +1529,10 @@ _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <las
     plain=$(_fm_composer_row_content "$raw" 0)
     state=$(fm_composer_classify_content 1 "$content" \
       "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled")
+    if [ "$state" = pending ] && [ "$styled" = 1 ] && fm_composer_wintermolt_scope \
+       && _fm_composer_wintermolt_placeholder_row "$raw" "$plain"; then
+      state=empty
+    fi
     case "$state" in
       pending)
         if [ "$ambiguous" = 1 ]; then printf 'pending-unproven'; else printf 'pending'; fi
@@ -1876,6 +1935,8 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
   _fm_composer_row_is_braille_furniture "$row" && return 0
   fm_composer_idle_matches "$row" \
     "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 0
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_WINTERMOLT_FOOTER_RE:-$FM_COMPOSER_WINTERMOLT_FOOTER_RE_DEFAULT}" insensitive && return 0
   fm_composer_leading_agent_glyph_var glyph "$row" || return 1
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
 }
@@ -2116,7 +2177,13 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     fi
     # The same footer zone, read from the other side: rows this envelope's own
     # glyph proved to be its furniture are not the lower live shape that makes
-    # the envelope stale, so the staleness probe resumes past them.
+    # the envelope stale, so the staleness probe resumes past them. A row
+    # recognized as harness furniture by its own anchored signature claims the
+    # same exemption without a glyph proof, because a glyphless envelope
+    # (wintermolt's rounded box) still owns the row its harness draws below
+    # it; the exemption may only ever keep an envelope selectable, never turn
+    # its content empty, and the recognized signature is the composer's own
+    # furniture text rather than anything a draft could render there.
     next=$((boundary + 1))
     if [ "$footer" = 1 ] && [ "$FM_COMPOSER_FOOTER_AFTER" = "$boundary" ]; then
       next=$((FM_COMPOSER_FOOTER_LAST + 1))
@@ -2124,7 +2191,8 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     raw=$(_fm_composer_screen_row "$next" "$plain")
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
-    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed" \
+       && ! _fm_composer_row_is_composer_furniture "$trimmed" ''; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi

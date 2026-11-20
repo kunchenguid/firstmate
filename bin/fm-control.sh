@@ -504,6 +504,18 @@ send_interrupt_keys() {
   if [ "$HARNESS" = hermes ] && [ "$(fm_backend_composer_state "$BACKEND" "$T")" != empty ]; then
     die 'Hermes double-Escape clears an unsent draft; interrupt requires a proven empty composer'
   fi
+  # wintermolt's interrupt key is also its quit key: a single Escape pressed on
+  # an idle wintermolt TUI exits it outright, and a draft does not protect the
+  # pane (verified live, wintermolt 0.7.0). Unlike Hermes - where the hazard is
+  # a lost draft - this one loses the worker, so the press requires positive
+  # proof of a running turn first, read through the same rendered-tail busy
+  # contract the supervisor uses. No busy verdict means no press.
+  if [ "$HARNESS" = wintermolt ]; then
+    case "$(fm_busy_classify "$BACKEND" "$T" wintermolt "$ID" "$STATE")" in
+      'busy wintermolt-regex') ;;
+      *) die 'wintermolt Escape quits an idle TUI; interrupt requires a proven running turn (the pane shows no working footer)' ;;
+    esac
+  fi
   key=$(fm_control_interrupt_key "$HARNESS")
   repeat=$(fm_control_interrupt_repeat "$HARNESS")
   clear=$(fm_control_interrupt_clear_key "$HARNESS")
@@ -618,6 +630,30 @@ deliver_interrupt() {
     if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
         --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+    fi
+    # wintermolt has no recorded ack source, but its interrupted turn is
+    # observable through the same rendered-tail busy verdict that authorized
+    # the press, so the interrupt waits - bounded by SETTLE_WAIT - for that
+    # verdict to clear and reports a confirmed stop when it does. Without
+    # this wait the pane still shows its working row for a redraw moment,
+    # which made an immediately following exit read a busy composer and
+    # refuse; with it, interrupt's own postcondition says the turn ended.
+    if [ "$HARNESS" = wintermolt ]; then
+      local elapsed=0 settled=
+      while :; do
+        case "$(fm_busy_classify "$BACKEND" "$T" wintermolt "$ID" "$STATE")" in
+          'busy wintermolt-regex') ;;
+          *) settled=1; break ;;
+        esac
+        awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' || break
+        sleep "$POLL"
+        elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+      done
+      if [ -n "$settled" ]; then
+        cancel=confirmed
+      else
+        cancel="$cancel pane-still-working"
+      fi
     fi
   fi
   [ "$INTERRUPT_HAZARD" = none ] || cancel="$cancel revert-picker=$INTERRUPT_HAZARD"

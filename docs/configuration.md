@@ -1435,6 +1435,10 @@ Hermes Agent is verified for crewmate and scout TUI launches on tmux only; prima
 Its native profile selects the model and reasoning, and the profile's own gateway may run only if it is idle at dispatch.
 The [Hermes adapter reference](../.agents/skills/harness-adapters/references/harness/hermes.md) owns operating limits, [`fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the per-spawn profile flag, and [Hermes verification](verification/hermes.md) owns live evidence.
 
+Wintermolt is verified for crewmate and scout TUI launches on tmux only; primary and secondmate use and other backends are refused.
+Its backend and provider are selected by wintermolt's own documented environment (`WINTERMOLT_BACKEND` plus the chosen backend's URL/key variables) inherited from the worker environment, and `--model` carries a bare backend model id through `WINTERMOLT_MODEL` - provider-prefixed ids are refused, effort is recorded and omitted because wintermolt has no such setting, and the launch pins `WINTERMOLT_NO_FALLBACK=1` so a failed request fails visibly instead of being answered by a fallback model nobody selected.
+[The Wintermolt adapter reference](../.agents/skills/harness-adapters/references/harness/wintermolt.md) owns the operating contract, including why the interrupt verb requires a proven running turn, and [Wintermolt verification](verification/wintermolt.md) owns the live evidence.
+
 Polytoken is verified for crewmate and scout launches only; [its adapter reference](../.agents/skills/harness-adapters/references/harness/polytoken.md) owns the operating contract and [verification record](verification/polytoken.md) owns the live evidence.
 It has no primary or secondmate supervision protocol.
 The launch generates a private per-task config directory that mirrors the operator's provider/model configuration and enforces unattended permissions without modifying global configuration.
@@ -2083,7 +2087,7 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 | Harness | Provider declaration on the opted-in resolver path |
 | --- | --- |
 | `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, `muse` | The resolver has an authoritative single-provider mapping. |
-| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `devin`, `commandcode`, `cortex`, and `kiro`; omission is an actionable configuration error before any request. |
+| Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, `devin`, `commandcode`, `cortex`, `kiro`, and `wintermolt`; omission is an actionable configuration error before any request. |
 
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 
