@@ -1583,12 +1583,20 @@ EOF
 # nothing. Callers compare the resolved path, never the file name, so a
 # parent-replies.status in any other home shape stays an ordinary task log.
 status_scan_parent_channel_exclude() {  # <state>
-  local state=$1 exclude
+  local state=$1 exclude parent
+  # dirname without a fork for the plain directory paths callers pass; a
+  # parent-replies lookup runs once per status scan and dirname was a
+  # measurable share of the poll loop's cost.
+  case "$state" in
+    *//*|*/) parent=$(dirname "$state") ;;
+    /*/*|[!/]*/*) parent=${state%/*} ;;
+    *) parent=$(dirname "$state") ;;
+  esac
   if ! command -v fm_parent_channel_outbound_status >/dev/null 2>&1; then
     # shellcheck source=bin/fm-parent-channel-lib.sh
     . "$_FM_CLASSIFY_LIB_DIR/fm-parent-channel-lib.sh"
   fi
-  exclude=$(fm_parent_channel_outbound_status "$(dirname "$state")" "$state") || return 0
+  exclude=$(fm_parent_channel_outbound_status "$parent" "$state") || return 0
   printf '%s\n' "$exclude"
 }
 
@@ -2845,9 +2853,23 @@ window_to_task() {
 # that touches this ledger must have sourced that library first.
 
 status_home_appends_path() {  # <status-file>
-  local f=$1 dir base
-  dir=$(dirname "$f")
-  base=$(basename "$f")
+  local f=$1 dir='' base=''
+  # The drain asks for this path once per status file several times over, and
+  # a dirname plus a basename fork each time was a measurable share of it. A
+  # path with a plain directory part and a plain final name takes the
+  # expansions below, which print exactly what dirname and basename print for
+  # it; anything unusual (a root-level name, doubled or trailing slashes)
+  # keeps the forks.
+  case "$f" in
+    *//*|*/) ;;
+    /*/*|[!/]*/*) dir=${f%/*} base=${f##*/} ;;
+    /*) ;;
+    ?*) dir=. base=$f ;;
+  esac
+  if [ -z "$dir" ] || [ -z "$base" ]; then
+    dir=$(dirname "$f")
+    base=$(basename "$f")
+  fi
   printf '%s/.%s.home-appends' "$dir" "${base%.status}"
 }
 

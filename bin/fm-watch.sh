@@ -348,8 +348,11 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 # token (e.g. the word "File" read as an unset variable), which silently kills the
 # watcher mid-cycle. Detect the platform once and pick the right form.
 # On Darwin, call /usr/bin/stat rather than PATH-resolved stat so GNU coreutils
-# cannot shadow the BSD `-f` syntax.
-if [ "$(uname)" = Darwin ]; then
+# cannot shadow the BSD `-f` syntax. The platform probe runs once: forked per
+# call it was a measurable share of the poll loop (signal_fingerprint asks on
+# every scan).
+_FM_WATCH_UNAME=$(uname 2>/dev/null || echo unknown)
+if [ "$_FM_WATCH_UNAME" = Darwin ]; then
   stat_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }        # epoch seconds of mtime
   stat_devino() { /usr/bin/stat -f '%d %i' "$1" 2>/dev/null; }  # device + inode pair
 else
@@ -569,7 +572,9 @@ window_kind() {
   local w=$1 meta kind
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
-    kind=$(grep '^kind=' "$meta" | cut -d= -f2- || true)
+    # fm_meta_get is the fork-free meta reader; a grep|cut pipeline per call
+    # was a per-window cost on every pass.
+    kind=$(fm_meta_get "$meta" kind)
     [ -n "$kind" ] || kind=ship
     echo "$kind"
     return 0
@@ -584,7 +589,7 @@ window_backend() {
   local w=$1 meta backend
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
-    backend=$(grep '^backend=' "$meta" | cut -d= -f2- || true)
+    backend=$(fm_meta_get "$meta" backend)
     [ -n "$backend" ] || backend=tmux
     echo "$backend"
     return 0
@@ -596,7 +601,7 @@ window_harness() {
   local w=$1 meta
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
   [ -n "$meta" ] || return 0
-  grep '^harness=' "$meta" | cut -d= -f2- || true
+  fm_meta_get "$meta" harness
 }
 
 window_label() {
@@ -3146,7 +3151,7 @@ ci_fixing_green_tick() {  # [now-epoch], for deterministic clock callers
     [ "$f" != "$exclude" ] || continue
     task=${f##*/}; task=${task%.status}
     [ -f "$STATE/$task.meta" ] || continue
-    kind=$(grep '^kind=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    kind=$(fm_meta_get "$STATE/$task.meta" kind)
     [ "$kind" != secondmate ] || continue
     verdict=$(crew_ci_fixing_run "$task") || continue
     run=${verdict%% *}; pr=${verdict#* }
@@ -5054,7 +5059,7 @@ MAINTENANCE_PREEMPTIBLE=0
 SIGNAL_QUIET_FINGERPRINT=unscanned
 
 signal_fingerprint() {
-  if [ "$(uname)" = Darwin ]; then
+  if [ "$_FM_WATCH_UNAME" = Darwin ]; then
     /usr/bin/stat -f '%N %z %Fm %i' "$STATE"/*.status "$STATE"/*.turn-ended 2>/dev/null
   else
     stat -c '%n %s %y %i' "$STATE"/*.status "$STATE"/*.turn-ended 2>/dev/null

@@ -3381,7 +3381,9 @@ fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min
     }
   ') || return 1
   [ -n "$FM_WAKE_UNREAD_LINES" ] || return 1
-  FM_WAKE_EVENT_LINE=$(printf '%s\n' "$FM_WAKE_UNREAD_LINES" | tail -1)
+  # Last line without a printf|tail fork: unread events are rare but this runs
+  # on every wake-read path.
+  FM_WAKE_EVENT_LINE=${FM_WAKE_UNREAD_LINES##*$'\n'}
   FM_WAKE_EVENT_LINE=$(printf '%s' "$FM_WAKE_EVENT_LINE" | LC_ALL=C tr '\t\r' '  ')
 }
 

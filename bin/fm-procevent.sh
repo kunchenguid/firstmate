@@ -434,14 +434,37 @@ adapter_self_announcing() {  # <adapter>
 }
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
+# One fork-free read for the first <field>= value of a registration. The old
+# `sed -n "s/^$2=//p" | head -1` pipeline forked twice per field, and the
+# reconcile pass reads several fields per source every cycle. This loop reads
+# the same first matching line and prints the same value (an empty line for an
+# empty value), so only the stderr of a vanished registration is quieter.
 source_field() {  # <source-id> <field>
-  sed -n "s/^$2=//p" "$(source_file "$1")" | head -1
+  local f=$1 line prefix="$2="
+  f=$(source_file "$f")
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$prefix"*) printf '%s\n' "${line#"$prefix"}"; return 0 ;;
+    esac
+  done < "$f"
+  return 0
 }
 source_kind() { source_field "$1" kind; }
 source_owner_task() { source_field "$1" owner_task; }
 # Every captured round of one source with no handled acknowledgement yet.
+# The unread set is read in bash (fm_procevent_pending is fork-free) and the
+# per-id filter is the same substring test the awk filter made: a result path
+# containing "/<id>." names this source's rounds.
 source_pending() {  # <source-id>
-  fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
+  local line pending
+  pending=$(fm_procevent_pending "$STATE")
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *"/$1."*) printf '%s\n' "$line" ;;
+    esac
+  done <<< "$pending"
 }
 # The registration record is a worker-owned board's ONLY ownership evidence, so
 # it cannot be retired while a captured round of it is still unacknowledged.
@@ -533,7 +556,7 @@ publish_parent_event() {  # <adapter> <source-id> <result-file>
 read_adapter() {  # <source-id>
   local f; f=$(source_file "$1")
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  sed -n 's/^adapter=//p' "$f" | head -1
+  source_field "$1" adapter
 }
 
 # Read the stored argv into the ARGV array. One argument per line after the
@@ -1869,10 +1892,15 @@ cmd_reconcile() {
   # Stop a runner this home owns whose source is no longer registered. Without
   # this, unregistering a source that never completes leaves its child blocked
   # forever with nothing left to reap it.
+  # The claim root is shared by every home on the host, so a foreign claim is
+  # skipped by a fork-free ownership pre-read before any lock is taken: a claim
+  # lock costs a double-digit process count, and every reconcile pass walks the
+  # whole root. Ownership is re-decided under the lock for claims that pass.
   for claim in "$(fm_procevent_claim_root)"/*.claim; do
     [ -e "$claim" ] || continue
     id=${claim##*/}; id=${id%.claim}
     fm_procevent_source_id_valid "$id" || continue
+    fm_procevent_claim_possibly_ours "$claim" "$STATE" "$FM_HOME" || continue
     fm_procevent_source_lock_acquire "$id" || continue
     if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
       fm_procevent_source_lock_release "$id"

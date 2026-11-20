@@ -1845,11 +1845,20 @@ for seq in 10 2 1; do
   printf 'lavish\n' > "$HP/state/procevent-inbox/ordered-src.$seq.adapter"
   chmod 0600 "$HP/state/procevent-inbox/ordered-src.$seq.result" "$HP/state/procevent-inbox/ordered-src.$seq.adapter"
 done
+# A second source interleaved across the sequence range keeps the merged
+# order honest: both sources' unread rounds surface in sequence order.
+for seq in 20 3; do
+  printf '%s\n' "$seq" > "$HP/state/procevent-inbox/second-src.$seq.result"
+  printf 'lavish\n' > "$HP/state/procevent-inbox/second-src.$seq.adapter"
+  chmod 0600 "$HP/state/procevent-inbox/second-src.$seq.result" "$HP/state/procevent-inbox/second-src.$seq.adapter"
+done
 pending=$(bash -c '. "$1/bin/fm-procevent-lib.sh"; fm_procevent_pending "$2"' _ "$ROOT" "$HP/state")
 expected=$(printf '%s\n' \
   "$HP/state/procevent-inbox/ordered-src.1.result" \
   "$HP/state/procevent-inbox/ordered-src.2.result" \
-  "$HP/state/procevent-inbox/ordered-src.10.result")
+  "$HP/state/procevent-inbox/second-src.3.result" \
+  "$HP/state/procevent-inbox/ordered-src.10.result" \
+  "$HP/state/procevent-inbox/second-src.20.result")
 [ "$pending" = "$expected" ] || fail "pending results were not emitted in numeric sequence order: $pending"
 pe "$HP" reconcile >/dev/null
 deduped=$(FM_HOME="$HP" bash -c '
@@ -1859,7 +1868,9 @@ deduped=$(FM_HOME="$HP" bash -c '
 expected=$(printf '%s\n' \
   'check: procevent lavish ordered-src 1' \
   'check: procevent lavish ordered-src 2' \
-  'check: procevent lavish ordered-src 10')
+  'check: procevent lavish second-src 3' \
+  'check: procevent lavish ordered-src 10' \
+  'check: procevent lavish second-src 20')
 [ "$deduped" = "$expected" ] || fail "distinct result generations were coalesced or reordered: $deduped"
 pass "pending results preserve numeric order and distinct wake identity"
 
@@ -2753,6 +2764,14 @@ kill -0 "$foreign_pid" 2>/dev/null || fail "home sweep signaled a foreign-home r
 assert_present "$FM_PROCEVENT_CLAIM_ROOT/foreign-src.claim" "home sweep preserves a foreign-home claim"
 [ "$(sed -n '1p' "$FM_PROCEVENT_CLAIM_ROOT/foreign-src.claim")" = "$HN" ] || fail "home sweep changed foreign claim ownership"
 assert_absent "$HO/state/procevent/foreign-src.source" "home sweep removes only the local registration"
+# Reconcile walks the same shared root every supervision cycle; a claim owned
+# by another home, with no registration here, must come through untouched.
+foreign_before=$(cat "$FM_PROCEVENT_CLAIM_ROOT/foreign-src.claim")
+pe "$HO" reconcile >/dev/null
+kill -0 "$foreign_pid" 2>/dev/null || fail "reconcile signaled a foreign-home runner"
+[ "$(cat "$FM_PROCEVENT_CLAIM_ROOT/foreign-src.claim")" = "$foreign_before" ] \
+  || fail "reconcile rewrote a foreign-home claim"
+pass "reconcile leaves foreign-home claims untouched in the shared root"
 pe "$HN" retire foreign-src >/dev/null
 pass "home sweep leaves foreign-home claims and runners untouched"
 

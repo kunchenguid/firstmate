@@ -348,7 +348,14 @@ fm_procevent_source_lock_acquire() {
   local id=$1 root
   fm_procevent_source_id_valid "$id" || return 1
   root=$(fm_procevent_claim_root)
-  (umask 077; mkdir -p "$root") || return 1
+  # The root persists for the home's lifetime; creating it is first-run work,
+  # and a mkdir fork per acquire was a measurable share of every reconcile.
+  # A present non-symlink directory is exactly what the mkdir -p would leave.
+  if [ -d "$root" ] && [ ! -L "$root" ]; then
+    :
+  else
+    (umask 077; mkdir -p "$root") || return 1
+  fi
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
   fm_lock_acquire_wait "$(fm_procevent_source_lock_path "$id")"
 }
@@ -360,7 +367,11 @@ fm_procevent_source_lock_try_acquire() {
   local id=$1 root
   fm_procevent_source_id_valid "$id" || return 1
   root=$(fm_procevent_claim_root)
-  (umask 077; mkdir -p "$root") || return 1
+  if [ -d "$root" ] && [ ! -L "$root" ]; then
+    :
+  else
+    (umask 077; mkdir -p "$root") || return 1
+  fi
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
   fm_lock_try_acquire "$(fm_procevent_source_lock_path "$id")"
 }
@@ -641,6 +652,36 @@ fm_procevent_claim_owned_by_state() {  # <state-root> <legacy-home>
     [ "$FM_PROCEVENT_CLAIM_STATE_ROOT" = "$1" ]
   else
     [ "$FM_PROCEVENT_CLAIM_HOME" = "$2" ]
+  fi
+}
+
+# Fork-free pre-read of a claim's ownership fields, for a caller about to take
+# the source lock and re-load the claim under it. Claims are published by
+# atomic same-directory rename, so a reader always holds one complete claim -
+# possibly one generation stale. Ownership follows the loaded claim's rule
+# (fm_procevent_claim_owned_by_state): the recorded state root decides when the
+# claim carries one, else the legacy home line. Only the two well-shaped forms
+# (7-line legacy, 12-line state-rooted) are decided here; any other shape - a
+# truncated or overlong claim - returns 1 so the caller keeps its existing
+# locked path and its existing uncertain accounting for it. Returns 0 only when
+# the rule already says the claim belongs to <state-root>/<legacy-home>; a claim
+# that changed hands between this read and the caller's lock is settled by that
+# locked re-load, at worst one reconcile later.
+fm_procevent_claim_possibly_ours() {  # <claim-file> <state-root> <legacy-home>
+  local claim=$1 home='' line n=0 state_root=''
+  [ -f "$claim" ] && [ ! -L "$claim" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    [ "$n" -eq 1 ] && home=$line
+    [ "$n" -eq 8 ] && state_root=$line
+    [ "$n" -ge 12 ] && break
+  done < "$claim" 2>/dev/null || return 1
+  if [ "$n" -eq 12 ]; then
+    [ "$state_root" = "$2" ]
+  elif [ "$n" -eq 7 ] && [ -n "$home" ]; then
+    [ "$home" = "$3" ]
+  else
+    return 1
   fi
 }
 
@@ -1230,7 +1271,8 @@ fm_procevent_result_owner_task() {  # <result-path>
 # it; this is what makes a restart between publication and handling recover
 # instead of silently losing the result.
 fm_procevent_pending() {
-  local state=$1 inbox result base seq
+  local state=$1 inbox result base seq i j n trow tseq
+  local -a rows=() seqs=()
   inbox=$(fm_procevent_inbox_dir "$state")
   [ -d "$inbox" ] || return 0
   for result in "$inbox"/*.result; do
@@ -1239,8 +1281,27 @@ fm_procevent_pending() {
     base=${result%.result}
     seq=${base##*.}
     case "$seq" in ''|*[!0-9]*) continue ;; esac
-    printf '%s\t%s\n' "$seq" "$result"
-  done | sort -n -k1,1 -k2,2 | cut -f2-
+    rows+=("$seq"$'\t'"$result"); seqs+=("$seq")
+  done
+  # The previous `sort -n -k1,1 -k2,2 | cut -f2-` pipeline forked three
+  # processes per call, and reconcile plus every pending check pay it each
+  # cycle. An insertion sort over the same (sequence, path) keys in bash keeps
+  # the identical ordering for the well-formed sequences that reach here.
+  n=${#rows[@]}
+  for ((i = 1; i < n; i++)); do
+    trow=${rows[i]}; tseq=${seqs[i]}; j=$((i - 1))
+    while [ "$j" -ge 0 ] \
+      && { [ "$((10#${seqs[j]}))" -gt "$((10#$tseq))" ] \
+        || { [ "$((10#${seqs[j]}))" -eq "$((10#$tseq))" ] \
+          && [ "${rows[j]}" \> "$trow" ]; }; }; do
+      rows[j + 1]=${rows[j]}; seqs[j + 1]=${seqs[j]}
+      j=$((j - 1))
+    done
+    rows[j + 1]=$trow; seqs[j + 1]=$tseq
+  done
+  for ((i = 0; i < n; i++)); do
+    printf '%s\n' "${rows[i]#*$'\t'}"
+  done
 }
 
 # fm_procevent_event_line <adapter> <source-id> <sequence>
