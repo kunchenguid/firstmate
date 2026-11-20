@@ -2511,6 +2511,61 @@ SH
   pass "a killed acquirer's stranded lock and steal staging is reaped; published owners stay"
 }
 
+test_killed_inbox_enqueue_owner_litter_is_reaped() {
+  local dir state inbox lock holder fakebin real_mktemp acquirer_pid i owner stranded
+  dir=$(make_case killed-inbox-enqueue)
+  state="$dir/state"
+  inbox="$state/demo.inbox"
+  lock="$inbox/.seq.lock"
+  fakebin="$dir/fakebin"
+  real_mktemp=$(command -v mktemp)
+  mkdir -p "$inbox"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' \
+    _ "$LIB" "$lock" || fail "inbox holder did not acquire the lock"
+  holder=$(readlink "$lock") || fail "inbox holder did not publish its owner"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'.seq.lock.steal.owner.'*)
+    kill -TERM "$(cat "$TEST_KILL_PIDFILE")"
+    "$TEST_KILL_REAL" "$@"
+    status=$?
+    : > "$TEST_KILL_DONE"
+    exit "$status" ;;
+esac
+exec "$TEST_KILL_REAL" "$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    TEST_KILL_PIDFILE="$dir/acquirer.pid" TEST_KILL_DONE="$dir/done" \
+    TEST_KILL_REAL="$real_mktemp" bash -c '
+      printf "%s\n" "$$" > "$3"
+      . "$1"
+      . "$4"
+      fm_task_inbox_write "$2" demo "interrupted enqueue"
+    ' _ "$LIB" "$state" "$dir/acquirer.pid" "$ROOT/bin/fm-task-inbox-lib.sh" &
+  acquirer_pid=$!
+  wait "$acquirer_pid" 2>/dev/null
+  i=0
+  while [ ! -e "$dir/done" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$dir/done" ] || fail "inbox enqueue was not killed mid-acquire"
+  stranded=0
+  for owner in "$inbox"/.*.owner.*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] && [ "$owner" != "$holder" ] || continue
+    stranded=$((stranded + 1))
+  done
+  [ "$stranded" -ge 1 ] || fail "killed inbox enqueue stranded no owner"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_state_reap_orphans "$2"' _ "$LIB" "$state" \
+    || fail "inbox state sweep failed"
+  for owner in "$inbox"/.*.owner.*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] || continue
+    [ "$owner" = "$holder" ] || fail "inbox state sweep left stranded owner $owner"
+  done
+  [ "$(readlink "$lock")" = "$holder" ] && [ -d "$holder" ] \
+    || fail "inbox state sweep removed the published owner"
+  pass "killed inbox enqueue staging is reaped while its published owner stays"
+}
+
 # The state sweep removes an entry only when the pid its name leads with is
 # dead and nothing still claims it; every other shape is left for its owner or
 # for ordinary lock recovery.
@@ -3013,6 +3068,7 @@ test_arm_confirms_a_slow_post_claim_startup
 test_arm_relays_a_startup_lock_held_by_live_pid
 test_staged_owner_cleanup_preserves_other_acquirers
 test_killed_acquirer_owner_litter_is_reaped
+test_killed_inbox_enqueue_owner_litter_is_reaped
 test_state_reap_orphans_boundaries
 test_startup_cleanup_waits_for_inflight_lock_mutations
 test_forced_term_before_the_safe_point_stays_clean

@@ -687,29 +687,32 @@ fm_lock_discard_staged_owners() {
 }
 
 # fm_state_reap_orphans <state-dir>
-# Remove top-level state litter that only a killed process leaves behind, each
-# entry only once the pid its name leads with is dead: lock owner staging
-# directories (<lock>.owner.<pid>.*, a .steal mutex's included) and the
-# per-process temporary files named .<name>.<pid>.* below. An owner directory
+# Remove lock owner staging in state/ and real state/*.inbox/ directories,
+# plus top-level per-process temporary files named .<name>.<pid>.* below,
+# only once the pid each name leads with is dead. Lock owner directories
+# include <lock>.owner.<pid>.* and a .steal mutex's staging. An owner directory
 # its lock link still names, or whose recorded holder is alive (a bounded wait
 # hands its helper's owner to the caller), is lock evidence and stays, as do
 # reaper tombstones, unknown owner contents, names without a pid, and symlinks.
 # A reused pid only delays removal. Session start runs it on each locked start.
 fm_state_reap_orphans() {
-  local state=$1 path lock rest pid recorded name
-  for path in "$state"/.*.owner.* "$state"/*.owner.*; do
-    [ -d "$path" ] && [ ! -L "$path" ] || continue
-    lock=${path%.owner.*}
-    case "$lock" in *.lock|*.lock.steal) ;; *) continue ;; esac
-    rest=${path##*.owner.}
-    case "$rest" in *.reaped.*) continue ;; esac
-    pid=${rest%%.*}
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    fm_pid_alive "$pid" && continue
-    [ -L "$lock" ] && [ "$lock" -ef "$path" ] && continue
-    recorded=$(cat "$path/pid" 2>/dev/null || true)
-    fm_pid_alive "$recorded" && continue
-    fm_lock_discard_owner "$path"
+  local state=$1 dir path lock rest pid recorded name
+  for dir in "$state" "$state"/*.inbox; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    for path in "$dir"/.*.owner.* "$dir"/*.owner.*; do
+      [ -d "$path" ] && [ ! -L "$path" ] || continue
+      lock=${path%.owner.*}
+      case "$lock" in *.lock|*.lock.steal) ;; *) continue ;; esac
+      rest=${path##*.owner.}
+      case "$rest" in *.reaped.*) continue ;; esac
+      pid=${rest%%.*}
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      fm_pid_alive "$pid" && continue
+      [ -L "$lock" ] && [ "$lock" -ef "$path" ] && continue
+      recorded=$(cat "$path/pid" 2>/dev/null || true)
+      fm_pid_alive "$recorded" && continue
+      fm_lock_discard_owner "$path"
+    done
   done
   for name in home-summary.json home-summary-error claude-autoarm-output \
     watch-arm-output fm-check-output fm-custom-check claude-autoarm-epoch.tmp; do
