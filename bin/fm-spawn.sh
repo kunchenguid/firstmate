@@ -2344,18 +2344,44 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   }
   if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+    # A competing spawn is benign and brief (parallel dispatches in one turn
+    # are the ordinary case), so that one holder is waited out up to
+    # FM_SPAWN_TASK_SET_WAIT seconds (default 30) instead of making the caller
+    # retry the whole spawn by hand. Every other holder - a forced teardown
+    # above all - still refuses immediately: the home may be moments from
+    # removal, so there is nothing worth waiting for.
     case "$(fm_lock_role "$SPAWN_TASK_SET_LOCK" 2>/dev/null || true)" in
       task-spawn)
-        echo "error: this home's task set is locked by another spawn; refusing to create task $ID rather than racing it" >&2
+        spawn_task_set_wait=${FM_SPAWN_TASK_SET_WAIT:-30}
+        case "$spawn_task_set_wait" in ''|*[!0-9]*) spawn_task_set_wait=30 ;; esac
+        spawn_waited=0
+        spawn_task_set_acquired=
+        while [ "$spawn_waited" -lt "$spawn_task_set_wait" ]; do
+          sleep 2
+          spawn_waited=$((spawn_waited + 2))
+          if fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+            spawn_task_set_acquired=1
+            break
+          fi
+          case "$(fm_lock_role "$SPAWN_TASK_SET_LOCK" 2>/dev/null || true)" in
+            task-spawn) continue ;;
+            *) break ;;
+          esac
+        done
+        if [ -z "$spawn_task_set_acquired" ]; then
+          echo "error: this home's task set stayed locked by another spawn for ${spawn_task_set_wait}s; refusing to create task $ID - retry the spawn" >&2
+          exit 1
+        fi
         ;;
       forced-teardown)
         echo "error: this home's task set is locked by a forced teardown; refusing to create task $ID rather than racing it" >&2
+        exit 1
         ;;
       *)
         echo "error: this home's task set is locked by another operation; refusing to create task $ID rather than racing it" >&2
+        exit 1
         ;;
     esac
-    exit 1
   fi
   if ! fm_lock_set_role "$SPAWN_TASK_SET_LOCK" task-spawn; then
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
