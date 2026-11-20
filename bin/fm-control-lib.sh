@@ -212,7 +212,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin|commandcode) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes) printf '0.2' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes|wintermolt) printf '0.2' ;;
     *) return 1 ;;
   esac
 }

@@ -558,9 +558,11 @@ FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT='esc[[:space:]]+to[[:space:]]+cancel'
 # changes to `Esc stop` for exactly the turn a submission starts, and whose
 # status cell ends the row with a braille spinner frame plus `working` (the
 # idle row reads `Esc quit` and `● ready`; verified live, wintermolt 0.7.0).
-# Delivery guard only, matched like the busy fold in bin/fm-busy-lib.sh; the
-# conversation area above the footer is never scanned, so echoed worker
-# output containing the word cannot fake an acknowledgement.
+# Delivery guard only, and matched exactly like the busy fold in
+# bin/fm-busy-lib.sh: the wintermolt arm reduces the capture to the pane's LAST
+# non-empty row - that footer - before matching, because the same reduction is
+# what keeps a conversation row ending in `working` from faking an
+# acknowledgement above an idle footer.
 FM_DELIVERY_WINTERMOLT_BUSY_REGEX_DEFAULT='Esc[[:space:]]+stop|[[:space:]]working[[:space:]]*$'
 # polytoken renders a live elapsed row above its composer separators while a
 # turn runs - ` Running for 11.12s`, with a leading space and an unanchored
@@ -605,7 +607,10 @@ fm_busy_lines_match() {  # [harness]
       omp) regex=$FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT ;;
       grok) regex=$FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT ;;
       agy) regex=$FM_DELIVERY_AGY_BUSY_REGEX_DEFAULT ;;
-      wintermolt) regex=$FM_DELIVERY_WINTERMOLT_BUSY_REGEX_DEFAULT ;;
+      wintermolt)
+        lines=$(printf '%s' "$lines" | grep -v '^[[:space:]]*$' | tail -1)
+        regex=$FM_DELIVERY_WINTERMOLT_BUSY_REGEX_DEFAULT
+        ;;
       polytoken) regex=$FM_DELIVERY_POLYTOKEN_BUSY_REGEX_DEFAULT ;;
       kiro) regex=$FM_DELIVERY_KIRO_BUSY_REGEX_DEFAULT ;;
       kimi) regex=$FM_DELIVERY_KIMI_BUSY_REGEX_DEFAULT ;;

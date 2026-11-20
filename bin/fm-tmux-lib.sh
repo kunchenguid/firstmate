@@ -348,7 +348,10 @@ fm_pane_is_busy() {  # <target> [harness]
 # transition evidence could mark an undelivered message delivered.
 # [busy-harness] scopes every busy read to one harness signature; the submit
 # core passes polytoken for a pane whose composer identity is polytoken (its
-# `Running for` row is outside the harness-less union) and nothing otherwise.
+# `Running for` row is outside the harness-less union), wintermolt for a pane
+# whose foreground process is wintermolt (only its own pinned footer row may
+# acknowledge that pane; the union reaches it only by borrowing another
+# harness's wording from the working row), and nothing otherwise.
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness]
   local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 j state busy_state
   while :; do
@@ -394,11 +397,18 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 # fm_tmux_submit_busy_harness: the busy-footer harness for a submit on
-# <target> - polytoken when the pane's composer identity is polytoken, empty
-# (the harness-less union) for every other pane.
+# <target> - polytoken when the pane's composer identity is polytoken,
+# wintermolt when the pane's foreground process group is wintermolt (its TUI
+# draws its own cursor cell, so the composer identity probe never answers for
+# it, and its pinned footer row is the only acknowledgement its panes accept),
+# and empty (the harness-less union) for every other pane.
 fm_tmux_submit_busy_harness() {  # <target>
   local identity
-  identity=$(fm_tmux_composer_identity "$1") || return 0
+  if ! identity=$(fm_tmux_composer_identity "$1"); then
+    fm_tmux_pane_is_wintermolt "$1" || return 0
+    printf 'wintermolt'
+    return 0
+  fi
   [ "${identity%%$'\t'*}" != polytoken ] || printf 'polytoken'
 }
 

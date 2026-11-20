@@ -47,6 +47,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-tmux-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -198,6 +200,106 @@ test_wintermolt_busy_signatures_are_harness_scoped() {
   printf '%s\n' "$WM_FOOTER_BUSY" | fm_busy_lines_match spaceship \
     && fail "an unverified harness must match nothing" || true
   pass "fm-composer-lib: wintermolt delivery signatures never cross harnesses"
+}
+
+# The submit cores read the pane through tmux and the anchored wintermolt
+# process name. The fake below serves the real classifier both of those, so the
+# resolution under test is the shipped one: the styled box plus footer, the
+# cursor parked on the footer row, and the pane's foreground process.
+make_wintermolt_pane_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+state=\$(cat "\${FM_FAKE_WM_STATE:?}" 2>/dev/null || printf 'idle')
+styled=
+for arg in "\$@"; do [ "\$arg" = "-e" ] && styled=1; done
+screen() {
+  if [ -n "\$styled" ]; then
+    case "\$state" in
+      idle) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_IDLE_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      *) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_BUSY_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
+    esac
+  else
+    case "\$state" in
+      idle) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  Type a message, or /help')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      # The pane rendering its working row while its footer still reads idle:
+      # the state that tells the wintermolt footer apart from any other
+      # harness's busy wording.
+      stale) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      *) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
+    esac
+  fi
+}
+case "\${1:-}" in
+  display-message)
+    case "\$*" in
+      *'#{cursor_y}'*) printf '6\n'; exit 0 ;;
+      *'#{pane_tty}'*) printf '/dev/ttys99999'; exit 0 ;;
+      *'#{pane_current_command}'*) printf '%s' "\${FM_FAKE_WM_COMMAND:-wintermolt}"; exit 0 ;;
+    esac
+    exit 0 ;;
+  capture-pane) screen; exit 0 ;;
+  send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+[ "${FM_FAKE_PS_WINTERMOLT:-1}" = 1 ] || exit 0
+case "$*" in
+  *'-t ttys99999'*) printf '4242 4242 4242 wintermolt\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+test_wintermolt_submit_busy_read_resolves_its_own_signature() {
+  local case_dir fakebin state busy_harness scoped
+  case_dir="$TMP_ROOT/submit-busy-read"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'busy\n' > "$state"
+  busy_harness=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" \
+    fm_tmux_submit_busy_harness win)
+  [ "$busy_harness" = wintermolt ] \
+    || fail "a submit on a wintermolt pane must resolve wintermolt's own busy signature, got '$busy_harness'"
+  scoped=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" fm_pane_busy_state win "$busy_harness")
+  [ "$scoped" = busy ] \
+    || fail "the submit core's busy read must see wintermolt's pinned footer, got '$scoped'"
+  printf 'idle\n' > "$state"
+  scoped=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" fm_pane_busy_state win "$busy_harness")
+  [ "$scoped" = idle ] \
+    || fail "an idle wintermolt pane must read idle through the resolved signature, got '$scoped'"
+  # The resolved read is wintermolt's pinned footer alone: a pane rendering its
+  # working row above an idle footer still reads idle, which no borrowed
+  # wording from another harness may override.
+  printf 'stale\n' > "$state"
+  scoped=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" fm_pane_busy_state win "$busy_harness")
+  [ "$scoped" = idle ] \
+    || fail "the resolved wintermolt read must follow its own footer, got '$scoped'"
+  # A pane whose foreground process is not the anchored wintermolt name claims
+  # no signature and keeps the harness-less union.
+  printf 'busy\n' > "$state"
+  busy_harness=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" \
+    FM_FAKE_PS_WINTERMOLT=0 FM_FAKE_WM_COMMAND=bash fm_tmux_submit_busy_harness win)
+  [ -z "$busy_harness" ] \
+    || fail "a non-wintermolt pane must keep the harness-less union, got '$busy_harness'"
+  pass "fm-tmux-lib: a wintermolt submit resolves the wintermolt busy signature"
+}
+
+test_wintermolt_busy_classification_reads_only_the_last_row() {
+  printf 'the build is still working\n%s\n' "$WM_FOOTER_IDLE" | fm_busy_lines_match wintermolt \
+    && fail "a conversation row ending in the busy word above an idle footer must not read busy" || true
+  printf 'the build is still working\n%s\n' "$WM_FOOTER_BUSY" | fm_busy_lines_match wintermolt \
+    || fail "the busy footer below a conversation row must still read busy"
+  printf '%s\n' "$WM_FOOTER_IDLE" | fm_busy_lines_match wintermolt \
+    && fail "the idle footer must not read busy" || true
+  pass "fm-composer-lib: wintermolt busy classification reads the pane's last row only"
 }
 
 test_wintermolt_classify_reads_the_rendered_tail() {
@@ -612,6 +714,8 @@ test_wintermolt_claims_no_inherited_launcher_marker
 test_wintermolt_control_mechanics_are_the_verified_ones
 test_wintermolt_busy_tail_needs_the_pinned_footer_row
 test_wintermolt_busy_signatures_are_harness_scoped
+test_wintermolt_submit_busy_read_resolves_its_own_signature
+test_wintermolt_busy_classification_reads_only_the_last_row
 test_wintermolt_classify_reads_the_rendered_tail
 test_wintermolt_idle_composer_reads_empty_only_through_the_scope
 test_wintermolt_draft_and_busy_rows_stay_pending
