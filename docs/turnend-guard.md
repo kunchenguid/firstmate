@@ -97,7 +97,7 @@ The downtime recorded when `off` stopped the watcher arrives as one recovery wak
 
 - `tests/fm-supervision.test.sh` covers the switch, the need it zeroes, the real watcher it stops, the arm and checkpoint that start nothing, the refused away and quiet entries and daemon, and a daemon that stops slowly or never.
 - `tests/fm-supervision-host-hook.test.sh` drives the real Claude Stop hook, supervision host, and watcher through off, a turn end while off, and on with its catch-up, for both the host and the plain arm.
-- `tests/fm-pi-watch-extension.test.sh` covers the Pi extension's and the OpenCode plugin's dropped close, refused arm, and first cycle after on.
+- `tests/fm-pi-watch-extension.test.sh` covers the Pi extension's and the OpenCode plugin's dropped close, refused arm, restoration that ends quietly when switched off mid-wake, and first cycle after on.
 - `tests/fm-turnend-guard.test.sh`, `tests/fm-supervision-instructions.test.sh`, and `tests/fm-session-start.test.sh` cover the guard, the rendered instructions, and session start.
 
 ## Guard predicates

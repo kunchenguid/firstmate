@@ -6136,6 +6136,69 @@ EOF
   pass "OpenCode arms nothing and retries nothing while supervision is switched off, and arms again once it is on"
 }
 
+test_opencode_switched_off_during_restoration_reports_no_failure() {
+  local plugin repo home log release out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-off-restore-root"
+  home="$TMP_ROOT/opencode-off-restore-home"
+  log="$TMP_ROOT/opencode-off-restore.log"
+  release="$TMP_ROOT/opencode-off-restore.release"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -gt 1 ]; then
+  printf 'since=2026-01-01T00:00:00Z\n' > "$FM_HOME/state/.supervision-off"
+  exit 0
+fi
+while [ ! -e "$FM_RELEASE_FILE" ] && [ -e "$0" ]; do sleep 0.02; done
+printf 'signal: lock handoff\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=3 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompt = "";
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompt += request.body.parts[0].text;
+    },
+  },
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const eventPromise = hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) await sleep(10);
+writeFileSync(process.env.FM_RELEASE_FILE, "release\n");
+await eventPromise;
+for (let i = 0; i < 300 && !prompt.includes("lock handoff"); i += 1) await sleep(10);
+await sleep(200);
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (!prompt.includes("lock handoff")) throw new Error(`the actionable wake was not delivered: ${prompt}`);
+if (prompt.includes("FAILED")) throw new Error(`switching off during restoration surfaced a failure: ${prompt}`);
+if (rows.length !== 2) throw new Error(`expected the first arm and one successor, got ${rows.length}`);
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must not report a restoration failure when supervision is switched off mid-restoration"
+  [ -z "$out" ] || fail "OpenCode off-during-restoration test printed output: $out"
+  pass "OpenCode delivers the wake without a failure when supervision is switched off mid-restoration"
+}
+
 test_opencode_established_empty_close_honors_retry_limit() {
   local plugin repo home log out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -6533,6 +6596,7 @@ test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
 test_opencode_switched_off_arms_nothing_and_retries_nothing
+test_opencode_switched_off_during_restoration_reports_no_failure
 test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
