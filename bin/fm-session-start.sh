@@ -27,7 +27,10 @@
 # was bootstrap-then-lock):
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
-#                       mutating step runs.
+#                       mutating step runs. On a locked start (not --reemit),
+#                       run fm_state_reap_orphans from fm-wake-lib.sh before
+#                       the home-summary refresh and deferred worker launch;
+#                       that helper owns the dead-process litter safety rules.
 #   1b. home role    - the resolved firstmate-repository role line
 #                      (bin/fm-role.sh report), purely local, no network.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
