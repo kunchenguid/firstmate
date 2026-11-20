@@ -1023,6 +1023,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_UNSAFE=0
   FM_COMPOSER_SCAN_CURSOR_EDGE=0
   FM_COMPOSER_SCAN_BARE_ROW=-1
+  FM_COMPOSER_SCAN_BARE_RULE_ROW=-1
   FM_COMPOSER_SCAN_SHELL_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
@@ -1090,6 +1091,11 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
     # earlier transcript rule can never outrank the live bottom composer pair.
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
+      FM_COMPOSER_SCAN_BARE_RULE_ROW=-1
+      if [ -z "$cy" ] && [ "$pi_open" -lt 0 ] \
+         && _fm_composer_bare_rule_sandwich "$pane" "$FM_COMPOSER_SCAN_BARE_ROW"; then
+        FM_COMPOSER_SCAN_BARE_RULE_ROW=$FM_COMPOSER_SCAN_BARE_ROW
+      fi
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
@@ -1934,6 +1940,14 @@ _fm_composer_locate_footer_zone() {  # <plain>
     FM_COMPOSER_FOOTER_GLYPH=$FM_COMPOSER_SCAN_PI_GLYPH_ROW
     proof=$FM_COMPOSER_SCAN_PI_GLYPH
   fi
+  if [ "$FM_COMPOSER_SCAN_BARE_RULE_ROW" -ge 0 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$FM_COMPOSER_FOOTER_AFTER" ]; then
+    FM_COMPOSER_FOOTER_AFTER=$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR
+    FM_COMPOSER_FOOTER_GLYPH=$FM_COMPOSER_SCAN_BARE_RULE_ROW
+    trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
+    fm_composer_normalize_trim_var trimmed
+    fm_composer_leading_agent_glyph_var proof "$trimmed" || return 1
+  fi
   [ "$FM_COMPOSER_FOOTER_AFTER" -ge 0 ] || return 1
   # Nothing below the envelope can be demoted unless a bare candidate sits
   # there, so settle that from the scan's own record before walking any rows.
@@ -2086,8 +2100,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     # Spare only a bare glyph inside its own titled composer rules; see
     # _fm_composer_bare_rule_sandwich for why that shape is not scrollback.
     if ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
-           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_ROW" ] \
-           && _fm_composer_bare_rule_sandwich "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; }; then
+           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_RULE_ROW" ]; }; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi

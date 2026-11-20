@@ -1297,6 +1297,46 @@ test_matrix_claude_fast_badge_top_rule() {
   pass "matrix: claude's fast-mode badge top rule proves an idle composer empty and a wrapped doorbell pending"
 }
 
+test_matrix_claude_titled_envelope_lower_candidates() {
+  local prefix bottom top footer screen wrapped popup stranded caps want out claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  prefix=$(printf '─%.0s' $(seq 1 22))
+  bottom="${prefix}──────────"
+  footer=$'\n  → repo git:(main)\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  for top in "${prefix} ↯ /fast ─" "${prefix} Andrew ──"; do
+    screen="$top"$'\n❯'"$NBSP"$'\n'"$bottom$footer"
+    wrapped="$top"$'\n❯ fix the login\n  bug\n'"$bottom$footer"
+    popup="$top"$'\n❯ /exit\n'"$bottom"$'\n  ❯ /exit    Exit the CLI\n    /context    Visualize context'
+    stranded="$top"$'\n❯'"$NBSP"$'\n'"$bottom"$'\nlater transcript output\n'"$bottom"
+    for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN"; do
+      want=pending
+      [ "$caps" != "$CAPS_PLAIN" ] || want=unknown
+      assert_screen "titled/badge idle under a statusline" empty "$caps" "$screen"
+      out=$(fm_composer_extract_selected_content "$caps" "$screen")
+      [ -z "$out" ] || fail "an idle titled/badge composer must not extract its footer, got '$out'"
+      assert_screen "titled/badge wrapped draft under a statusline" "$want" "$caps" "$wrapped"
+      out=$(fm_composer_extract_selected_content "$caps" "$wrapped")
+      [ "$out" = 'fix the login bug' ] || fail "the wrapped draft must exclude its footer, got '$out'"
+      assert_screen "titled/badge slash popup" "$want" "$caps" "$popup"
+      out=$(fm_composer_extract_selected_content "$caps" "$popup")
+      [ "$out" = /exit ] || fail "the typed command must exclude its popup, got '$out'"
+      out=$(LC_ALL=C fm_composer_extract_selected_content "$caps" "$popup")
+      [ "$out" = /exit ] || fail "the typed command must exclude its popup under LC_ALL=C, got '$out'"
+      assert_screen "titled/badge sandwich stranded above transcript" unknown "$caps" "$stranded" '' "$claude_idle"
+      assert_screen "titled/badge sandwich crossing transcript" unknown "$caps" \
+        "$top"$'\n❯'"$NBSP"$'\nlater transcript output\n'"$bottom"
+      assert_screen "titled/badge lower live draft keeps winning" "$want" "$caps" \
+        "$screen"$'\n❯ my typed draft'
+      out=$(fm_composer_extract_selected_content "$caps" "$screen"$'\n❯ my typed draft')
+      [ "$out" = 'my typed draft' ] || fail "the lower live draft must remain selected, got '$out'"
+      out=$(fm_composer_extract_selected_content "$caps" \
+        "$top"$'\n❯'"$NBSP"$'\n'"$bottom"$'\n  ❯ /exit    Exit the CLI')
+      [ "$out" = '/exit Exit the CLI' ] || fail "an empty envelope must not demote a popup-shaped draft, got '$out'"
+    done
+  done
+  pass "matrix: titled/badge envelopes prove footer and popup ownership before candidate selection"
+}
+
 test_matrix_grok_144_approval_titled_bottom_border() {
   # Grok 1.0.44 draws the title inside a bottom border exactly as wide as the
   # top border and appends its approval mode (` · always-approve`). The mid-dot
@@ -1788,6 +1828,7 @@ test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_claude_fast_badge_top_rule
+test_matrix_claude_titled_envelope_lower_candidates
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_grok_1077_fast_model_title
 test_matrix_kimi_bordered_shell_glyph_box
