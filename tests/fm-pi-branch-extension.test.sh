@@ -5338,6 +5338,43 @@ EOF
   pass "second-mate signal rows route by their new span while crewmate and stale routing stay unchanged"
 }
 
+link_real_pi_dependency() {
+  local package_dir=$1 fixture=$2 dependency=$3 candidate
+  for candidate in "$package_dir/node_modules/$dependency" "$package_dir/../../$dependency"; do
+    if [ -f "$candidate/package.json" ]; then
+      ln -s "$candidate" "$fixture/node_modules/$dependency" || return 1
+      return 0
+    fi
+  done
+  echo "missing Pi dependency $dependency: checked $package_dir/node_modules and $package_dir/../.." >&2
+  return 1
+}
+
+test_real_pi_dependency_layouts() {
+  local install package_dir fixture dependency layout out
+  install="$TMP_ROOT/dependency-layouts"
+  package_dir="$install/node_modules/@earendil-works/pi-coding-agent"
+  fixture="$install/fixture"
+  mkdir -p "$fixture/node_modules/@earendil-works"
+  for dependency in @earendil-works/pi-tui @earendil-works/pi-ai typebox; do
+    for layout in "$package_dir/../.." "$package_dir/node_modules"; do
+      mkdir -p "$layout/$dependency"
+      printf '%s\n' "$layout" > "$layout/$dependency/package.json"
+      link_real_pi_dependency "$package_dir" "$fixture" "$dependency" \
+        || fail "could not link $dependency from $layout"
+      [ "$(cat "$fixture/node_modules/$dependency/package.json")" = "$layout" ] \
+        || fail "wrong dependency selected for $dependency from $layout"
+      rm "$fixture/node_modules/$dependency"
+    done
+  done
+  if out=$(link_real_pi_dependency "$package_dir" "$fixture" missing-package 2>&1); then
+    fail "missing Pi dependency unexpectedly linked"
+  fi
+  [[ "$out" == *"missing Pi dependency missing-package:"* ]] \
+    || fail "missing dependency diagnostic did not name the package: $out"
+  pass "real Pi dependencies resolve siblings and prefer nested packages, with a clear missing-package failure"
+}
+
 # The model picker's bounded scrolling and its search ranking are Pi's own
 # SelectList and fuzzyFilter, so the guarantee only holds while the installed
 # Pi still exports them and still bounds what it renders. Stubs cannot answer
@@ -5357,7 +5394,8 @@ test_real_pi_picker_primitives_stay_bounded_and_searchable() {
   mkdir -p "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/lib/fm-branch-model-picker.ts"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  link_real_pi_dependency "$package_dir" "$fixture" @earendil-works/pi-tui \
+    || fail "could not link the installed Pi picker dependency"
   original_dir=$PWD
   cd "$fixture" || fail "could not enter the Pi picker primitives fixture"
   LIB="$fixture/lib/fm-branch-model-picker.ts" PI_VERSION_FILE="$package_dir/package.json" \
@@ -5524,9 +5562,11 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$fixture/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$package_dir" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$package_dir/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
-  ln -s "$package_dir/node_modules/@earendil-works/pi-ai" "$fixture/node_modules/@earendil-works/pi-ai"
-  ln -s "$package_dir/node_modules/typebox" "$fixture/node_modules/typebox"
+  local dependency
+  for dependency in @earendil-works/pi-tui @earendil-works/pi-ai typebox; do
+    link_real_pi_dependency "$package_dir" "$fixture" "$dependency" \
+      || fail "could not link the installed Pi rendering dependency $dependency"
+  done
 
   out=$(cd "$fixture" && EXT="$fixture/.pi/extensions/fm-branch-supervision.ts" PI_PACKAGE_DIR="$package_dir" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
@@ -6232,6 +6272,7 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
+test_real_pi_dependency_layouts
 test_outcomes_tool_call_headers_follow_the_loaded_pi_version
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
