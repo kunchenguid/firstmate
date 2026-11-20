@@ -792,7 +792,7 @@ trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
-child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
+child_out=$(mktemp "$STATE/.watch-arm-output.$$.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }

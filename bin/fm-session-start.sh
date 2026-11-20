@@ -734,6 +734,9 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # Publication is side-band and best-effort, so it can never change the
   # session-start result. A context re-emit is not another session start.
   if [ "$REEMIT" -eq 0 ]; then
+    # Killed processes can strand lock staging directories and temporary
+    # files in state/; reclaim those whose owning pid is dead.
+    fm_state_reap_orphans "$STATE"
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   fi
   # Every network call and the potentially slow inactive-outcome startup scan
