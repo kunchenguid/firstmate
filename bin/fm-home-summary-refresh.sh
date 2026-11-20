@@ -115,11 +115,11 @@ home_summary_refresh_once() {
     fm_lock_acquire_wait "$REFRESH_LOCK"
   fi
   HOME_SUMMARY_LOCK_HELD=1
-  HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.XXXXXX") || {
+  HOME_SUMMARY_TMP=$(umask 077; mktemp "$STATE/.home-summary.json.$$.XXXXXX") || {
     home_summary_fail "could not create an atomic publication file in $STATE"
     return 1
   }
-  HOME_SUMMARY_ERR_TMP=$(umask 077; mktemp "$STATE/.home-summary-error.XXXXXX") || {
+  HOME_SUMMARY_ERR_TMP=$(umask 077; mktemp "$STATE/.home-summary-error.$$.XXXXXX") || {
     home_summary_fail "could not create a producer diagnostic file in $STATE"
     return 1
   }

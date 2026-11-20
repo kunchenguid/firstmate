@@ -578,12 +578,16 @@ fm_lock_abs_path() {
   printf '%s/%s\n' "$dir" "$base"
 }
 
+# fm_lock_owner_dir <lockdir> <acquirer-pid>
+# The staging name leads with the acquirer's pid, or with an opted-in
+# FM_LOCK_OWNER_SCOPE that itself leads with its owner's pid. A directory a
+# signal strands - even before this command substitution returns its path -
+# stays attributable: the scope's owner can discard its own staging, and
+# fm_state_reap_orphans removes it once that pid is dead.
 fm_lock_owner_dir() {
-  local lockdir=$1 lock_abs
+  local lockdir=$1 pid=$2 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
-  # An opted-in caller can recover its own staging directories even when a
-  # signal interrupts this command substitution before it returns the path.
-  mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:+$FM_LOCK_OWNER_SCOPE.}XXXXXX" 2>/dev/null
+  mktemp -d "${lock_abs}.owner.${FM_LOCK_OWNER_SCOPE:-$pid}.XXXXXX" 2>/dev/null
 }
 
 # The acquiring process's own fm_pid_start_time, probed once per pid: a
@@ -591,12 +595,12 @@ fm_lock_owner_dir() {
 _FM_LOCK_SELF_START_PID=
 _FM_LOCK_SELF_START=
 
-# Record the holder's pid and, when it can be probed, its start time, before
-# the owner directory is published, so fm_lock_holder_alive can tell this
-# holder from a later process that reuses its pid.
-fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
-  fm_current_pid mypid || return 1
+# Record the holder's pid (this process's, already probed by the caller) and,
+# when it can be probed, its start time, before the owner directory is
+# published, so fm_lock_holder_alive can tell this holder from a later process
+# that reuses its pid.
+fm_lock_prepare_owner() {  # <ownerdir> <pid>
+  local ownerdir=$1 mypid=$2 back
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ] || return 1
@@ -682,6 +686,47 @@ fm_lock_discard_staged_owners() {
   done
 }
 
+# fm_state_reap_orphans <state-dir>
+# Remove lock owner staging in state/ and real state/*.inbox/ directories,
+# plus top-level per-process temporary files named .<name>.<pid>.* below,
+# only once the pid each name leads with is dead. Lock owner directories
+# include <lock>.owner.<pid>.* and a .steal mutex's staging. An owner directory
+# its lock link still names, or whose recorded holder is alive (a bounded wait
+# hands its helper's owner to the caller), is lock evidence and stays, as do
+# reaper tombstones, unknown owner contents, names without a pid, and symlinks.
+# A reused pid only delays removal. Session start runs it on each locked start.
+fm_state_reap_orphans() {
+  local state=$1 dir path lock rest pid recorded name
+  for dir in "$state" "$state"/*.inbox; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    for path in "$dir"/.*.owner.* "$dir"/*.owner.*; do
+      [ -d "$path" ] && [ ! -L "$path" ] || continue
+      lock=${path%.owner.*}
+      case "$lock" in *.lock|*.lock.steal) ;; *) continue ;; esac
+      rest=${path##*.owner.}
+      case "$rest" in *.reaped.*) continue ;; esac
+      pid=${rest%%.*}
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      fm_pid_alive "$pid" && continue
+      [ -L "$lock" ] && [ "$lock" -ef "$path" ] && continue
+      recorded=$(cat "$path/pid" 2>/dev/null || true)
+      fm_pid_alive "$recorded" && continue
+      fm_lock_discard_owner "$path"
+    done
+  done
+  for name in home-summary.json home-summary-error claude-autoarm-output \
+    watch-arm-output fm-check-output fm-custom-check claude-autoarm-epoch.tmp; do
+    for path in "$state/.$name."*; do
+      [ -f "$path" ] && [ ! -L "$path" ] || continue
+      rest=${path#"$state/.$name."}
+      pid=${rest%%.*}
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      fm_pid_alive "$pid" && continue
+      rm -f -- "$path" 2>/dev/null || true
+    done
+  done
+}
+
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
   stray="$lockdir/$(basename "$ownerdir")"
@@ -754,15 +799,16 @@ fm_lock_wait_pending_mutation() {
 }
 
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir=
+  local lockdir=$1 allowed_steal_owner=${2:-} mypid ownerdir=
   local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
   FM_LOCK_OWNER_DIR=
+  fm_current_pid mypid || return 1
   if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
     # This bash also applies nounset to ${!:-}; isolate the safe probe.
     FM_LOCK_PENDING_PREVIOUS_PID=$(set +u; printf '%s' "$!")
     # Bash 3.2 defers fatal signals until command substitutions finish, and
     # does not expose a process substitution's pid through $!.
-    if ! ownerdir=$(fm_lock_owner_dir "$lockdir"); then
+    if ! ownerdir=$(fm_lock_owner_dir "$lockdir" "$mypid"); then
       fm_lock_discard_owner "$ownerdir"
       return 1
     fi
@@ -770,7 +816,7 @@ fm_lock_try_create() {
     FM_LOCK_PENDING_PREVIOUS_PID=${!:-}
     # Newer bash can enter EXIT before the child finishes. A process
     # substitution exposes its pid even before read returns the owner path.
-    if ! IFS= read -r ownerdir < <(fm_lock_owner_dir "$lockdir"); then
+    if ! IFS= read -r ownerdir < <(fm_lock_owner_dir "$lockdir" "$mypid"); then
       fm_lock_discard_owner "$ownerdir"
       return 1
     fi
@@ -786,7 +832,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ! fm_lock_prepare_owner "$ownerdir"; then
+  if ! fm_lock_prepare_owner "$ownerdir" "$mypid"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
