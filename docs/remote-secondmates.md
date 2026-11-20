@@ -253,6 +253,7 @@ Each gap carries one of two tags:
 
 Every gap is followed by an `action:` line naming the exact step.
 Any remaining gap exits non-zero.
+A `note:` line, such as a Herdr server that herdr's saved SSH machines would refuse, also carries an `action:` line but is not a gap and never fails readiness.
 The script's own header owns the full line protocol.
 
 ### Repair with --fix

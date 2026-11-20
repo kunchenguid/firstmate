@@ -67,6 +67,16 @@ esac
 [ -n "$SEEDED_TAB_ID" ] || fail "the first container_ensure in a brand-new isolated session must CREATE the workspace and report its seeded default tab id"
 pass "real herdr: container_ensure starts the isolated session's server, creates the firstmate workspace ($CONTAINER), and reports its seeded default tab id ($SEEDED_TAB_ID)"
 
+# herdr reports whether the server it is talking to leads its own session, and
+# `herdr machine add` refuses one that does not; a herdr too old to report the
+# capability has nothing to check.
+DETACHED=$(fm_backend_herdr_cli "$SESSION" status --json 2>/dev/null | jq -r '.server.capabilities.detached_server_daemon | if type == "boolean" then tostring else "absent" end')
+case "$DETACHED" in
+  true) pass "real herdr: the server Firstmate started reports detached_server_daemon=true, so saved SSH machines accept it" ;;
+  absent) pass "real herdr: this herdr does not report detached_server_daemon, so there is no session-leader capability to check" ;;
+  *) fail "real herdr: the server Firstmate started reports detached_server_daemon=$DETACHED, so herdr machine add would refuse it" ;;
+esac
+
 # --- client selection: the real status shape the selection reads ------------
 # bin/backends/herdr.sh "client selection" steps around a client the running
 # server refuses by reading .server.running/.server.compatible per session; a

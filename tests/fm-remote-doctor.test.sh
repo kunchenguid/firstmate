@@ -314,7 +314,11 @@ case " $* " in
         running=true
       fi
     fi
-    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"socket":"%s"}}\n' "$running" "$FM_FAKE_HERDR_SOCKET"
+    capabilities=
+    if [ -f "$FM_FAKE_STATE/detached-server-daemon" ]; then
+      capabilities=",\"capabilities\":{\"detached_server_daemon\":$(cat "$FM_FAKE_STATE/detached-server-daemon")}"
+    fi
+    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"socket":"%s"%s}}\n' "$running" "$FM_FAKE_HERDR_SOCKET" "$capabilities"
     ;;
   *"server "*)
     printf 'true\n' > "$running_file"
@@ -550,6 +554,21 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" bootstrap \
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
+
+# --- a non-session-leader server is a note, never a gap or a restart ---------
+
+printf 'false\n' > "$CASE_STATE/detached-server-daemon"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a launch-agent server that herdr saved machines refuse failed readiness"
+assert_contains "$DOCTOR_OUT" 'check herdr-detached=note:' "a darwin server reporting detached_server_daemon=false was not noted"
+assert_contains "$DOCTOR_OUT" 'action: herdr-detached: none for second mates' "the darwin note did not say no Firstmate repair applies"
+assert_not_contains "$DOCTOR_OUT" 'live-handoff' "the darwin note offered a handoff that would move the server out of the launch agent"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-detached=' "--fix acted on a note"
+[ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_no_regex '^(bootout|bootstrap|kickstart)' "$CASE_LAUNCHCTL_LOG" \
+  "a note made --fix reload or restart the launch agent"
+rm -f "$CASE_STATE/detached-server-daemon"
+pass "a darwin launch-agent server that herdr saved machines refuse is a note with no repair"
 
 # --- a second code root must not rewrite the shared running service ----------
 
@@ -1097,7 +1116,28 @@ assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the started server was n
 [ "$(cat "$CASE_HOME/.firstmate/remote-herdr-owner")" = "$ROOT" ] \
   || fail "the Linux server owner marker does not record its code root"
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux path invoked launchctl"
+assert_not_contains "$DOCTOR_OUT" 'herdr-detached' "a server that does not report the detached capability was noted"
 pass "a non-darwin host skips launch agents and starts its herdr server directly"
+
+# A running linux server that herdr saved machines refuse is noted, with a
+# live-handoff action behind the replacement marker; it never fails readiness,
+# and neither the check nor --fix stops or restarts it.
+printf 'false\n' > "$CASE_STATE/detached-server-daemon"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a linux server that herdr saved machines refuse failed readiness"
+assert_contains "$DOCTOR_OUT" "check herdr-detached=note: session fm-remote's server does not lead its own session (detached_server_daemon=false)" \
+  "a linux server reporting detached_server_daemon=false was not noted"
+assert_contains "$DOCTOR_OUT" "touch '$CASE_STATE/firstmate-server-replacing' && herdr --session fm-remote server live-handoff; rm -f '$CASE_STATE/firstmate-server-replacing'" \
+  "the linux note's action is not the marker-guarded live handoff"
+assert_not_contains "$DOCTOR_OUT" 'server stop' "the linux note offered a stop"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-detached=' "--fix acted on a note"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=' "--fix restarted a running server over a note"
+[ "$(cat "$CASE_HERDR_RUNNING")" = true ] || fail "the note changed the running server's state"
+printf 'true\n' > "$CASE_STATE/detached-server-daemon"
+doctor
+expect_code 0 "$DOCTOR_RC" "a linux server that leads its own session failed readiness"
+assert_not_contains "$DOCTOR_OUT" 'herdr-detached' "a server reporting detached_server_daemon=true was noted"
+pass "a linux server that herdr saved machines refuse is a non-gating note whose action is a marker-guarded live handoff"
 
 new_case Linux with-herdr no-gui
 rm -f "$CASE_BIN/claude"

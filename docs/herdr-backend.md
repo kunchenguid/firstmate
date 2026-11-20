@@ -804,7 +804,7 @@ No Herdr-specific copy of that protocol exists.
 
 ### Externally managed servers
 
-By default Firstmate starts a session's Herdr server itself, headless, whenever an operation finds it not running.
+By default Firstmate starts a session's Herdr server itself, headless and as the leader of its own session as Herdr's saved SSH machines require, whenever an operation finds it not running.
 That is wrong when a service manager, such as a systemd user unit, owns the server.
 During a unit restart or a `server live-handoff`, `status` can briefly report not running, and a server Firstmate started would race the owner and split panes across two servers.
 
