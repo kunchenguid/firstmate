@@ -382,16 +382,16 @@ fm_backend_herdr_workspace_label() {
 # fm_backend_herdr_version_check, which is intentionally session-independent
 # (reads only .client.* fields).
 fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
-  local session=$1 rc=0 err failed_bin selected_bin client_bin=herdr
+  local session=$1 rc=0 err failed_bin selected_bin client_bin
   shift
-  if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
-    client_bin=$(fm_backend_herdr_bin)
-  fi
+  client_bin=$(fm_backend_herdr_cli_client "$session")
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
-  # The long-lived `server` launch is exec'd straight through: buffering its
-  # stderr would hold this call open for the server's whole lifetime.
+  # `server` subcommands run unbuffered as a child of this call, because
+  # buffering a foreground server's stderr would hold this call open for the
+  # server's whole lifetime. fm_backend_herdr_server_ensure does not start the
+  # long-lived server through here; it starts it as a session leader.
   if [ "${1:-}" = server ]; then
     HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
     return $?
@@ -442,6 +442,17 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 # PATH-first client.
 fm_backend_herdr_bin() {
   printf '%s' "${FM_BACKEND_HERDR_BIN:-herdr}"
+}
+
+# fm_backend_herdr_cli_client: the client fm_backend_herdr_cli starts with for
+# <session>: the selected client when that exact session has one, else the
+# first `herdr` on PATH.
+fm_backend_herdr_cli_client() {  # <session>
+  if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$1" ]; then
+    fm_backend_herdr_bin
+  else
+    printf 'herdr'
+  fi
 }
 
 # fm_backend_herdr_client_candidates: every distinct executable named herdr on
@@ -1707,14 +1718,39 @@ fm_backend_herdr_server_owner_name() {  # <owner-marker>
   printf '%s' "${name:-an external service manager}"
 }
 
+# fm_backend_herdr_session_leader: run <command...> as the leader of a new
+# session, the way herdr's own server launchers do. herdr reports
+# capabilities.detached_server_daemon from getsid(0) == getpid() at server
+# start, and `herdr machine add` refuses to save a machine whose server reports
+# false. setsid(1) is used where it exists (Linux); macOS has none, so perl's
+# POSIX::setsid stands in. Either forks first only when the caller leads its
+# process group, because setsid() refuses a group leader. With neither tool the
+# command still runs, in the caller's session, so the server works but saved
+# SSH machines refuse it; bin/fm-remote-doctor.sh reports that server.
+fm_backend_herdr_session_leader() {  # <command...>
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e '
+      if (getpgrp() == $$) { my $pid = fork(); defined $pid or die "fork: $!\n"; exit 0 if $pid; }
+      defined(POSIX::setsid()) or die "setsid: $!\n";
+      exec { $ARGV[0] } @ARGV or die "exec $ARGV[0]: $!\n";
+    ' -- "$@"
+  else
+    "$@"
+  fi
+}
+
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. The server outlives its launcher and passes its startup environment to
 # every later pane, so remove home, harness identity, and supervision selection
-# inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# inherited from whichever agent happened to start it. The server starts as a
+# session leader (fm_backend_herdr_session_leader) with the client
+# fm_backend_herdr_cli would use for <session>. Bounded poll for the server to
+# report running.
 #
 # A running server returns after one marker check in the session directory,
 # unless that directory holds a replacement marker. While the session directory
@@ -1755,7 +1791,8 @@ fm_backend_herdr_server_ensure() {  # <session>
   (
     unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
       CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server </dev/null >/dev/null 2>&1 &
+    HERDR_SESSION="$session" fm_backend_herdr_session_leader \
+      "$(fm_backend_herdr_cli_client "$session")" server --session "$session" </dev/null >/dev/null 2>&1 &
   ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)

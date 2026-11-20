@@ -43,7 +43,9 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # reads 1.out, call 2 reads 2.out, ...) so a test can script a short sequence
 # of calls precisely. A missing response file means "succeed with empty
 # stdout" (mirrors send-text/send-keys/pane close/tab close, which are silent
-# on success in the real CLI - verified in herdr-verification-p2.md).
+# on success in the real CLI - verified in herdr-verification-p2.md). The
+# long-lived `server --session` launch is logged but takes no response slot,
+# because it runs in the background and races the caller's next call.
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -61,6 +63,9 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = server ] && [ "${2:-}" = --session ]; then
   exit 0
 fi
 if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
@@ -1454,24 +1459,28 @@ test_container_ensure_refuses_an_ambiguous_home_label() {
 # --- container_ensure / create_task ------------------------------------------
 
 test_container_ensure_starts_server_and_workspace() {
-  local dir log resp fb out
+  local dir log resp fb out i
   dir="$TMP_ROOT/container"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: version_check status --json (server not running yet, irrelevant to client check)
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   # 2: server_ensure's status --json check -> not running
   printf '{"server":{"running":false}}\n' > "$resp/2.out"
-  # 3: `herdr server` backgrounded launch - no meaningful output
-  # 4: server_ensure poll -> now running
-  printf '{"server":{"running":true}}\n' > "$resp/4.out"
-  # 5: workspace list -> empty (no "firstmate" workspace yet)
-  printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
-  # 6: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
+  # The backgrounded `herdr server` launch is logged without taking a slot.
+  # 3: server_ensure poll -> now running
+  printf '{"server":{"running":true}}\n' > "$resp/3.out"
+  # 4: workspace list -> empty (no "firstmate" workspace yet)
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/4.out"
+  # 5: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
   # the seeded tab/pane ids in the SAME response - verified empirically).
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
   [ "$out" = $'fmtest:w1\tw1:t9' ] || fail "container_ensure should echo '<session>:<workspace_id>\\t<seeded_default_tab_id>', got '$out'"
+  # The server launch runs in the background, so give its log line a bounded
+  # moment to land before asserting it.
+  i=0
+  while ! grep -q $'^HERDR_SESSION=fmtest\x1fserver\x1f' "$log" && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
   assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f''server' "container_ensure did not start the herdr server"
   assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--cwd'$'\x1f''/tmp'$'\x1f''--label'$'\x1f''firstmate' \
     "container_ensure did not create the firstmate workspace with the given cwd"
@@ -1497,6 +1506,62 @@ test_server_ensure_scrubs_home_and_harness_identity() {
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
   pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
+}
+
+# make_herdr_session_probe_fakebin: `status` reports running while
+# $FM_HERDR_SERVER_MARKER exists; `server` execs python3, so the probed pid IS
+# the fake server's own, and records in $FM_HERDR_SESSION_LOG whether it leads
+# its own session - the getsid(0) == getpid() fact herdr reports as
+# capabilities.detached_server_daemon, which `herdr machine add` requires.
+make_herdr_session_probe_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    if [ -e "$FM_HERDR_SERVER_MARKER" ]; then
+      printf '{"server":{"running":true}}\n'
+    else
+      printf '{"server":{"running":false}}\n'
+    fi
+    ;;
+  server)
+    exec python3 -I -c '
+import os, sys
+leader = os.getsid(0) == os.getpid()
+with open(sys.argv[1], "w") as log:
+    log.write("leader=%s\n" % ("yes" if leader else "no"))
+open(sys.argv[2], "w").close()
+' "$FM_HERDR_SESSION_LOG" "$FM_HERDR_SERVER_MARKER"
+    ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
+test_server_ensure_starts_the_server_as_a_session_leader() {
+  local dir fb i
+  command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (session-leader probe)"; return 0; }
+  dir="$TMP_ROOT/server-session-leader"; mkdir -p "$dir"
+  fb=$(make_herdr_session_probe_fakebin "$dir")
+  # Control: the same probe started the way the server used to start, as a
+  # plain background job, does not lead a session, so the assertion below
+  # cannot pass vacuously.
+  ( PATH="$fb:$PATH" FM_HERDR_SESSION_LOG="$dir/control" FM_HERDR_SERVER_MARKER="$dir/control-running" \
+      herdr server --session fmtest </dev/null >/dev/null 2>&1 & )
+  i=0
+  while [ ! -e "$dir/control-running" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  [ "$(cat "$dir/control" 2>/dev/null)" = leader=no ] \
+    || fail "a plain background job did not report leader=no, so this case cannot tell the launches apart: $(cat "$dir/control" 2>/dev/null)"
+  PATH="$fb:$PATH" FM_HERDR_SESSION_LOG="$dir/log" FM_HERDR_SERVER_MARKER="$dir/running" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should start the server"
+  [ "$(cat "$dir/log" 2>/dev/null)" = leader=yes ] \
+    || fail "server_ensure started a server that does not lead its own session, which herdr machine add refuses: $(cat "$dir/log" 2>/dev/null)"
+  pass "fm_backend_herdr_server_ensure: starts the server as a session leader, so herdr reports it as a detached server daemon"
 }
 
 # run_owned_server_ensure: run server_ensure for fmtest against
@@ -6585,6 +6650,7 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_starts_the_server_as_a_session_leader
 test_server_ensure_starts_a_firstmate_owned_server
 test_server_ensure_never_starts_an_externally_managed_server
 test_server_ensure_uses_a_running_externally_managed_server
