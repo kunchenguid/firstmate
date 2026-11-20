@@ -466,6 +466,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} rc=0 held line
   fm_task_inbox_ring_core "$@" || rc=$?
   [ "$rc" = 1 ] || return "$rc"
+  fm_backend_source "$backend" || return 1
+  fm_backend_has_send_literal "$backend" || return 1
   held=$(fm_task_inbox_composer_text "$backend" "$target" "$label") || return 1
   [ -n "$held" ] || return 1
   line=$(fm_task_inbox_doorbell_line "$rec") || return 1
