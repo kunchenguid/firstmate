@@ -26,7 +26,9 @@
 # and firstmate.home=<hometag> (bin/fm-backend-hometag-lib.sh). Operations that
 # receive an expected label refuse a terminal whose labels do not match, so a
 # recorded address can never steer input into another home's terminal. hc
-# names are not used: they allow only 1-32 of [a-z0-9_-], narrower than task ids.
+# names are display only, never identity: create_task names the terminal after
+# the task id (fm_backend_hc_task_name) so the app shows it, and starts it
+# unnamed when a live terminal already holds that name (`name_taken`).
 #
 # Visibility in Herdr.app: the app shows a terminal that carries
 # herdr.space=<id> and herdr.tab=<id> labels, and an unknown id becomes a new
@@ -272,13 +274,25 @@ fm_backend_hc_container_ensure() {
   printf '%s' "$session"
 }
 
+# fm_backend_hc_task_name: the hc terminal name for <window-label> (fm-<id>):
+# the task id lowercased, every character outside [a-z0-9_-] turned into `-`,
+# cut to hc's 32-character limit. Empty means no name, also when the result is
+# `t` followed by a digit (`t7`, `t8f`), which hc 0.1.21 refuses as id-shaped,
+# or starts with `-` or `_`, which hc 0.1.21 refuses as `invalid_params`.
+fm_backend_hc_task_name() {  # <window-label>
+  local name
+  name=$(printf '%s' "${1#fm-}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9_-' '-' | cut -c1-32)
+  case $name in [-_]*|t[0-9]*) return 0 ;; esac
+  printf '%s' "$name"
+}
+
 # fm_backend_hc_create_task: start a login shell terminal in <cwd> for
 # <window-label>, refusing a live duplicate in this home. Prints the address.
 # --no-parent and --outlive-parent keep the terminal independent of whichever
 # hc terminal firstmate itself runs in; --no-notify keeps hc from typing notes
 # into any parent.
 fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
-  local session=$1 label=$2 cwd=$3 home scoped dup out address
+  local session=$1 label=$2 cwd=$3 home scoped dup out address name args rc
   home=$(fm_backend_hometag)
   scoped=$(fm_backend_hc_scoped_label "$label")
   dup=$(fm_backend_hc_cli "$session" ls --json --label "firstmate.task=$label" --label "firstmate.home=$home" 2>/dev/null) \
@@ -287,11 +301,23 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
     echo "error: hc terminal for $label already exists in session '$session'" >&2
     return 1
   fi
-  out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
+  args=(run --bg --json --no-parent --outlive-parent --no-notify \
     --cwd "$cwd" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
-    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" 2>&1) \
-    || { echo "error: hc run failed for $label: $out" >&2; return 1; }
+    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped")
+  name=$(fm_backend_hc_task_name "$label")
+  rc=0
+  if [ -n "$name" ]; then
+    out=$(fm_backend_hc_cli "$session" "${args[@]}" "--name=$name" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ] && [ "$(printf '%s' "$out" | jq -r '.error.kind? // empty' 2>/dev/null)" = name_taken ]; then
+      name=
+    fi
+  fi
+  if [ -z "$name" ]; then
+    rc=0
+    out=$(fm_backend_hc_cli "$session" "${args[@]}" 2>&1) || rc=$?
+  fi
+  [ "$rc" -eq 0 ] || { echo "error: hc run failed for $label: $out" >&2; return 1; }
   address=$(printf '%s' "$out" | jq -r '.address // empty' 2>/dev/null)
   fm_backend_hc_address_valid "$address" || { echo "error: hc run did not return a terminal address for $label (got: $out)" >&2; return 1; }
   printf '%s\n' "$address"
