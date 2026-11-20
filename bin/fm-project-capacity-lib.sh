@@ -102,6 +102,11 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
   FM_PROJECT_CAPACITY=
   FM_PROJECT_CAPACITY_ANY=
   FM_PROJECT_CAPACITY_ERROR=
+  if { [ -e "$1" ] || [ -L "$1" ]; } &&
+    { [ ! -d "$1" ] || [ ! -r "$1" ] || [ ! -x "$1" ]; }; then
+    FM_PROJECT_CAPACITY_ERROR="$FM_PROJECT_CAPACITY_FILE is not accessible"
+    return 1
+  fi
   if [ ! -e "$FM_PROJECT_CAPACITY_FILE" ] && [ ! -L "$FM_PROJECT_CAPACITY_FILE" ]; then
     return 0
   fi
@@ -156,7 +161,11 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
     esac
     seen="$seen$pname|"
     [ "$pname" != "$name" ] || FM_PROJECT_CAPACITY=$pcap
-  done < "$FM_PROJECT_CAPACITY_FILE"
+  done < "$FM_PROJECT_CAPACITY_FILE" || {
+    FM_PROJECT_CAPACITY_ERROR="$FM_PROJECT_CAPACITY_FILE cannot be read"
+    FM_PROJECT_CAPACITY=
+    return 1
+  }
   [ "$seen" = '|' ] || FM_PROJECT_CAPACITY_ANY=1
   return 0
 }
