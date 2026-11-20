@@ -38,6 +38,9 @@
 #      the decision; a retry while that decision is still open appends nothing
 #  19. A request summary keeps accented letters, drops control characters, and
 #      caps at 120 characters without splitting one under any caller locale
+#  20. A resolve scan checks only the lines naming its request, so its cost does
+#      not grow with unrelated status history, and still returns the first
+#      whole-token reply
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2123,6 +2126,43 @@ test_summary_keeps_accents_and_caps_by_character() {
   pass "the summary keeps accented letters, drops control characters, and caps by character"
 }
 
+test_resolve_scan_checks_only_lines_naming_the_request() {
+  local home status checked corr other out count
+  (
+    home=$(setup_parent scan-candidates)
+    status="$home/state/hibit.status"
+    checked="$home/checked"
+    corr=$(fm_pending_reply_new_id)
+    other=$(fm_pending_reply_new_id)
+    {
+      awk 'BEGIN { for (i = 0; i < 2000; i++) printf "working: unrelated history %d\n", i }'
+      printf 'done [corr=%s]: reply to another request\n' "$other"
+      printf 'blocked: pending-reply-missed corr=%s\n' "$corr"
+      printf 'working: xcorr=%s and corr=%sff are other tokens\n' "$corr" "$corr"
+      # A stray NUL byte must not hide the reply on its line.
+      printf 'done [corr=%s]: first\0 reply\n' "$corr"
+      printf 'done [corr=%s]: second reply' "$corr"
+    } > "$status"
+    eval "real_$(declare -f fm_pending_reply_line_resolves)"
+    # Count the per-line checks a scan makes.
+    # shellcheck disable=SC2329
+    fm_pending_reply_line_resolves() {
+      printf x >> "$checked"
+      real_fm_pending_reply_line_resolves "$@"
+    }
+    out=$(fm_pending_reply_find_resolve_line "$status" "$corr")
+    [ "$out" = "done [corr=$corr]: first reply" ] || fail "scan must return the first whole-token reply, got '$out'"
+    count=$(wc -c < "$checked" | tr -d ' ')
+    [ "$count" -le 10 ] || fail "scan checked $count lines of a history that names the request on 4"
+    out=$(fm_pending_reply_find_resolve_line "$status" "$(fm_pending_reply_new_id)")
+    [ -z "$out" ] || fail "scan must find nothing for a request the history never names, got '$out'"
+    printf 'done [corr=%s]: only reply' "$corr" > "$status"
+    out=$(fm_pending_reply_find_resolve_line "$status" "$corr")
+    [ "$out" = "done [corr=$corr]: only reply" ] || fail "scan must read a reply with no final newline, got '$out'"
+  ) || fail "the resolve scan check failed"
+  pass "a resolve scan checks only the lines naming its request"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2174,5 +2214,6 @@ test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
 test_same_kind_escalation_reopens_after_operator_close
 test_summary_keeps_accents_and_caps_by_character
+test_resolve_scan_checks_only_lines_naming_the_request
 
 printf 'ok - all pending-reply tests passed\n'
