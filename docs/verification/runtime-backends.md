@@ -1021,7 +1021,7 @@ A run containing unclaimed activity (`Working on request...`, `→ ran npm test 
 The one exception, the selected row of Claude 2.1.291's slash-command popup, which leads with that same `❯`, is recorded in [Claude Code 2.1.291 marks the popup's selected row](#claude-code-21291-marks-the-popups-selected-row).
 `test_composer_footer_zone_refuses_rather_than_allows` pins both directions on the bordered-box and separator-pair shapes.
 
-Coverage is the bordered box and the separator pair, the two shapes claude 2.x renders. The opencode left bar is wired into the same rule but is **unexercised**: every left-bar row this repo records leads with plain text, and opencode's own prompt character is `>`, a shell glyph deliberately outside the agent set, so no opencode shape recorded here can prove a left-bar envelope or open a footer zone beneath one.
+The [classifier header](../../bin/fm-composer-lib.sh) owns current footer-zone coverage and the unexercised left-bar boundary.
 
 The live refresh for this entry is the cursorless arm added to the composer-matrix guard, which re-reads each harness's already-proven-idle pane the way every non-tmux backend reads it and fails naming the harness and version when that read is `pending`:
 
@@ -1030,7 +1030,7 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 ```
 
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
-The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
+The Herdr captures above are this entry's live evidence; newer Claude guard results are recorded in [the fast-mode badge verification](#2026-11-20-claude-fast-mode-badge-top-rule-through-herdr).
 
 ### 2026-09-29 claude 2.1.284 named session through Herdr
 
@@ -1062,6 +1062,37 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 ok - claude-named (2.1.284 (Claude Code)): real idle composer classifies empty
 ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
 ```
+
+### 2026-11-20 claude fast-mode badge top rule through Herdr
+
+Verified on 2026-11-20 on Linux x86_64 against Claude Code 2.1.327, 2.1.328 and 2.1.329 in Herdr 0.9.0 panes of an isolated lab session and in an isolated tmux server.
+With fast mode enabled (`"fastMode": true` in Claude Code settings, or `claude --settings '{"fastMode":true}'`), freshly started sessions on all three versions burn a fast-mode badge into an unnamed composer's top rule: `───…─── ↯ /fast ─` while idle and `───…─── ↯ ─` once text is typed, with `↯` as U+21AF.
+With fast mode off the top rule stays solid, checked live on 2.1.329 by launching `claude --settings '{"fastMode":false}'` and `claude --settings '{"fastMode":true}'` side by side, so the CLI version alone does not predict the shape.
+The titled-rule predicate accepted ASCII titles only, so the badge rule never matched, the closing rule read as an unmatched separator, and the cursorless read was `unknown` unless an unrelated solid rule elsewhere in the viewport happened to pair with the closing rule.
+Herdr's Claude payload proof requires a readable empty composer before typing, so every doorbell to such a worker reported `send-failed`; tmux, which anchors on the cursor row and runs no payload proof, delivered normally.
+A typed doorbell also wraps onto a second composer row at 120 columns, which the titled-rule sandwich did not admit.
+
+The [classifier's titled-rule and sandwich comments](../../bin/fm-composer-lib.sh) own the accepted title, width, continuation, and envelope-selection constraints.
+`test_matrix_claude_fast_badge_top_rule` in `tests/fm-composer-lib.test.sh` pins the idle, wrapped-draft, extraction, staleness, width, and foreign-glyph cases on every capability profile.
+`test_matrix_claude_titled_envelope_lower_candidates` covers titled and badge composers with a `→ repo git:(main)` footer or marked slash popup, both with and without an earlier transcript separator and prompt, plus lower live drafts and stale-envelope refusals.
+The composer-matrix guard's plain `claude` arm now also requires a cursorless `empty`, and its `claude-fast` arm forces fast mode on so the badge shape is proven whatever the operator's settings say:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.329 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
+ok - claude-named (2.1.329 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
+ok - claude-fast (2.1.329 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
+ok - live Herdr submit confirm: Claude Code (2.1.329 (Claude Code)) on herdr 0.9.0 reports empty and renders the requested reply in isolated session <lab-session>
+ok - live Herdr submit confirm: Claude Code (2.1.329 (Claude Code)) on herdr 0.9.0 proves and submits a typed /context behind its command popup and renders its report
+```
+
+Against the classifier without the `↯` mapping, the `claude-fast` arm fails with `read cursorless as unknown, expected empty`, as do the plain and named arms when the operator's settings enable fast mode.
+
+Claude Code 2.1.329 also retitled the `/context` report heading from `Context Usage` to `Context usage`; the Herdr guard accepts both.
 
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
