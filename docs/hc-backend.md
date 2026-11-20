@@ -72,6 +72,9 @@ The terminal carries these labels:
 | `herdr.space` | `FM_HC_SPACE`, default `fm-<hometag>` | Groups a home's tasks in one Herdr.app space. |
 | `herdr.tab` | `<hometag>-fm-<id>` | One Herdr.app tab per task. |
 
+The terminal is also started with `--name`: the task id lowercased, every character outside `a-z0-9_-` turned into `-`, cut to hc's 32-character limit.
+The name is display only, never identity: when a live terminal already holds it, hc answers `name_taken` and the task starts unnamed instead.
+
 ```text
 backend=hc
 backend_detect=app-terminal
@@ -92,7 +95,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Operation | hc command |
 | --- | --- |
 | Container ensure | `hc server status` plus the `hello` generation handshake over `hc connect` |
-| Create task | `hc run --bg --no-parent --outlive-parent --no-notify --cwd <project> --label ...` |
+| Create task | `hc run --bg --no-parent --outlive-parent --no-notify --cwd <project> --label ... --name <name>` |
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
