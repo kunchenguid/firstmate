@@ -2756,12 +2756,12 @@ EOF
   held=$(hold_task_set_lock "$subhome/state" task-spawn) \
     || fail "could not stage a fresh spawn holding the task-set lock"
   holder=${held%% *}
-  if FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 \
+  if FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 FM_SPAWN_TASK_SET_WAIT=2 \
     "$ROOT/bin/fm-spawn.sh" newtask "$subhome/projects/alpha" --scout >/dev/null 2>"$err"; then
     kill "$holder" 2>/dev/null || true
     fail "a fresh spawn published while another spawn owned the task set"
   fi
-  grep -F "task set is locked by another spawn" "$err" >/dev/null \
+  grep -F "task set stayed locked by another spawn for 2s" "$err" >/dev/null \
     || fail "the refusal did not name the other spawn: $(cat "$err")"
   [ ! -e "$subhome/state/newtask.meta" ] || fail "a refused spawn published a task"
   kill "$holder" 2>/dev/null || true

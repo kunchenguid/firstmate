@@ -153,7 +153,8 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
       watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=999
     pid=$!
     wait_for_exit "$pid" 100 || { reap "$pid"; fail "$wait_kind lost its first-sight alert"; }
-    grep -Fx "stale: $window" "$out" >/dev/null || fail "$wait_kind did not surface as a plain stale"
+    grep -Fx "stale: $window [paused: waiting for my $wait_kind to finish; resume on completion]" "$out" >/dev/null \
+      || fail "$wait_kind did not surface as a stale carrying its own declared wait line: $(cat "$out")"
     ack_stopped_cycle "$state" || fail "could not acknowledge $wait_kind first alert"
 
     # Cross the ordinary wedge threshold twice without aging the declaration
@@ -496,7 +497,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       || fail "[$name] a replacement declared wait inherited the previous wait's re-surface throttle"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
-    bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
+    bare=$(awk -F '\t' -v w="$window" -v r="$replacement" '$3 == "stale" && $4 == w && $5 == "stale: " w " [" r "]" { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes first wakes instead of one"
     [ "$bare" -eq 1 ] || fail "[$name] replacement declared wait changed the wake identity: $(cat "$state/.wake-queue")"
@@ -517,7 +518,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       || fail "[$name] a parked worker did not re-surface once its re-surface window elapsed"
     wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
-    bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' \
+    bare=$(awk -F '\t' -v w="$window" -v r="$replacement" '$3 == "stale" && $4 == w && $5 == "stale: " w " [" r "]" { n++ } END { print n + 0 }' \
       "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
     [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/.wake-queue")"
