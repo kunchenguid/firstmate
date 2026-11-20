@@ -537,7 +537,11 @@ fm_tmux_submit_typed_state() {  # <target> <before> <text> [scroll-capacity]
 # literal write, and the chunked write is the shape its input loop keeps. Every
 # other caller passes 0 and keeps the single one-shot write.
 fm_tmux_type_literal() {  # <target> <text> [chunk]
-  local target=$1 text=$2 chunk=${3:-0} i=0 n=${#text} err
+  local target=$1 text=$2 chunk=${3:-0} i=0 n=0 err
+  # bash 3.2 expands a whole `local` line before assigning any of it, so the
+  # length must be taken after `text` is bound, or `${#text}` reads the caller's
+  # scope (and aborts a `set -u` caller that has no `text`).
+  n=${#text}
   if [ "$chunk" -le 0 ] || [ "$n" -le "$chunk" ]; then
     err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null) \
       || { printf '%s' "$err"; return 1; }
