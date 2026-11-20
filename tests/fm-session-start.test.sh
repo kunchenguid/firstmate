@@ -2403,29 +2403,68 @@ SH
 
 # --- context re-emit (--reemit) ----------------------------------------------
 
-test_reemit_cue_survives_the_hook_output_preview() {
-  local rec root home fakebin reemit normal head2k
-  rec=$(new_world reemit-cue)
+test_reemit_fits_the_hook_output_cap_and_points_to_bulky_sections() {
+  local rec root home fakebin reemit normal head2k label i id
+  rec=$(new_world reemit-cap)
   IFS='|' read -r root home fakebin <<FIXTURE
 $rec
 FIXTURE
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
-  mkdir -p "$home/data"
   awk 'BEGIN { for (i = 0; i < 400; i++) printf "preference line %04d padding padding padding\n", i }' > "$home/data/captain.md"
+  awk 'BEGIN { for (i = 0; i < 400; i++) printf "learning line %04d padding padding padding\n", i }' > "$home/data/learnings.md"
+  awk 'BEGIN {
+    print "# Backlog\n\n## In flight\n"
+    for (i = 0; i < 150; i++) printf "- [ ] in-flight-%03d example task title with padding padding\n", i
+    print "\n## Queued\n"
+  }' > "$home/data/backlog.md"
+  for i in $(seq -w 1 20); do
+    printf 'kind=ship\nwindow=fm-task-0%s\n' "$i" > "$home/state/task-0$i.meta"
+    awk 'BEGIN { for (i = 0; i < 50; i++) printf "working [at=%d]: status event %03d padding padding padding\n", 1700000000 + i, i }' \
+      > "$home/state/task-0$i.status"
+  done
+  for i in $(seq -w 1 5); do
+    printf 'done: status event 001\n' > "$home/state/orphan-0$i.status"
+  done
+  append_wake "$home/state" signal task-001 "done: queued before the re-emit" || fail "seed wake failed"
 
   normal=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_not_contains "$normal" "RE-EMIT CUE" "a normal start printed the re-emit cue"
+  assert_contains "$normal" "preference line 0399" "a normal start stopped printing captain preferences in full"
+  [ "${#normal}" -gt 10000 ] || fail "the fixture did not make a full digest exceed the hook output cap"
 
   reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     "$SESSION_START" --reemit)
-  [ "${#reemit}" -gt 10000 ] || fail "re-emit fixture did not exceed the hook output limit"
+  [ "${#reemit}" -lt 10000 ] || fail "the re-emit is ${#reemit} characters, over the 10000-character hook output cap"
   head2k=$(printf '%s' "$reemit" | head -c 2000)
   assert_contains "$head2k" "RE-EMIT CUE" "the re-emit cue is not inside the first 2000 characters"
-  assert_contains "$head2k" "Full output saved to" "the re-emit cue does not point at the saved output"
+  assert_not_contains "$reemit" "read that whole file" "the re-emit cue still asks for the whole saved output"
 
-  pass "--reemit puts its read cue in the first 2000 characters and a normal start omits it"
+  for label in "$home/data/captain.md" "$home/data/learnings.md" "$home/data/backlog.md" "$home/state/<id>.status"; do
+    assert_contains "$reemit" "$label" "the re-emit did not point to $label"
+  done
+  assert_not_contains "$reemit" "preference line 0000" "the re-emit inlined captain preferences"
+  assert_not_contains "$reemit" "learning line 0000" "the re-emit inlined learnings"
+  assert_not_contains "$reemit" "in-flight-000" "the re-emit inlined the backlog listing"
+  assert_not_contains "$reemit" "status event 049" "the re-emit inlined a status tail"
+  assert_contains "$reemit" "ABSENT" "the re-emit stopped marking absent context files"
+
+  assert_contains "$reemit" "LOCK" "the re-emit dropped the lock result"
+  assert_contains "$reemit" "done: queued before the re-emit" "the re-emit dropped the queued wake"
+  assert_contains "$reemit" "WAKE_ACK_REQUIRED:" "the re-emit dropped the wake acknowledgement instruction"
+  for i in $(seq -w 1 20); do
+    assert_contains "$reemit" "--- task-0$i ---" "the re-emit dropped the work-under-way identity task-0$i"
+  done
+  for i in $(seq -w 1 5); do
+    assert_contains "$reemit" "--- orphan-0$i ---" "the re-emit dropped the orphan status log orphan-0$i"
+  done
+  assert_not_contains "$reemit" "Follow the supervision operating instructions block above" \
+    "the re-emit NEXT STEP points at a supervision block it did not print"
+  assert_contains "$reemit" "Print the supervision instructions with the command" \
+    "the re-emit NEXT STEP does not say to print the supervision instructions"
+
+  pass "--reemit stays under the hook output cap, keeps the safety lines inline, and points to each bulky section"
 }
 
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
@@ -2469,6 +2508,27 @@ EOF
   assert_contains "$reemit" "NEXT STEP" "--reemit dropped the closing reminder"
 
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
+}
+
+test_reemit_supervision_command_runs_from_a_home_path_with_a_space() {
+  local rec root home fakebin reemit cmd out
+  rec=$(new_world "reemit spaced home")
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  reemit=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_FAKE_HARNESS_PID=$$ PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+  cmd=$(printf '%s\n' "$reemit" | sed -n 's/^turn with work under way: //p' | head -1)
+  [ -n "$cmd" ] || fail "the re-emit did not print the supervision instructions command"
+  out=$(PATH="$fakebin:$BASE_PATH" bash -c "$cmd" 2>&1) \
+    || fail "the re-emit supervision command failed from a home path with a space: $out"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS" \
+    "the re-emit supervision command did not print the supervision instructions"
+
+  pass "--reemit prints a supervision command that runs from a home path with a space"
 }
 
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
@@ -3152,7 +3212,8 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
-test_reemit_cue_survives_the_hook_output_preview
+test_reemit_fits_the_hook_output_cap_and_points_to_bulky_sections
+test_reemit_supervision_command_runs_from_a_home_path_with_a_space
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
 test_read_only_pi_compact_refreshes_against_its_own_session_identity
 test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh

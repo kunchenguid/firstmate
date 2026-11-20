@@ -64,7 +64,7 @@ The run wrapper learns the source in one of two ways:
 - It takes `--source <name>` when the adapter knows the source natively.
 - Otherwise it reads the `source` field from a Claude/Codex-shaped JSON hook payload on stdin.
 
-A re-emit (`--reemit`) reprints the digest for a process that already has the helm and lost only its context.
+A re-emit (`--reemit`) reprints a compact digest, with bulky sections as pointers to their files, for a process that already has the helm and lost only its context.
 
 | Source | Action | Why |
 | --- | --- | --- |
@@ -246,7 +246,7 @@ The wrapper reads `source` from the hook payload.
 Native stdout context injection is supported.
 Claude caps one hook output string at 10,000 characters.
 Above the cap the model receives a preview of the first 2,000 characters plus the path of a saved file, and is not asked to read that file.
-A context re-emit therefore prints a short `RE-EMIT CUE` first, which tells the model to read the saved file.
+A context re-emit therefore prints each bulky section as a pointer to its file, so it stays under the cap, and its short `RE-EMIT CUE` says to read a pointed file only when the turn needs it.
 
 ### Codex exec
 
