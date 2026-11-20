@@ -639,21 +639,26 @@ deliver_interrupt() {
     # which made an immediately following exit read a busy composer and
     # refuse; with it, interrupt's own postcondition says the turn ended.
     if [ "$HARNESS" = wintermolt ]; then
-      local elapsed=0 settled=
+      # Only the readable idle footer settles the claim: an unreadable pane
+      # (a failed or missing capture) proves nothing about the turn, and a
+      # footer still showing busy means it has not ended.
+      local elapsed=0 settled='' verdict
       while :; do
-        case "$(fm_busy_classify "$BACKEND" "$T" wintermolt "$ID" "$STATE")" in
+        verdict=$(fm_busy_classify "$BACKEND" "$T" wintermolt "$ID" "$STATE")
+        case "$verdict" in
+          'unknown wintermolt-regex') settled=confirmed; break ;;
           'busy wintermolt-regex') ;;
-          *) settled=1; break ;;
+          *) settled=unreadable; break ;;
         esac
         awk -v e="$elapsed" -v t="$SETTLE_WAIT" 'BEGIN{exit !(e < t)}' || break
         sleep "$POLL"
         elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
       done
-      if [ -n "$settled" ]; then
-        cancel=confirmed
-      else
-        cancel="$cancel pane-still-working"
-      fi
+      case "$settled" in
+        confirmed) cancel=confirmed ;;
+        unreadable) cancel="$cancel pane-unreadable" ;;
+        *) cancel="$cancel pane-still-working" ;;
+      esac
     fi
   fi
   [ "$INTERRUPT_HAZARD" = none ] || cancel="$cancel revert-picker=$INTERRUPT_HAZARD"

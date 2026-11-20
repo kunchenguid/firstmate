@@ -35,9 +35,29 @@ Established in that run, on the real binary:
 
 - The composer box is the shared rounded bordered shape; the idle placeholder `Type a message, or /help` renders as a reverse-video cursor cell on the first character plus one de-emphasized palette run (`38;5;8`), which the ghost stripper cannot reach (a palette index outside the fixed 232-255 ramp), so the pane reads `empty` only through the wintermolt-scoped rule in `bin/fm-composer-lib.sh`.
 - A typed draft renders the opposite shape (default-foreground text, cursor cell after it) and reads `pending`; the busy row `working… (Esc stops, Ctrl+C quits)` shares the placeholder's cursor-cell shape and reads `pending-unproven` (the `…` defeats the ASCII geometry proof), never `empty`.
-- That busy-row verdict is why a submitted steer is confirmed by the transition, not by the composer: the pre-typing read is `empty`, the pane's own `Esc stop` footer then reads busy, and the shared submit core's idle-to-busy proof (`bin/fm-tmux-lib.sh`) accepts the submit on that harness-scoped busy read alone. The composer read is never consulted for the confirmation, so the busy row's `pending-unproven` is expected and harmless there.
+- That busy-row verdict is why a submitted steer cannot be confirmed by the composer alone: it reads `pending-unproven`, never `empty`, whatever the turn is doing. This run read the row after its own probe prompt; it did not submit through the shared submit core, so the confirmation itself is covered below, not by this run.
 - The pane foreground is exactly `wintermolt`; a bash tool subprocess is its direct child and inherits no identity variable, only backend-config variables, so detection is anchored ancestry alone.
 - One Escape stops a running turn; one `/quit` exits to the pane shell.
+
+## Submit confirmation (not exercised live)
+
+The confirmation path a steer actually takes is covered by
+`tests/fm-wintermolt-harness.test.sh`, not by a live run against the shipped
+code:
+
+- The burst is verified against the composer's own text before Enter, because a
+  literal burst typed while the TUI is still settling its input loop is dropped
+  or truncated, and the composer such a burst leaves behind reads exactly like a
+  submitted turn. A burst that provably landed nothing is replayed; a composer
+  holding a fragment, or content that is not ours, refuses the submit. This is
+  the behaviour that makes a swallowed first steer survive; it has not been
+  re-measured on the real binary since the check was added.
+- A landed submit is confirmed by the idle-to-busy transition read through the
+  anchored footer alone. The footer's render time after Enter was never measured
+  on this path, so the wait is pinned to the budget the spawn gate already grants
+  the same verdict (`FM_WINTERMOLT_DELIVERY_POLLS` x `FM_WINTERMOLT_POLL_INTERVAL`,
+  60 x 0.5s by default) rather than to a measurement, and a footer slower than
+  that budget would still report the steer unconfirmed.
 
 ## Lane rehearsal results (2026-11-20, wintermolt 0.7.0)
 
@@ -59,6 +79,11 @@ Established in that run:
 - The interrupt verb waits - bounded by the control settle window - for the rendered busy verdict to clear and then reports `cancel=confirmed`; without that wait the working row persists for a redraw moment and an immediately following exit read a busy composer and refused.
 - The interrupt verb refuses on an idle pane ("requires a proven running turn") and leaves the worker running, because the same key quits an idle wintermolt outright, draft included.
 - The exit verb types `/quit` into a proven-empty composer and reports `stopped`.
+
+Only a readable idle footer settles that cancellation claim: a pane that stays
+busy reports `pane-still-working` and one whose capture fails reports
+`pane-unreadable`, both unconfirmed. The lane exercised the cleared-footer case
+only; `tests/fm-control.test.sh` covers the other two.
 
 ## Non-interactive backend surface (2026-11-20)
 

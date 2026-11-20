@@ -207,59 +207,147 @@ test_wintermolt_busy_signatures_are_harness_scoped() {
   pass "fm-composer-lib: wintermolt delivery signatures never cross harnesses"
 }
 
+# The composer rows a wintermolt box renders for <text>, wrapped at
+# <inner-width> with the cursor cell after the last character. The submit
+# fixtures below embed this definition in their fake tmux, so the shipped text
+# extractor reads exactly what a live draft renders.
+wm_fake_draft_rows() {  # <inner-width> <text>
+  local width=$1 rest=$2 chunk pad
+  while :; do
+    chunk=${rest:0:$((width - 4))}
+    rest=${rest:$((width - 4))}
+    if [ -n "$rest" ]; then
+      printf '│\033[39m  %s%*s\n' "$chunk" 2 ''
+    else
+      pad=$((width - 3 - ${#chunk}))
+      printf '│\033[39m  %s\033[48;5;6m \033[49m%*s\033[38;5;8m│\n' "$chunk" "$pad" ''
+    fi
+    [ -n "$rest" ] || break
+  done
+}
+
 # The submit cores read the pane through tmux and the anchored wintermolt
 # process name. The fake below serves the real classifier both of those, so the
 # reads under test are the shipped ones: the styled box plus footer, the cursor
 # parked on the footer row, and the pane's foreground process. `Enter` moves an
-# idle pane to FM_FAKE_WM_AFTER (the render a submitted steer produces) and
-# leaves any other state alone; `idle`, `busy`, `draft`, and `stale` are the
-# renders those reads must tell apart.
+# idle pane that holds text to FM_FAKE_WM_AFTER (the render a submitted steer
+# produces) and leaves any other state alone; `idle`, `busy`, `draft`, and
+# `stale` are the renders those reads must tell apart. A literal burst models
+# what the live TUI does with it: FM_FAKE_WM_SWALLOW=N drops the first N bursts,
+# FM_FAKE_WM_LOSE=1 drops every burst, and FM_FAKE_WM_TRUNCATE=N keeps only the
+# tail of burst N.
 make_wintermolt_pane_fakebin() {  # <dir>
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+INNER=$WM_INNER_WIDTH
 state=\$(cat "\${FM_FAKE_WM_STATE:?}" 2>/dev/null || printf 'idle')
 styled=
 mode=key
 previous=
+payload=
 for arg in "\$@"; do
   [ "\$arg" = "-e" ] && styled=1
-  [ "\$previous" = "-l" ] && mode=literal
+  if [ "\$previous" = "-l" ]; then mode=literal; payload=\$arg; fi
   previous=\$arg
 done
+draft_file="\${FM_FAKE_WM_STATE:?}.draft"
+bursts_file="\${FM_FAKE_WM_STATE:?}.bursts"
+draft=\$(cat "\$draft_file" 2>/dev/null || printf '')
+$(declare -f wm_fake_draft_rows)
+composer_text() {
+  if [ -n "\$draft" ]; then printf '%s' "\$draft"
+  elif [ "\$state" = draft ]; then printf '%s' 'draft text never sent'
+  fi
+}
+draft_row_count() {
+  local text=\$1 n
+  [ -n "\$text" ] || { printf '1'; return 0; }
+  n=\$(( (\${#text} + INNER - 5) / (INNER - 4) ))
+  [ "\$n" -ge 1 ] || n=1
+  printf '%s' "\$n"
+}
+inner_plain() {
+  printf '│%s%s%*s│' '  ' "\$1" "\$((INNER - 2 - \${#1}))" ''
+}
 screen() {
+  local text
+  text=\$(composer_text)
   if [ -n "\$styled" ]; then
     case "\$state" in
-      idle) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_IDLE_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
-      draft) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_DRAFT_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
       # The pane rendering its working row while its footer still reads idle,
       # under conversation output that ends in the busy word.
       stale) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$(wm_inner_plain '  still working')" "$WM_BOTTOM" "$WM_TOP" "$WM_BUSY_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
-      *) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_BUSY_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
+      busy) printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP" "$WM_BUSY_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
+      *)
+        printf '%s\n' "$(wm_transcript_top)" "$(wm_inner_plain '  conversation history')" "$WM_BOTTOM" "$WM_TOP"
+        if [ -z "\$text" ]; then printf '%s\n' "$WM_IDLE_COMPOSER_RAW"; else wm_fake_draft_rows "\$INNER" "\$text"; fi
+        printf '%s\n%s\n' "$WM_BOTTOM" "$WM_FOOTER_IDLE"
+        ;;
     esac
   else
     case "\$state" in
-      idle) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  Type a message, or /help')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
-      draft) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  draft text never sent')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
       stale) printf 'conversation\n%s\n%s\n%s\n%s\n' "still working" "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
-      *) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
+      busy) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
+      *)
+        [ -n "\$text" ] || text='Type a message, or /help'
+        printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "\$(inner_plain "\$text")" "$WM_BOTTOM" "$WM_FOOTER_IDLE"
+        ;;
     esac
   fi
 }
 case "\${1:-}" in
   display-message)
     case "\$*" in
-      *'#{cursor_y}'*) printf '6\n'; exit 0 ;;
+      *'#{cursor_y}'*) printf '%s\n' "\$((5 + \$(draft_row_count "\$(composer_text)")))"; exit 0 ;;
       *'#{pane_tty}'*) printf '/dev/ttys99999'; exit 0 ;;
       *'#{pane_current_command}'*) printf '%s' "\${FM_FAKE_WM_COMMAND:-wintermolt}"; exit 0 ;;
     esac
     exit 0 ;;
-  capture-pane) screen; exit 0 ;;
+  capture-pane)
+    if [ -f "\${FM_FAKE_WM_STATE:?}.delay" ]; then
+      left=\$(cat "\${FM_FAKE_WM_STATE:?}.delay")
+      left=\$((left - 1))
+      if [ "\$left" -le 0 ]; then
+        rm -f "\${FM_FAKE_WM_STATE:?}.delay"
+        printf '%s\n' "\${FM_FAKE_WM_AFTER:-busy}" > "\${FM_FAKE_WM_STATE:?}"
+      else
+        printf '%s\n' "\$left" > "\${FM_FAKE_WM_STATE:?}.delay"
+      fi
+    fi
+    screen; exit 0 ;;
   send-keys)
-    if [ "\$mode" = key ] && [ "\$previous" = Enter ] && [ "\$state" = idle ]; then
-      printf '%s\n' "\${FM_FAKE_WM_AFTER:-busy}" > "\${FM_FAKE_WM_STATE:?}"
+    if [ "\$mode" = literal ]; then
+      bursts=\$(cat "\$bursts_file" 2>/dev/null || printf '0')
+      bursts=\$((bursts + 1))
+      printf '%s\n' "\$bursts" > "\$bursts_file"
+      if [ "\${FM_FAKE_WM_LOSE:-0}" = 1 ] \
+         || [ "\$bursts" -le "\${FM_FAKE_WM_SWALLOW:-0}" ]; then
+        exit 0
+      fi
+      if [ "\${FM_FAKE_WM_TRUNCATE:-0}" -ge "\$bursts" ] \
+         && [ "\${FM_FAKE_WM_TRUNCATE:-0}" -gt 0 ]; then
+        keep=\$(( \${#payload} / 2 ))
+        draft=\${payload:\$((\${#payload} - keep))}
+      else
+        draft=\$draft\$payload
+      fi
+      printf '%s' "\$draft" > "\$draft_file"
+      exit 0
+    fi
+    if [ "\$previous" = Enter ] && [ "\$state" = idle ] && [ -n "\$(composer_text)" ]; then
+      : > "\$draft_file"
+      if [ "\${FM_FAKE_WM_AFTER_DELAY:-0}" -gt 0 ]; then
+        # The working row replaces the composer at once while the footer takes
+        # a few more reads to render busy, the slow-footer shape the
+        # confirmation budget must tolerate.
+        printf 'stale\n' > "\${FM_FAKE_WM_STATE:?}"
+        printf '%s\n' "\${FM_FAKE_WM_AFTER_DELAY}" > "\${FM_FAKE_WM_STATE:?}.delay"
+      else
+        printf '%s\n' "\${FM_FAKE_WM_AFTER:-busy}" > "\${FM_FAKE_WM_STATE:?}"
+      fi
     fi
     exit 0 ;;
 esac
@@ -319,7 +407,9 @@ test_wintermolt_steer_confirmation_uses_the_busy_transition() {
   state="$case_dir/wm.state"
   submit() {  # <pre-state> <post-enter-state>
     printf '%s\n' "$1" > "$state"
+    rm -f "$state.draft" "$state.bursts" "$state.delay"
     PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_AFTER="$2" \
+      FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
       fm_tmux_submit_core win 'steer text' 2 0.05 0.05
   }
   verdict=$(submit idle busy)
@@ -344,6 +434,83 @@ test_wintermolt_steer_confirmation_uses_the_busy_transition() {
   [ "$verdict" = pending-unproven ] \
     || fail "the harness-less union must not confirm an unproven composer, got '$verdict'"
   pass "fm-tmux-lib: a wintermolt steer confirms through the idle-to-busy transition"
+}
+
+test_wintermolt_swallowed_burst_is_retyped_before_submit() {
+  local case_dir fakebin state verdict bursts
+  case_dir="$TMP_ROOT/submit-swallow"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # The first burst is exactly what a freshly launched 0.7.0 TUI drops, and a
+  # dropped burst leaves the idle placeholder, which reads like a submitted
+  # turn. The composer's own content is what tells the two apart.
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_SWALLOW=1 \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
+  [ "$verdict" = empty ] \
+    || fail "a steer swallowed by a fresh pane and retyped must confirm delivery, got '$verdict'"
+  bursts=$(cat "$state.bursts")
+  [ "$bursts" = 2 ] \
+    || fail "a swallowed burst must be replayed exactly once, got $bursts bursts"
+  pass "fm-tmux-lib: a burst the fresh wintermolt TUI swallows is retyped and then confirmed"
+}
+
+test_wintermolt_slow_footer_still_confirms_the_steer() {
+  local case_dir fakebin state verdict
+  case_dir="$TMP_ROOT/submit-slow-footer"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # A footer that renders after the shared Enter budget is still a landed
+  # steer: the read is granted the same poll budget the spawn gate grants it.
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_AFTER_DELAY=6 \
+    FM_WINTERMOLT_DELIVERY_POLLS=10 FM_WINTERMOLT_POLL_INTERVAL=0.01 \
+    fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
+  [ "$verdict" = empty ] \
+    || fail "a footer that renders after the shared Enter budget must still confirm its steer, got '$verdict'"
+  [ "$(cat "$state")" = busy ] \
+    || fail "the slow footer should have rendered busy, pane state read '$(cat "$state")'"
+  pass "fm-tmux-lib: a slow wintermolt footer still confirms the steer"
+}
+
+test_wintermolt_burst_that_never_lands_does_not_confirm() {
+  local case_dir fakebin state verdict bursts
+  case_dir="$TMP_ROOT/submit-never-lands"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_LOSE=1 \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
+  [ "$verdict" = send-failed ] \
+    || fail "a steer that never reaches the composer must not confirm a submit, got '$verdict'"
+  bursts=$(cat "$state.bursts")
+  [ "$bursts" = 3 ] \
+    || fail "the swallow retry must stop at its burst budget, got $bursts bursts"
+  pass "fm-tmux-lib: a wintermolt burst that never lands never confirms a submit"
+}
+
+test_wintermolt_truncated_burst_is_never_submitted() {
+  local case_dir fakebin state verdict bursts
+  case_dir="$TMP_ROOT/submit-truncated"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # Live, the TUI kept only the tail of the burst and the submit reported a
+  # confirmed steer for the fragment. A composer holding a fragment is neither
+  # ours nor untouched, so it is never replayed onto and never submitted.
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_TRUNCATE=1 \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    fm_tmux_submit_core win 'steer text' 2 0.05 0.05)
+  [ "$verdict" = send-failed ] \
+    || fail "a truncated burst must not confirm a submit, got '$verdict'"
+  bursts=$(cat "$state.bursts")
+  [ "$bursts" = 1 ] \
+    || fail "a composer holding a fragment must never be replayed onto, got $bursts bursts"
+  [ "$(cat "$state")" = idle ] \
+    || fail "a fragment must never be submitted as a turn, pane state read '$(cat "$state")'"
+  pass "fm-tmux-lib: a wintermolt burst the TUI truncates is never submitted as a fragment"
 }
 
 test_wintermolt_busy_classification_reads_only_the_last_row() {
@@ -475,22 +642,38 @@ make_wintermolt_fakebin() {
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+INNER=$WM_INNER_WIDTH
 printf '%s\n' "\$*" >> "\${FM_FAKE_TMUX_CALL_LOG:-/dev/null}"
 state=\$(cat "\${FM_FAKE_WM_STATE:-/dev/null}" 2>/dev/null || printf 'shell')
 styled=
 for arg in "\$@"; do
   [ "\$arg" = "-e" ] && styled=1
 done
+$(declare -f wm_fake_draft_rows)
+fake_draft() {
+  [ -f "\${FM_FAKE_WM_STATE}.draft" ] || return 1
+  cat "\${FM_FAKE_WM_STATE}.draft"
+}
 fake_screen() {
   if [ -n "\$styled" ]; then
     case "\$state" in
-      launched) printf '%s\n' "$WM_TOP" "$WM_IDLE_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      launched)
+        printf '%s\n' "$WM_TOP"
+        if draft=\$(fake_draft); then wm_fake_draft_rows "\$INNER" "\$draft"; else printf '%s\n' "$WM_IDLE_COMPOSER_RAW"; fi
+        printf '%s\n%s\n' "$WM_BOTTOM" "$WM_FOOTER_IDLE"
+        ;;
       busy) printf '%s\n' "$WM_TOP" "$WM_BUSY_COMPOSER_RAW" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
       *) printf 'shell prompt\n\$ \n' ;;
     esac
   else
     case "\$state" in
-      launched) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  Type a message, or /help')" "$WM_BOTTOM" "$WM_FOOTER_IDLE" ;;
+      launched)
+        if draft=\$(fake_draft); then
+          printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "  \$draft" "$WM_BOTTOM" "$WM_FOOTER_IDLE"
+        else
+          printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  Type a message, or /help')" "$WM_BOTTOM" "$WM_FOOTER_IDLE"
+        fi
+        ;;
       busy) printf 'conversation\n%s\n%s\n%s\n%s\n' "$WM_TOP" "$(wm_inner_plain '  working… (Esc stops, Ctrl+C quits)')" "$WM_BOTTOM" "$WM_FOOTER_BUSY" ;;
       *) printf 'shell prompt\n\$ \n' ;;
     esac
@@ -554,8 +737,10 @@ case "\${1:-}" in
             || printf 'launched\n' > "\${FM_FAKE_WM_STATE:?}"
           ;;
         *Read*the*brief*at*)
-          # The brief pointer: the Enter that follows it is the one that
-          # starts the brief turn, so mark it for the plain-Enter branch.
+          # The brief pointer: the composer holds it until the Enter that
+          # starts the brief turn, so the submit core can verify the typed
+          # text, and the plain-Enter branch below submits it.
+          printf '%s' "\$literal" > "\${FM_FAKE_WM_STATE:?}.draft"
           printf 'pointer\n' > "\${FM_FAKE_WM_STATE:?}.pending"
           ;;
       esac
@@ -576,7 +761,7 @@ case "\${1:-}" in
     esac
     if [ "\$count" -eq 1 ] && [ "\${pos[0]}" = Enter ]; then
       if [ -f "\${FM_FAKE_WM_STATE:?}.pending" ]; then
-        rm -f "\${FM_FAKE_WM_STATE:?}.pending"
+        rm -f "\${FM_FAKE_WM_STATE:?}.pending" "\${FM_FAKE_WM_STATE:?}.draft"
         case "\$state" in
           launched) printf 'busy\n' > "\${FM_FAKE_WM_STATE:?}" ;;
         esac
@@ -770,6 +955,10 @@ test_wintermolt_busy_tail_needs_the_pinned_footer_row
 test_wintermolt_busy_signatures_are_harness_scoped
 test_wintermolt_submit_busy_read_resolves_its_own_signature
 test_wintermolt_steer_confirmation_uses_the_busy_transition
+test_wintermolt_swallowed_burst_is_retyped_before_submit
+test_wintermolt_slow_footer_still_confirms_the_steer
+test_wintermolt_burst_that_never_lands_does_not_confirm
+test_wintermolt_truncated_burst_is_never_submitted
 test_wintermolt_busy_classification_reads_only_the_last_row
 test_wintermolt_classify_reads_the_rendered_tail
 test_wintermolt_idle_composer_reads_empty_only_through_the_scope
