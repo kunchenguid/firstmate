@@ -19,6 +19,16 @@ A Bob session is recognized for harness detection and the session lock so firstm
 | Self-update | Bob's default `bobShell.autoUpdate` runs `npm install -g --force` against whichever node is active, which can write outside the running install; it reads only the user settings, so firstmate cannot pin it per task and the operator sets it in `~/.bob/settings/settings.json`. |
 | Composer | `❯` row between two `─` rules with the idle placeholder `Build Anything, @ for context, / for commands, $ for skills` in a 256-colour grey; `../../../bin/fm-composer-lib.sh` owns the classifier. Bob hides its terminal cursor on the last pane row, so the tmux composer read ignores the cursor row when the caller names the harness bob. |
 
+## Approval prompts that remain
+
+`--auto-approve` in a trusted folder approves everything except two checks that still ask (observed live on Bob 2.1.0; bob has no equivalent of claude's `--dangerously-skip-permissions`), so a worker can stop on a confirmation dialog with no turn ending:
+
+- **"Command is too complex and needs manual verification"** comes from bob's command security check. It can be switched off only with `isCommandSecurityEnabled: false` in the user settings, `~/.bob/settings/settings.json`; the worktree's `.bob/settings.json` does not reach it, so firstmate cannot turn it off per task.
+- **"This operation accesses protected Bob files and requires explicit approval"** (Approve Once or Reject) is built in and cannot be switched off. It fires when a command names `.bob/settings.json`, even to read it, or when the edit tool changes a file under `~/.bob/`.
+
+The adapter already starts bob with `--auto-approve --trust` and there is nothing stronger to add, so firstmate answers such a dialog itself with `../../../bin/fm-send.sh <task> --key Enter` after reading the pane.
+A brief for a bob worker should avoid commands that name `.bob/settings.json`; `.bob/launch-brief.md` is not protected.
+
 ## Launch and readiness
 
 The launch template clears `BOB_SESSION` (bob's source throws on a nested session), `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` inline, and the shared outer wrap clears `CURSOR_AGENT`, `CURSOR_INVOKED_AS`, and `GEMINI_CLI`, so neither a foreign primary marker nor a nested-session marker reaches the worker.
