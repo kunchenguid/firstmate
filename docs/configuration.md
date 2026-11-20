@@ -1208,7 +1208,7 @@ The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the
 The optional local, gitignored `config/dibs-scopes` presence flag opts this home into giving every ship and scout one dibs task scope, so the labs, clusters, jobs, and worktrees a worker leases share one owner that lives exactly as long as the task record.
 With the flag absent, spawn and teardown never call dibs.
 With it present, the integration also needs the `dibs` CLI on PATH and dibs scopes turned on in dibs's own user config; without the CLI nothing changes, and with scopes off spawn and teardown run only a read-only `dibs scope show` probe and otherwise behave as they do without the flag.
-An opted-in home with scopes on also needs dibs `exec_owner` and `lease_policies` on and jq on PATH, and any dibs failure there refuses the spawn and names the missing setting.
+An opted-in home with scopes on also needs dibs `exec_owner` and `lease_policies` on and jq on PATH; failures refuse the spawn, with missing-setting diagnostics where the cause is identified.
 A spawned worker starts with `DIBS_TASK` and `DIBS_SCOPE` exported, so tools it runs can lease with `--owner scope:$DIBS_SCOPE`.
 Teardown releases the scope's members before it returns the task worktree, refuses while dibs retains one, and ends the scope after the return.
 Only its presence is read, at each spawn and teardown.
