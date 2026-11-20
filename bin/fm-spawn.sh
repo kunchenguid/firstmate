@@ -3261,8 +3261,9 @@ esac
 case "$DISPATCH_OVERRIDE" in *[![:print:]]*) echo 'error: --dispatch-override must be a printable reason' >&2; exit 1 ;; esac
 [ "$DISPATCH_OVERRIDE" != default ] || { echo 'error: --dispatch-override default is reserved for launches that follow the resolved profile; state a reason' >&2; exit 1; }
 DISPATCH_RECORD="$DATA/$ID/dispatch-resolution.json"
-DISPATCH_SNAPSHOT= DISPATCH_SNAPSHOT_READ=0
-if [ "$RELAUNCH" -eq 0 ] && { [ -e "$CONFIG/fleet-ledger" ] || { [ "$KIND" != secondmate ] && [ -f "$CONFIG/crew-dispatch.json" ]; }; }; then
+DISPATCH_SNAPSHOT= DISPATCH_SNAPSHOT_READ=0 LEDGER_ON=0
+[ ! -e "$CONFIG/fleet-ledger" ] || LEDGER_ON=1
+if [ "$RELAUNCH" -eq 0 ] && { [ "$LEDGER_ON" -eq 1 ] || { [ "$KIND" != secondmate ] && [ -f "$CONFIG/crew-dispatch.json" ]; }; }; then
   ! DISPATCH_SNAPSHOT=$(cat -- "$DISPATCH_RECORD" 2>/dev/null) || DISPATCH_SNAPSHOT_READ=1
 fi
 LEDGER_OVERRIDE=$DISPATCH_OVERRIDE
@@ -8318,7 +8319,7 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 [ -z "$OMP_PROFILE_PIN" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT omp_profile=$OMP_PROFILE_PIN"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
-if [ -e "$CONFIG/fleet-ledger" ] && [ "$RELAUNCH" -eq 0 ]; then
+if [ "$LEDGER_ON" -eq 1 ] && [ "$RELAUNCH" -eq 0 ]; then
   # The resolution snapshot read at the dispatch gate is copied; a missing or unreadable record is null.
   LEDGER_RESOLUTION=$(jq -c --arg id "$ID" 'select(.task == $id) | {status, confidence: (.confidence // null), profile: (.profile // .suggested // null)}' <<<"$DISPATCH_SNAPSHOT" 2>/dev/null) || LEDGER_RESOLUTION=
   FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" "${EFFORT:-}" "${LEDGER_RESOLUTION:-null}" "$LEDGER_OVERRIDE" || true
