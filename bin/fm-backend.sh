@@ -1430,6 +1430,21 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_composer_identity: probe the native agent identity/state of
+# <target> on <backend>, returning "<agent>\t<status>" or non-zero when the
+# backend has no identity probe or probe reading fails.
+fm_backend_composer_identity() {  # <backend> <target> -> "<agent>\t<status>"
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_composer_identity "$@" 2>/dev/null ;;
+    herdr) fm_backend_herdr_composer_identity "$@" 2>/dev/null ;;
+    rex) fm_backend_rex_composer_identity "$@" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

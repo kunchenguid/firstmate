@@ -410,6 +410,44 @@ test_ring_submits_its_own_stuck_doorbell() {
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
+test_inbox_composer_holds_matches_agy_leading_gt() {
+  local test_cap state rc=0
+  state="$TMP_ROOT/holds-agy/state"
+  mkdir -p "$state"
+  test_cap=$(printf '● Reply landed\n────────────────────────\n> please continue\n────────────────────────\n  ? for shortcuts')
+
+  FM_STATE_OVERRIDE="$state" TEST_CAP="$test_cap" bash -c '
+    set -u
+    . "$1/bin/fm-composer-lib.sh"
+    . "$1/bin/fm-task-inbox-lib.sh"
+    fm_backend_source() { return 0; }
+    fm_backend_capture() { printf "%s\n" "$TEST_CAP"; }
+    fm_backend_composer_identity() { printf "agy\tidle"; }
+
+    fm_task_inbox_composer_holds dummy_backend dummy_target "please continue" || exit 11
+    if fm_task_inbox_composer_holds dummy_backend dummy_target "someone elses draft"; then
+      exit 12
+    fi
+
+    # For non-agy (pi), leading > is user quoted text
+    fm_backend_composer_identity() { printf "pi\tidle"; }
+    if fm_task_inbox_composer_holds dummy_backend dummy_target "please continue"; then
+      exit 13
+    fi
+    fm_task_inbox_composer_holds dummy_backend dummy_target "> please continue" || exit 14
+  ' _ "$ROOT" || rc=$?
+  case "$rc" in
+    0) ;;
+    11) fail "fm_task_inbox_composer_holds must match agy composer holding doorbell with leading >" ;;
+    12) fail "fm_task_inbox_composer_holds must not match unrelated draft on agy" ;;
+    13) fail "fm_task_inbox_composer_holds must not strip leading > for pi" ;;
+    14) fail "fm_task_inbox_composer_holds must match exact text with > for pi" ;;
+    *) fail "fm_task_inbox_composer_holds check failed unexpectedly with rc=$rc" ;;
+  esac
+
+  pass "inbox: fm_task_inbox_composer_holds passes identity to strip leading > for agy while preserving user text for other harnesses"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -1377,6 +1415,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_inbox_composer_holds_matches_agy_leading_gt
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_prefilters_history
 test_idempotent_write_prefilter_preserves_exact_bodies

@@ -2207,6 +2207,11 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
+  if ! cleanup_worktree_agents_hooks "$WT"; then
+    echo "REFUSED: cannot safely clean up hooks in $WT; preserving worktree." >&2
+    return 1
+  fi
+
   read_worktree_dirt || return
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
@@ -3612,6 +3617,7 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        cleanup_worktree_agents_hooks "$child_wt"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -3632,6 +3638,7 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        cleanup_worktree_agents_hooks "$child_wt"
         if [ "$child_backend" = t3code ]; then
           "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$child_wt" || return 1
           git -C "$child_wt" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 \
@@ -4081,6 +4088,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
     remove_harness_worktree_wiring "$WT"
+    cleanup_worktree_agents_hooks "$WT"
   fi
   if [ -n "$T_ORCA" ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
@@ -4102,6 +4110,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   remove_harness_worktree_wiring "$WT"
+  cleanup_worktree_agents_hooks "$WT"
   if [ "$BACKEND" = t3code ]; then
     "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
     git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"

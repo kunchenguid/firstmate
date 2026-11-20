@@ -10,9 +10,9 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 |---|---|
 | Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
-| Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
+| Busy state | Semantic busy wiring via `$WT/.agents/plugins/fm-crew-busy/` (`PreInvocation` marks busy, `Stop` marks idle); on Herdr the native `working` status classifies busy, and elsewhere the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
-| Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
+| Turn end | Worktree `Stop` hook touches `state/<id>.turn-ended` and transitions busy state to `idle`; completion also arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
 | Exit | `/quit`, one Enter; the process exits. |
 | Interrupt | Single `Escape`, which prints the Interrupted row and leaves an idle composer with no repollution, so no clear key follows. |
 | Skill | No verified slash-skill form; use natural language. |
@@ -21,7 +21,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
-| Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
+| Composer | Separated `─` pair whose first row leads with `>` (`> ` when empty, `> <draft>` when pending), optionally followed by a `─`-bounded `● [HH:MM:SS] <cmd> running` background-task tray above `? for shortcuts`; classified via the shared identity+structure conjunction (`empty` when idle/done, `pending` when text follows `>`, `unknown` when working or without identity). |
 
 ## Trust, and where the decision persists
 
@@ -44,9 +44,12 @@ agy is included in the session-lock name vocabulary in `../../../../../bin/fm-se
 
 ## Worker busy state and turn end
 
-`../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
-`fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
-Teardown removes nothing agy-specific because the spawn leaves nothing behind.
+`../../../../../bin/fm-spawn.sh` arms a per-task busy generation for agy workers and writes semantic lifecycle hooks into `$WT/.agents/plugins/fm-crew-busy/`.
+The `PreInvocation` hook runs `bin/fm-busy-event.sh apply <state> <id> busy` to record the active turn and emits `{}`.
+The `Stop` hook touches `state/<id>.turn-ended`, runs `bin/fm-busy-event.sh apply <state> <id> idle` to transition the task to idle, and emits `{"decision":"allow"}`.
+Because the hooks live in `.agents/plugins/fm-crew-busy/`, any project-tracked `.agents/hooks.json` stays untouched and excluded from git tracking via `.git/info/exclude`.
+On teardown (`../../../../../bin/fm-teardown.sh`) or relaunch (`../../../../../bin/fm-control-lib.sh`), `fm-crew-busy` is safely pruned while preserving any pre-existing hooks or worker files.
+On Herdr, the native `working` and `idle` status acts as a verified backend authority, and `fm_busy_agy_tail_busy` (`esc to cancel`) provides a rendered-tail fallback.
 
 ## Primary and secondmate integration
 

@@ -100,7 +100,8 @@ fm_tmux_composer_caps() {
 #     same scoping as fm_backend_tmux_foreground_comms) contains a
 #     shape-owner process (pi, pi-signed, pi-launcher - docs/verification/
 #     runtime-backends.md "Agent liveness name sources"; polytoken, whose
-#     TUI pane foreground is comm `polytoken`, verified live on 0.8.19),
+#     TUI pane foreground is comm `polytoken`, verified live on 0.8.19; agy,
+#     whose TUI pane foreground is comm `agy`, verified live on 1.4.5),
 #     falling back to tmux's own foreground-derived #{pane_current_command}.
 #     A pane whose agent died to a shell has no shape-owner foreground
 #     process and gets NO identity, which is exactly what keeps the strict
@@ -115,7 +116,7 @@ fm_tmux_composer_caps() {
 # an interpreter, so it is matched by foreground argv through
 # bin/fm-hermes-process-lib.sh rather than by process name.
 # Prints "<owner><TAB>idle" or "<owner><TAB>working" for owner pi,
-# polytoken, commandcode, or hermes; exits 1 when the pane is not a live
+# polytoken, agy, commandcode, or hermes; exits 1 when the pane is not a live
 # shape owner.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pid pgid tpgid comm args owner='' status
@@ -128,6 +129,7 @@ fm_tmux_composer_identity() {  # <target>
         case "${comm##*/}" in
           pi|pi-signed|pi-launcher|Pi) owner=pi ;;
           polytoken) owner=polytoken ;;
+          agy) owner=agy ;;
           command-code) owner=commandcode ;;
         esac
         if [ -z "$owner" ]; then
@@ -145,13 +147,14 @@ EOF
     case "${comm##*/}" in
       pi|pi-signed|pi-launcher) owner=pi ;;
       polytoken) owner=polytoken ;;
+      agy) owner=agy ;;
     esac
   fi
   [ -n "$owner" ] || return 1
   # The busy footer read is scoped to the matched owner's own harness
-  # signature (pi for the pi family, polytoken's `Running for` row, Command
-  # Code's own footer) so one owner's ordinary output can never acknowledge
-  # another's pane.
+  # signature (pi for the pi family, polytoken's `Running for` row, agy's
+  # `esc to cancel` row, Command Code's own footer) so one owner's ordinary
+  # output can never acknowledge another's pane.
   status=$(fm_pane_busy_state "$target" "$owner")
   case "$status" in
     busy) printf '%s\tworking' "$owner" ;;
