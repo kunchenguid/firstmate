@@ -1241,6 +1241,60 @@ test_matrix_claude_titled_top_rule() {
   pass "matrix: claude's titled top rule proves an idle composer empty and a draft pending (#5601, #5558)"
 }
 
+test_matrix_claude_fast_badge_top_rule() {
+  # Claude Code 2.1.327-2.1.329 sessions started from 2026-11-20 burn a
+  # fast-mode badge into an unnamed composer's TOP rule (captured live through
+  # Herdr 0.9.0 at 119 columns): `───…─── ↯ /fast ─` while idle and
+  # `───…─── ↯ ─` once text is typed, the `↯` (U+21AF) in truecolor orange and
+  # `/fast` dim. The rule no longer opened the separator pair, the closing rule
+  # read as an unmatched separator, and every cursorless read was `unknown`, so
+  # the Herdr payload proof refused every doorbell to such a Claude worker.
+  # A typed doorbell also wraps onto a second composer row at that width.
+  local rule idle_top typed_top bottom footer idle ansi typed out line claude_idle
+  local stranded wide_badge other_glyph
+  claude_idle=$(printf 'claude\tidle')
+  rule=$(printf '─%.0s' $(seq 1 109))
+  bottom="$rule"'──────────'
+  idle_top="$rule"' ↯ /fast ─'
+  typed_top="$rule"'────── ↯ ─'
+  footer=$'  firstmate on HEAD | Opus 5.5\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  line=": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't.inbox' steering inbox, read and act on each in numeric order, then mv each into its handled/."
+  idle=$'\n'"$(printf '%100s' '')◉ xhigh · /effort"$'\n'"$idle_top"$'\n'"❯$NBSP"$'\n'"$bottom"$'\n'"$footer"
+  ansi=$'\n'"${ESC}[0m${ESC}[38;2;136;136;136m${rule} ${ESC}[0m${ESC}[38;2;255;120;20m↯ ${ESC}[0m${ESC}[2m/fast ${ESC}[0m${ESC}[38;2;136;136;136m─${ESC}[0m"$'\r\n'
+  ansi+="❯$NBSP"$'\r\n'"${ESC}[0m${ESC}[38;2;136;136;136m${bottom}${ESC}[0m"$'\r\n'"$footer"
+  assert_screen "fast-badge claude idle on herdr" empty "$CAPS_STYLED" "$idle" '' "$claude_idle"
+  assert_screen "fast-badge claude idle on herdr (ansi)" empty "$CAPS_STYLED" "$ansi" '' "$claude_idle"
+  assert_screen "fast-badge claude idle on zellij" empty "$CAPS_STYLED_NOID" "$ansi"
+  assert_screen "fast-badge claude idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "fast-badge claude idle on tmux" empty "$CAPS_TMUX" "$idle" 3 "$claude_idle"
+  # The typed doorbell, wrapped exactly as Claude wrapped it at 119 columns.
+  typed="$typed_top"$'\n'"❯$NBSP${line:0:115}"$'\n'"  ${line:115}"$'\n'"$bottom"$'\n'"$footer"
+  assert_screen "fast-badge claude wrapped draft on herdr" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  assert_screen "fast-badge claude wrapped draft on tmux" pending "$CAPS_TMUX" "$typed" 1 "$claude_idle"
+  out=$(FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
+  [ "$out" = "$line" ] \
+    || fail "fast-badge claude wrapped draft should extract the whole doorbell, got '$out'"
+  # The staleness rule holds: a badge sandwich whose glyph row is followed by
+  # an unindented transcript row before the lower rule is scrollback.
+  stranded="$idle_top"$'\n'"❯$NBSP"$'\nlater transcript output\n'"$bottom"$'\n'"$footer"
+  assert_screen "fast-badge sandwich over transcript" unknown "$CAPS_STYLED_NOID" "$stranded"
+  # A blank or whitespace-only row is not a wrapped continuation row either,
+  # and neither is an indented structural row such as a transcript box edge.
+  stranded="$idle_top"$'\n'"❯ fix the login bug"$'\n\n'"$bottom"
+  assert_screen "fast-badge sandwich over a blank row" unknown "$CAPS_STYLED_NOID" "$stranded"
+  stranded="$idle_top"$'\n'"❯ fix the login bug"$'\n    \n'"$bottom"
+  assert_screen "fast-badge sandwich over a whitespace row" unknown "$CAPS_STYLED_NOID" "$stranded"
+  stranded="$idle_top"$'\n'"❯ fix the login bug"$'\n  │ boxed transcript output │\n'"$bottom"
+  assert_screen "fast-badge sandwich over an indented edge row" unknown "$CAPS_STYLED_NOID" "$stranded"
+  # Width is still proven: one badge glyph is one column, never a wildcard.
+  wide_badge="$rule"' ↯ /fast ──'$'\n'"❯$NBSP"$'\n'"$bottom"
+  assert_screen "fast-badge rule wider than its closing rule" unknown "$CAPS_STYLED_NOID" "$wide_badge"
+  # Only that one glyph is accepted; another non-ASCII glyph still refuses.
+  other_glyph="$rule"' ✳ /fast ─'$'\n'"❯$NBSP"$'\n'"$bottom"
+  assert_screen "other non-ASCII badge glyph" unknown "$CAPS_STYLED_NOID" "$other_glyph"
+  pass "matrix: claude's fast-mode badge top rule proves an idle composer empty and a wrapped doorbell pending"
+}
+
 test_matrix_grok_144_approval_titled_bottom_border() {
   # Grok 1.0.44 draws the title inside a bottom border exactly as wide as the
   # top border and appends its approval mode (` · always-approve`). The mid-dot
@@ -1731,6 +1785,7 @@ test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
+test_matrix_claude_fast_badge_top_rule
 test_matrix_grok_144_approval_titled_bottom_border
 test_matrix_grok_1077_fast_model_title
 test_matrix_kimi_bordered_shell_glyph_box

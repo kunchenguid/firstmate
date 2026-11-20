@@ -1063,6 +1063,33 @@ ok - claude-named (2.1.284 (Claude Code)): real idle composer classifies empty
 ok - claude-named (2.1.284 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
 ```
 
+### 2026-11-20 claude fast-mode badge top rule through Herdr
+
+Verified on 2026-11-20 on Linux x86_64 against Claude Code 2.1.327, 2.1.328 and 2.1.329 in Herdr 0.9.0 panes of an isolated lab session and in an isolated tmux server.
+Freshly started sessions on all three versions burn a fast-mode badge into an unnamed composer's top rule: `───…─── ↯ /fast ─` while idle and `───…─── ↯ ─` once text is typed, with `↯` as U+21AF.
+Long-running sessions started before that rendering keep a solid top rule, so the CLI version alone does not predict the shape.
+The titled-rule predicate accepted ASCII titles only, so the badge rule never matched, the closing rule read as an unmatched separator, and the cursorless read was `unknown` unless an unrelated solid rule elsewhere in the viewport happened to pair with the closing rule.
+Herdr's Claude payload proof requires a readable empty composer before typing, so every doorbell to such a worker reported `send-failed`; tmux, which anchors on the cursor row and runs no payload proof, delivered normally.
+A typed doorbell also wraps onto a second composer row at 120 columns, which the titled-rule sandwich did not admit.
+
+The classifier now maps the single-column `↯` like a title character in `_fm_composer_titled_rule_row` and lets `_fm_composer_bare_rule_sandwich` cross the draft's own indented continuation rows.
+`test_matrix_claude_fast_badge_top_rule` in `tests/fm-composer-lib.test.sh` pins the idle, wrapped-draft, extraction, staleness, width, and foreign-glyph cases on every capability profile.
+The composer-matrix guard's plain `claude` arm now also requires a cursorless `empty`:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.329 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
+ok - claude-named (2.1.329 (Claude Code)): the same idle pane read cursorless is not pending (verdict: empty)
+ok - live Herdr submit confirm: Claude Code (2.1.329 (Claude Code)) on herdr 0.9.0 reports empty and renders the requested reply in isolated session <lab-session>
+ok - live Herdr submit confirm: Claude Code (2.1.329 (Claude Code)) on herdr 0.9.0 proves and submits a typed /context behind its command popup and renders its report
+```
+
+Claude Code 2.1.329 also retitled the `/context` report heading from `Context Usage` to `Context usage`; the Herdr guard accepts both.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

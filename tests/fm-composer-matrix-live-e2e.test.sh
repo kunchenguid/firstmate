@@ -168,9 +168,16 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --
+# Claude's unnamed composer must also prove itself cursorless: Claude Code
+# 2.1.327+ sessions burn a fast-mode badge (`↯ /fast`) into its top rule, and a
+# cursorless `unknown` there refuses every Herdr doorbell to the worker.
 for h in claude codex opencode pi grok kimi muse; do
   if command -v "$h" >/dev/null 2>&1; then
-    check_harness_idle_empty "$h" "$h"
+    if [ "$h" = claude ]; then
+      CMX_REQUIRE_CURSORLESS_EMPTY=1 check_harness_idle_empty "$h" "$h"
+    else
+      check_harness_idle_empty "$h" "$h"
+    fi
   else
     note "harness absent, not verified here: $h"
   fi
