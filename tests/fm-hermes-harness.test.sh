@@ -51,10 +51,11 @@ else
 fi
 [ "$(fm_agent_process_classify unrelated unrelated '' "$process_pid")" = "$nul_argv_expected" ] || fail 'NUL argv identity lost when names/ps args are blind'
 native_argv0=${native_args%% *}
-case "${native_argv0##*/}" in
-  python|python[0-9]*) ps_argv_expected=agent ;;
-  *) ps_argv_expected=other ;;
-esac
+if [ "${native_argv0##*/}" = Python ]; then
+  ps_argv_expected=other
+else
+  ps_argv_expected=agent
+fi
 [ "$(fm_agent_process_classify "$native_name" '' "$native_args")" = "$ps_argv_expected" ] || fail 'ps argv identity lost when NUL argv is absent'
 [ "$(fm_agent_process_classify "$native_name" '' '')" = other ] || fail 'bare interpreter falsely identified without either argv source'
 kill "$process_pid"
