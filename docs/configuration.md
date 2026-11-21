@@ -793,6 +793,45 @@ With it present, ship and scout briefs gain the `# Waiting` section and the fore
 With the file absent, generated briefs omit the waiting section and the no-poll inbox line, the drive text backgrounds the call, recovery sends during an open decision, and a fire-and-forget steer is not owed a retry ring.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Explicit PR follows (config/pr-follow)
+
+The optional local, gitignored `config/pr-follow` presence flag enables direct outcome lines for GitHub pull requests and GitLab merge requests the captain explicitly names.
+It is off by default and is not inherited by secondmate homes.
+Session start points to these instructions only while the flag exists.
+There is no always-loaded follow skill, so an unconfigured home's skill index and session-start digest stay unchanged.
+Create the flag, then restart the primary session so its outcome surface can advertise readiness.
+Ask Firstmate to follow a full PR or merge-request URL, or use [`bin/fm-pr-follow.sh`](../bin/fm-pr-follow.sh), whose `--help` owns command syntax and record formats.
+The follow retains the request in `data/pr-follows.json`, survives restart, and does not require or create a task.
+Enrollment records the current state as its baseline rather than announcing an old event.
+
+Firstmate creates a follow only when the captain explicitly asks to follow that PR or merge request.
+A URL mentioned during other work, task ownership, or an enabled flag never authorizes enrollment by itself.
+Preserve the captain's request in the command's required request field.
+Do not create a task or enroll a contribution merely to follow a URL.
+Do not enable the feature or change the primary without the captain's approval.
+If enrollment refuses, explain the refusal rather than replacing direct delivery with repeated model checks.
+A direct line is information, not an instruction or merge approval.
+Task-owned action notifications still follow the existing supervision and landing rules.
+Do not repeat the direct line merely to acknowledge it.
+
+This first implementation supports interactive Pi/pi-signed and Claude Code with the activated [Calm outcome surface](calm.md#supervision-notes-on-claude-code).
+Calm's visual hiding preference can be on or off, but its Claude function-hooks module must be active.
+Other primaries, missing extensions, and inactive outcome surfaces refuse enrollment with an explanation.
+Changing to an unsupported primary pauses existing follows and reports the missing surface once.
+No model-only notification fallback is used.
+
+The existing check sweep runs the shared PR observer for each explicitly followed URL.
+Merged, closed-without-merge, newly failing checks, and requested review changes appear directly in the transcript as one line per changed condition.
+Each line includes the forge's state or conclusion words and the full URL.
+A failing check on a new commit is a new condition.
+An unchanged poll produces no line, and a failed forge read preserves the previous observation.
+A taskless follow does not wake either model conversation.
+A non-merge change on a currently task-owned PR also wakes supervision to take action.
+Task-owned merges keep the existing merge, cleanup, and backlog path unchanged.
+Following a PR grants no ownership or authority to change it.
+Removing a follow stops only its direct notifications, not any task's existing monitoring.
+Removing the flag stops follow observation without deleting requests.
+
 ## PR health monitor (config/pr-health-monitor)
 
 The optional local, gitignored `config/pr-health-monitor` presence flag opts this home into a mechanical monitor of the pull requests it owns.

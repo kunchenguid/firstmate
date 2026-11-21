@@ -3141,6 +3141,30 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Explicit PR-follow outcome display
+
+Verified on 2026-11-21 with Pi 1.5.2 and Claude Code 2.1.330 on Linux.
+[Explicit PR follows](../configuration.md#explicit-pr-follows-configpr-follow) owns the opt-in setup and supported presentation boundary.
+The guard opens real terminal sessions and substitutes only forge reads.
+It submits no prompt and changes no real PR.
+Each taskless merge, closure, and failing check on a new commit produces one URL-bearing transcript line.
+The guard also checks that no primary model turn or supervision wake starts.
+Pi's native skill discovery verifies that no follow trigger enters the unconditional skill index.
+`tests/fm-session-start.test.sh` checks that the flag adds only one guidance line and removing it restores the original digest bytes.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-pr-follow-live-e2e.test.sh
+```
+
+```text
+ok - pi 1.5.2: three taskless forge changes produced three visible lines, no primary turn or wake
+skip: pi-signed is not installed for the live PR-follow proof
+ok - claude 2.1.330 (Claude Code): three taskless forge changes produced three visible lines, no primary turn or wake
+```
+
+Pi-signed was not separately exercised in this run.
+Other primaries are outside this feature's supported presentation boundary, rather than silently using model-mediated notification.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
