@@ -191,7 +191,9 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
       bin/fm-x-reply.sh <request_id> --text-file <path-to-reply-file>
       ```
 
-      (`bin/fm-x-reply.sh <request_id> -`, reading the reply on stdin, is equally fine.) It echoes the `request_id` and exits 0 on success; non-zero on a failed live post or failed dry-run record.
+      (`bin/fm-x-reply.sh <request_id> -`, reading the reply on stdin, is equally fine.)
+      It echoes the `request_id` and exits 0 on success; non-zero on refused text, a failed live post, or a failed dry-run record.
+      For a public-text refusal, follow the policy and correction guidance in [`fm-public-text-check.sh`'s header](../../../bin/fm-public-text-check.sh) before retrying.
       When the reply carries one real visual artifact, add `--image <path>`: the helper reads one local PNG, JPEG, GIF, WebP, BMP, or TIFF, detects the media type, base64-encodes it, and sends it in the relay's optional `image` object without ever inlining image bytes into the shell command.
       If the reply auto-splits into a thread, the image rides the first/opener message only.
    e-skip. **For a skip, dismiss it at the relay instead of replying.** A pure acknowledgment gets no reply, but clearing only the local inbox file is not enough: the relay keeps re-offering that request on every poll until it times out to a polite "offline" auto-reply. So before clearing the file, tell the relay to drop the request:
@@ -212,13 +214,13 @@ Treat `state/x-inbox/` as the source of truth and process **every** file you fin
 ## Dry-run / preview mode
 
 When `FMX_DRY_RUN` is set (truthy, in the environment or `.env`), `bin/fm-x-reply.sh` does **not** post and `bin/fm-x-dismiss.sh` does **not** call the relay.
-The reply client records the full would-be reply payload to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one message, or `{request_id, text, texts}` for a thread), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
+After the public-text check passes, the reply client records the full would-be reply payload to `state/x-outbox/<request_id>.json` (`{request_id, text}` for one message, or `{request_id, text, texts}` for a thread), prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
 The dismiss client records `{request_id, endpoint:"dismiss"}` to the same outbox path, prints a `DRY RUN` summary to stderr, and still echoes the `request_id` and exits 0.
 Truthy means anything except unset, empty, `0`, `false`, `no`, or `off`; an explicit environment value wins over `.env`.
 When an image was attached, the dry-run record keeps only compact `{media_type, bytes, source_path}` metadata instead of the base64 bytes, so a preview never writes a multi-MB blob.
 Dry-run needs `jq` to build the JSON payload, but it needs neither `FMX_PAIRING_TOKEN` nor the relay because it runs before token and network checks.
 Your procedure does not change: compose as usual and call `bin/fm-x-reply.sh ... --text-file <path>`, or call `bin/fm-x-dismiss.sh <request_id>` for a skip.
-Because the call still succeeds, the loop completes normally (clear the inbox file as in step 2f); the only difference is nothing reaches the relay.
+On a successful dry-run call, the loop completes normally (clear the inbox file as in step 2f); a refusal follows the failure handling in step 2g.
 This is the mode for end-to-end testing the poll -> compose -> would-post loop without a public post.
 Inspect `state/x-outbox/` to see exactly what would have been posted.
 The completion follow-up honors `FMX_DRY_RUN` the same way (it flows through `bin/fm-x-reply.sh --followup`): the would-be follow-up is recorded to `state/x-outbox/`, and the local counter and link mutate exactly as a live post would.

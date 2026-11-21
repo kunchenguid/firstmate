@@ -4,6 +4,7 @@ The first mate drives these; interactive entrypoints work by hand too, while `*-
 Each row is one purpose clause only: the script's own header comment is the authoritative description of its behavior, flags, and contracts, so read the header before first use.
 If you have changed away from the firstmate home in an interactive shell, invoke these scripts by absolute path through the repo's `bin/` directory; the scripts self-locate internally after they start.
 The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md](architecture.md#no-mistakes-gate-authority-boundary), while `docs/sessionstart-nudge.md` covers the silent session-open hook use; `fm-gate-refuse-lib.sh`'s header owns its exact contract.
+For public-evidence policy, generic-path guidance, and publication coverage limits, read [`fm-public-text-check.sh`'s header and help](../bin/fm-public-text-check.sh); [`fm-pr-check.sh`'s header](../bin/fm-pr-check.sh) owns GitHub readiness refusal for unsafe or unreadable public text and retry behavior.
 
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
@@ -163,9 +164,10 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-contributions.sh`    | Observe owned publications, retain exact-head judgments, measure required actors, and wake on maintainer or configured review-bot signals |
 | `fm-pr-health.sh`        | Opt-in: enroll owned PRs; wake once per latest commit for conflicts, failing checks, and author actions; record maintainer-gated CI and missing required reviews without waking the task, using GitHub notifications plus a fallback sweep (see [configuration.md](configuration.md#pr-health-monitor-configpr-health-monitor)) |
 | `fm-park.sh`             | Park a ship lane whose PR or MR only awaits human review from a verified clean state, relaunch a fresh worker on review activity, and clean it up on merge (see [configuration.md](configuration.md#park-on-review)) |
-| `fm-pr-check.sh`         | Record validated task `pr=` and `pr_head=` values, then atomically arm a static merge poll that also wakes on degraded ready PR/MR states (GitHub checks, GitLab pipelines, and merge-train drops) when `config/pr-degraded-watch` is present; refuses GitHub drafts and persistent secondmate records (see [architecture.md](architecture.md)); `scan`, run by the watcher's check sweep when `config/pr-register-scan` is present, records a task's ready `done:` PR when no `pr=` exists, its matching poll is missing, or it replaces one its status log named |
+| `fm-pr-check.sh`         | Record validated task `pr=` and `pr_head=` values, then atomically arm a static merge poll that also wakes on degraded ready PR/MR states (GitHub checks, GitLab pipelines, and merge-train drops) when `config/pr-degraded-watch` is present; refuses GitHub drafts and persistent secondmate records (see [architecture.md](architecture.md)); public-text refusal and retry details belong to its [header](../bin/fm-pr-check.sh); `scan`, run by the watcher's check sweep when `config/pr-register-scan` is present, records a task's ready `done:` PR when no `pr=` exists, its matching poll is missing, or it replaces one its status log named |
 | `fm-review-check.sh`    | Record a forge=external task's validated `review=` and `review_head=` without arming a merge watch ([design](external-review-forge.md)) |
 | `fm-external-review-lib.sh` | Shared readers for the forge=external review tool adapter, ready-URL pattern, backup remote, and remote URLs |
+| [`fm-public-text-check.sh`](../bin/fm-public-text-check.sh) | Check outgoing publication text against the public-evidence policy owned by its header |
 | `fm-pr-merge.sh`         | Record PR metadata, merge a task's canonical full GitHub, GitLab, or Forgejo URL, refuse a Gerrit change because firstmate never submits one, then refuse an outcome it cannot prove landed or queued |
 | `fm-pr-state.sh`         | Read-only: print one line per GitHub pull-request blocker it can see, reporting on checks that have reported rather than verdicting merge-readiness |
 | `fm-pr-reviewers.sh`     | Read-only: suggest reviewers from GitHub's own author mapping of recent commits on a pull request's changed files, never requesting one |
@@ -178,7 +180,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared Relay config, relay, and reply-threading helpers                              |
 | `fm-x-poll.sh`           | One bounded Relay poll: stash newly offered mentions, emit their once-only wake, and raise queued public-followup rejection wakes at least once |
-| `fm-x-reply.sh`          | Post or dry-run preview a composed Relay reply or follow-up                          |
+| `fm-x-reply.sh`          | Post or dry-run preview a composed Relay reply or follow-up, refused first if it fails the public-text check |
 | `fm-x-dismiss.sh`        | Dismiss a skipped Relay mention at the relay without replying                        |
 | `fm-x-link.sh`           | Link a spawned task to its originating Relay mention in task meta                    |
 | `fm-x-followup.sh`       | Detect, post, and cap completion follow-ups for a Relay-linked task                  |

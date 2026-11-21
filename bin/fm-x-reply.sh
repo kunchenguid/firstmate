@@ -22,6 +22,8 @@
 # surplus positional is a usage error before anything is recorded or posted, and
 # reply text that starts with '-' is only accepted via --text-file or stdin.
 #
+# bin/fm-public-text-check.sh owns public-evidence policy; text is checked before
+# reply lookup, payload construction, dry-run output, or transport.
 # Optional --image <path> attaches one local image file to the answer or followup
 # POST body as {media_type,data_base64}. Supported extension mapping includes
 # PNG, JPEG, GIF, WebP, BMP, and TIFF. If long text becomes a thread, the relay
@@ -80,10 +82,11 @@
 # Authorization: Bearer <token>.
 #
 # Preview / dry-run: with FMX_DRY_RUN set (truthy), the reply is NOT posted.
-# Instead the would-be POST body ({request_id, text}, or {request_id, text,
-# texts} for a thread) is recorded to state/x-outbox/<request_id>.json and a "DRY
-# RUN" summary is printed to stderr; stdout still echoes the request_id and the
-# exit is 0, so the loop runs end to end without a public post. A follow-up
+# After the public-text check passes, the would-be POST body ({request_id, text},
+# or {request_id, text, texts} for a thread) is recorded to
+# state/x-outbox/<request_id>.json and a "DRY RUN" summary is printed to stderr;
+# a successful preview echoes the request_id and exits 0. A refused check exits
+# non-zero before recording or previewing the reply. A follow-up
 # dry-run additionally carries an "endpoint":"followup" marker in the recorded
 # body so a preview is self-describing; the live POST body is unchanged. With
 # --image, the dry-run record replaces image bytes with a compact image marker
@@ -237,6 +240,7 @@ if [ -z "$TEXT" ]; then
   echo "fm-x-reply: empty reply text" >&2
   exit 2
 fi
+printf '%s\n' "$TEXT" | "$SCRIPT_DIR/fm-public-text-check.sh" - || exit 1
 
 # The endpoint is the only behavioral difference between an answer and a
 # follow-up; everything below (split, payload, dry-run, post) is shared.
