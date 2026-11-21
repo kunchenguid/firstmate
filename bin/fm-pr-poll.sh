@@ -119,10 +119,12 @@ case "$provider" in
     # this branch, and the head is validated here so the watcher's dedupe
     # marker never sees another byte. Each line is printed only while its own
     # flag is present. Green mirrors bin/fm-pr-merge.sh's github_checks_not_green
-    # closely enough to trigger: every status context SUCCESS, and the newest
-    # run of each named check run completed SUCCESS, NEUTRAL, or SKIPPED, so a
+    # closely enough to trigger: every status context SUCCESS, and each check
+    # run green unless every non-green run of its name completed with a
+    # whole-second UTC startedAt strictly before a green run of that name, so a
     # cancelled or failed run a passing re-run replaced does not hide a green
-    # PR; green is therefore tested before degraded. It never reads required
+    # PR while a queued, running, undated, or tied run keeps it red; green is
+    # therefore tested before degraded. It never reads required
     # checks; an unreported required check leaves the merge state BLOCKED
     # rather than CLEAN, and the merge path re-reads them anyway.
     # shellcheck disable=SC2016  # The filter's $f and $r are jq variables, expanded by jq, not the shell.
@@ -135,12 +137,25 @@ case "$provider" in
         and ([.statusCheckRollup[]?] | length) > 0
         and ([.statusCheckRollup[]? | select(is_run | not) | select(.state != "SUCCESS")]
              | length) == 0
-        and ([.statusCheckRollup[]? | select(is_run)]
-             | group_by(.name // "")
-             | all(.[]; max_by(.startedAt // "")
-                 | .status == "COMPLETED"
-                   and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL"
-                        or .conclusion == "SKIPPED")))
+        and ([.statusCheckRollup[]?] | to_entries
+             | [.[] | .key as $i | .value | select(is_run)
+                 | {ok: (.status == "COMPLETED"
+                         and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL"
+                              or .conclusion == "SKIPPED")),
+                    completed: (.status == "COMPLETED"),
+                    at: (.startedAt
+                         | if type == "string"
+                             and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
+                           then . else null end),
+                    group: (if (.name // "") == "" then ["", $i] else [.name, -1] end)}]
+             | group_by(.group)
+             | all(.[];
+                 ([.[] | select(.ok) | .at | select(. != null)] | max) as $g
+                 | [.[] | select(.ok | not)] as $r
+                 | ($r | length) == 0
+                   or ($g != null
+                       and all($r[]; .completed and .at != null)
+                       and ([$r[] | .at] | max) < $g)))
       then
         "green head=" + (.headRefOid // "") + " since="
           + ([.statusCheckRollup[]?

@@ -2228,6 +2228,10 @@ test_github_green_poll() {
     '[]' \
     '[{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]' \
     '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-11-19T19:10:00Z"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"QUEUED","conclusion":null,"startedAt":"0001-01-01T00:00:00Z"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"QUEUED","conclusion":null,"startedAt":null}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-19T19:00:00Z"}]' \
     '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"StatusContext","context":"deploy","state":"PENDING"}]' \
     '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]'; do
     out=$(FM_TEST_GH_ROLLUP="$rollup" run_poll "$dir")
