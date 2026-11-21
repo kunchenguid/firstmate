@@ -33,7 +33,7 @@ The `fj` refusal and the `tea` path were **not** re-verified live in that pass: 
 
 ## Versions
 
-The interface evidence below was collected on 2026-11-12 against a released build of each CLI on the development machine; the live `fgj` pass described above is the one part collected afterwards.
+The interface evidence below was collected on 2026-11-12 against a released build of each CLI on the development machine; the live `fgj` pass described above and the separate `fj` login-predicate check recorded in the `fj` section are the parts collected afterwards.
 This record deliberately embeds no versions, revisions, or installation paths of those builds: they are properties of the machine the evidence was gathered on, not of the interfaces the findings describe, and a reader cannot reproduce them.
 Reproducing the record needs only a released build of each tool whose interface matches the generation named at each finding.
 
@@ -95,7 +95,7 @@ There is no `--json`/`-o` flag anywhere in `fj pr`.
 A merge watch runs from the fleet's state directory with no clone of the target in scope, so this alone rules `fj` out of that read even if the output were parseable.
 
 **What `fj` does offer, and what firstmate therefore uses.** Only a per-host login predicate: `fj whoami --host <host>` exits 0 exactly when the user holds a login for `<host>` and nonzero otherwise, so firstmate reads the login from that exit status alone and parses no display line at all.
-The `whoami` command is listed by the `fj --help` output above; its `--host` flag and this exit-status meaning were taken from that shipped surface and the released source, and were **not** exercised live against a real `forgejo-cli` build in this record's verification pass, unlike the `fgj` path.
+The `whoami` command is listed by the `fj --help` output above; its `--host` flag and this exit-status meaning were taken from that shipped surface and the released source, and were then exercised live against a released `forgejo-cli` build: `fj whoami --host <configured-host>` exited 0 while `fj whoami --host <unconfigured-host>` exited nonzero, which is the two-way answer this predicate rests on.
 The refusal is what makes a wrong answer safe: a generation whose `whoami` cannot tell a logged-out host from a logged-in one would make the resolver regard that host as configured, and every operation that needs the pull request record still refuses `fj` by name rather than reading a rendered line or merging unbound.
 Its store is a JSON map from host to token (`~/Library/Application Support/forgejo-cli.forgejo-cli/keys.json` on macOS, the platform config directory elsewhere), which firstmate never reads, so the credential stays inside `fj`.
 
