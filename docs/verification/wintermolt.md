@@ -155,7 +155,7 @@ Every read and write below went through the shipped functions (`fm_backend_rex_c
 - A 104-character brief pointer written once loses its head on this backend, which is why literal input is chunked (8 characters, 50 ms) and the composer is read back before Enter.
   Driving that submit against the idle pane returned `empty`, and the endpoint received the pointer exactly once in a 6179-byte request body.
 - The same payload through an 80-column block also returned `empty` and arrived once under that run's revision, which judged a payload wider than the composer row by the row-filling tail it left behind.
-  The shipped rex read compares the whole payload and accepts no suffix, so a payload wider than the visible composer row is refused there: that row-width case is a known limitation covered by `tests/fm-backend-rex.test.sh`, not by a live run.
+  The shipped rex read compares the composer against the text it already held plus the whole payload and accepts no suffix, so a payload wider than the visible composer row is refused there: that row-width case is a known limitation covered by `tests/fm-backend-rex.test.sh`, not by a live run.
 - A first attempt at that narrow block delivered the pointer twice (6312-byte body, the text twice in one message): a composer the classifier called a draft but the extractor read as empty was taken as proof that nothing had landed, so the burst was replayed.
   That read now returns `unknown` instead, which never replays, and the rerun above is the evidence for the corrected behaviour.
 - One Escape on a proven-busy turn stopped it: the footer returned to `Esc quit`, the composer read `empty`, and the agent stayed `alive`.

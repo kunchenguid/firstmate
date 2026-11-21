@@ -596,15 +596,14 @@ fm_backend_rex_current_path() {  # <target> [expected-label]
 #                                holds nothing of it, so a replay cannot
 #                                duplicate text.
 #
-# What the read-back will not do is guess. It judges each burst against an
-# EMPTY baseline, because a rex submit is only ever made into a composer that
-# holds nothing: a row that carried a draft or a working line before the write
-# is never taken as the baseline, so content that was already there reads as
-# foreign and refuses the submit. An unreadable composer is never assumed empty
-# either, because a replay on that assumption could type the text twice. Where
-# the composer cannot be read at all, this pane keeps the chunked write as its
-# only protection and reports the shared verdict unchanged; a prompt shape the
-# shared reader cannot resolve is exactly that case.
+# What the read-back will not do is guess. Each burst is judged against the
+# composer text read before the first key, which is empty only when the composer
+# verdict itself was empty: a draft already in the composer is that draft, so
+# the read expects it to still be there with our payload beside it. Content that
+# is neither that baseline nor the baseline plus the whole payload is a fragment
+# and refuses the submit. A composer that cannot be read back at all answers
+# `unknown` rather than empty, because a replay on an empty assumption could
+# type the text twice.
 #
 # One limitation is known and not covered: a payload wider than the visible
 # composer row scrolls, so the read sees only its tail and reports the burst as
@@ -1217,11 +1216,12 @@ fm_backend_rex_submit_busy_confirm() {  # <target> <retries> <enter-sleep> [foot
 # because submitting a fragment would run a truncated steer, brief pointer, or
 # command. A burst is replayed (up to FM_BACKEND_REX_TYPE_ATTEMPTS) only when
 # the composer provably holds nothing of it; content that is neither the
-# pre-typing baseline nor the whole payload is a fragment and stops there
-# (`send-failed`, fragment left visible for the supervisor rather than typed
-# over). A composer that cannot be read back at all keeps the pre-fix best
-# effort - the chunked write is the only protection there - because guessing a
-# failure from an unreadable pane would refuse deliveries that did land.
+# pre-typing baseline nor that baseline plus the whole payload is a fragment and
+# stops there (`send-failed`, fragment left visible for the supervisor rather
+# than typed over). A composer that cannot be read back at all keeps the pre-fix
+# best effort - the chunked write is the only protection there - because
+# guessing a failure from an unreadable pane would refuse deliveries that did
+# land.
 fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} verdict
   local chunk interval max_attempts attempts=0 typed before=''
@@ -1245,7 +1245,9 @@ fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   # held. An `empty` verdict is the one positive proof that it held nothing, and
   # there the baseline is empty rather than the idle placeholder the raw row
   # carries - the same rule the tmux wintermolt path applies. A pane whose
-  # composer cannot be read yields no baseline and keeps the unverified path.
+  # composer cannot be read falls back to an empty baseline, and the read-back
+  # then answers `unknown` for it instead of empty, so nothing is replayed on
+  # that assumption.
   if [ "$(fm_backend_rex_composer_state "$target" "$expected_label")" = empty ]; then
     before=''
   elif before=$(fm_backend_rex_composer_text "$target" "$expected_label"); then

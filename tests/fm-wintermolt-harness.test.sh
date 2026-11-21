@@ -996,18 +996,19 @@ _rex_submit_verdict() {  # <after-enter> <after-busy> <foreground>
   )
 }
 
-# _rex_typed_burst <mode> <payload>
-# Drives the shipped rex submit seam against a simulated wintermolt composer:
-# <mode> kept lands the whole burst, headloss keeps only the last five
-# characters of every write (the shape a head-truncated write leaves), and
-# swallow drops the first burst whole so the replay is what lands.
-_rex_typed_burst() {  # <mode> <payload>
+# _rex_typed_burst <mode> <payload> [draft]
+# Drives the shipped rex submit seam against a simulated wintermolt composer
+# holding <draft> (empty when omitted) before the first key: <mode> kept lands
+# the whole burst, headloss keeps only the last five characters of every write
+# (the shape a head-truncated write leaves), swallow drops the first burst whole
+# so the replay is what lands, and drop loses every burst.
+_rex_typed_burst() {  # <mode> <payload> [draft]
   local mode=$1 payload=$2 state verdict
   state=$(mktemp -d "${TMPDIR:-/tmp}/fm-rex-burst.XXXXXX") || return 1
   (
     REX_SIM_STATE=$state
     REX_SIM_MODE=$mode
-    : >"$REX_SIM_STATE/text"
+    printf '%s' "${3:-}" >"$REX_SIM_STATE/text"
     : >"$REX_SIM_STATE/bursts"
     : >"$REX_SIM_STATE/enters"
     fm_backend_rex_parse_target() { return 0; }
@@ -1020,6 +1021,7 @@ _rex_typed_burst() {  # <mode> <payload>
       case "$REX_SIM_MODE" in
         headloss) printf '%s' "${slice: -5}" >>"$REX_SIM_STATE/text" ;;
         swallow) [ "$(wc -c <"$REX_SIM_STATE/bursts")" -le 1 ] || printf '%s' "$slice" >>"$REX_SIM_STATE/text" ;;
+        drop) : ;;
         *) printf '%s' "$slice" >>"$REX_SIM_STATE/text" ;;
       esac
       return 0
@@ -1055,6 +1057,25 @@ test_wintermolt_rex_submit_refuses_a_fragment_and_replays_only_nothing() {
   [ "$out" = 'empty bursts=2 enters=1' ] \
     || fail "a burst that provably landed nothing must be replayed and submitted once, got '$out'"
   pass "rex: a wintermolt submit refuses a fragment and replays only a composer that provably holds nothing"
+}
+
+test_wintermolt_rex_submit_judges_against_the_pre_typing_composer() {
+  local out payload='Read the brief at /srv/firstmate/data/fm-wintermolt-rex/brief.md and follow it exactly'
+  local draft='queued from the captain:'
+  # A composer that already held a draft is the baseline, so the burst that
+  # lands beside it reads held and is submitted once. Judging that same burst
+  # against an empty baseline reads the draft as foreign text and refuses a
+  # delivery that landed whole.
+  out=$(_rex_typed_burst kept "$payload" "$draft")
+  [ "$out" = 'empty bursts=1 enters=1' ] \
+    || fail "a burst landing beside a pre-typing draft must be submitted once, got '$out'"
+  # A burst that never extended the draft leaves the composer holding exactly
+  # that baseline: it provably landed nothing of ours, so no Enter is pressed
+  # over the draft and the replay budget runs out refusing it.
+  out=$(_rex_typed_burst drop "$payload" "$draft")
+  [ "$out" = 'send-failed bursts=3 enters=0' ] \
+    || fail "a draft our burst never extended must never be submitted, got '$out'"
+  pass "rex: a wintermolt submit judges the burst against the pre-typing composer"
 }
 
 test_wintermolt_rex_submit_confirms_through_the_turn_started_transition() {
@@ -1435,6 +1456,7 @@ test_wintermolt_rex_idle_placeholder_reads_empty_and_draft_stays_pending
 test_wintermolt_rex_scope_is_gated_on_its_own_foreground_process
 test_wintermolt_rex_delivery_busy_is_scoped_to_its_own_footer
 test_wintermolt_rex_submit_refuses_a_fragment_and_replays_only_nothing
+test_wintermolt_rex_submit_judges_against_the_pre_typing_composer
 test_wintermolt_rex_submit_confirms_through_the_turn_started_transition
 test_wintermolt_launch_pins_the_env_contract_and_delivers_the_pointer
 test_wintermolt_accepts_a_slash_namespaced_model_id
