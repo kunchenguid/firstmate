@@ -4471,6 +4471,51 @@ EOF
   pass "branch activates on a cold start once the lock is acquired, never before"
 }
 
+# On Windows the session lock may hold a tagged win:<pid> (bin/fm-session-lock-lib.sh),
+# and native Node sees that Windows pid directly. The branch activates for its own
+# tagged lock and never for a malformed tag or for any tag off Windows. Each run
+# sets the platform for the whole process so every host exercises both sides.
+test_branch_activates_for_a_windows_tagged_session_lock() {
+  local repo home platform out status
+  for platform in win32 linux; do
+    repo="$TMP_ROOT/tagged-lock-$platform-root"
+    home="$TMP_ROOT/tagged-lock-$platform-home"
+    mkdir -p "$home/state" "$home/config"
+    install_pi_branch_extension_fixture "$repo"
+    PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_TEST_SKIP_LOCK=1 FM_TEST_PLATFORM="$platform" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+      node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+const platform = Object.getOwnPropertyDescriptor(process, "platform");
+Object.defineProperty(process, "platform", { ...platform, value: process.env.FM_TEST_PLATFORM });
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, home, defaultSessionCtx } = globalThis.__t;
+const marker = `${home}/state/.pi-branch-extension-loaded`;
+
+writeFileSync(`${home}/state/.lock`, `win:${process.pid}x\n`);
+await fire("session_start", {}, defaultSessionCtx);
+if (dispatch("signal: malformed tag").accepted) throw new Error("branch accepted a wake under a malformed tagged lock");
+writeFileSync(`${home}/state/.lock`, `win:${process.pid}\n`);
+await fire("turn_end", {}, defaultSessionCtx);
+const accepted = dispatch("signal: tagged lock").accepted;
+if (process.platform !== "win32") {
+  if (accepted) throw new Error("branch accepted a wake under a tagged lock off Windows");
+  if (existsSync(marker)) throw new Error("branch wrote its marker under a tagged lock off Windows");
+  process.exit(0);
+}
+if (!accepted) throw new Error("branch refused a wake under its own Windows-tagged lock");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "tagged-lock branch wake prompt");
+if (!existsSync(marker)) throw new Error("owned tagged activation did not write the diagnostic marker");
+process.exit(0);
+EOF
+    status=$?
+    out=$(cat "$TMP_ROOT/node-output")
+    expect_code 0 "$status" "branch must read a Windows-tagged session lock only on Windows ($platform): $out"
+  done
+  pass "branch activates for its own Windows-tagged session lock only on Windows, never for a malformed tag"
+}
+
 test_queued_actions_recheck_lock_ownership() {
   local repo home out status
   repo="$TMP_ROOT/queued-ownership-root"
@@ -6231,6 +6276,7 @@ test_supervision_model_command_picks_effort_after_the_model
 test_unusable_model_pin_falls_back_to_main
 test_replacement_activation_cleans_leases_and_retries_failure
 test_cold_start_activates_after_lock_acquisition
+test_branch_activates_for_a_windows_tagged_session_lock
 test_queued_actions_recheck_lock_ownership
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert

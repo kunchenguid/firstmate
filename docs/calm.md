@@ -207,7 +207,7 @@ Toggling Calm redraws every hooked row already on screen, so rows drawn before t
 ### Working sailboat on Claude Code
 
 While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry.
-The sailboat fills the row inside the transcript margin.
+The sailboat fills the row inside the transcript margin, under one blank row so its sail never touches the highlighted prompt above it.
 It repaints on the boat's 220ms cadence, with the hull moving every 880ms.
 It reflows on resize, and appears and disappears exactly where the stock row would.
 

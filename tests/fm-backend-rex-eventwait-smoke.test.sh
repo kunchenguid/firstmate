@@ -93,6 +93,52 @@ END=$(now_ms)
 [ $((END - START)) -ge 1500 ] || fail "the clean deadline returned after $((END - START))ms, before its 2s budget"
 pass "real rex: an escalated block is not re-delivered and the reader runs its whole budget ($((END - START))ms for 2s)"
 
+# --- opt-in attention marks never read as the worker's state -------------------
+
+PAIRM=$(rex_test_new_session evmark) || fail "could not create the marks test's own fm-test- session"
+read -r SIDM BIDM <<<"$PAIRM"
+SM=${SIDM#session:}
+TM=$(fm_backend_rex_target "$SIDM" "$BIDM")
+mark_shell_ready() { [ "$(fm_backend_rex_agent_state "$TM")" = dead ]; }
+rex_test_wait_for 50 mark_shell_ready || fail "the marks test block's shell never reached a prompt"
+MCFG="$REX_TEST_WORK/marks-config"
+mkdir -p "$MCFG"
+printf 'on\n' >"$MCFG/rex-status-marks"
+printf '%s\n' "window=$TM" "backend=rex" "kind=ship" >"$STATE/evmark.meta"
+printf '%s\n' "needs-decision [at=1700000000] [key=pick-db]: pick a database" >"$STATE/evmark.status"
+marks() { FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$MCFG" "$ROOT/bin/fm-rex-marks.sh" "$@"; }
+mark_record() {  # the block's Firstmate record as "<state>|<kind>|<title>|<msg>"
+  fm_backend_rex_block_call "$TM" program_status \
+    | jq -r '[.records[] | select(.app == "firstmate")] | first // empty | "\(.state)|\(.kind)|\(.title)|\(.msg)"'
+}
+marks sync || fail "the marks sync failed on a real Rex block"
+[ "$(mark_record)" = "blocked|question|fm-evmark|Needs your decision: pick a database" ] \
+  || fail "Rex must record Firstmate's mark on the task's pane, got '$(mark_record)'"
+pass "real rex: an opt-in attention mark is one app=firstmate record on the task's pane, titled with its tab label"
+
+[ -z "$(fm_backend_rex_trusted_record "$TM")" ] || fail "Firstmate's mark must never read as the worker's trusted record"
+( fm_backend_wait_transition rex "$SM" 4 "$STATE" "$TM" >"$OUT"; echo $? >"$RCF" ) &
+WPID=$!
+sleep 1.5
+rm -f "$STATE/.rex-mark-evmark"
+printf '%s\n' "blocked [at=1700000100]: needs a GitHub login" >"$STATE/evmark.status"
+marks sync || fail "the marks rewrite failed"
+wait "$WPID"
+[ "$(cat "$RCF")" = 1 ] || fail "a Firstmate mark rewritten during the wait must not escalate, got rc=$(cat "$RCF") rec=$(cat "$OUT")"
+[ "$(mark_record)" = "blocked|auth|fm-evmark|Blocked: needs a GitHub login" ] || fail "the rewritten mark must be live, got '$(mark_record)'"
+pass "real rex: a Firstmate mark rewritten during a wait never escalates, through the real event reader"
+
+( fm_backend_wait_transition rex "$SM" 10 "$STATE" "$TM" >"$OUT"; echo $? >"$RCF" ) &
+WPID=$!
+sleep 1.5
+fm_backend_rex_send_text_line "$TM" "printf '\\033]7501;state=blocked:app=fm-test:kind=question\\033\\\\'" || fail "could not drive the shell's own blocked edge"
+wait "$WPID"
+[ "$(cat "$RCF")" = 0 ] && [ "$(fm_transition_to_status "$(cat "$OUT")")" = blocked ] \
+  || fail "the shell's own blocked report must still escalate beside a Firstmate mark, got rc=$(cat "$RCF") rec=$(cat "$OUT")"
+marks clear evmark || fail "the marks clear failed"
+[ -z "$(mark_record)" ] || fail "clear must remove Firstmate's record, got '$(mark_record)'"
+pass "real rex: the pane's own blocked report still escalates beside a mark, and clear removes only Firstmate's record"
+
 # --- an endpoint-gone edge ends the wait at once ---------------------------------
 
 PAIR2=$(rex_test_new_session evgone) || fail "could not create a second fm-test- session"

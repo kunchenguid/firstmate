@@ -426,7 +426,7 @@ test_restart_e2e_delivers_exactly_once() {
   [ "$receipt" = posted ] || fail "a validated posted receipt must be recorded, got '$receipt'"
   [ "$(task_state "$home" pf-restart)" = 'done' ] \
     || fail "the commitment must be Done only after the receipt"
-  assert_no_grep '^x_request=' "$child/state/work-code-q1.meta" \
+  assert_no_regex '^x_request=' "$child/state/work-code-q1.meta" \
     "typed delivery must clear the secondmate's legacy X link"
   pass "restart end-to-end: typed result reconciles from disk and delivers one reply to the original thread"
 }
@@ -637,7 +637,7 @@ test_late_receipt_closes_the_exact_attempt_without_reposting() {
   posts=$(followup_posts "$log")
   [ "$posts" -eq 0 ] || fail "recording a late receipt must post nothing, got $posts posts"
   [ "$(task_state "$home" pf-late)" = 'done' ] || fail "a validated late receipt must close the commitment"
-  assert_no_grep '^x_request=' "$home/state/work-late.meta" \
+  assert_no_regex '^x_request=' "$home/state/work-late.meta" \
     "a late receipt must clear the legacy X link"
 
   FAKE_CURL_LOG="$log" expect_failure "a receipt for a different attempt must be refused" \
@@ -657,9 +657,9 @@ test_typed_terminal_clear_only_removes_legacy_link() {
     || fail "the typed terminal clear transition must succeed"
   [ "$out" = work-clear ] || fail "the clear-only transition must identify the task"
   assert_grep 'status=working' "$meta" "clear-only transition must preserve unrelated task metadata"
-  assert_no_grep '^x_request=' "$meta" "clear-only transition must remove the request link"
-  assert_no_grep '^x_followups=' "$meta" "clear-only transition must remove the follow-up counter"
-  assert_no_grep '^x_platform=' "$meta" "clear-only transition must remove platform metadata"
+  assert_no_regex '^x_request=' "$meta" "clear-only transition must remove the request link"
+  assert_no_regex '^x_followups=' "$meta" "clear-only transition must remove the follow-up counter"
+  assert_no_regex '^x_platform=' "$meta" "clear-only transition must remove platform metadata"
   pass "typed terminal cleanup clears the legacy link without posting"
 }
 
@@ -718,7 +718,7 @@ test_outward_delivery_stays_with_the_owning_home() {
   [ "$(followup_posts "$log")" -eq 0 ] || fail "the refused delivery must post nothing"
   FAKE_CURL_LOG="$log" run_pf "$owner" deliver pf-own >/dev/null \
     || fail "the owning home must deliver the typed public reply"
-  assert_no_grep '^x_request=' "$child/state/work-child.meta" \
+  assert_no_regex '^x_request=' "$child/state/work-child.meta" \
     "typed delivery must clear the child task's legacy X link"
   pass "a child home reports typed results but can never become the outward-post owner"
 }
@@ -3912,8 +3912,14 @@ test_a_retained_refusal_repeats_its_wake_rather_than_a_new_one() {
   pass "a refusal whose event was retained repeats its wake instead of a new one"
 }
 
-# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
-# register regression. The rest of this file is not a 3.2 snapshot suite.
+# CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the bash-3.2
+# empty-lock register regression. The rest of this file is not a 3.2 snapshot
+# suite. Adding another stock-bash case means adding it to this list, not to
+# ci.yml.
+if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
+  fm_test_run test_first_register_succeeds_with_empty_lock_list_under_bash32
+  exit 0
+fi
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
