@@ -17,9 +17,13 @@
 #      WINTERMOLT_MODEL from the model axis exactly as given, a slash-namespaced
 #      gateway id included, and an effort request is recorded but omitted (no
 #      such setting exists).
-#   4. wintermolt is a crewmate/scout adapter on tmux only: a secondmate launch
-#      and any other backend are refused, and nothing is armed as busy wiring
-#      because no writer could ever clear it.
+#   4. wintermolt is a crewmate/scout adapter on tmux and rex: a secondmate
+#      launch and every other backend are refused, and nothing is armed as busy
+#      wiring because no writer could ever clear it. The rex surfaces this
+#      depends on are pinned below too - the composer scope gated on the block's
+#      foreground process, the scoped delivery busy read, the submit confirmation
+#      on the idle-to-busy transition, and the prefix-by-prefix proof that
+#      refuses a headless fragment on a row narrower than the payload.
 #   5. The busy verdict is the pinned footer row alone - `Esc stop` or a
 #      spinner-plus-`working` status cell ending the pane's LAST non-empty row -
 #      so conversation output containing the word can never read busy, and an
@@ -989,6 +993,55 @@ _rex_submit_verdict() {  # <after-enter> <after-busy> <foreground>
   )
 }
 
+# The measured narrow-block geometry: an 80-column block leaves a 70-character
+# composer row, and the brief pointer is wider than that. A suffix read once at
+# the end cannot tell that whole payload from a headless fragment of the same
+# width, so the writer proves each prefix as it lands instead.
+WM_REX_LONG_PAYLOAD="Read the brief at /Users/philipp/.treehouse/firstmate-b8697d/4/firstmate/data/fm-wintermolt-rex/brief.md"
+WM_REX_NARROW_CAPACITY=70
+
+# _rex_shim_writer <mode> <payload> <chunk> <capacity>
+# <mode> faithful lands every chunk; headloss drops the head of the first burst
+# the way the real block does on a large single write.
+_rex_shim_writer() {  # <mode> <payload> <chunk> <capacity>
+  local mode=$1 payload=$2 chunk=$3 cap=$4 state
+  state=$(mktemp "${TMPDIR:-/tmp}/fm-rex-shim.XXXXXX")
+  (
+    REX_SIM_STATE=$state
+    REX_SIM_MODE=$mode
+    fm_backend_rex_parse_target() { return 0; }
+    fm_backend_rex_type_literal() {  # <target> <slice> [chunk] [interval]
+      local slice=$2
+      if [ "$REX_SIM_MODE" = headloss ] && [ ! -s "$REX_SIM_STATE" ]; then
+        printf '%s' "${slice: -2}" >>"$REX_SIM_STATE"
+      else
+        printf '%s' "$slice" >>"$REX_SIM_STATE"
+      fi
+      return 0
+    }
+    fm_backend_rex_composer_state() {
+      [ -s "$REX_SIM_STATE" ] && printf 'pending' || printf 'empty'
+    }
+    fm_backend_rex_composer_text() { cat "$REX_SIM_STATE" 2>/dev/null; }
+    fm_backend_rex_type_literal_verified probe "$payload" "$chunk" 0 "$cap"
+  )
+  rm -f "$state"
+}
+
+test_wintermolt_rex_long_payload_is_proved_prefix_by_prefix() {
+  local out
+  out=$(_rex_shim_writer faithful "$WM_REX_LONG_PAYLOAD" 8 "$WM_REX_NARROW_CAPACITY")
+  [ "$out" = held ] \
+    || fail "a payload wider than the row that lands whole must prove held, got '$out'"
+  # The head of the first burst is lost, so the composer's tail fills the row but
+  # is not the payload's. A single end read would accept that suffix; the prefix
+  # proof refuses it.
+  out=$(_rex_shim_writer headloss "$WM_REX_LONG_PAYLOAD" 8 "$WM_REX_NARROW_CAPACITY")
+  [ "$out" = other ] \
+    || fail "a headless fragment must never be read as held, got '$out'"
+  pass "rex: a long payload is proved prefix by prefix and a headless fragment is refused"
+}
+
 test_wintermolt_rex_submit_confirms_through_the_turn_started_transition() {
   local verdict
   verdict=$(_rex_submit_verdict pending-unproven busy wintermolt)
@@ -1366,6 +1419,7 @@ test_wintermolt_idle_placeholder_is_fleet_wide
 test_wintermolt_rex_idle_placeholder_reads_empty_and_draft_stays_pending
 test_wintermolt_rex_scope_is_gated_on_its_own_foreground_process
 test_wintermolt_rex_delivery_busy_is_scoped_to_its_own_footer
+test_wintermolt_rex_long_payload_is_proved_prefix_by_prefix
 test_wintermolt_rex_submit_confirms_through_the_turn_started_transition
 test_wintermolt_launch_pins_the_env_contract_and_delivers_the_pointer
 test_wintermolt_accepts_a_slash_namespaced_model_id
