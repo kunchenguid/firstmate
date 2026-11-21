@@ -899,7 +899,6 @@ test_teardown_closes_the_backlog_item_itself() {
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
-  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
@@ -955,7 +954,6 @@ SH
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
   cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
-  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
   out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
   tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
     | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
@@ -1004,11 +1002,6 @@ SH
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
     cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
-    if [[ "$url" == https://github.com/* ]]; then
-      add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
-    else
-      add_tea_pull_for_head "$case_dir" true "$(git -C "$case_dir/wt" rev-parse HEAD)" forgejo.example.com
-    fi
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
       | grep -F "links: \"pr:$url\"" >/dev/null \
@@ -1024,7 +1017,6 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
   seed_backlog_in_flight "$case_dir"
-  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
