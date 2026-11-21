@@ -69,7 +69,17 @@ Every CLI call passes the recorded session with `-s`, because the CLI otherwise 
 
 `send -- <text>` sends literal, unsubmitted input, and the caller sends Enter separately.
 Keys map to Rex names (`enter`, `escape`, `tab`, `ctrl+c`, `ctrl+u`); any other key is refused rather than guessed.
-Verified submit types the payload once, retries only Enter through the shared composer classifier, and converts still-pending text to success only when the shared queued-Enter policy accepts the trusted native busy state or rendered busy footer.
+
+Literal input is written in chunks, because one large `send` loses the head of its payload in a block's terminal: a brief pointer written that way reached a model endpoint as its last five characters while the send reported success, and a launch line lost the first two characters of `env` in a plain shell block.
+The defaults are tmux's measured ones, 8 characters per write with a 50 ms gap; `FM_BACKEND_REX_TYPE_CHUNK` and `FM_BACKEND_REX_TYPE_INTERVAL` override them, and a chunk of `0` restores one write per burst.
+That covers every literal write, including the pane launch line spawn types.
+
+Verified submit then reads the composer back before pressing Enter, and treats only content that still holds the whole payload as delivered.
+A truncated write lands as a suffix of the payload, so a suffix is never accepted as a wrapped or scrolled tail: it is reported `send-failed` with no Enter sent, leaving the fragment visible instead of submitting it.
+That fragment is deliberately not typed over, because clearing a composer means guessing a harness's own key semantics: inspect the pane with `bin/fm-peek.sh` and clear it before re-sending.
+A burst is replayed only when the composer provably holds nothing of it, up to `FM_BACKEND_REX_TYPE_ATTEMPTS` bursts (default 3), so a replay can never duplicate text.
+A composer that cannot be read back at all keeps the chunked write as its only protection rather than guessing a failure.
+The submit then retries only Enter through the shared composer classifier, and converts still-pending text to success only when the shared queued-Enter policy accepts the trusted native busy state or rendered busy footer.
 
 `capture --trim` returns the scrollback plus the screen as plain text, and the adapter trims the tail locally.
 Rex has no viewport-only capture, so the visible viewport is derived from one styled read through the `format` block method (`vt` with `extra_cursor`), which returns the scrollback plus the full screen grid, blank rows included, and then the cursor position as a trailing `ESC[<row>;<col>H`.

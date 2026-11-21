@@ -552,12 +552,168 @@ fm_backend_rex_current_path() {  # <target> [expected-label]
   printf '%s' "$out" | jq -r '.foreground.cwd // empty' 2>/dev/null
 }
 
-# fm_backend_rex_send_literal: literal, UNSUBMITTED input. `--` guards an
-# option-shaped payload; Rex refuses empty input, which has nothing to send.
+# --- literal input: chunked writes and a read-back verdict -------------------
+#
+# Rex delivers one `send` as ONE pty write into the block, and one large write
+# loses its HEAD on this backend: an 86-character brief pointer typed as a
+# single write arrived at a model endpoint as its last five characters while the
+# send reported success, and a ~230-character launch line typed into a plain
+# shell block lost the first two characters of `env`. It is intermittent, and it
+# is the block's terminal rather than any one harness, so every steer, brief
+# pointer and pane launch line is exposed to it. The same 86-character payload
+# lands whole when written in 8- or 16-character chunks, which is why literal
+# input is written in chunks here.
+#
+# Trusting the send is what made the old behaviour dangerous: a truncated write
+# that reports success is worse than a failed one, because nothing retries it.
+# So the submit seam also reads the composer back and treats only content that
+# still holds the whole payload as proof of delivery. A truncated write lands as
+# a SUFFIX of the payload (`ef.md` for the 86-character path), so a mere suffix
+# is never accepted as a scrolled or wrapped tail: that shape is reported as a
+# fragment and no Enter is pressed, exactly as the tmux path refuses it.
+#
+# This is tmux's shape (bin/fm-tmux-lib.sh fm_tmux_type_literal and its submit
+# read-back) at the two rex seams that carry literal input:
+# fm_backend_rex_type_literal is the chunked writer behind
+# fm_backend_rex_send_literal, and fm_backend_rex_send_text_submit is the
+# verified submit. The pane launch line goes through send_literal too
+# (fm_backend_rex_send_text_line), so it is chunked for free.
+#
+# Operator knobs, sized from the measured payloads above (the tmux constants are
+# a chunk of 8 characters with a 50 ms gap):
+#   FM_BACKEND_REX_TYPE_CHUNK     characters per write, default 8. A plain `0`
+#                                writes the payload in one go (the old shape, an
+#                                escape hatch); anything that is not a plain
+#                                decimal integer, or a zero-padded one that
+#                                arithmetic would read as octal, falls back to 8.
+#   FM_BACKEND_REX_TYPE_INTERVAL  seconds between writes, default 0.05.
+#   FM_BACKEND_REX_TYPE_ATTEMPTS  bursts per verified submit, default 3. A burst
+#                                is replayed only when the composer provably
+#                                holds nothing of it, so a replay cannot
+#                                duplicate text.
+#
+# What the read-back will not do is guess. It judges each burst against a
+# GENUINE pre-typing read of the composer, because a payload that is already on
+# screen cannot prove this write landed - the doorbell line is constant text, so
+# a previous ring's copy is often still visible - and an unreadable composer is
+# never assumed empty, because a replay on that assumption could type the text
+# twice. Where the composer cannot be read at all, this pane keeps the chunked
+# write as its only protection and reports the shared verdict unchanged; a
+# prompt shape the shared reader cannot resolve is exactly that case.
+
+# fm_backend_rex_type_chunk: the validated chunk size, from
+# FM_BACKEND_REX_TYPE_CHUNK.
+fm_backend_rex_type_chunk() {
+  local chunk=${FM_BACKEND_REX_TYPE_CHUNK:-8}
+  case "$chunk" in
+    '' | *[!0-9]* | 0?*) chunk=8 ;;
+  esac
+  printf '%s' "$chunk"
+}
+
+# fm_backend_rex_type_interval: the validated inter-write gap, from
+# FM_BACKEND_REX_TYPE_INTERVAL.
+fm_backend_rex_type_interval() {
+  local interval=${FM_BACKEND_REX_TYPE_INTERVAL:-0.05}
+  case "$interval" in
+    '' | *[!0-9.]*) interval=0.05 ;;
+  esac
+  printf '%s' "$interval"
+}
+
+# fm_backend_rex_type_literal: write <text> into <target> as literal,
+# UNSUBMITTED input, in writes of at most <chunk> characters spaced by
+# <interval>. <chunk> of 0 (or a payload that already fits one chunk) keeps the
+# single one-shot write, which is all a short payload needs. `--` guards an
+# option-shaped payload - including a chunk that happens to begin with `-`,
+# which is why it is passed on every write rather than only the first. Rex
+# refuses empty input, which has nothing to send.
+fm_backend_rex_type_literal() {  # <target> <text> [chunk] [interval]
+  local target=$1 text=$2 chunk=${3:-0} interval=${4:-} n i=0 end=0 byte probe
+  [ -n "$text" ] || return 0
+  case "$chunk" in '' | *[!0-9]*) chunk=0 ;; esac
+  n=${#text}
+  fm_backend_rex_parse_target "$target" || return 1
+  if [ "$chunk" -le 0 ] || [ "$n" -le "$chunk" ]; then
+    fm_backend_rex_read send -s "$FM_BACKEND_REX_SESSION" -b "$FM_BACKEND_REX_BLOCK" \
+      -- "$text" >/dev/null 2>&1
+    return
+  fi
+  while [ "$i" -lt "$n" ]; do
+    end=$((i + chunk))
+    # A chunk boundary must never land INSIDE a UTF-8 character: under a C
+    # locale the substring below cuts bytes, and half a character would corrupt
+    # the payload the block receives. The boundary is examined as one byte in
+    # either locale (a multibyte character reports its first byte, which is
+    # never a continuation byte), and a printable character at the boundary is
+    # already a whole one, which settles the common path without a fork.
+    while [ "$end" -lt "$n" ]; do
+      probe=${text:end:1}
+      case "$probe" in
+        [[:print:]]) break ;;
+      esac
+      byte=$(printf '%d' "'$probe" 2>/dev/null) || break
+      byte=$(((byte % 256 + 256) % 256))
+      { [ "$byte" -ge 128 ] && [ "$byte" -le 191 ]; } || break
+      end=$((end + 1))
+    done
+    [ "$end" -gt "$n" ] && end=$n
+    fm_backend_rex_read send -s "$FM_BACKEND_REX_SESSION" -b "$FM_BACKEND_REX_BLOCK" \
+      -- "${text:i:end-i}" >/dev/null 2>&1 || return 1
+    i=$end
+    [ "$i" -ge "$n" ] || sleep "$interval"
+  done
+}
+
+# fm_backend_rex_send_literal: literal, UNSUBMITTED input, in chunks (see the
+# block comment above). Fails when any write fails, so a caller that presses
+# Enter next knows the payload is at least on its way.
 fm_backend_rex_send_literal() {  # <target> <text> [expected-label]
-  fm_backend_rex_parse_target "$1" || return 1
-  [ -n "$2" ] || return 0
-  fm_backend_rex_read send -s "$FM_BACKEND_REX_SESSION" -b "$FM_BACKEND_REX_BLOCK" -- "$2" >/dev/null 2>&1
+  fm_backend_rex_type_literal "$1" "$2" "$(fm_backend_rex_type_chunk)" "$(fm_backend_rex_type_interval)"
+}
+
+# fm_backend_rex_composer_text: what the composer holds right now, read back
+# through the same styled viewport the composer classifier reads, so line
+# wrapping, ghost text and harness furniture are the shared extractor's problem
+# rather than a second opinion here. Fails when the composer shape cannot be
+# extracted, which is the signal that this pane cannot be verified at all.
+fm_backend_rex_composer_text() {  # <target> [expected-label]
+  local screen
+  screen=$(fm_backend_rex_visible_capture_vt "$1") || return 1
+  fm_composer_extract_selected_content 'styled=1' "$screen"
+}
+
+# _fm_backend_rex_squeeze: <text> with every run of whitespace removed, in the
+# shared locale-independent normalization, so a comparison ignores the newline
+# or space a wrapped row contributes at a wrap point.
+_fm_backend_rex_squeeze() {  # <text>
+  local text=$1
+  fm_composer_normalize_spaces_var text
+  text=${text//[[:space:]]/}
+  printf '%s' "$text"
+}
+
+# fm_backend_rex_typed_state: what the composer holds against the burst just
+# written - `held` when it holds exactly the pre-typing content plus <text>,
+# `nothing` when it still holds only the pre-typing content (the burst never
+# landed, so replaying it cannot duplicate anything), `other` for content that
+# is neither (a truncated write, a fragment, or someone else's text), and
+# `unknown` when the composer cannot be read back at all.
+# A proper suffix of <text> is `other`, never `held`: a head-truncated write and
+# a scrolled tail are the same shape, so only the whole payload proves delivery.
+fm_backend_rex_typed_state() {  # <target> <before> <text> [expected-label]
+  local held before_n expect_n
+  held=$(fm_backend_rex_composer_text "$1" "${4:-}") || { printf 'unknown'; return 0; }
+  held=$(_fm_backend_rex_squeeze "$held")
+  before_n=$(_fm_backend_rex_squeeze "$2")
+  expect_n=$(_fm_backend_rex_squeeze "$2$3")
+  if [ "$held" = "$expect_n" ]; then
+    printf 'held'
+  elif [ "$held" = "$before_n" ]; then
+    printf 'nothing'
+  else
+    printf 'other'
+  fi
 }
 
 # fm_backend_rex_key_name: Firstmate's key vocabulary in Rex's binding syntax
@@ -972,19 +1128,64 @@ fm_backend_rex_delivery_busy() {  # <target>
   fm_backend_rex_rendered_busy_state "$1"
 }
 
-# fm_backend_rex_send_text_submit: type <text> once, then drive the shared
-# verify-and-retry-Enter loop (fm_composer_submit_retry_core) against the
-# shared composer verdict, and convert a still-pending composer whose agent is
-# visibly busy into a queued delivery (fm_composer_queued_enter_verdict).
+# fm_backend_rex_send_text_submit: write <text> in chunks, prove it landed in
+# the composer, and only then drive the shared verify-and-retry-Enter loop
+# (fm_composer_submit_retry_core) against the shared composer verdict, converting
+# a still-pending composer whose agent is visibly busy into a queued delivery
+# (fm_composer_queued_enter_verdict).
 # Echoes empty|pending|pending-unproven|unknown|send-failed.
+# The write-back proof is what makes this safe on rex: `send-failed` means the
+# payload provably did not land whole, and it is returned WITHOUT pressing
+# Enter, because submitting a fragment would run a truncated steer, brief
+# pointer, or command. A burst is replayed (up to FM_BACKEND_REX_TYPE_ATTEMPTS)
+# only when the composer provably holds nothing of it; content that is neither
+# the pre-typing read nor the whole payload is a fragment and stops there
+# (`send-failed`, fragment left visible for the supervisor rather than typed
+# over). A composer that cannot be read back at all keeps the pre-fix best
+# effort - the chunked write is the only protection there - because guessing a
+# failure from an unreadable pane would refuse deliveries that did land.
 fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} verdict
+  local chunk interval max_attempts attempts=0 before='' verify=0 typed
   fm_backend_rex_parse_target "$target" || { printf 'unknown'; return 0; }
-  fm_backend_rex_send_literal "$target" "$text" "$expected_label" || {
-    printf 'send-failed'
-    return 0
-  }
-  sleep "$settle"
+  chunk=$(fm_backend_rex_type_chunk)
+  interval=$(fm_backend_rex_type_interval)
+  max_attempts=${FM_BACKEND_REX_TYPE_ATTEMPTS:-3}
+  case "$max_attempts" in '' | *[!0-9]* | 0*) max_attempts=3 ;; esac
+  # The pre-typing read is the baseline the words are judged against, and it
+  # must be taken before the first write. A pane whose composer cannot be read
+  # yields no baseline and keeps the unverified path.
+  if before=$(fm_backend_rex_composer_text "$target" "$expected_label"); then
+    verify=1
+  fi
+  while :; do
+    fm_backend_rex_type_literal "$target" "$text" "$chunk" "$interval" || {
+      printf 'send-failed'
+      return 0
+    }
+    sleep "$settle"
+    [ "$verify" = 1 ] || break
+    typed=$(fm_backend_rex_typed_state "$target" "$before" "$text" "$expected_label")
+    case "$typed" in
+      held) break ;;
+      nothing)
+        # A render can trail the keys; re-read before deciding the burst is
+        # missing, so a slow echo never replays text that already landed.
+        sleep "$sleep_s"
+        typed=$(fm_backend_rex_typed_state "$target" "$before" "$text" "$expected_label")
+        case "$typed" in
+          held) break ;;
+          nothing) ;;
+          *) printf 'send-failed'; return 0 ;;
+        esac
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt "$max_attempts" ] || { printf 'send-failed'; return 0; }
+        continue
+        ;;
+      unknown) break ;;
+      *) printf 'send-failed'; return 0 ;;
+    esac
+  done
   verdict=$(fm_composer_submit_retry_core fm_backend_rex_send_key fm_backend_rex_composer_state \
     "$target" "$retries" "$sleep_s" "$expected_label")
   if [ "$verdict" = pending ]; then

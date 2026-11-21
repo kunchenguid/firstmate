@@ -476,7 +476,11 @@ test_send_literal_and_keys() {
   read -r sid _ bid <<<"$out"
   t="${sid#session:}:${bid#block:}"
   rex_env "$dir" "fm_backend_rex_send_literal '$t' '-n dashed'" || fail "an option-shaped literal must send"
-  assert_equals "-n dashed" "$(cat "$dir/fake/sent")" "the literal must arrive verbatim"
+  # A 9-character payload is longer than one chunk, so it arrives as the two
+  # writes below; the payload is what matters, not the write shape.
+  assert_equals "-n dashed" "$(tr -d '\n' <"$dir/fake/sent")" "the chunked writes must join into the payload verbatim"
+  assert_grep 'send -s' "$dir/fake/log" "the literal must go through rex send"
+  assert_grep ' -- -n dashe' "$dir/fake/log" "every write must carry -- so an option-shaped chunk is never read as a flag"
   : >"$dir/fake/log"
   rex_env "$dir" "fm_backend_rex_send_literal '$t' ''" || fail "empty input must succeed"
   assert_no_grep "send" "$dir/fake/log" "empty input must make no call"
@@ -492,6 +496,218 @@ test_send_literal_and_keys() {
   assert_equals enter "$(cat "$dir/fake/keys")" "send_text_line must submit with Enter"
   assert_scoped_calls "$dir" "input"
   pass "rex input: literal text after --, no call for empty input, verified key names only, line submit"
+}
+
+# --- chunked literal writes and the verified submit --------------------------
+
+# The payload shape the investigation measured: a long brief pointer written as
+# one `rex send`, which arrived as its last five characters while the send
+# reported success.
+REX_BRIEF_POINTER='Read the brief at /srv/treehouse/firstmate/data/fm-wintermolt-rex/report.md and follow it'
+
+# rex_text_env <dir> <snippet>: rex_env with the measured payload exported as
+# FM_REX_TEST_TEXT, so a snippet reaches text with spaces and quotes intact
+# without re-quoting it into the snippet itself.
+rex_text_env() {
+  export FM_REX_TEST_TEXT=$REX_BRIEF_POINTER
+  rex_env "$1" "$2"
+  unset FM_REX_TEST_TEXT
+}
+
+# pty_case: a task block whose terminal echoes what is written into it (the
+# shared fake's pty-echo model), starting on an idle shell prompt. Sets PCDIR,
+# PCBID, and PCT.
+pty_case() {  # <name>
+  local dir out sid
+  dir=$(new_case "$1")
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ PCBID <<<"$out"
+  PCDIR=$dir
+  PCT="${sid#session:}:${PCBID#block:}"
+  : >"$dir/fake/pty-echo"
+  printf '❯ \r\n' >"$dir/fake/capture/${PCBID#block:}.vt"
+}
+
+# pty_screen <text>: the composer row the fake renders, as the block's screen.
+pty_screen() {  # <composer-content>
+  printf '❯ %s\r\n' "$1" >"$PCDIR/fake/capture/${PCBID#block:}.vt"
+}
+
+# pty_composer: the composer row the fake is showing right now.
+pty_composer() {
+  tr -d '\r' <"$PCDIR/fake/capture/${PCBID#block:}.vt"
+}
+
+# pty_writes: how many literal writes reached the block.
+pty_writes() {
+  wc -l <"$PCDIR/fake/sent" 2>/dev/null | tr -d ' '
+}
+
+# pty_enters: how many Enters reached the block (0 when none did).
+pty_enters() {
+  if [ -f "$PCDIR/fake/keys" ]; then
+    awk '$0 == "enter" { n++ } END { print n + 0 }' "$PCDIR/fake/keys"
+  else
+    printf '0'
+  fi
+}
+
+# pty_submitted: the line the block submitted, prefix stripped.
+pty_submitted() {
+  tr -d '\r' <"$PCDIR/fake/transcript/${PCBID#block:}" 2>/dev/null | sed 's/^❯ //'
+}
+
+test_type_chunk_knob_validation() {
+  local dir
+  dir=$(new_case chunk-knob)
+  assert_equals 8 "$(rex_env "$dir" 'fm_backend_rex_type_chunk')" \
+    "an unset chunk knob must default to tmux's verified 8 characters"
+  assert_equals 0 "$(rex_env "$dir" 'FM_BACKEND_REX_TYPE_CHUNK=0 fm_backend_rex_type_chunk')" \
+    "a plain 0 must keep the one-write escape hatch"
+  assert_equals 8 "$(rex_env "$dir" 'FM_BACKEND_REX_TYPE_CHUNK=08 fm_backend_rex_type_chunk')" \
+    "a zero-padded operand arithmetic would read as octal must fall back to the default"
+  assert_equals 8 "$(rex_env "$dir" 'FM_BACKEND_REX_TYPE_CHUNK=wide fm_backend_rex_type_chunk')" \
+    "a non-numeric chunk must fall back to the default rather than stall the write"
+  assert_equals 0.05 "$(rex_env "$dir" 'fm_backend_rex_type_interval')" \
+    "the inter-write gap must default to the measured 50 ms"
+  assert_equals 0.05 "$(rex_env "$dir" 'FM_BACKEND_REX_TYPE_INTERVAL=fast fm_backend_rex_type_interval')" \
+    "a non-numeric interval must fall back to the default"
+  pass "rex type knobs: 8 characters and 50 ms by default, a plain 0 disables chunking, junk operands fall back"
+}
+
+test_typed_state_reads_the_composer_back() {
+  local held other nothing before
+  pty_case typed-state
+  before=$(rex_env "$PCDIR" "fm_backend_rex_composer_text '$PCT'")
+  assert_equals '' "$before" "an idle prompt must read back as no held text"
+  pty_screen "$REX_BRIEF_POINTER"
+  held=$(rex_text_env "$PCDIR" "fm_backend_rex_typed_state '$PCT' '' \"\$FM_REX_TEST_TEXT\"")
+  assert_equals held "$held" "a composer holding the whole payload must read held"
+  # The measured truncation is a SUFFIX of the payload, which is exactly the
+  # shape a scrolled tail has; only the whole payload may ever read held.
+  pty_screen 'ef.md'
+  other=$(rex_text_env "$PCDIR" "fm_backend_rex_typed_state '$PCT' '' \"\$FM_REX_TEST_TEXT\"")
+  assert_equals other "$other" "a truncated write is a suffix of the payload and must never read as held"
+  pty_screen ''
+  nothing=$(rex_text_env "$PCDIR" "fm_backend_rex_typed_state '$PCT' '' \"\$FM_REX_TEST_TEXT\"")
+  assert_equals nothing "$nothing" "an unchanged prompt must read nothing, the only shape a replay may follow"
+  # Wrapping is the composer's business: the same text split across two rows
+  # must still read held.
+  printf '❯ Read the brief at /srv/treehouse/firstmate/data/fm-wintermolt-rex/\r\nreport.md and follow it\r\n' \
+    >"$PCDIR/fake/capture/${PCBID#block:}.vt"
+  held=$(rex_text_env "$PCDIR" "fm_backend_rex_typed_state '$PCT' '' \"\$FM_REX_TEST_TEXT\"")
+  assert_equals held "$held" "a payload the composer wrapped must read held"
+  # A pre-typing draft is the baseline, so its own text is never mistaken for ours.
+  pty_screen 'half a draft'
+  nothing=$(rex_env "$PCDIR" "fm_backend_rex_typed_state '$PCT' 'half a draft' 'x'")
+  assert_equals nothing "$nothing" "an untouched draft must read nothing against its own baseline"
+  pty_screen "half a draft $REX_BRIEF_POINTER"
+  held=$(rex_text_env "$PCDIR" "fm_backend_rex_typed_state '$PCT' 'half a draft' \"\$FM_REX_TEST_TEXT\"")
+  assert_equals held "$held" "the payload appended to a pre-typing draft must read held"
+  pass "fm_backend_rex_typed_state: held only for the whole payload, a suffix is other, an untouched composer is nothing, wrapping is ignored"
+}
+
+test_send_literal_writes_in_chunks() {
+  local dir out sid bid t n expect
+  dir=$(new_case literal-chunks)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  n=${#REX_BRIEF_POINTER}
+  expect=$(((n + 7) / 8))
+  rex_text_env "$dir" "fm_backend_rex_send_literal '$t' \"\$FM_REX_TEST_TEXT\"" \
+    || fail "the chunked literal write must succeed"
+  assert_equals "$expect" "$(wc -l <"$dir/fake/sent" | tr -d ' ')" \
+    "a $n-character payload must arrive in writes of at most 8 characters"
+  assert_equals "$REX_BRIEF_POINTER" "$(tr -d '\n' <"$dir/fake/sent")" \
+    "the chunks must join back into the whole payload"
+  assert_equals 0 "$(awk 'length($0) > 8 { n++ } END { print n + 0 }' "$dir/fake/sent")" \
+    "no write may exceed the verified 8-character size"
+  : >"$dir/fake/sent"
+  rex_text_env "$dir" "FM_BACKEND_REX_TYPE_CHUNK=0 fm_backend_rex_send_literal '$t' \"\$FM_REX_TEST_TEXT\"" \
+    || fail "the one-write escape hatch must still send"
+  assert_equals 1 "$(wc -l <"$dir/fake/sent" | tr -d ' ')" "a 0 chunk knob must write the payload in one go"
+  pass "fm_backend_rex_send_literal: the payload arrives in writes of at most 8 characters that join back into it; a 0 knob keeps one write"
+}
+
+test_send_literal_never_splits_a_utf8_character() {
+  local dir out sid bid t w bad=0 payload='abcdef–ghij'
+  command -v iconv >/dev/null 2>&1 || { pass "rex chunks: skipped (no iconv to validate UTF-8 with)"; return 0; }
+  dir=$(new_case literal-utf8)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  # The dash straddles the 8-byte boundary, so a byte-wise cut would split it.
+  # Under LC_ALL=C the substring expansion counts bytes, which is the case this
+  # guards.
+  rex_env "$dir" LC_ALL=C "fm_backend_rex_send_literal '$t' '$payload'" \
+    || fail "the literal write must succeed in a C locale"
+  assert_equals "$payload" "$(tr -d '\n' <"$dir/fake/sent")" "the writes must join back into the payload"
+  while IFS= read -r w; do
+    printf '%s' "$w" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || bad=$((bad + 1))
+  done <"$dir/fake/sent"
+  assert_equals 0 "$bad" "no write may split a UTF-8 character, whatever the locale"
+  pass "fm_backend_rex_send_literal: a chunk boundary never lands inside a UTF-8 character, even in a C locale"
+}
+
+test_send_text_submit_lands_the_whole_payload() {
+  local out
+  pty_case submit-whole
+  out=$(rex_text_env "$PCDIR" "fm_backend_send_text_submit rex '$PCT' \"\$FM_REX_TEST_TEXT\" 2 0.01 0.01")
+  assert_equals empty "$out" "a payload the chunked write landed whole must be submitted and confirmed"
+  assert_equals "$REX_BRIEF_POINTER" "$(tr -d '\n' <"$PCDIR/fake/sent")" \
+    "the submitted payload must be the whole text"
+  assert_equals 1 "$(pty_enters)" "exactly one Enter submits a payload that landed"
+  assert_equals '❯ ' "$(pty_composer)" "the submitted payload must leave the composer"
+  assert_equals "$REX_BRIEF_POINTER" "$(pty_submitted)" \
+    "the whole payload, not a fragment, must reach the submitted line"
+  pass "fm_backend_rex_send_text_submit: the chunked write lands the whole payload and the submit reports confirmed delivery"
+}
+
+test_send_text_submit_refuses_a_fragment() {
+  local out frag
+  pty_case submit-truncated
+  frag=${REX_BRIEF_POINTER:${#REX_BRIEF_POINTER}-5}
+  # The measured failure: one large write keeps only its last five characters
+  # and the shipped path still reported a delivered turn.
+  printf '5\n' >"$PCDIR/fake/pty-max"
+  out=$(rex_text_env "$PCDIR" "FM_BACKEND_REX_TYPE_CHUNK=0 fm_backend_send_text_submit rex '$PCT' \"\$FM_REX_TEST_TEXT\" 2 0.01 0.01")
+  assert_equals send-failed "$out" "a head-truncated write must be reported as a failure, never as delivered"
+  assert_equals 0 "$(pty_enters)" "a fragment must never be submitted"
+  assert_equals "❯ $frag" "$(pty_composer)" "the fragment stays visible rather than being typed over"
+  # The same loss inside a chunked burst is caught the same way: the composer
+  # holds a mangled run, which is neither the baseline nor the payload.
+  : >"$PCDIR/fake/sent"
+  pty_screen ''
+  out=$(rex_text_env "$PCDIR" "fm_backend_send_text_submit rex '$PCT' \"\$FM_REX_TEST_TEXT\" 2 0.01 0.01")
+  assert_equals send-failed "$out" "a burst that loses the head of every chunk must be reported as a failure"
+  assert_equals 0 "$(pty_enters)" "no Enter may follow a mangled burst"
+  pass "fm_backend_rex_send_text_submit: a truncated write is a fragment, reported send-failed with no Enter pressed"
+}
+
+test_send_text_submit_replays_only_when_nothing_landed() {
+  local out n expect
+  pty_case submit-replay
+  n=${#REX_BRIEF_POINTER}
+  expect=$(((n + 7) / 8))
+  # Losing exactly the writes of one burst loses the burst whole, never part of it.
+  printf '%s\n' "$expect" >"$PCDIR/fake/pty-drop-writes"
+  out=$(rex_text_env "$PCDIR" "fm_backend_send_text_submit rex '$PCT' \"\$FM_REX_TEST_TEXT\" 2 0.01 0.01")
+  assert_equals empty "$out" "a burst that provably landed nothing must be replayed and then confirmed"
+  assert_equals "$((expect * 2))" "$(pty_writes)" "the replay must be a second full burst"
+  assert_equals "$REX_BRIEF_POINTER" "$(pty_submitted)" "the replay must not duplicate the payload"
+  assert_equals 1 "$(pty_enters)" "one Enter submits the replayed payload"
+  # A burst that never lands must stop at the attempt budget instead of typing
+  # into a broken pane forever, and must never press Enter.
+  : >"$PCDIR/fake/sent"
+  : >"$PCDIR/fake/keys"
+  : >"$PCDIR/fake/pty-drop"
+  pty_screen ''
+  out=$(rex_text_env "$PCDIR" "FM_BACKEND_REX_TYPE_ATTEMPTS=2 fm_backend_send_text_submit rex '$PCT' \"\$FM_REX_TEST_TEXT\" 2 0.01 0.01")
+  assert_equals send-failed "$out" "a payload that never lands must be reported as a failure"
+  assert_equals "$((expect * 2))" "$(pty_writes)" "the attempt budget must bound the replays"
+  assert_equals 0 "$(pty_enters)" "nothing may be submitted when nothing landed"
+  pass "fm_backend_rex_send_text_submit: replays only a burst that provably landed nothing, within the attempt budget"
 }
 
 # --- push events -------------------------------------------------------------
@@ -1043,6 +1259,13 @@ test_agent_state_sees_a_harness_below_a_shell_foreground
 test_native_busy_trusts_live_owner_only
 test_current_path_follows_foreground
 test_send_literal_and_keys
+test_type_chunk_knob_validation
+test_typed_state_reads_the_composer_back
+test_send_literal_writes_in_chunks
+test_send_literal_never_splits_a_utf8_character
+test_send_text_submit_lands_the_whole_payload
+test_send_text_submit_refuses_a_fragment
+test_send_text_submit_replays_only_when_nothing_landed
 test_kill_closes_and_retires_per_home_session
 test_kill_never_retires_a_foreign_session
 test_kill_refuses_without_proof
