@@ -2,7 +2,7 @@
 # tests/fm-wake-queue.test.sh - wake-queue losslessness (the queue safety matrix):
 # concurrent append/drain, bounded structural enrichment and presentation-lock
 # waits, interruption safety, signal catch-up while no watcher runs, stale/check enqueue-before-suppressor
-# ordering, atomic double-drain, duplicate collapse, and liveness assertion.
+# ordering, one sweep queuing every printing check, atomic double-drain, duplicate collapse, and liveness assertion.
 # Nothing is lost and nothing is double-consumed. General watcher/lock liveness
 # lives in fm-watcher-lock.test.sh; daemon classification/injection in
 # fm-daemon.test.sh.
@@ -268,6 +268,72 @@ SH
   grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "$check_file" | grep -F 'merged: https://example.test/pr/1' >/dev/null || fail "check wake was not queued"
   [ -e "$state/.last-check" ] || fail "check cadence marker was not written after queue append"
   pass "registered custom check output is queued before cadence suppression"
+}
+
+# A printing check must not end the sweep: every due check runs, each result is
+# queued, and the watcher wakes once with the first result as the headline.
+test_one_sweep_queues_every_printing_check() {
+  local dir state fakebin out drain_out early quiet late marker rows
+  dir=$(make_case sweep-all-checks)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  marker="$dir/quiet-ran"
+  early="$state/a-news.check.sh"
+  quiet="$state/b-quiet.check.sh"
+  late="$state/c-news.check.sh"
+  printf '#!/usr/bin/env bash\nprintf "memory-low\\n"\n' > "$early"
+  printf '#!/usr/bin/env bash\n: > %q\n' "$marker" > "$quiet"
+  printf '#!/usr/bin/env bash\nprintf "disk-full\\n"\n' > "$late"
+  chmod 0700 "$early" "$quiet" "$late"
+  for id in a-news b-quiet c-news; do
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+      || fail "could not register custom check $id"
+  done
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit after one check sweep"
+  [ -f "$marker" ] || fail "the quiet check after a printing check did not run"
+  [ "$(grep -c '' "$out")" -eq 1 ] || fail "one sweep printed more than one wake line"
+  grep -Fx "check: $early: memory-low" "$out" >/dev/null \
+    || fail "the sweep wake did not lead with the first printing check"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the check sweep failed"
+  grep -F "$(printf '\tcheck\t%s\t' "$early")" "$drain_out" | grep -F 'memory-low' >/dev/null \
+    || fail "the first printing check was not queued"
+  grep -F "$(printf '\tcheck\t%s\t' "$late")" "$drain_out" | grep -F 'disk-full' >/dev/null \
+    || fail "the later printing check was not queued in the same sweep"
+  rows=$(grep -c "$(printf '\tcheck\t')" "$drain_out")
+  [ "$rows" -eq 2 ] || fail "the sweep queued $rows check rows; expected 2"
+  [ -e "$state/.last-check" ] || fail "the sweep did not stamp the check cadence"
+  pass "one sweep runs every due check and queues each printing result"
+}
+
+# A printing check must not skip the park-on-review tick after the loop: its
+# pending report is consumed and queued in the same sweep, under one wake.
+test_printing_check_does_not_skip_park_tick() {
+  local dir state fakebin out drain_out check report
+  dir=$(make_case sweep-park-tick)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  drain_out="$dir/drain.out"
+  check="$state/a-news.check.sh"
+  report="$state/.review-park-report-lane-1-1"
+  printf '#!/usr/bin/env bash\nprintf "memory-low\\n"\n' > "$check"
+  chmod 0700 "$check"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" a-news >/dev/null \
+    || fail "could not register custom check a-news"
+  printf 'cleanup-refused lane: automatic cleanup refused: REFUSED\n' > "$report"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit after one check sweep"
+  [ ! -e "$report" ] || fail "the park-on-review tick did not run after a printing check"
+  [ "$(grep -c '' "$out")" -eq 1 ] || fail "one sweep printed more than one wake line"
+  grep -Fx "check: $check: memory-low" "$out" >/dev/null \
+    || fail "the sweep wake did not lead with the printing check"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" || fail "drain after the check sweep failed"
+  grep -F "$(printf '\tcheck\tpark-on-review\t')" "$drain_out" | grep -F 'cleanup-refused lane' >/dev/null \
+    || fail "the park-on-review report was not queued in the same sweep"
+  pass "a printing check does not skip the park-on-review tick"
 }
 
 test_multiline_check_output_wakes_as_one_line() {
@@ -3848,6 +3914,8 @@ test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
+test_one_sweep_queues_every_printing_check
+test_printing_check_does_not_skip_park_tick
 test_multiline_check_output_wakes_as_one_line
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
