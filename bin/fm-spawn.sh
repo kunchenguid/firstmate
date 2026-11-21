@@ -609,7 +609,9 @@
 # a mate's completed turns stay in its own home. Codex stays unknown until a semantic
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
-# as for a crewmate. Muse, gemini, devin, cortex, and rovo are refused as secondmates.
+# as for a crewmate. Every crewmate/scout-only adapter is refused as a secondmate
+# (AGENTS.md section 4 owns that list; fm_control_harness_supports_kind enforces
+# the same bound).
 # A raw launch command for a claude, pi, pi-signed, or omp secondmate is not armed
 # and retires any arm an earlier launch of that mate left, so its verdict is unknown:
 # the raw command carries no --settings or -e flag to load the wiring.

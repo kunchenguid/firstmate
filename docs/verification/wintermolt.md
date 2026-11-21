@@ -144,12 +144,15 @@ EXIT=0
 
 The stub received the whole pointer, and the same pane showed the `Esc stop`
 footer with its `working…` composer: the brief arrived. This width is the point
-of the re-run: before the scroll-tail proof, the same lane at 80 columns refused
-the pointer because only its tail was visible, so the earlier claim that the
-lane passed held only on a pane wide enough to show the whole pointer. The same
-lane against a tmux server without that backend environment starts the TUI on
-its own default backend (`ollama` in its footer), so a lane run there measures
-the stub, not the adapter.
+of the re-run: before the tmux read accepted a row-filling tail, the same lane
+at 80 columns refused the pointer because only its tail was visible, so the
+earlier claim that the lane passed held only on a pane wide enough to show the
+whole pointer. The 80-column pass therefore rests on that tail acceptance - the
+known limitation recorded above, not a proof that the whole pointer landed - and
+the rex read, which accepts no suffix, reports the same payload `send-failed`
+instead. The same lane against a tmux server without that backend environment
+starts the TUI on its own default backend (`ollama` in its footer), so a lane
+run there measures the stub, not the adapter.
 
 ## Rex (2026-11-21, wintermolt 0.7.0, rex 0.1.0-preview.21)
 
