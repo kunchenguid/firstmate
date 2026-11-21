@@ -82,10 +82,11 @@
 # Authorization: Bearer <token>.
 #
 # Preview / dry-run: with FMX_DRY_RUN set (truthy), the reply is NOT posted.
-# Instead the would-be POST body ({request_id, text}, or {request_id, text,
-# texts} for a thread) is recorded to state/x-outbox/<request_id>.json and a "DRY
-# RUN" summary is printed to stderr; stdout still echoes the request_id and the
-# exit is 0, so the loop runs end to end without a public post. A follow-up
+# After the public-text check passes, the would-be POST body ({request_id, text},
+# or {request_id, text, texts} for a thread) is recorded to
+# state/x-outbox/<request_id>.json and a "DRY RUN" summary is printed to stderr;
+# a successful preview echoes the request_id and exits 0. A refused check exits
+# non-zero before recording or previewing the reply. A follow-up
 # dry-run additionally carries an "endpoint":"followup" marker in the recorded
 # body so a preview is self-describing; the live POST body is unchanged. With
 # --image, the dry-run record replaces image bytes with a compact image marker

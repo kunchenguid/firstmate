@@ -53,12 +53,11 @@
 # final milestone (shipped, failed) so a task never leaves a stale link lying
 # around waiting for a follow-up that will never come.
 #
-# Dry-run (FMX_DRY_RUN) flows through fm-x-reply.sh: the follow-up is recorded to
-# state/x-outbox/<request_id>.json instead of posted, and the counter/link are
-# mutated exactly as a live post would (increment-and-keep, or clear on --final
-# / cap), so the full loop runs end to end without a public post. With --image,
-# the follow-up carries one local image attachment; if the reply text splits
-# into a thread, the relay attaches the image to the opener.
+# Dry-run (FMX_DRY_RUN) follows fm-x-reply.sh's header-owned preview and
+# public-text refusal contract. Only a successful preview applies the live
+# success counter/link changes above; a refusal leaves both unchanged.
+# With --image, the follow-up carries one local image attachment; if the reply
+# text splits into a thread, the relay attaches the image to the opener.
 #
 # The window is FMX_FOLLOWUP_MAX_AGE_SECS (default 604800, 7 days). The cap is
 # FMX_FOLLOWUP_MAX_COUNT (default 3). FMX_NOW_OVERRIDE pins "now" for
