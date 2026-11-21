@@ -90,6 +90,27 @@ unsafe=(
   '[public](https://example.org/docs/(v1))/home/alice/report'
   "'https://example.org/report'/home/alice/report"
   'Evidence: http://169.254.1.20/report'
+  'Evidence: http://0.0.0.0:8000/report'
+  'Evidence: https://0.0.0.0./report'
+  'Evidence: http://0?report=1'
+  'Evidence: http://0.0/report'
+  'Evidence: http://0.0.0/report'
+  'Evidence: http://000.0.00.000/report'
+  'Evidence: http://0x0/report'
+  'Evidence: http://0x00.0.0x0.00/report'
+  'Evidence: http://[::]:8000/report'
+  'Evidence: https://[0:0:0:0:0:0:0:0]/report'
+  'Evidence: http://[0000:0000:0000:0000:0000:0000:0000:0000]/report'
+  'Evidence: http://[0::0]/report'
+  'Evidence: http://[::0.0.0.0]/report'
+  'Evidence: http://[0:0:0:0:0:0:0.0.0.0]/report'
+  'Evidence: http://[::ffff:0.0.0.0]/report'
+  'Evidence: http://[::ffff:0:0]/report'
+  'Evidence: http://[0:0:0:0:0:ffff:0000:0000]/report'
+  'Evidence: https://[::FFFF:0000:0000]:8000?report=1'
+  'Evidence: http://reader:p*ss@[::]:8000/report'
+  'Evidence: **http://0.0.0.0:8000/report**'
+  '|https://example.org/report|http://[::ffff:0:0]/report|'
   'Evidence: http://[fd12::1]/report'
   'Evidence: https://[fc00::1]:8080?report=1'
   'Evidence: http://[fe80::1%25en0]/report'
@@ -141,6 +162,8 @@ Public URL paths stay intact: https://example.org/home/example/report.md
 Public host outside the private range: https://172.32.0.1/proof
 Public IPv6 host: https://[2606:4700:4700::1111]/report
 Public mapped hosts: http://[::ffff:808:808]/report, http://[::ffff:8.8.8.8]/report.
+Public zero-containing addresses: https://8.8.0.1/report, https://[2001:4860:4860::8888]/report.
+Public unspecified lookalikes: https://0.0.0.0.example.org/report, https://example.org/0.0.0.0/report.
 Public mapped range boundaries: http://[::ffff:ac0f:ffff]/report, http://[::ffff:ac20:1]/report.
 Public table: |https://example.org/home/alice|https://example.net/Users/alice|
 Public link: [https://example.org/results](https://example.net/home/alice)
@@ -195,7 +218,10 @@ for method in answer followup; do
   args=()
   [ "$method" = answer ] || args=(--followup)
   for text in 'Private proof: /Users/example/private/report.md' \
-    'Evidence: http://reader:p*ss@192.168.1.20/report'; do
+    'Evidence: http://reader:p*ss@192.168.1.20/report' \
+    'Evidence: http://0.0.0.0:8000/report' \
+    'Evidence: http://[::]:8000/report' \
+    'Evidence: http://[::ffff:0:0]/report'; do
     if FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" example-request "${args[@]}" \
       "$text" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"; then
       fail "$method accepted private proof"
@@ -203,6 +229,7 @@ for method in answer followup; do
     [ ! -e "$home/state/x-outbox" ] || fail "$method recorded unsafe outbound text"
     ! grep -q '/Users/example' "$TMP_ROOT/err" || fail "$method disclosed rejected text"
     ! grep -Fq '192.168.1.20' "$TMP_ROOT/err" || fail "$method disclosed rejected host"
+    ! grep -Fq "$text" "$TMP_ROOT/err" || fail "$method disclosed rejected reference"
   done
   FM_HOME="$home" FMX_DRY_RUN=1 FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     "$ROOT/bin/fm-x-reply.sh" example-request "${args[@]}" \
