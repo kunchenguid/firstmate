@@ -22,10 +22,15 @@
 #      fast-forward is still named for restart and genuinely restarted, and one
 #      whose runtime cannot prove a restart keeps the honest re-read path with
 #      its agent left running.
+#   7. A T3 mate, whose thread keeps its conversation so no replacement can be
+#      launched into it, is routed by both passes to the re-read message on its
+#      thread and never asked to persist for a restart that cannot come.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/t3-fake-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
 
 RESTART="$ROOT/bin/fm-secondmate-restart.sh"
 
@@ -33,7 +38,7 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-restart)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'rm -rf -- "$TMP_ROOT"' EXIT
+trap 't3_fake_stop; rm -rf -- "$TMP_ROOT"' EXIT
 
 # A session-provider stub that models the two things this pass depends on: the
 # harness exit command stops the agent, a launch brief starts the replacement,
@@ -265,7 +270,7 @@ test_persist_gates_and_asks_only_for_open_records() {
   assert_not_contains "$out" "restarted: sm1" "a mate that never confirmed must not be restarted"
   assert_contains "$out" "summary: 0 of 1 restarted" "the summary must not claim a reload"
   # The agent is untouched: nothing exited, nothing relaunched.
-  assert_no_grep '^/exit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "the agent was stopped without a confirmed persist"
   assert_absent "$dir/home/state/sm1.control-relaunch" \
     "a restart transaction was opened without a confirmed persist"
   grep -h '^phase=' "$dir/home/state/pending-replies"/* | grep -q '^phase=awaiting_report$' \
@@ -420,7 +425,7 @@ test_refused_restart_falls_back_without_claiming_a_reload() {
   assert_not_contains "$out" "restarted: sm1" "a refused restart must not be reported as restarted"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "a refusal before the stop should leave the running agent exactly as it was"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "a pre-stop refusal must not have stopped the agent"
   pass "T5 a refused restart leaves the mate running and reports an unknown outcome"
 }
 
@@ -454,7 +459,6 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -463,16 +467,17 @@ argv_b64=$4
 decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
 rargs=()
 while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+stdin_payload=$(cat)
 printf '%s\n' "${rargs[*]}" >> "$FM_FAKE_SSH_LOG"
 case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
 esac
 case "${rargs[1]:-}" in
-  send)
+  send-stdin)
     # Model the live remote mate: act on the instruction and report back on the
     # parent channel, carrying the correlation token the request embedded.
     if [ -n "${FM_FAKE_ANSWER_STATUS:-}" ]; then
-      corr=$(printf '%s' "${rargs[3]:-}" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+      corr=$(printf '%s' "$stdin_payload" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
       [ -z "$corr" ] || printf 'done [%s]: open records written down\n' "$corr" \
         >> "$FM_FAKE_ANSWER_STATUS"
     fi
@@ -525,7 +530,7 @@ test_remote_mate_restarts_over_the_transport_hop() {
   [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
     || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
   # The persist request crossed the SAME hop before the restart did.
-  [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
+  [ "$(grep -n '^fm-remote-secondmate-control.sh send-stdin' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
      -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \
     || fail "the remote mate was restarted before it was asked to persist"$'\n'"$(cat "$dir/ssh.log")"
   pass "T6 a remote mate restarts through the host-local control plane over the fm-on hop"
@@ -702,7 +707,7 @@ SH
 
   expect_code 3 "$rc" "an unrelated concurrent answer must not release the persist gate"$'\n'"$out"
   assert_not_contains "$out" "restarted: sm1" "the unrelated answer authorized a restart"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "the unrelated answer stopped the mate"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "the unrelated answer stopped the mate"
   pass "T9 the persist gate retains its explicitly allocated correlation"
 }
 
@@ -922,8 +927,64 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   assert_not_contains "$out" "restarted: sm1" "an unprovable mate must never be reported as reloaded"
   [ "$(cat "$dir/fake/command")" = "$before" ] \
     || fail "the unprovable mate's agent was stopped anyway"
-  assert_no_grep '^/exit$' "$dir/fake/literal" "nothing may be stopped on the nudge path"
+  assert_no_regex '^/exit$' "$dir/fake/literal" "nothing may be stopped on the nudge path"
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
+}
+
+# --- T17: a T3 mate has no replacement to launch, so it keeps the nudge -------
+# T3 proves its agent's state, but its thread keeps the conversation across
+# turns, so the control plane refuses a relaunch onto it before stopping
+# anything. The update pass must route a live T3 mate to the re-read steer, and
+# the restart pass must deliver the re-read message on its thread without first
+# asking it to persist for a restart that can never come.
+test_t3_mate_stays_on_the_nudge_path() {
+  local dir out rc restart_line nudge_line sends
+  dir=$(new_case t3-mate)
+  add_repo_backed_mate "$dir" sm1 claude t3code
+  printf 't3_thread_id=thread-sm1\nt3_project_id=proj-1\n' >> "$dir/home/state/sm1.meta"
+  fm_fake_exit0 "$dir/fakebin" treehouse
+  t3_fake_start "$dir/t3-server"
+  t3_fake_case "$dir/t3"
+  FM_T3_HOME="$dir/sm1-home" t3_fake_set '
+w = { tokens: [],
+  projects: [{ id: "proj-1", title: "sm1-home", workspaceRoot: process.env.FM_T3_HOME, deletedAt: null,
+    defaultModelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" } }],
+  threads: { "thread-sm1": { threadId: "thread-sm1", projectId: "proj-1", status: "idle", activeRunId: null,
+    archived: false, worktreePath: null, pendingRequestCount: 0, providerInstanceId: "claudeAgent",
+    runtimeMode: "full-access", parentThreadId: null, items: [], runs: [] } } };'
+  t3_fake_credential "$dir/home/config/t3code-token"
+  arm_answer "$dir" sm1
+
+  out=$(run_update_in_case "$dir")
+
+  restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
+  nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
+  assert_not_contains "$restart_line" "sm1" \
+    "a T3 mate, which cannot be given a replacement agent, must stay out of the restart set"
+  assert_contains "$nudge_line" "fm-sm1" \
+    "a live T3 mate must keep the re-read steer"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+  sends=$(t3_fake_calls t3_thread_send)
+  t3_fake_stop
+
+  expect_code 3 "$rc" "a T3 mate must not report a reload"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1: its runtime cannot launch a replacement agent (backend t3code)" \
+    "the T3 mate must be nudged, naming the runtime limit"
+  assert_not_contains "$out" "restarted: sm1" "a T3 mate must never be reported as restarted"
+  assert_contains "$out" "summary: 0 of 1 restarted, 1 nudged, 0 unreached" \
+    "the pass must count the T3 mate as nudged"
+  assert_no_grep 'Open-record persistence' "$dir/home/state/sm1.inbox/001.msg" \
+    "a T3 mate should not be asked to persist for a restart that cannot come"
+  assert_grep 're-read your AGENTS.md' "$dir/home/state/sm1.inbox/001.msg" \
+    "the T3 mate should be handed the ordinary re-read message"
+  [ "$(printf '%s\n' "$sends" | grep -c .)" = 1 ] \
+    || fail "the T3 thread should receive exactly the one re-read doorbell, got: $sends"
+  assert_contains "$sends" "Firstmate instruction waiting" \
+    "the re-read doorbell must reach the T3 thread"
+  [ "$(t3_fake_mutations)" = t3_thread_send ] \
+    || fail "nothing but the doorbell may reach the T3 thread, got '$(t3_fake_mutations)'"
+  pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
 }
 
 test_persist_gates_and_asks_only_for_open_records
@@ -949,5 +1010,6 @@ test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored
 test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
+test_t3_mate_stays_on_the_nudge_path
 
 echo "# all fm-secondmate-restart tests passed"

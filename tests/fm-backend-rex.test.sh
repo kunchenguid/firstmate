@@ -22,172 +22,11 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-rex-tests)
 # pid probe never reads a real process.
 DEAD_PID=99999999
 
-# make_rex_fake: a stateful fake `rex` at <dir>/bin/rex. Every invocation is
-# logged as one space-joined line to <dir>/fake/log. Marker files under
-# <dir>/fake steer failure modes: `unreachable` (every call exits 4), `down`
-# (a stopped server: --autostart=false reads exit 4, any other call starts a
-# fresh server with no sessions), `ls-fail`, `close-noop` (a close that leaves
-# the block alive). Per-block canned reads live in fake/process/<uuid>.json,
-# fake/status/<uuid>.json, fake/capture/<uuid>.txt and fake/capture/<uuid>.vt.
-# `do` stands in for the bounded event reader: it prints "@subscribed", then
-# replays fake/events (a `sleep N` line pauses), and exits 0; `do-fail` makes
-# it exit 3 before subscribing.
-make_rex_fake() {  # <dir>
-  local dir=$1
-  mkdir -p "$dir/bin" "$dir/fake/process" "$dir/fake/status" "$dir/fake/capture" "$dir/fake/cursor" "$dir/home/state"
-  cat >"$dir/bin/rex" <<'SH'
-#!/usr/bin/env bash
-D="${FM_REX_FAKE_DIR:?}"
-S="$D/state.json"
-[ -f "$S" ] || printf '{"sessions":[]}' >"$S"
-{ printf 'rex'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"$D/log"
-autostart=1
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --autostart=false) autostart=0; shift ;;
-    --*) shift ;;
-    *) break ;;
-  esac
-done
-if [ -f "$D/unreachable" ]; then echo "error: could not connect to the rex server" >&2; exit 4; fi
-if [ -f "$D/down" ]; then
-  if [ "$autostart" = 0 ]; then echo "error: could not connect to the rex server" >&2; exit 4; fi
-  rm -f "$D/down"
-  printf '{"sessions":[]}' >"$S"
-fi
-newid() {
-  local n
-  n=$(( $(cat "$D/.n" 2>/dev/null || echo 0) + 1 ))
-  echo "$n" >"$D/.n"
-  printf '%s:%08x-0000-7000-8000-%012x' "$1" "$n" "$n"
-}
-save() { jq "$@" "$S" >"$S.tmp" && mv "$S.tmp" "$S"; }
-notfound() { echo "error: $1 not found" >&2; exit 3; }
-has_session() { jq -e --arg s "$1" 'any(.sessions[]; .session_id == $s)' "$S" >/dev/null; }
-has_block() {
-  jq -e --arg s "$1" --arg b "$2" \
-    'any(.sessions[] | select(.session_id == $s) | .windows[].blocks[]; .block_id == $b)' "$S" >/dev/null
-}
-cmd=${1:-}; shift
-sub=
-case "$cmd" in window|block|api) sub=${1:-}; shift ;; esac
-sid=; bid=; fmt=text; wlabel=; pos=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -s) sid=$2; shift 2 ;;
-    -b) bid=$2; shift 2 ;;
-    --format=*) fmt=${1#--format=}; shift ;;
-    --window) wlabel=$2; shift 2 ;;
-    --cwd) shift 2 ;;
-    --) shift; pos+=("$@"); break ;;
-    --*) shift ;;
-    *) pos+=("$1"); shift ;;
-  esac
-done
-p0=${pos[0]:-}; p1=${pos[1]:-}
-case "$cmd:$sub" in
-  version:)
-    printf 'rex 0.0.1-fake\napi: revision %s\n' "${FM_REX_FAKE_API:-5}" ;;
-  whoami:)
-    printf '{"endpoint":"%s"}\n' "${FM_REX_FAKE_ENDPOINT:-unix:///fake/rex.sock}" ;;
-  ls:)
-    [ ! -f "$D/ls-fail" ] || exit 1
-    jq -c '{sessions: [.sessions[] | {session_id, label}]}' "$S" ;;
-  api:call)
-    case "$p0" in
-      server.status) printf '{"api_revision":%s}\n' "${FM_REX_FAKE_SERVER_API:-5}" ;;
-      session.view)
-        has_session "$sid" || notfound "session"
-        jq -c --arg s "$sid" '.sessions[] | select(.session_id == $s)
-          | if ((.windows // []) | length) == 0 then {session_id, label}
-            else {session_id, label, windows: [.windows[] | {window_id, label,
-              layers: [{blocks: [.blocks[] | {block_id, label}]}]}]} end' "$S" ;;
-      *) exit 2 ;;
-    esac ;;
-  new:)
-    s=$(newid session); w=$(newid window); b=$(newid block)
-    save --arg s "$s" --arg w "$w" --arg b "$b" --arg l "$p0" --arg wl "$wlabel" \
-      '.sessions += [{session_id: $s, label: $l, windows: [{window_id: $w, label: $wl,
-        blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]}]'
-    printf '{"session_id":"%s","initial_windows":[{"window_id":"%s","block_ids":["%s"]}]}\n' "$s" "$w" "$b" ;;
-  window:new)
-    has_session "$sid" || notfound "session"
-    w=$(newid window); b=$(newid block)
-    save --arg s "$sid" --arg w "$w" --arg b "$b" --arg l "$p0" \
-      '(.sessions[] | select(.session_id == $s) | .windows) += [{window_id: $w, label: $l,
-        blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]'
-    printf '{"window_id":"%s","block_ids":["%s"]}\n' "$w" "$b" ;;
-  block:rename)
-    has_block "$sid" "$p0" || notfound "block"
-    save --arg s "$sid" --arg b "$p0" --arg l "$p1" \
-      '(.sessions[] | select(.session_id == $s) | .windows[].blocks[] | select(.block_id == $b) | .label) = $l' ;;
-  block:close)
-    has_block "$sid" "$p0" || notfound "block"
-    [ ! -f "$D/close-noop" ] || exit 0
-    save --arg s "$sid" --arg b "$p0" \
-      '(.sessions[] | select(.session_id == $s) | .windows) |= ([.[] | .blocks |= map(select(.block_id != $b))]
-        | map(select(.blocks | length > 0)))' ;;
-  block:call)
-    has_block "$sid" "$bid" || notfound "block"
-    u=${bid#block:}
-    case "$p0" in
-      size)
-        jq -c --arg s "$sid" --arg b "$bid" '.sessions[] | select(.session_id == $s) | .windows[].blocks[]
-          | select(.block_id == $b) | {columns, rows, owner: null}' "$S" ;;
-      resize)
-        save --arg s "$sid" --arg b "$bid" --argjson r "$p1" \
-          '(.sessions[] | select(.session_id == $s) | .windows[].blocks[] | select(.block_id == $b))
-            |= (.columns = $r.columns | .rows = $r.rows)' ;;
-      process)
-        if [ -f "$D/process/$u.json" ]; then cat "$D/process/$u.json"; else
-          printf '{"foreground":{"pid":%s,"name":"zsh","path":"/bin/zsh","argv0":"-zsh","cwd":"/tmp"},"ancestors":[],"last_exit":null}\n' "${FM_REX_FAKE_DEAD_PID:-99999999}"
-        fi ;;
-      program_status)
-        if [ -f "$D/status/$u.json" ]; then cat "$D/status/$u.json"; else printf '{"records":[]}\n'; fi ;;
-      format)
-        # The styled grid without the newline `capture` adds when the grid
-        # does not already end in one, then the cursor from fake/cursor/<uuid>
-        # ("<row>;<col>") when extra_cursor is asked for.
-        content=$(cat "$D/capture/$u.vt" 2>/dev/null && printf x); content=${content%x}
-        case "$content" in *$'\r\n') ;; *$'\n') content=${content%$'\n'} ;; esac
-        case "$p1" in
-          *extra_cursor*) [ ! -f "$D/cursor/$u" ] || content="$content"$'\033['"$(cat "$D/cursor/$u")H" ;;
-        esac
-        printf '%s' "$content" | jq -Rs '{content: .}' ;;
-      *) exit 2 ;;
-    esac ;;
-  capture:)
-    has_block "$sid" "$bid" || notfound "block"
-    u=${bid#block:}
-    if [ "$fmt" = vt ]; then cat "$D/capture/$u.vt" 2>/dev/null; else cat "$D/capture/$u.txt" 2>/dev/null; fi ;;
-  send:)
-    has_block "$sid" "$bid" || notfound "block"
-    [ -n "$p0" ] || exit 2
-    printf '%s\n' "$p0" >>"$D/sent" ;;
-  send-key:)
-    has_block "$sid" "$bid" || notfound "block"
-    case "$p0" in enter|escape|tab|ctrl+c|ctrl+u) ;; *) exit 2 ;; esac
-    printf '%s\n' "$p0" >>"$D/keys" ;;
-  do:)
-    has_session "$sid" || notfound "session"
-    [ ! -f "$D/do-fail" ] || exit 3
-    echo "@subscribed"
-    if [ -f "$D/events" ]; then
-      while IFS= read -r line; do
-        case "$line" in
-          "sleep "*) sleep "${line#sleep }" ;;
-          *) printf '%s\n' "$line" ;;
-        esac
-      done <"$D/events"
-    fi ;;
-  kill:)
-    has_session "$p0" || notfound "session"
-    save --arg s "$p0" '.sessions |= map(select(.session_id != $s))' ;;
-  *) exit 2 ;;
-esac
-SH
-  chmod +x "$dir/bin/rex"
-}
+# The fake rex CLI and its driver helpers moved to the shared fixture so the
+# remote second-mate suites can install the same server model on a fake remote
+# host.
+# shellcheck source=tests/rex-fake-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/rex-fake-fixture.sh"
 
 # rex_env: run a bash snippet with the adapter loaded through the dispatcher,
 # the fake CLI on REX_BIN_DIR, and an isolated home. Extra VAR=value words
@@ -206,13 +45,6 @@ rex_env() {  # <dir> [VAR=value...] <snippet>
     done
     bash -c '. "$0/bin/fm-backend.sh" && fm_backend_source rex && eval "$1"' "$ROOT" "$1"
   )
-}
-
-# fake_rex: drive the fake directly (test setup and server-state reads).
-fake_rex() {  # <dir> <rex-args...>
-  local dir=$1
-  shift
-  FM_REX_FAKE_DIR="$dir/fake" "$dir/bin/rex" "$@"
 }
 
 new_case() {  # <name> -> echoes a fresh case dir with the fake installed
@@ -251,6 +83,19 @@ test_bin_prefers_rex_bin_dir() {
   out=$(rex_env "$dir" "FM_BACKEND_REX_BUNDLE_BIN=$dir/bin/rex" 'unset REX_BIN_DIR; PATH=/usr/bin:/bin; fm_backend_rex_bin')
   assert_equals "$dir/bin/rex" "$out" "the server bundle path is the last fallback"
   pass "fm_backend_rex_bin: REX_BIN_DIR, then PATH, then the server bundle path"
+}
+
+test_rex_spawn_refuses_unproven_remote_endpoint() {
+  local dir out
+  dir=$(new_case remote-endpoint)
+  out=$(rex_env "$dir" FM_REX_FAKE_ENDPOINT=tcp://rex-linux.example:8723 \
+    'fm_backend_rex_local_server_ensure' 2>&1) && fail "a non-locality-proving Rex endpoint must be refused"
+  assert_contains "$out" "tcp://rex-linux.example:8723" "the refusal must name the endpoint"
+  assert_contains "$out" "Rex workers need a Rex server on this machine" "the refusal must explain the same-machine requirement"
+  assert_contains "$out" "remote second mates" "the refusal must point to remote second mates"
+  assert_no_grep 'rex (new|window new)' "$dir/fake/log" "the locality refusal must happen before any tab or session is created"
+  rex_env "$dir" 'fm_backend_rex_local_server_ensure' || fail "a local Unix-socket server must pass the locality check"
+  pass "Rex spawn refuses an endpoint whose server locality is unproven before creating sessions or tabs"
 }
 
 test_version_check_gates_api_revision() {
@@ -498,6 +343,100 @@ test_agent_state_from_process_view() {
   rm -f "$dir/fake/down"; touch "$dir/fake/unreachable"
   assert_equals unreadable "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "an unreachable server is unreadable"
   pass "fm_backend_agent_state rex: alive/dead/ambiguous from the process view, missing on not-found, unreadable without starting a server"
+}
+
+# start_shell_tree: a real process tree shaped like a pane whose login shell
+# launched <leaf> through a wrapper script in its own process group: a root
+# shell (TREE_ROOT), a wrapper shell below it, and <leaf> (a stand-in under that
+# name, TREE_LEAF) below the wrapper. Its args name <dir>/tree, so the suite's
+# fixture reaping also covers it.
+start_shell_tree() {  # <dir> <leaf-name>
+  local dir=$1 leaf=$2 i=0 standin
+  standin=$(fm_agent_standin "$dir/standin") || {
+    echo "skip: no long-running stand-in survives a rename, so the shell descendant case cannot run"
+    return 1
+  }
+  mkdir -p "$dir/tree"
+  ln -sf "$standin" "$dir/tree/$leaf"
+  cat >"$dir/tree/wrapper" <<'SH'
+#!/usr/bin/env bash
+"$1" "$2"
+exit $?
+SH
+  chmod +x "$dir/tree/wrapper"
+  bash -c '"$1" "$2" "$3" & wait' root "$dir/tree/wrapper" "$dir/tree/$leaf" "$FM_TEST_STUB_MAX_BLOCK_SECONDS" >/dev/null 2>&1 &
+  TREE_ROOT=$!
+  TREE_LEAF=
+  while [ -z "$TREE_LEAF" ] && [ "$i" -lt 50 ]; do
+    TREE_LEAF=$(ps -axo pid=,args= | awk -v p="$dir/tree/$leaf" '$2 == p { print $1; exit }')
+    [ -n "$TREE_LEAF" ] || sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$TREE_LEAF" ] || fail "the $leaf fixture process never started"
+}
+
+stop_shell_tree() {  # <dir>
+  fm_test_reap_root_processes "$1/tree"
+}
+
+# shell_foreground_payload: the process view Rex reports for a pane whose
+# login shell (fish here, as captured live) is the foreground process with
+# treehouse, fish, and login above it.
+shell_foreground_payload() {  # <foreground-pid>
+  printf '{"foreground":{"pid":%s,"name":"fish","path":"/opt/homebrew/Cellar/fish/4.7.1/bin/fish","argv0":"/opt/homebrew/bin/fish","cwd":"/w"},"ancestors":[{"pid":%s,"name":"treehouse","argv0":"treehouse"},{"pid":%s,"name":"fish","argv0":"-fish"},{"pid":%s,"name":"login","argv0":null}],"last_exit":null}' \
+    "$1" "$DEAD_PID" "$DEAD_PID" "$DEAD_PID"
+}
+
+test_agent_state_sees_a_harness_below_a_shell_foreground() {
+  local dir out sid bid t fakebin real_sleep PATH=$PATH
+  dir=$(new_case agent-state-below-shell)
+  # Model a multicall sleep on every host, including macOS and GNU coreutils.
+  # The real process tree must still start when sleep refuses a foreign name.
+  real_sleep=$(command -v sleep) || fail "sleep not found"
+  fakebin=$(fm_fakebin "$dir/multicall")
+  cat >"$fakebin/sleep" <<SH
+#!/usr/bin/env bash
+case "\${0##*/}" in
+  sleep) exec "$real_sleep" "\$@" ;;
+  *) echo "Requested utility \${0##*/} does not match executable name" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/sleep"
+  ln -s "$fakebin/sleep" "$dir/multicall/claude"
+  "$fakebin/sleep" 0 || fail "the fake multicall sleep must run under its own name"
+  if "$dir/multicall/claude" 0 2>/dev/null; then
+    fail "the fake multicall sleep must refuse a harness name, or this case proves nothing"
+  fi
+  export PATH="$fakebin:$PATH"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp')
+  read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+
+  start_shell_tree "$dir" claude || return 0
+  write_process "$dir" "$bid" "$(shell_foreground_payload "$DEAD_PID")"
+  assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
+    "the reported chain alone holds no harness, so a foreground shell with no live process below it is dead"
+  write_process "$dir" "$bid" "$(shell_foreground_payload "$TREE_ROOT")"
+  assert_equals alive "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
+    "a harness running below the shell foreground, through a wrapper, is alive"
+  printf '{"records":[{"state":"working","kind":"agent","owner":{"pid":%s}}]}\n' "$TREE_LEAF" >"$dir/fake/status/${bid#block:}.json"
+  assert_equals busy "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" \
+    "an OSC 7501 record from the harness below the shell foreground is trusted"
+  stop_shell_tree "$dir"
+  rm -f "$dir/fake/status/${bid#block:}.json"
+
+  start_shell_tree "$dir" worker || return 0
+  write_process "$dir" "$bid" "$(shell_foreground_payload "$TREE_ROOT")"
+  assert_equals dead "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" \
+    "a shell foreground with only non-harness processes below it is dead"
+  printf '{"records":[{"state":"working","owner":{"pid":%s}}]}\n' "$TREE_LEAF" >"$dir/fake/status/${bid#block:}.json"
+  assert_equals unknown "$(rex_env "$dir" "fm_backend_busy_state rex '$t'")" \
+    "a record from a non-harness process below the shell foreground is ignored"
+  stop_shell_tree "$dir"
+
+  write_process "$dir" "$bid" "{\"foreground\":{\"pid\":$DEAD_PID,\"name\":\"2.1.310\",\"path\":\"/Users/u/.cac/versions/2.1.310/claude\",\"argv0\":\"claude\"},\"ancestors\":[{\"pid\":$DEAD_PID,\"name\":\"zsh\",\"argv0\":\"-zsh\"}],\"last_exit\":null}"
+  assert_equals alive "$(rex_env "$dir" "fm_backend_agent_state rex '$t'")" "a harness foreground is still alive"
+  pass "fm_backend_agent_state rex: a harness below a shell foreground is alive and its records are trusted; a bare shell stays dead"
 }
 
 test_native_busy_trusts_live_owner_only() {
@@ -880,7 +819,216 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit 0
 fi
 
+# --- attention marks (opt-in) ---------------------------------------------------
+
+# mark_case: a task tab whose foreground is a harness at pid 4242 under a shell
+# at 4000, with `ps -o tty=` faked so the pane's terminal device is the
+# regular file $MARK_DIR/dev/ttys999 and every write to it can be read back.
+mark_case() {  # <name>
+  local out sid
+  MARK_DIR=$(new_case "$1")
+  out=$(rex_env "$MARK_DIR" 'fm_backend_rex_create_task fm-t1 /tmp')
+  read -r sid _ MARK_BID <<<"$out"
+  MARK_T="${sid#session:}:${MARK_BID#block:}"
+  write_process "$MARK_DIR" "$MARK_BID" '{"foreground":{"pid":4242,"name":"claude"},"ancestors":[{"pid":4000,"name":"zsh"}],"last_exit":null}'
+  mkdir -p "$MARK_DIR/psbin" "$MARK_DIR/dev" "$MARK_DIR/home/config"
+  cat >"$MARK_DIR/psbin/ps" <<'SH'
+#!/usr/bin/env bash
+case " $* " in *" -o tty= "*) echo ttys999; exit 0 ;; esac
+exec /bin/ps "$@"
+SH
+  chmod +x "$MARK_DIR/psbin/ps"
+  : >"$MARK_DIR/dev/ttys999"
+  MARK_TTY="$MARK_DIR/dev/ttys999"
+}
+
+mark_env() {  # <snippet>
+  rex_env "$MARK_DIR" PATH="$MARK_DIR/psbin:$PATH" FM_BACKEND_REX_DEV_DIR="$MARK_DIR/dev" "$1"
+}
+
+mark_status() {  # <records-json-array>
+  printf '{"records":%s}\n' "$1" >"$MARK_DIR/fake/status/${MARK_BID#block:}.json"
+}
+
+# marks_run: run bin/fm-rex-marks.sh against the case's home and fake Rex.
+marks_run() {  # <args...>
+  env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+    FM_REX_FAKE_DIR="$MARK_DIR/fake" REX_BIN_DIR="$MARK_DIR/bin" FM_HOME="$MARK_DIR/home" \
+    FM_STATE_OVERRIDE="$MARK_DIR/home/state" FM_CONFIG_OVERRIDE="$MARK_DIR/home/config" \
+    FM_REX_FAKE_DEAD_PID="$DEAD_PID" FM_BACKEND_REX_BUNDLE_BIN="$MARK_DIR/no-bundle/rex" \
+    PATH="$MARK_DIR/psbin:$PATH" FM_BACKEND_REX_DEV_DIR="$MARK_DIR/dev" \
+    "$ROOT/bin/fm-rex-marks.sh" "$@"
+}
+
+mark_task_status() {  # <line>
+  printf '%s\n' "$1" >"$MARK_DIR/home/state/t1.status"
+}
+
+test_mark_progress_tint_and_alert_sequences() {
+  local want
+  mark_case mark-seq
+  mark_env "fm_backend_rex_mark '$MARK_T' blocked question 'Needs your decision'" || fail "mark failed"
+  want=$(printf '\033]7501;state=blocked:kind=question:app=firstmate:id=fm:msg=%s\033\134' "$(printf 'Needs your decision' | base64)")
+  assert_equals "$want" "$(cat "$MARK_TTY")" "a mark must be exactly one OSC 7501 id=fm record"
+  : >"$MARK_TTY"
+  mark_env "fm_backend_rex_mark '$MARK_T' blocked question 'Pick a db' '' fm-t1 fm-t1" || fail "notifying mark failed"
+  grep -qF $'\033]777;notify;fm-t1;Pick a db\a' "$MARK_TTY" || fail "a notifying mark must carry one OSC 777 notification"
+  grep -qF "title=$(printf 'fm-t1' | base64)" "$MARK_TTY" || fail "a titled mark must carry its title"
+  : >"$MARK_TTY"
+  mark_env "fm_backend_rex_mark '$MARK_T' clear" || fail "clear failed"
+  assert_equals $'\033]7501;state=clear:app=firstmate:id=fm\033\\' "$(cat "$MARK_TTY")" "clear must remove only Firstmate's record"
+  : >"$MARK_TTY"
+  mark_env "fm_backend_rex_progress '$MARK_T' 44 \$'Validating: review\\t4/9' '' fm-t1" || fail "progress failed"
+  want=$(printf '\033]7501;state=working:app=firstmate:id=fm/validate:progress=44:title=%s:msg=%s\033\134' \
+    "$(printf 'fm-t1' | base64)" "$(printf 'Validating: review 4/9' | base64)")
+  assert_equals "$want" "$(cat "$MARK_TTY")" "progress must be one working id=fm/validate record with its percentage"
+  : >"$MARK_TTY"
+  mark_env "fm_backend_rex_tint '$MARK_T' '#2b2614'" || fail "tint failed"
+  assert_equals $'\033]11;#2b2614\033\\' "$(cat "$MARK_TTY")" "a tint must be one OSC 11 set"
+  : >"$MARK_TTY"
+  mark_env "fm_backend_rex_tint '$MARK_T' reset" || fail "tint reset failed"
+  assert_equals $'\033]111\033\\' "$(cat "$MARK_TTY")" "a reset must be one OSC 111"
+  : >"$MARK_TTY"
+  mark_env "fm_backend_rex_tint '$MARK_T' '?'" && fail "a query or any value other than #rrggbb must be refused"
+  [ ! -s "$MARK_TTY" ] || fail "a refused tint must write nothing"
+  mark_env "fm_backend_rex_alert '$MARK_T' 'firstmate: WEDGED' 'see marker'" || fail "alert failed"
+  grep -qF 'state=blocked:kind=permission:app=firstmate:id=fm-wedge' "$MARK_TTY" || fail "the wedge alert must be a blocked id=fm-wedge record"
+  grep -qF $'\033]777;notify;firstmate: WEDGED;see marker\a' "$MARK_TTY" || fail "the wedge alert must carry one notification"
+  pass "rex: a mark, progress record, tint, and wedge alert are each one small terminal write of Firstmate's own app=firstmate record"
+}
+
+test_mark_read_reports_only_firstmate_records() {
+  mark_case mark-read
+  mark_status '[{"state":"working","app":"claude-code"},{"id":"fm","state":"blocked","kind":"question","app":"firstmate","msg":"Needs it"}]'
+  assert_equals $'blocked\tquestion\tNeeds it\t\t' "$(mark_env "fm_backend_rex_mark_read '$MARK_T'")" "mark_read must report only Firstmate's record"
+  mark_status '[{"state":"working","app":"claude-code"}]'
+  assert_equals $'clear\t\t\t\t' "$(mark_env "fm_backend_rex_mark_read '$MARK_T'")" "no Firstmate record reads as clear"
+  rm -f "$MARK_DIR/fake/status/${MARK_BID#block:}.json"
+  printf 'not json' >"$MARK_DIR/fake/status/${MARK_BID#block:}.json"
+  mark_env "fm_backend_rex_mark_read '$MARK_T'" >/dev/null && fail "an unreadable pane must fail, never read as clear"
+  pass "rex: mark_read reports only Firstmate's record and fails on an unreadable pane"
+}
+
+# Rex attributes a record written to the pane's terminal to its foreground
+# process, so without this rule a Firstmate mark would read as the harness's
+# own blocked state and wake the supervisor.
+test_firstmate_records_never_count_as_worker_state() {
+  local res
+  push_case push-own-records
+  printf '{"records":[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","owner":{"pid":4242}}]}\n' \
+    >"$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
+  assert_equals unknown "$(rex_env "$PUSH_DIR" "fm_backend_busy_state rex '$PUSH_T'")" "a Firstmate record must not decide busy state"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "the level reconcile must ignore a Firstmate record"
+  printf '{"records":[{"state":"working","app":"firstmate-grok","title":"fm-t1","owner":{"pid":4242}}]}\n' \
+    >"$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
+  assert_equals unknown "$(rex_env "$PUSH_DIR" "fm_backend_busy_state rex '$PUSH_T'")" "the status bridge's own root record must not decide busy state"
+  rm -f "$PUSH_DIR/fake/status/${PUSH_BID#block:}.json"
+  rex_event "$PUSH_BID" blocked question firstmate 4242 "Needs your decision" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "a streamed Firstmate record must never escalate"
+  rex_event "$PUSH_BID" blocked question firstmate-grok 4242 "Needs your decision" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  assert_equals "1|" "$res" "a streamed status-bridge record must never escalate"
+  rex_event "$PUSH_BID" blocked question claude-code 4242 "Continue?" >"$PUSH_DIR/fake/events"
+  res=$(push_wait 1)
+  [ "${res%%|*}" = 0 ] || fail "the harness's own blocked edge must still escalate, got $res"
+  pass "rex: Firstmate's own program-status records never count as the worker's busy state or blocked edge"
+}
+
+test_marks_are_off_by_default() {
+  mark_case marks-off
+  printf '%s\n' "window=$MARK_T" "backend=rex" "kind=ship" >"$MARK_DIR/home/state/t1.meta"
+  mark_task_status "needs-decision [at=1700000000] [key=pick-db]: pick a database"
+  : >"$MARK_DIR/fake/log"
+  marks_run sync || fail "sync failed"
+  [ ! -s "$MARK_TTY" ] || fail "with no config file the marks must write nothing"
+  grep -q 'program_status' "$MARK_DIR/fake/log" && fail "with no config file the marks must cost no Rex call"
+  compgen -G "$MARK_DIR/home/state/.rex-*" >/dev/null && fail "with no config file the marks must cache nothing"
+  pass "rex: attention marks are off unless config/rex-status-marks turns them on"
+}
+
+test_marks_producer_converges_and_notifies_once() {
+  local out
+  mark_case marks-on
+  printf 'on\n' >"$MARK_DIR/home/config/rex-status-marks"
+  printf '%s\n' "window=$MARK_T" "backend=rex" "kind=ship" >"$MARK_DIR/home/state/t1.meta"
+  mark_task_status "needs-decision [at=1700000000] [key=pick-db]: pick a database"
+  out=$(marks_run plan)
+  assert_equals $'t1\tblocked\tquestion\tNeeds your decision: pick a database' "$out" "needs-decision must plan a blocked question mark"
+  mark_status '[]'
+  marks_run sync || fail "sync failed"
+  grep -qF "id=fm:title=$(printf 'fm-t1' | base64):msg=" "$MARK_TTY" || fail "sync must write the mark titled with the tab label"
+  grep -qF '777;notify;fm-t1;Needs your decision: pick a database' "$MARK_TTY" || fail "a new mark must notify once"
+  : >"$MARK_TTY"
+  mark_status '[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","title":"fm-t1","msg":"Needs your decision: pick a database"}]'
+  marks_run sync || fail "sync failed"
+  [ ! -s "$MARK_TTY" ] || fail "an unchanged live mark must not be rewritten"
+  mark_status '[]'
+  marks_run sync || fail "sync failed"
+  grep -qF 'id=fm:title=' "$MARK_TTY" || fail "a dropped record must be repaired"
+  grep -qF '777;notify' "$MARK_TTY" && fail "a repair must not notify again"
+  : >"$MARK_TTY"
+  mark_task_status "working [at=1700000100]: back on it"
+  mark_status '[{"id":"fm","state":"blocked","kind":"question","app":"firstmate","msg":"Needs your decision: pick a database"}]'
+  marks_run sync || fail "sync failed"
+  grep -qF 'state=clear:app=firstmate:id=fm' "$MARK_TTY" || fail "a working task must clear its mark"
+  [ ! -e "$MARK_DIR/home/state/.rex-mark-t1" ] || fail "a cleared mark must drop its cache"
+  mark_task_status "blocked [at=1700000200]: needs a GitHub login"
+  assert_equals auth "$(marks_run plan t1 | cut -f3)" "a credential blocker must be kind auth"
+  mark_task_status "done [at=1700000300]: PR https://github.com/o/r/pull/9 checks green"
+  assert_contains "$(marks_run plan t1)" $'done\t\tPR ready: PR https://' "a done line with a URL plans a PR-ready done mark"
+  mark_task_status "failed [at=1700000400]: build broke"
+  assert_contains "$(marks_run plan t1)" $'error\t\tFailed: build broke' "failed plans an error mark"
+  mark_task_status "needs-decision [at=1700000500] [key=k2]: second call"
+  mark_status '[]'
+  : >"$MARK_TTY"
+  marks_run sync || fail "sync failed"
+  [ -e "$MARK_DIR/home/state/.rex-mark-t1" ] || fail "a written mark must be cached"
+  printf 'off\n' >"$MARK_DIR/home/config/rex-status-marks"
+  : >"$MARK_TTY"
+  marks_run sync || fail "off sync failed"
+  grep -qF 'state=clear:app=firstmate:id=fm' "$MARK_TTY" || fail "turning marks off must clear the shown mark"
+  [ ! -e "$MARK_DIR/home/state/.rex-mark-t1" ] || fail "off must drop the cache"
+  printf 'loud\n' >"$MARK_DIR/home/config/rex-status-marks"
+  : >"$MARK_TTY"
+  out=$(marks_run sync 2>&1) || fail "sync with an unknown value failed"
+  assert_contains "$out" "unknown value; using off" "a value other than on or off must warn and read as off"
+  [ ! -s "$MARK_TTY" ] || fail "an unknown value must read as off"
+  pass "rex: the marks producer plans from status, writes once, repairs without re-notifying, clears on resolve, and honors off"
+}
+
+test_marks_clear_removes_records_and_caches() {
+  mark_case marks-clear
+  printf 'on\n' >"$MARK_DIR/home/config/rex-status-marks"
+  printf 'subtle\n' >"$MARK_DIR/home/config/rex-tint"
+  printf '%s\n' "window=$MARK_T" "backend=rex" "kind=ship" >"$MARK_DIR/home/state/t1.meta"
+  mark_task_status "blocked [at=1700000000]: stuck"
+  mark_status '[]'
+  marks_run sync || fail "sync failed"
+  [ -e "$MARK_DIR/home/state/.rex-mark-t1" ] && [ -e "$MARK_DIR/home/state/.rex-tint-t1" ] || fail "sync must cache the mark and tint"
+  assert_contains "$(cat "$MARK_TTY")" $'\033]11;#2b2614' "a waiting task must get the subtle waiting tint"
+  : >"$MARK_TTY"
+  marks_run clear t1 || fail "clear failed"
+  grep -qF 'state=clear:app=firstmate:id=fm' "$MARK_TTY" || fail "clear must remove the mark"
+  grep -qF $'\033]111\033\\' "$MARK_TTY" || fail "clear must reset the tint"
+  compgen -G "$MARK_DIR/home/state/.rex-*-t1" >/dev/null && fail "clear must drop every cache"
+  pass "rex: clearing a task removes its mark, tint, and caches"
+}
+
+test_nm_run_progress_reads_captured_status() {
+  local out caps="$ROOT/tests/captures/no-mistakes-v1.70.1"
+  out=$(bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/replacement.toon")
+  [ "$out" = $'88\t9\t9\tci\tstarting' ] || fail "a run at its ci step must read 8 of 9 steps done with ci active, got '$out'"
+  out=$(bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/parked.toon")
+  [ "$(printf '%s' "$out" | cut -f2-4)" = $'4\t9\ttest' ] || fail "a parked run must name its first unfinished step, got '$out'"
+  bash -c '. "$1/bin/fm-nm-run-lib.sh"; fm_nm_run_progress "$(cat "$2")"' _ "$ROOT" "$caps/overview.toon" >/dev/null \
+    && fail "output with no steps table must fail"
+  pass "rex: validation progress reads captured no-mistakes status by column name"
+}
+
 test_bin_prefers_rex_bin_dir
+test_rex_spawn_refuses_unproven_remote_endpoint
 test_version_check_gates_api_revision
 test_parse_target_restores_prefixes
 test_create_task_per_home_session_create_then_adopt
@@ -891,6 +1039,7 @@ test_reclaim_fallback_placement_replaces_a_husk
 test_capture_and_derived_viewport
 test_composer_reads_the_cursor_row
 test_agent_state_from_process_view
+test_agent_state_sees_a_harness_below_a_shell_foreground
 test_native_busy_trusts_live_owner_only
 test_current_path_follows_foreground
 test_send_literal_and_keys
@@ -908,3 +1057,10 @@ test_push_untrusted_owner_is_ignored
 test_push_level_reconcile_and_dedupe
 test_push_gone_edge_ends_the_wait
 test_push_reader_failures_fall_back
+test_mark_progress_tint_and_alert_sequences
+test_mark_read_reports_only_firstmate_records
+test_firstmate_records_never_count_as_worker_state
+test_marks_are_off_by_default
+test_marks_producer_converges_and_notifies_once
+test_marks_clear_removes_records_and_caches
+test_nm_run_progress_reads_captured_status
