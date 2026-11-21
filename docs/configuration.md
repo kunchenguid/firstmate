@@ -864,6 +864,18 @@ With the flag present, registration records a degraded/train baseline and each p
 Without the flag, registration performs no baseline read, polls make no GitHub rollup or GitLab JSON, pipeline, or train reads, and the watcher ignores `degraded` and `ontrain` results while retaining the existing merged-PR wake.
 The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
 
+## Merge on green (config/pr-merge-on-green)
+
+The optional local, gitignored `config/pr-merge-on-green` presence flag lets the watcher act on a recorded task PR as soon as its merge poll sees it green, instead of waiting for a supervision turn.
+With the flag present, a GitHub task PR's poll also reads whether the pull request is open, not a draft, cleanly mergeable (mergeable, with merge state CLEAN or HAS_HOOKS), and green on the newest run of every check.
+For a ship task recorded `yolo=on`, the first sweep that sees a head green starts one automatic merge of that head through `bin/fm-pr-merge.sh` with `--expected-head`, so every live merge guard, captain hold, and away-posture rule still decides, and a landed merge is reported through the ordinary merge outcome.
+A task without `yolo=on` is never merged automatically, a refused or failed attempt is not retried, and the attempt's output stays in `state/<task-id>.pr-poll-green.log` until cleanup.
+For any task, once a head has stayed green and mergeable but unmerged for `FM_PR_GREEN_ALARM_SECS` seconds (default 600), and any automatic attempt on it is itself that old, the watcher queues one wake naming the PR; the same head never wakes again, while a new head starts over.
+That green age is the forge's newest check completion time, so a watcher restarted after an outage alarms on its first sweep rather than ten minutes later.
+GitLab, Forgejo, and Gerrit polls are unchanged by the flag.
+Because yolo merges become automatic, a task whose merge must still escalate as destructive, irreversible, or security-sensitive is recorded with yolo off.
+The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
+
 ## Treehouse pool report (config/treehouse-pool-report)
 
 The optional local, gitignored `config/treehouse-pool-report` presence flag opts this home into a read-only Treehouse pool hygiene report at bootstrap.

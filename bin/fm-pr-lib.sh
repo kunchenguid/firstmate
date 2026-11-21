@@ -1869,3 +1869,119 @@ fm_pr_poll_train_clear() {  # <state> <id>
     rm -f -- "$marker"
   }
 }
+
+# --- green ready-PR marker ----------------------------------------------------
+# With config/pr-merge-on-green, the static poll reports a GitHub pull request
+# that is green and mergeable as "green head=<sha> since=<epoch>", and
+# bin/fm-watch.sh acts on it at most once per head: one detached merge attempt
+# for a task whose merge authority already lets firstmate merge it, and one
+# unmerged-too-long wake. This marker is that per-head memory:
+#   state/<task-id>.pr-poll-green  (mode 0600, single-link, on the state device)
+#   fm-pr-poll-green-v1
+#   <provider> <host> <path> <number>   one per line, the poll's identity
+#   <head>       the 40-hex head the poll reported green
+#   <since>      epoch the head has been green since
+#   <merge>      epoch the merge attempt started, or -
+#   <alarm>      epoch the unmerged wake was queued, or -
+# A marker for another identity or head is not a match, so a new head starts
+# over. The read sets FM_PR_POLL_GREEN_SINCE, FM_PR_POLL_GREEN_MERGE, and
+# FM_PR_POLL_GREEN_ALARM.
+fm_pr_poll_green_field_valid() {  # <value> [dash-ok]
+  local value=${1-}
+  local LC_ALL=C
+  if [ "${2:-}" = dash-ok ] && [ "$value" = - ]; then
+    return 0
+  fi
+  case $value in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#value}" -le 12 ]
+}
+
+fm_pr_poll_green_head_valid() {  # <head>
+  local head=${1-}
+  local LC_ALL=C
+  [ "${#head}" -eq 40 ] || return 1
+  case $head in
+    *[!0-9a-f]*) return 1 ;;
+  esac
+}
+
+fm_pr_poll_green_read() {  # <state> <id> <provider> <host> <path> <number> <head>
+  local state=$1 id=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6 expected_head=$7
+  local marker state_device version provider host path number head since merge alarm
+  FM_PR_POLL_GREEN_SINCE=
+  FM_PR_POLL_GREEN_MERGE=
+  FM_PR_POLL_GREEN_ALARM=
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-green"
+  fm_pr_private_file_valid "$marker" 600 "$state_device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r head <&8 || { exec 8<&-; return 1; }
+  IFS= read -r since <&8 || { exec 8<&-; return 1; }
+  IFS= read -r merge <&8 || { exec 8<&-; return 1; }
+  IFS= read -r alarm <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-green-v1 ] \
+    && [ "$provider" = "$expected_provider" ] \
+    && [ "$host" = "$expected_host" ] \
+    && [ "$path" = "$expected_path" ] \
+    && [ "$number" = "$expected_number" ] \
+    && [ "$head" = "$expected_head" ] \
+    && fm_pr_poll_green_field_valid "$since" \
+    && fm_pr_poll_green_field_valid "$merge" dash-ok \
+    && fm_pr_poll_green_field_valid "$alarm" dash-ok || return 1
+  # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
+  FM_PR_POLL_GREEN_SINCE=$since
+  # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
+  FM_PR_POLL_GREEN_MERGE=$merge
+  # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
+  FM_PR_POLL_GREEN_ALARM=$alarm
+}
+
+fm_pr_poll_green_write() {  # <state> <id> <provider> <host> <path> <number> <head> <since> <merge> <alarm>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 head=$7 since=$8 merge=$9 alarm=${10}
+  local marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_poll_green_head_valid "$head" || return 1
+  fm_pr_poll_green_field_valid "$since" || return 1
+  fm_pr_poll_green_field_valid "$merge" dash-ok || return 1
+  fm_pr_poll_green_field_valid "$alarm" dash-ok || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-green"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-green.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-green-v1 "$provider" "$host" "$path" "$number" "$head" "$since" "$merge" "$alarm" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_green_read "$state" "$id" "$provider" "$host" "$path" "$number" "$head"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Removed at teardown alongside the other per-task PR-poll artifacts.
+fm_pr_poll_green_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-green"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || {
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker"
+  }
+}

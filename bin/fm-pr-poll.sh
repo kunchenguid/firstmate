@@ -20,6 +20,13 @@
 # "ontrain" while the merge request has a merge-train car, and a degraded
 # train=dropped line once the car is gone from a still-open merge request; the
 # watcher wakes on a drop only after it saw the car on the train.
+# With config/pr-merge-on-green present, a GitHub poll also emits one
+# "green head=<sha> since=<epoch>" line for an open, non-draft pull request
+# whose mergeability is computed clean and whose newest run of every check is
+# green; since is the newest check completion time the forge reports (0 when
+# none is readable), so a restarted watcher sees how long the PR has really
+# been green. The line is only a trigger: bin/fm-watch.sh owns what follows,
+# and bin/fm-pr-merge.sh re-reads every merge condition live before any merge.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -31,6 +38,8 @@ unknown=0
 degraded_enabled=0
 poll_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
 [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-degraded-watch" ] && degraded_enabled=1
+green_enabled=0
+[ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-merge-on-green" ] && green_enabled=1
 if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ]; }; then
   [ "$1" != --baseline ] || unknown=3
   provider=$2
@@ -91,13 +100,13 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
-    if [ "$degraded_enabled" != 1 ]; then
+    if [ "$degraded_enabled" != 1 ] && [ "$green_enabled" != 1 ]; then
       result=$(GH_HOST=$host gh pr view "$url" --json state --jq '.state' 2>/dev/null) || exit $unknown
       [ "$result" = MERGED ] && printf '%s\n' merged
       exit 0
     fi
-    # One read answers both questions this poll owns: the merged wake it has
-    # always owned, and the degraded state firstmate now watches for. The
+    # One read answers every question this poll owns: the merged wake it has
+    # always owned, the degraded state, and the green state. The
     # parse runs through gh's own --jq, so no JSON processor is needed here.
     # Any failing check on the rollup counts as degraded because gh's rollup
     # cannot say which checks are required: at the ready report the required
@@ -107,9 +116,17 @@ case "$provider" in
     # dig. Every error, a non-open state, a pending or green rollup, and an
     # unreadable head all stay silent; only the exact line shape below leaves
     # this branch, and the head is validated here so the watcher's dedupe
-    # marker never sees another byte.
+    # marker never sees another byte. Each line is printed only while its own
+    # flag is present. Green mirrors bin/fm-pr-merge.sh's github_checks_not_green
+    # closely enough to trigger: every status context SUCCESS, and the newest
+    # run of each named check run completed SUCCESS, NEUTRAL, or SKIPPED, so a
+    # cancelled run a passing re-run replaced does not hide a green PR. It never
+    # reads required checks; an unreported required check leaves the merge
+    # state BLOCKED rather than CLEAN, and the merge path re-reads them anyway.
     # shellcheck disable=SC2016  # The filter's $f and $r are jq variables, expanded by jq, not the shell.
-    result=$(GH_HOST=$host gh pr view "$url" --json state,headRefOid,statusCheckRollup --jq '
+    result=$(GH_HOST=$host gh pr view "$url" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,statusCheckRollup --jq '
+      def is_run: .__typename == "CheckRun"
+        or (.__typename == null and (.status != null or .conclusion != null));
       if .state == "MERGED" then
         "merged"
       elif .state == "OPEN"
@@ -131,6 +148,26 @@ case "$provider" in
                           | gsub("[\\n\\r\\t]"; " ")))]
             | join(",") | .[:300])
           + (if $u == "" then "" else " url=" + ($u | gsub("[\\n\\r\\t]"; " ")) end)
+      elif .state == "OPEN" and .isDraft == false and .mergeable == "MERGEABLE"
+        and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "HAS_HOOKS")
+        and ([.statusCheckRollup[]?] | length) > 0
+        and ([.statusCheckRollup[]? | select(is_run | not) | select(.state != "SUCCESS")]
+             | length) == 0
+        and ([.statusCheckRollup[]? | select(is_run)]
+             | group_by(.name // "")
+             | all(.[]; max_by(.startedAt // "")
+                 | .status == "COMPLETED"
+                   and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL"
+                        or .conclusion == "SKIPPED")))
+      then
+        "green head=" + (.headRefOid // "") + " since="
+          + ([.statusCheckRollup[]?
+              | (.completedAt // .startedAt // "")
+              | select(type == "string"
+                       and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))
+              | sub("\\.[0-9]+Z$"; "Z")
+              | fromdateiso8601]
+             | max // 0 | floor | tostring)
       else
         ""
       end' 2>/dev/null) || exit $unknown
@@ -138,7 +175,26 @@ case "$provider" in
       merged)
         printf '%s\n' merged
         ;;
+      'green head='*)
+        [ "$green_enabled" = 1 ] || exit 0
+        case $result in
+          *$'\n'*) exit 0 ;;
+        esac
+        head=${result#'green head='}
+        since=${head#* since=}
+        head=${head%% *}
+        case $head in
+          ''|*[!0-9a-f]*) exit 0 ;;
+        esac
+        [ "${#head}" -eq 40 ] || exit 0
+        case $since in
+          ''|*[!0-9]*) exit 0 ;;
+        esac
+        [ "${#since}" -le 12 ] || exit 0
+        printf 'green head=%s since=%s\n' "$head" "$since"
+        ;;
       'degraded head='*)
+        [ "$degraded_enabled" = 1 ] || exit 0
         case $result in
           *$'\n'*) exit $unknown ;;
         esac

@@ -227,6 +227,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PR_DEGRADED_WATCH_ENABLED=0
 [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
+PR_GREEN_WATCH_ENABLED=0
+[ ! -e "$CONFIG/pr-merge-on-green" ] || PR_GREEN_WATCH_ENABLED=1
+# Seconds a recorded task PR may stay green and mergeable but unmerged before
+# one wake names it (pr_green_handle below).
+PR_GREEN_ALARM_SECS=${FM_PR_GREEN_ALARM_SECS:-600}
+case $PR_GREEN_ALARM_SECS in
+  ''|*[!0-9]*) PR_GREEN_ALARM_SECS=600 ;;
+esac
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 # Hold this state directory open for the main loop's teardown check: a
@@ -4009,6 +4017,87 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
+# pr_green_handle acts on a validated poll's "green head=<sha> since=<epoch>"
+# result (bin/fm-pr-poll.sh, only with config/pr-merge-on-green). It is called
+# with the task's control lock held and releases it before returning, because
+# bin/fm-pr-merge.sh takes that same lock. Per head, recorded in the green
+# marker (bin/fm-pr-lib.sh owns its format), it does at most two things:
+#   - for a ship task recorded yolo=on, the merge authority under which
+#     firstmate already merges green work itself, it starts one detached
+#     bin/fm-pr-merge.sh <id> <url> --expected-head <head>, so every live merge
+#     guard, captain hold, and away-posture rule still decides, and a landed
+#     merge reports through that script's own merge outcome; the marker is
+#     written first, so a crash can lose an attempt but never repeat one;
+#   - for any task, once the head has been green PR_GREEN_ALARM_SECS (the
+#     forge's newest check completion, else this watcher's first sight) and
+#     any merge attempt it started is itself that old, it queues one check
+#     wake naming the PR, the wake before the marker so a crash can only
+#     repeat it.
+# A refused or failed attempt is not retried; that wake is the backstop, and
+# the attempt's output stays in state/<id>.pr-poll-green.log for it.
+# Sets PR_GREEN_WAKE_REASON to the queued wake's reason, or leaves it empty.
+PR_GREEN_WAKE_REASON=
+pr_green_handle() {  # <id> <provider> <url> <host> <path> <number> <check> <result>
+  local id=$1 provider=$2 url=$3 host=$4 path=$5 number=$6 check=$7 out=$8
+  local head since now meta kind merge alarm launch=0 reason='' log
+  PR_GREEN_WAKE_REASON=
+  head=${out#'green head='}
+  since=${head#* since=}
+  head=${head%% *}
+  case $out in
+    *$'\n'*) head= ;;
+  esac
+  if ! fm_pr_poll_green_head_valid "$head" || ! fm_pr_poll_green_field_valid "$since"; then
+    pr_poll_control_release || exit 1
+    triage_log "PR poll for $id emitted an unreadable green result; staying silent"
+    return 0
+  fi
+  meta="$STATE/$id.meta"
+  kind=$(fm_meta_get "$meta" kind)
+  case $kind in
+    ''|ship) ;;
+    *)
+      pr_poll_control_release || exit 1
+      return 0
+      ;;
+  esac
+  now=$(date +%s)
+  if fm_pr_poll_green_read "$STATE" "$id" "$provider" "$host" "$path" "$number" "$head"; then
+    since=$FM_PR_POLL_GREEN_SINCE
+    merge=$FM_PR_POLL_GREEN_MERGE
+    alarm=$FM_PR_POLL_GREEN_ALARM
+  else
+    { [ "$since" -gt 0 ] && [ "$since" -le "$now" ]; } || since=$now
+    merge=-
+    alarm=-
+  fi
+  if [ "$merge" = - ] && [ "$(fm_meta_get "$meta" yolo)" = on ]; then
+    merge=$now
+    launch=1
+  fi
+  if [ "$alarm" = - ] && [ $((now - since)) -ge "$PR_GREEN_ALARM_SECS" ] \
+    && { [ "$merge" = - ] || [ $((now - merge)) -ge "$PR_GREEN_ALARM_SECS" ]; }; then
+    log="$STATE/$id.pr-poll-green.log"
+    reason="check: PR $url green and mergeable but still unmerged after $(( (now - since) / 60 ))m: head=$head"
+    [ "$merge" = - ] || reason="$reason; automatic merge attempt did not land (log $log)"
+    fm_wake_append check "$check" "$reason" || exit 1
+    alarm=$now
+  fi
+  fm_pr_poll_green_write "$STATE" "$id" "$provider" "$host" "$path" "$number" \
+    "$head" "$since" "$merge" "$alarm" || exit 1
+  pr_poll_control_release || exit 1
+  if [ "$launch" = 1 ]; then
+    triage_log "starting automatic merge of green yolo PR $url for $id at head $head"
+    ( set -m 2>/dev/null || true
+      umask 077
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        nohup "$SCRIPT_DIR/fm-pr-merge.sh" "$id" "$url" --expected-head "$head" \
+        </dev/null >"$STATE/$id.pr-poll-green.log" 2>&1 & )
+  fi
+  # shellcheck disable=SC2034 # Read by the check sweep after this returns.
+  PR_GREEN_WAKE_REASON=$reason
+}
+
 # A poll armed before a state volume remount can fail capture only because its
 # registration names the old device number; bin/fm-pr-lib.sh
 # fm_pr_poll_registration_rerecord_device owns the proof and the rewrite.
@@ -4060,6 +4149,8 @@ resurface_after_downtime() {
 while :; do
   PR_DEGRADED_WATCH_ENABLED=0
   [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
+  PR_GREEN_WATCH_ENABLED=0
+  [ ! -e "$CONFIG/pr-merge-on-green" ] || PR_GREEN_WATCH_ENABLED=1
   # Native Codex may tear down the async hook and its watchdog together.
   # fm-codex-stop-park.sh owns this optional identity binding. Self-expiry
   # closes the normal recovery generation and lets the arm/host exit too.
@@ -4345,6 +4436,16 @@ EOF
           && [ "$PR_DEGRADED_WATCH_ENABLED" != 1 ]; then
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
+          continue
+        elif [ "$is_pr_poll" -eq 1 ] && [ "${out%% *}" = green ]; then
+          if [ "$PR_GREEN_WATCH_ENABLED" = 1 ]; then
+            pr_green_handle "$id" "$provider" "$url" "$host" "$path" "$number" "$c" "$out"
+          else
+            PR_GREEN_WAKE_REASON=
+            pr_poll_control_release || exit 1
+          fi
+          touch "$STATE/.last-check"
+          [ -z "$PR_GREEN_WAKE_REASON" ] || wake "$PR_GREEN_WAKE_REASON"
           continue
         elif [ "$is_pr_poll" -eq 1 ] && [ "$out" = ontrain ] && [ "$PR_DEGRADED_WATCH_ENABLED" = 1 ]; then
           # A ready MR still on its merge train: remember it in the train
