@@ -758,8 +758,8 @@ test_lock_steal_reap_cannot_remove_successor() {
   # Two reapers verify the same dead steal owner. The competitor runs to
   # completion exactly when the first one is about to remove the link; at most
   # one of them may end up believing it holds the mutex.
-  local dir state steal fakebin out real_rm rc
-  dir=$(make_case lock-steal-reap-race)
+  local dir state steal fakebin out real_rm rc shape=${1:-link} trigger
+  dir=$(make_case "lock-steal-reap-race-$shape")
   state="$dir/state"
   steal="$state/.contend.lock.steal"
   fakebin="$dir/fakebin"
@@ -767,7 +767,13 @@ test_lock_steal_reap_cannot_remove_successor() {
   # The host's own rm path, not a hardcoded /bin/rm: on a host that keeps only
   # sh in /bin (NixOS) the fixture's shim would exec a path that does not exist.
   real_rm=$(command -v rm)
-  leave_dead_link_locks "$state" "$steal"
+  if [ "$shape" = directory ]; then
+    mkdir "$steal"
+    trigger=./watcher-path
+  else
+    leave_dead_link_locks "$state" "$steal"
+    trigger=$steal
+  fi
   # The killed fixture owner may have its PID reused during a loaded serial
   # shard. Pin a verified-dead PID so the race exercises reaping, not liveness.
   printf '%s\n' "$(dead_pid)" > "$steal/pid"
@@ -775,7 +781,7 @@ test_lock_steal_reap_cannot_remove_successor() {
 #!/usr/bin/env bash
 last=
 for arg do last=$arg; done
-if [ "$last" = "$FM_TEST_RACE_PATH" ] && mkdir "$FM_TEST_RACE_ONCE" 2>/dev/null; then
+if [ "$last" = "$FM_TEST_RACE_REMOVE_PATH" ] && mkdir "$FM_TEST_RACE_ONCE" 2>/dev/null; then
   bash -c '
     . "$1"
     if fm_lock_try_acquire_steal_mutex "$2"; then
@@ -783,7 +789,7 @@ if [ "$last" = "$FM_TEST_RACE_PATH" ] && mkdir "$FM_TEST_RACE_ONCE" 2>/dev/null;
       exec sleep 30
     fi
     printf "lost\n" > "$3"
-  ' _ "$FM_TEST_LIB" "$last" "$FM_TEST_RACE_OUT" >/dev/null 2>&1 &
+  ' _ "$FM_TEST_LIB" "$FM_TEST_RACE_PATH" "$FM_TEST_RACE_OUT" >/dev/null 2>&1 &
   i=0
   while [ "$i" -lt 100 ] && [ ! -s "$FM_TEST_RACE_OUT" ]; do
     sleep 0.05
@@ -795,7 +801,7 @@ SH
   chmod +x "$fakebin/rm"
 
   rc=0
-  PATH="$fakebin:$PATH" FM_TEST_LIB="$LIB" FM_TEST_RACE_PATH="$steal" \
+  PATH="$fakebin:$PATH" FM_TEST_LIB="$LIB" FM_TEST_RACE_PATH="$steal" FM_TEST_RACE_REMOVE_PATH="$trigger" \
     FM_TEST_RACE_ONCE="$dir/race-once" FM_TEST_RACE_OUT="$out" \
     FM_TEST_REAL_RM="$real_rm" FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
@@ -813,7 +819,11 @@ SH
       ;;
     *) fail "competing reaper did not report an outcome" ;;
   esac
-  pass "a competing reaper cannot remove the successor's steal mutex"
+  pass "a competing $shape reaper cannot remove the successor's steal mutex"
+}
+
+test_lock_directory_reap_cannot_remove_successor() {
+  test_lock_steal_reap_cannot_remove_successor directory
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
@@ -1052,49 +1062,53 @@ test_lock_reclaims_holder_whose_identity_no_longer_recomputes() {
   # identity still recomputes for its live pid. A mismatch is reclaimed
   # without signalling the pid; a matching identity, or no recorded identity
   # at all, still reads as live.
-  local dir state lockdir live identity out case_name recorded
+  local dir home state lockdir live identity out case_name recorded
   dir=$(make_case lock-identity-mismatch)
-  state="$dir/state"
-  lockdir="$state/.watch.lock"
+  mkdir -p "$dir/home/state"
+  ln -s "$dir/home" "$dir/logical-home"
   # Naming the holder under the fixture root lets the suite's cleanup reap it
   # if an assertion below fails before the kill at the end. A python holder
   # carries that name as its own argument instead of through `exec -a`, which a
   # multicall sleep rejects by dispatching on argv[0] and exiting at once.
   python3 -c 'import sys, time; time.sleep(300)' "$dir/holder" >/dev/null 2>&1 &
   live=$!
-  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
-    || fail "could not identify the fixture holder"
-  for case_name in mismatched matching unrecorded; do
-    rm -rf "$lockdir"
-    mkdir "$lockdir"
-    printf '%s\n' "$live" > "$lockdir/pid"
-    case "$case_name" in
-      mismatched) printf '%s\n' "identity no current rendering produces" > "$lockdir/pid-identity" ;;
-      matching) printf '%s\n' "$identity" > "$lockdir/pid-identity" ;;
-    esac
-    out=$(FM_STATE_OVERRIDE="$state" bash -c '
-      . "$1"
-      if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
-      printf "rc=%s held=%s recovered=%s pid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$2/pid" 2>/dev/null)"
-    ' _ "$LIB" "$lockdir")
-    is_live_non_zombie "$live" || fail "$case_name identity: the live pid was signalled"
-    recorded=$(cat "$lockdir/pid" 2>/dev/null || true)
-    case "$case_name" in
-      mismatched)
-        case "$out" in
-          *"rc=0 held= recovered=$live "*) ;;
-          *) fail "lock whose recorded identity no longer recomputes was not reclaimed: $out" ;;
-        esac
-        [ "$recorded" != "$live" ] || fail "reclaimed lock still records the mismatched pid"
-        ;;
-      *)
-        case "$out" in
-          *"rc=1 held=$live "*) ;;
-          *) fail "$case_name identity: live holder was not refused: $out" ;;
-        esac
-        [ "$recorded" = "$live" ] || fail "$case_name identity: live holder's lock pid was clobbered ('$recorded')"
-        ;;
-    esac
+  for home in "$dir/home" "$dir/logical-home"; do
+    state="$home/state"
+    lockdir="$state/.watch.lock"
+    identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+      || fail "could not identify the fixture holder"
+    for case_name in mismatched matching unrecorded; do
+      rm -rf "$lockdir"
+      mkdir "$lockdir"
+      printf '%s\n' "$live" > "$lockdir/pid"
+      case "$case_name" in
+        mismatched) printf '%s\n' "identity no current rendering produces" > "$lockdir/pid-identity" ;;
+        matching) printf '%s\n' "$identity" > "$lockdir/pid-identity" ;;
+      esac
+      out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+        . "$1"
+        if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+        printf "rc=%s held=%s recovered=%s pid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$2/pid" 2>/dev/null)"
+      ' _ "$LIB" "$lockdir")
+      is_live_non_zombie "$live" || fail "$home $case_name identity: the live pid was signalled"
+      recorded=$(cat "$lockdir/pid" 2>/dev/null || true)
+      case "$case_name" in
+        mismatched)
+          case "$out" in
+            *"rc=0 held= recovered=$live "*) ;;
+            *) fail "$home: lock whose recorded identity no longer recomputes was not reclaimed: $out" ;;
+          esac
+          [ "$recorded" != "$live" ] || fail "$home: reclaimed lock still records the mismatched pid"
+          ;;
+        *)
+          case "$out" in
+            *"rc=1 held=$live "*) ;;
+            *) fail "$home $case_name identity: live holder was not refused: $out" ;;
+          esac
+          [ "$recorded" = "$live" ] || fail "$home $case_name identity: live holder's lock pid was clobbered ('$recorded')"
+          ;;
+      esac
+    done
   done
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
@@ -1139,6 +1153,346 @@ test_lock_keeps_live_daemon_holder_with_stale_identity() {
   kill "$live" 2>/dev/null || true
   wait "$live" 2>/dev/null || true
   pass "live supervise-daemon lock with a stale local-time identity and no start time is not reclaimed"
+}
+
+test_lock_real_directory_residue() {
+  python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "real-directory lock recovery"
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+lib, root, dead = sys.argv[1:]
+for name in ('.lock.acquire', '.turnend-claude-blocks.lock'):
+    for shape in ('nested', 'top-level'):
+        state = Path(root) / ('real-dir-' + name + shape)
+        state.mkdir()
+        lock = state / name
+        for path in (lock, Path(str(lock) + '.steal')):
+            path.mkdir()
+            owner = path / (path.name + '.owner.fixture') if shape == 'nested' else path
+            owner.mkdir(exist_ok=True)
+            (owner / 'pid').write_text(dead + '\n')
+            (owner / 'pid-start').write_text('dead holder\n')
+            os.utime(owner, (1, 1))
+            os.utime(path, (1, 1))
+        result = subprocess.run(
+            ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" || exit 10; '
+             '[ -L "$2" ] || exit 11; fm_lock_release "$2"', '_', lib, str(lock)],
+            env=dict(os.environ, FM_STATE_OVERRIDE=str(state)),
+            capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, (name, shape, result.stderr)
+        assert list(state.iterdir()) == [], list(state.iterdir())
+PY
+  pass "dead real-directory primary and steal locks recover without leaked owners"
+}
+
+test_lock_real_directory_live_nested_owner() {
+  python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "live nested lock owner"
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+lib, root, dead = sys.argv[1:]
+for suffix in ('', '.steal'):
+    state = Path(root) / ('real-dir-live' + suffix)
+    state.mkdir()
+    lock = state / '.lock.acquire'
+    for path in (lock, Path(str(lock) + '.steal')):
+        path.mkdir()
+        (path / 'pid').write_text(dead + '\n')
+        owner = path / (path.name + '.owner.fixture')
+        owner.mkdir()
+        (owner / 'pid').write_text(str(os.getpid()) + '\n' if path == Path(str(lock) + suffix)
+                                   else dead + '\n')
+        os.utime(owner, (1, 1))
+        os.utime(path, (1, 1))
+    result = subprocess.run(
+        ['bash', '-c', '. "$1"; if fm_lock_try_acquire "$2"; then exit 10; fi',
+         '_', lib, str(lock)], env=dict(os.environ, FM_STATE_OVERRIDE=str(state)),
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    live_owner = Path(str(lock) + suffix) / (lock.name + suffix + '.owner.fixture')
+    assert (live_owner / 'pid').read_text().strip() == str(os.getpid())
+PY
+  pass "a live nested owner blocks reclamation even in an old directory"
+}
+
+test_lock_real_directory_named_refusal() {
+  python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "named directory-lock refusal"
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+lib, root, dead = sys.argv[1:]
+for suffix in ('', '.steal'):
+    state = Path(root) / ('real-dir-refusal' + suffix)
+    state.mkdir()
+    lock = state / '.lock.acquire'
+    wedged = Path(str(lock) + suffix)
+    for path in (lock, Path(str(lock) + '.steal')):
+        path.mkdir()
+        (path / 'pid').write_text(dead + '\n')
+        os.utime(path, (1, 1))
+    (wedged / 'unrecognized-record').write_text('preserve me\n')
+    os.utime(wedged, (1, 1))
+    result = subprocess.run(
+        ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" --refuse-unreapable', '_', lib, str(lock)],
+        env=dict(os.environ, FM_STATE_OVERRIDE=str(state)),
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0, result
+    assert 'cannot reclaim lock directory ' + str(wedged) in result.stderr, result.stderr
+    assert (wedged / 'unrecognized-record').read_text() == 'preserve me\n'
+    assert not list(state.glob('*.owner.*')), list(state.iterdir())
+PY
+  pass "unreapable real-directory locks refuse promptly naming the wedged path"
+}
+
+test_lock_real_directory_permission_refusal() {
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "SKIP permission refusal: root bypasses directory search permissions"
+    return
+  fi
+  # Triage #8275 requires a prompt named refusal. Missing search permission
+  # must not turn either session claim path back into an unbounded wait.
+  python3 - "$LIB" "$ROOT/bin/fm-lock.sh" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "inaccessible directory-lock refusal"
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+lib, script, root, dead = sys.argv[1:]
+fixture = Path(root) / 'permission-refusal'
+fixture.mkdir()
+harness = fixture / 'claude'
+harness.symlink_to(shutil.which('bash'))
+for mode in ('library', 'new-session', 'own-session'):
+    for suffix in ('', '.steal'):
+        home = fixture / (mode + suffix)
+        state = home / 'state'
+        state.mkdir(parents=True)
+        lock = state / '.lock.acquire'
+        wedged = Path(str(lock) + suffix)
+        for path in (lock, Path(str(lock) + '.steal')):
+            path.mkdir()
+            (path / 'pid').write_text(dead + '\n')
+            os.utime(path, (1, 1))
+        wedged.chmod(0o600)
+        try:
+            probe = subprocess.run(['bash', '-c', 'cd -- "$1"', '_', str(wedged)],
+                                   capture_output=True, timeout=5)
+            if probe.returncode == 0:
+                print('SKIP permission refusal: filesystem does not enforce search permissions')
+                sys.exit(0)
+            env = dict(os.environ, FM_HOME=str(home), FM_STATE_OVERRIDE=str(state))
+            for name in ('CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'):
+                env.pop(name, None)
+            if mode == 'library':
+                command = ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" --refuse-unreapable',
+                           '_', lib, str(lock)]
+            else:
+                command = [str(harness), '-c', 'if [ "$2" = own-session ]; then '
+                           'printf "%s\\n" "$$" > "$FM_HOME/state/.lock"; fi; '
+                           'bash "$1"; rc=$?; exit "$rc"', '_', script, mode]
+            result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+            assert result.returncode == 1, (mode, suffix, result)
+            assert 'cannot reclaim lock directory ' + str(wedged) in result.stderr, result.stderr
+            assert 'lock acquired:' not in result.stdout, result.stdout
+            assert wedged.is_dir() and not wedged.is_symlink()
+            assert not list(state.glob('*.owner.*')), list(state.iterdir())
+        finally:
+            wedged.chmod(0o700)
+        assert (wedged / 'pid').read_text() == dead + '\n'
+PY
+  pass "inaccessible primary and steal directories refuse by name on both session claim paths"
+}
+
+test_lock_inaccessible_directory_replacement_is_retriable() {
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "SKIP permission replacement: root bypasses directory search permissions"
+    return
+  fi
+  # Pause immediately after a real cd failure. A concurrent removal or
+  # successor publication must not be diagnosed as a stable blocked directory.
+  python3 - "$LIB" "$TMP_ROOT" <<'PY' || fail "inaccessible directory replacement safety"
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+lib, root = sys.argv[1:]
+for suffix in ('', '.steal'):
+    for replacement in ('removed', 'directory', 'symlink'):
+        state = Path(root) / ('permission-replacement-' + replacement + suffix)
+        state.mkdir()
+        lock = state / ('.lock.acquire' + suffix)
+        lock.mkdir()
+        os.utime(lock, (1, 1))
+        lock.chmod(0o600)
+        probe = subprocess.run(['bash', '-c', 'cd -- "$1"', '_', str(lock)],
+                               capture_output=True, timeout=5)
+        if probe.returncode == 0:
+            lock.chmod(0o700)
+            print('SKIP permission replacement: filesystem does not enforce search permissions')
+            sys.exit(0)
+        old = state / 'old-directory'
+        ready, resume = state / 'ready', state / 'resume'
+        child = subprocess.Popen(
+            ['bash', '-c', '''
+. "$1"
+cd() {
+  if [ "${1:-}" = -- ] && [ "${2:-}" = "$lock_path" ]; then
+    builtin cd "$@" && return 0
+    : > "$ready"
+    while [ ! -e "$resume" ]; do sleep 0.01; done
+    return 1
+  fi
+  builtin cd "$@"
+}
+if fm_lock_reap_dead_directory "$lock_path"; then exit 10; fi
+[ -z "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ] || exit 11
+''', '_', lib],
+            env=dict(os.environ, FM_STATE_OVERRIDE=str(state), lock_path=str(lock),
+                     ready=str(ready), resume=str(resume)),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready.exists(), 'real failed cd was never reached'
+            lock.rename(old)
+            if replacement != 'removed':
+                owner = state / 'successor' if replacement == 'symlink' else lock
+                owner.mkdir()
+                (owner / 'pid').write_text(str(os.getpid()) + '\n')
+                (owner / 'record').write_text('preserve successor\n')
+                if replacement == 'symlink':
+                    lock.symlink_to(owner)
+            resume.touch()
+            out, err = child.communicate(timeout=5)
+            assert child.returncode == 0, (replacement, out, err)
+            if replacement == 'removed':
+                assert not lock.exists()
+            else:
+                assert (lock / 'pid').read_text() == str(os.getpid()) + '\n'
+                assert (lock / 'record').read_text() == 'preserve successor\n'
+                assert lock.is_symlink() == (replacement == 'symlink')
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            (old if old.exists() else lock).chmod(0o700)
+PY
+  pass "failed directory entry stays retriable after concurrent removal or replacement"
+}
+
+test_lock_real_directory_default_wait() {
+  python3 - "$LIB" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "ordinary directory-lock wait"
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+lib, root, dead = sys.argv[1:]
+state = Path(root) / 'real-dir-default-wait'
+state.mkdir()
+lock = state / '.contend.lock'
+lock.mkdir()
+(lock / 'pid').write_text(dead + '\n')
+record = lock / 'unrecognized-record'
+record.write_text('preserve me\n')
+os.utime(lock, (1, 1))
+child = subprocess.Popen(
+    ['bash', '-c', '. "$1"; fm_lock_acquire_wait "$2" || exit 10; fm_lock_release "$2"',
+     '_', lib, str(lock)], env=dict(os.environ, FM_STATE_OVERRIDE=str(state)),
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+try:
+    for _ in range(100):
+        if not (lock / 'pid').exists():
+            break
+        time.sleep(0.05)
+    assert not (lock / 'pid').exists(), 'reclamation was never attempted'
+    assert child.poll() is None, 'ordinary wait returned without ownership'
+    assert record.read_text() == 'preserve me\n'
+    record.unlink()
+    os.utime(lock, (1, 1))
+    out, err = child.communicate(timeout=10)
+    assert child.returncode == 0, (out, err)
+finally:
+    if child.poll() is None:
+        child.kill()
+    child.wait()
+PY
+  pass "ordinary wait keeps waiting until directory residue can be reclaimed"
+}
+
+test_lock_failed_create_discards_owner() {
+  local dir state
+  dir=$(make_case lock-failed-create-cleanup)
+  state="$dir/state"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_owner_dir() {
+      mktemp -d "$1.owner.XXXXXX"
+      return 1
+    }
+    if fm_lock_try_create "$2"; then exit 10; fi
+    for owner in "$2.owner."*; do
+      [ ! -d "$owner" ] || exit 11
+    done
+  ' _ "$LIB" "$state/.contend.lock" || fail "failed owner publication leaked its staging directory"
+  pass "failed owner publication discards the staging directory"
+}
+
+test_session_lock_real_directory_residue() {
+  python3 - "$ROOT/bin/fm-lock.sh" "$TMP_ROOT" "$(dead_pid)" <<'PY' || fail "session-lock directory recovery/refusal"
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+script, root, dead = sys.argv[1:]
+harness = Path(root) / 'claude'
+harness.symlink_to(shutil.which('bash'))
+for mode in ('recover', 'refuse', 'own-refuse'):
+    home = Path(root) / ('session-real-dir-' + mode)
+    state = home / 'state'
+    state.mkdir(parents=True)
+    lock = state / '.lock.acquire'
+    for path in (lock, Path(str(lock) + '.steal')):
+        path.mkdir()
+        owner = path / (path.name + '.owner.fixture')
+        owner.mkdir()
+        (owner / 'pid').write_text(dead + '\n')
+        os.utime(owner, (1, 1))
+        os.utime(path, (1, 1))
+    if mode != 'recover':
+        (lock / 'unrecognized-record').write_text('preserve me\n')
+        os.utime(lock, (1, 1))
+    env = dict(os.environ, FM_HOME=str(home), FM_STATE_OVERRIDE=str(state))
+    for name in ('CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'):
+        env.pop(name, None)
+    result = subprocess.run(
+        [str(harness), '-c', 'if [ "$2" = own-refuse ]; then '
+         'printf "%s\\n" "$$" > "$FM_HOME/state/.lock"; fi; '
+         'bash "$1"; rc=$?; exit "$rc"', '_', script, mode],
+        env=env, capture_output=True, text=True, timeout=15)
+    if mode == 'recover':
+        assert result.returncode == 0, result.stderr
+        assert 'lock acquired:' in result.stdout, result.stdout
+    else:
+        assert result.returncode == 1, (mode, result)
+        assert 'cannot reclaim lock directory ' + str(lock) in result.stderr, result.stderr
+        assert 'lock acquired:' not in result.stdout, result.stdout
+    assert not list(state.glob('*.owner.*')), list(state.iterdir())
+PY
+  pass "session-lock acquisition recovers directory residue and honors named refusal on both claim paths"
 }
 
 test_lock_empty_pid_uses_minimum_grace() {
@@ -2473,6 +2827,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
 test_lock_steal_reap_cannot_remove_successor
+test_lock_directory_reap_cannot_remove_successor
 test_lock_reclaims_self_held_steal_mutex
 test_lock_resumes_own_interrupted_steal_reap
 test_lock_live_steal_mutex_is_not_reclaimed
@@ -2481,6 +2836,14 @@ test_lock_reclaims_reused_pid_lock
 test_lock_respects_live_holder_matching_its_start_time
 test_lock_reclaims_holder_whose_identity_no_longer_recomputes
 test_lock_keeps_live_daemon_holder_with_stale_identity
+test_lock_real_directory_residue
+test_lock_real_directory_live_nested_owner
+test_lock_real_directory_named_refusal
+test_lock_real_directory_permission_refusal
+test_lock_inaccessible_directory_replacement_is_retriable
+test_lock_real_directory_default_wait
+test_lock_failed_create_discards_owner
+test_session_lock_real_directory_residue
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_bounded_wait_earns_one_grace_window_for_unpublished_pid

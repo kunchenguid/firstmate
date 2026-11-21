@@ -11,7 +11,7 @@ fm_hermes_process_matches() {  # <args> [pid]
   else
     read -r -a words <<< "$args"
   fi
-  for word in "${words[@]}"; do
+  for word in ${words[@]+"${words[@]}"}; do
     if [ "$first" = 1 ]; then
       first=0
       case "${word##*/}" in
