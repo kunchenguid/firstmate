@@ -22,8 +22,11 @@
 #      wiring because no writer could ever clear it. The rex surfaces this
 #      depends on are pinned below too - the composer scope gated on the block's
 #      foreground process, the scoped delivery busy read, the submit confirmation
-#      on the idle-to-busy transition, and the prefix-by-prefix proof that
-#      refuses a headless fragment on a row narrower than the payload.
+#      on the idle-to-busy transition, and the exact read-back that refuses a
+#      fragment with no Enter and replays only a composer provably holding
+#      nothing. A payload wider than the visible composer row is only visible as
+#      its tail, so the read refuses it on both backends: a known limitation,
+#      not a covered case.
 #   5. The busy verdict is the pinned footer row alone - `Esc stop` or a
 #      spinner-plus-`working` status cell ending the pane's LAST non-empty row -
 #      so conversation output containing the word can never read busy, and an
@@ -993,53 +996,65 @@ _rex_submit_verdict() {  # <after-enter> <after-busy> <foreground>
   )
 }
 
-# The measured narrow-block geometry: an 80-column block leaves a 70-character
-# composer row, and the brief pointer is wider than that. A suffix read once at
-# the end cannot tell that whole payload from a headless fragment of the same
-# width, so the writer proves each prefix as it lands instead.
-WM_REX_LONG_PAYLOAD="Read the brief at /Users/philipp/.treehouse/firstmate-b8697d/4/firstmate/data/fm-wintermolt-rex/brief.md"
-WM_REX_NARROW_CAPACITY=70
-
-# _rex_shim_writer <mode> <payload> <chunk> <capacity>
-# <mode> faithful lands every chunk; headloss drops the head of the first burst
-# the way the real block does on a large single write.
-_rex_shim_writer() {  # <mode> <payload> <chunk> <capacity>
-  local mode=$1 payload=$2 chunk=$3 cap=$4 state
-  state=$(mktemp "${TMPDIR:-/tmp}/fm-rex-shim.XXXXXX")
+# _rex_typed_burst <mode> <payload>
+# Drives the shipped rex submit seam against a simulated wintermolt composer:
+# <mode> kept lands the whole burst, headloss keeps only the last five
+# characters of every write (the shape a head-truncated write leaves), and
+# swallow drops the first burst whole so the replay is what lands.
+_rex_typed_burst() {  # <mode> <payload>
+  local mode=$1 payload=$2 state verdict
+  state=$(mktemp -d "${TMPDIR:-/tmp}/fm-rex-burst.XXXXXX") || return 1
   (
     REX_SIM_STATE=$state
     REX_SIM_MODE=$mode
+    : >"$REX_SIM_STATE/text"
+    : >"$REX_SIM_STATE/bursts"
+    : >"$REX_SIM_STATE/enters"
     fm_backend_rex_parse_target() { return 0; }
+    fm_backend_rex_foreground_owner() { printf 'wintermolt'; }
+    fm_backend_rex_rendered_busy_state() { printf 'idle'; }
+    fm_backend_rex_busy_state() { printf 'unknown'; }
     fm_backend_rex_type_literal() {  # <target> <slice> [chunk] [interval]
       local slice=$2
-      if [ "$REX_SIM_MODE" = headloss ] && [ ! -s "$REX_SIM_STATE" ]; then
-        printf '%s' "${slice: -2}" >>"$REX_SIM_STATE"
-      else
-        printf '%s' "$slice" >>"$REX_SIM_STATE"
-      fi
+      printf 'x' >>"$REX_SIM_STATE/bursts"
+      case "$REX_SIM_MODE" in
+        headloss) printf '%s' "${slice: -5}" >>"$REX_SIM_STATE/text" ;;
+        swallow) [ "$(wc -c <"$REX_SIM_STATE/bursts")" -le 1 ] || printf '%s' "$slice" >>"$REX_SIM_STATE/text" ;;
+        *) printf '%s' "$slice" >>"$REX_SIM_STATE/text" ;;
+      esac
       return 0
     }
+    fm_backend_rex_composer_text() { cat "$REX_SIM_STATE/text" 2>/dev/null; }
     fm_backend_rex_composer_state() {
-      [ -s "$REX_SIM_STATE" ] && printf 'pending' || printf 'empty'
+      [ -s "$REX_SIM_STATE/text" ] && printf 'pending' || printf 'empty'
     }
-    fm_backend_rex_composer_text() { cat "$REX_SIM_STATE" 2>/dev/null; }
-    fm_backend_rex_type_literal_verified probe "$payload" "$chunk" 0 "$cap"
+    fm_backend_rex_send_key() {
+      printf 'x' >>"$REX_SIM_STATE/enters"
+      : >"$REX_SIM_STATE/text"
+      return 0
+    }
+    fm_backend_rex_send_text_submit probe "$payload" 1 0 0 >"$REX_SIM_STATE/verdict"
   )
-  rm -f "$state"
+  verdict=$(cat "$state/verdict" 2>/dev/null)
+  printf '%s bursts=%s enters=%s' "$verdict" \
+    "$(wc -c <"$state/bursts" | tr -d ' ')" "$(wc -c <"$state/enters" | tr -d ' ')"
+  rm -rf "$state"
 }
 
-test_wintermolt_rex_long_payload_is_proved_prefix_by_prefix() {
-  local out
-  out=$(_rex_shim_writer faithful "$WM_REX_LONG_PAYLOAD" 8 "$WM_REX_NARROW_CAPACITY")
-  [ "$out" = held ] \
-    || fail "a payload wider than the row that lands whole must prove held, got '$out'"
-  # The head of the first burst is lost, so the composer's tail fills the row but
-  # is not the payload's. A single end read would accept that suffix; the prefix
-  # proof refuses it.
-  out=$(_rex_shim_writer headloss "$WM_REX_LONG_PAYLOAD" 8 "$WM_REX_NARROW_CAPACITY")
-  [ "$out" = other ] \
-    || fail "a headless fragment must never be read as held, got '$out'"
-  pass "rex: a long payload is proved prefix by prefix and a headless fragment is refused"
+test_wintermolt_rex_submit_refuses_a_fragment_and_replays_only_nothing() {
+  local out payload='Read the brief at /srv/firstmate/data/fm-wintermolt-rex/brief.md and follow it exactly'
+  # Every write keeps only its tail, so the composer holds a suffix of the
+  # payload: the read-back compares the whole payload, so that is a fragment,
+  # and a fragment is never submitted through Enter.
+  out=$(_rex_typed_burst headloss "$payload")
+  [ "$out" = 'send-failed bursts=1 enters=0' ] \
+    || fail "a headless fragment must be refused with no Enter, got '$out'"
+  # A burst the TUI swallows whole leaves the composer provably empty, which is
+  # the only shape a replay may follow; the replay then lands and submits once.
+  out=$(_rex_typed_burst swallow "$payload")
+  [ "$out" = 'empty bursts=2 enters=1' ] \
+    || fail "a burst that provably landed nothing must be replayed and submitted once, got '$out'"
+  pass "rex: a wintermolt submit refuses a fragment and replays only a composer that provably holds nothing"
 }
 
 test_wintermolt_rex_submit_confirms_through_the_turn_started_transition() {
@@ -1419,7 +1434,7 @@ test_wintermolt_idle_placeholder_is_fleet_wide
 test_wintermolt_rex_idle_placeholder_reads_empty_and_draft_stays_pending
 test_wintermolt_rex_scope_is_gated_on_its_own_foreground_process
 test_wintermolt_rex_delivery_busy_is_scoped_to_its_own_footer
-test_wintermolt_rex_long_payload_is_proved_prefix_by_prefix
+test_wintermolt_rex_submit_refuses_a_fragment_and_replays_only_nothing
 test_wintermolt_rex_submit_confirms_through_the_turn_started_transition
 test_wintermolt_launch_pins_the_env_contract_and_delivers_the_pointer
 test_wintermolt_accepts_a_slash_namespaced_model_id

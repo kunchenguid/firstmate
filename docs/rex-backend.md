@@ -74,10 +74,12 @@ Literal input is written in chunks, because one large `send` loses the head of i
 The defaults are tmux's measured ones, 8 characters per write with a 50 ms gap; `FM_BACKEND_REX_TYPE_CHUNK` and `FM_BACKEND_REX_TYPE_INTERVAL` override them, and a chunk of `0` restores one write per burst.
 That covers every literal write, including the pane launch line spawn types.
 
-Verified submit then reads the composer back before pressing Enter, and treats only content that still holds the whole payload as delivered.
-A truncated write lands as a suffix of the payload, so a bare suffix is never read as a wrapped tail: it is reported `send-failed` with no Enter sent, leaving the fragment visible instead of submitting it.
-The one suffix that does prove delivery is the scrolling-composer tail, and only under both conditions that make it unambiguous: the payload is wider than the block's composer row (`size.columns` less the row's chrome and a conservative margin) and the visible text fills that row and ends the payload.
+Verified submit then reads the composer back before pressing Enter, and treats only content equal to the whole payload as delivered, compared against an empty baseline: a rex submit is only ever made into a composer that holds nothing, so a row that carried a draft or a working line before the write is never taken as the baseline and its content reads as foreign.
+A truncated write lands as a suffix of the payload, so a suffix is never read as a wrapped or scrolled tail: it is reported `send-failed` with no Enter sent, leaving the fragment visible instead of submitting it.
 That fragment is deliberately not typed over, because clearing a composer means guessing a harness's own key semantics: inspect the pane with `bin/fm-peek.sh` and clear it before re-sending.
+The read has one known limitation, on this backend and on tmux: a payload wider than the visible composer row scrolls, so the visible row holds only its tail and no read can tell that from a head-truncated write.
+This backend refuses it rather than confirm it; the tmux read accepts a tail that fills the row as proof, which is a known gap there rather than a covered case.
+A composer the classifier calls a draft whose extractor read is empty is `unknown`, never proof that nothing landed, so that shape is never replayed.
 A burst is replayed only when the composer provably holds nothing of it, up to `FM_BACKEND_REX_TYPE_ATTEMPTS` bursts (default 3), so a replay can never duplicate text.
 A composer that cannot be read back at all keeps the chunked write as its only protection rather than guessing a failure.
 The submit then retries only Enter through the shared composer classifier, and converts still-pending text to success only when the shared queued-Enter policy accepts the trusted native busy state or rendered busy footer.

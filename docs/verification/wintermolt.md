@@ -59,12 +59,16 @@ provider), driving the shipped `fm_backend_send_text_submit` - the exact call
   wider than the row shows only its tail. Measured on 0.7.0, 80 columns showed
   73 characters, 60 columns showed 53, and the box chrome is 7 columns, so a
   full row is `pane_width - 7` characters.
-- A head-truncated write renders the same tail as a scrolled full draft, so a
-  suffix is only accepted as proof when the burst was written in the
-  TUI-safe chunks above and the visible run fills the row (the shipped read
-  allows `pane_width - 10`, three columns of slack over the measured chrome).
-  A shorter run is still refused, so a truncated short message is never read
-  as the tail of a long one.
+- A head-truncated write renders the same tail as a scrolled full draft, and
+  no single read can tell them apart. The tmux read compares the whole payload
+  and additionally accepts a visible run as the whole draft when the burst was
+  written in the TUI-safe chunks above, the payload is wider than the composer
+  row, and that run fills the row (the shipped allowance is `pane_width - 10`,
+  three columns of slack over the measured chrome). That last acceptance is a
+  known limitation rather than a covered case: a truncated write whose
+  surviving fragment happens to fill the row would be read as delivered. The
+  rex read accepts no suffix at all and reports such a payload `send-failed`
+  without pressing Enter.
 - With that, a 132-character brief pointer submitted at the first ready frame,
   and a 113-character steer and a 51-character steer submitted on a settled
   TUI, all returned `empty` at 80 columns. The stub received the whole message
@@ -150,7 +154,8 @@ Every read and write below went through the shipped functions (`fm_backend_rex_c
   Reading the viewport cursorlessly under the wintermolt composer scope, gated on the block's foreground process being wintermolt, makes the identical shared classifier answer `empty`; every other foreground process keeps its previous verdict.
 - A 104-character brief pointer written once loses its head on this backend, which is why literal input is chunked (8 characters, 50 ms) and the composer is read back before Enter.
   Driving that submit against the idle pane returned `empty`, and the endpoint received the pointer exactly once in a 6179-byte request body.
-- The same payload through an 80-column block (scroll capacity 70) also returned `empty` and arrived once, because a wholly landed payload wider than the composer row is judged by the row-filling tail it leaves behind.
+- The same payload through an 80-column block also returned `empty` and arrived once under that run's revision, which judged a payload wider than the composer row by the row-filling tail it left behind.
+  The shipped rex read compares the whole payload and accepts no suffix, so a payload wider than the visible composer row is refused there: that row-width case is a known limitation covered by `tests/fm-backend-rex.test.sh`, not by a live run.
 - A first attempt at that narrow block delivered the pointer twice (6312-byte body, the text twice in one message): a composer the classifier called a draft but the extractor read as empty was taken as proof that nothing had landed, so the burst was replayed.
   That read now returns `unknown` instead, which never replays, and the rerun above is the evidence for the corrected behaviour.
 - One Escape on a proven-busy turn stopped it: the footer returned to `Esc quit`, the composer read `empty`, and the agent stayed `alive`.
