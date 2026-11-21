@@ -65,8 +65,13 @@
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
 # outages for the same URLs. Forge reads stop FM_CHECK_TIMEOUT (default 30)
 # minus 5 seconds after the pass starts, and each read is capped at 5 seconds.
-# Branch discovery and owned-PR reads each fan out in one concurrent wave;
-# there is no rotating PR backlog or serial network wait per PR.
+# Branch discovery fans out in one concurrent wave. Owned-PR reads run at most
+# READ_CONCURRENCY PRs at a time, so a loaded machine finishes each read inside
+# its cap; a PR not reached before the pass deadline stays pending for the next
+# pass. A PR whose read hit the 5 second cap is skipped for BACKOFF_PASSES
+# passes (kept pending, counted down in the .backoff map of the fingerprint
+# file) and a settled read clears it. There is no rotating PR backlog or serial
+# network wait per PR.
 # Fingerprints and the notifications cursor (Last-Modified, newest seen
 # updated_at, unsettled PRs, last full sweep) are fm-pr-health.v1 in
 # state/pr-health.json, written by rename
@@ -158,6 +163,8 @@ statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endC
 SUITE_QUERY='query($owner:String!,$repo:String!,$number:Int!,$suiteCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 commits(last:1){nodes{commit{oid checkSuites(first:100,after:$suiteCursor){pageInfo{hasNextPage endCursor} nodes{conclusion app{slug} workflowRun{workflow{name}}}}}}}}}}'
+READ_CONCURRENCY=4
+BACKOFF_PASSES=3
 SUITE_PAGES=10 # ponytail: 1000 suites per head; a longer list leaves the read unsettled, raise the bound if one appears
 
 # The fingerprint step: previous fingerprint plus one REST and one GraphQL
@@ -211,6 +218,13 @@ STEP='
             | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
     end'
 
+note_timeout() { # deadline output-directory rc... : mark a read cut off by its own cap, not by the pass deadline
+  local deadline=$1 out=$2 rc
+  shift 2
+  [ "$(date +%s)" -lt "$deadline" ] || return 0
+  for rc in "$@"; do [ "$rc" -ne 124 ] || { : > "$out/timeout"; return 0; }; done
+}
+
 read_pr() { # url deadline output-directory -> rest.json gql.json
   local url=$1 deadline=$2 out=$3 number owner repo rest_rc=0 gql_rc=0 suite_rc=0 cursor="" page
   fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = github ] || return 1
@@ -227,6 +241,7 @@ read_pr() { # url deadline output-directory -> rest.json gql.json
   wait "$rest_pid" || rest_rc=$?
   wait "$gql_pid" || gql_rc=$?
   wait "$suite_pid" || suite_rc=$?
+  note_timeout "$deadline" "$out" "$rest_rc" "$gql_rc" "$suite_rc"
   [ "$rest_rc" -eq 0 ] && [ "$gql_rc" -eq 0 ] && [ "$suite_rc" -eq 0 ] || return 1
   jq -e '
     select(type == "array" and length > 0)
@@ -245,7 +260,7 @@ read_pr() { # url deadline output-directory -> rest.json gql.json
       [ -n "$cursor" ] || return 0
       [ "$page" != last ] || return 1
       gh_read "$deadline" api graphql -F "owner=$owner" -F "repo=$repo" -F "number=$number" -f "suiteCursor=$cursor" \
-        -f "query=$SUITE_QUERY" > "$out/suites.json" 2>/dev/null || return 1
+        -f "query=$SUITE_QUERY" > "$out/suites.json" 2>/dev/null || { note_timeout "$deadline" "$out" "$?"; return 1; }
     fi
     jq -e --slurpfile more "$out/suites.json" '
       ($more[0].data.repository.pullRequest // null) as $m
@@ -412,6 +427,7 @@ poll() {
     ($owned[0] | map(.url)) as $urls | ($live | split(" ")) as $ids
     | .ownership_error = false
     | .prs |= with_entries(select(.key | IN($urls[])))
+    | .backoff = ((.backoff // {}) | with_entries(select(.key | IN($urls[]))))
     | .branches |= with_entries(select(.key | IN($ids[])))' "$TMP/health.json" > "$TMP/next.json"
   save_health "$TMP/next.json"
   cp "$TMP/next.json" "$TMP/health.json"
@@ -434,10 +450,15 @@ poll() {
   # interruption leaves every unprocessed event eligible for retry.
   jq --rawfile urls "$TMP/urls" '.notifications.pending = ($urls | split("\n") | map(select(length > 0)))' \
     "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
+  jq -r '(.backoff // {}) | to_entries[] | select(.value > 0) | .key' "$TMP/health.json" > "$TMP/backed-off"
+  : > "$TMP/skipped"; : > "$TMP/timedout"; : > "$TMP/cleared"
   while IFS= read -r url; do
     index=$((index + 1))
     read_dir="$TMP/read-$index"
     mkdir "$read_dir"
+    if grep -Fxq -- "$url" "$TMP/backed-off"; then printf '%s\n' "$url" >> "$TMP/skipped"; continue; fi
+    [ "$(date +%s)" -lt "$deadline" ] || continue
+    [ "${#pids[@]}" -lt "$READ_CONCURRENCY" ] || { wait "${pids[$((${#pids[@]} - READ_CONCURRENCY))]}" || true; }
     (
       read_pr "$url" "$deadline" "$read_dir" && : > "$read_dir/ok"
     ) &
@@ -448,7 +469,12 @@ poll() {
   while IFS= read -r url; do
     index=$((index + 1))
     read_dir="$TMP/read-$index"
-    [ -f "$read_dir/ok" ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
+    if [ ! -f "$read_dir/ok" ]; then
+      [ ! -f "$read_dir/timeout" ] || printf '%s\n' "$url" >> "$TMP/timedout"
+      printf '%s\n' "$url" >> "$TMP/unsettled"
+      continue
+    fi
+    printf '%s\n' "$url" >> "$TMP/cleared"
     jq -L "$SCRIPT_DIR" -n --arg url "$url" --slurpfile rest "$read_dir/rest.json" --slurpfile gql "$read_dir/gql.json" \
       --slurpfile prev <(jq --arg url "$url" '.prs[$url] // {}' "$TMP/health.json") \
       --argjson tasks "$(jq -c --arg url "$url" '[.[] | select(.url == $url) | .tasks[]] | unique' "$TMP/owned.json")" \
@@ -464,8 +490,14 @@ poll() {
       cp "$TMP/next.json" "$TMP/health.json"
     fi
   done < "$TMP/urls"
-  jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/unsettled" '
-    if has("notifications") then
+  jq --argjson full "$full" --argjson now "$now" --argjson passes "$BACKOFF_PASSES" --rawfile unsettled "$TMP/unsettled" \
+    --rawfile skipped "$TMP/skipped" --rawfile timedout "$TMP/timedout" --rawfile cleared "$TMP/cleared" '
+    def lines: split("\n") | map(select(length > 0));
+    .backoff = (((.backoff // {})
+        | with_entries(if (.key | IN(($skipped | lines)[])) then .value -= 1 else . end)
+        | with_entries(select(.value > 0 and (.key | IN(($cleared | lines)[]) | not))))
+      + (($timedout | lines) | map({key: ., value: $passes}) | from_entries))
+    | if has("notifications") then
       .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
       | if $full then .notifications.swept_at = $now else . end
     else . end' "$TMP/health.json" > "$TMP/next.json"

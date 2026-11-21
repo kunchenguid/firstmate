@@ -3,7 +3,7 @@
 #
 # Cases drive the registered check against a fake forge, with ownership from
 # real task records, task copies and durable contributions.
-# A barrier at the forge boundary proves reads fan out across owned PRs.
+# A barrier at the forge boundary proves owned-PR reads run together, up to a bound.
 set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -29,6 +29,16 @@ new_home() { # name -> home with the monitor flag on
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$FORGE/calls.log"
+if [ -f "$FORGE/track-concurrency" ]; then
+  : > "$FORGE/inflight-$$"
+  find "$FORGE" -name 'inflight-*' | wc -l >> "$FORGE/inflight.log"
+  trap 'rm -f "$FORGE/inflight-$$"' EXIT
+  sleep 0.2
+fi
+for hang in "$FORGE"/hang-*; do
+  [ -e "$hang" ] || continue
+  case "$*" in *"pulls/${hang##*/hang-}") sleep 30 ;; esac
+done
 model() {
   local n=$1 attempt
   if [ -f "$FORGE/barrier-count" ]; then
@@ -642,7 +652,7 @@ test_checks_on_later_pages() {
   pass 'all check pages contribute to required-check classification'
 }
 
-test_all_owned_pr_reads_start_in_one_wave() {
+test_all_owned_pr_reads_start_in_bounded_waves() {
   local home n out
   home=$(new_home concurrent)
   for n in $(seq 1 8); do
@@ -657,12 +667,54 @@ test_all_owned_pr_reads_start_in_one_wave() {
     pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
   done
   printf '4\n' > "$home/forge/branch-barrier-count"
-  printf '8\n' > "$home/forge/barrier-count"
+  printf '4\n' > "$home/forge/barrier-count"
   arm "$home"
   out=$(pass_once "$home")
   [ "$(printf '%s\n' "$out" | grep -c 'conflicts with its base')" = 8 ] \
-    || fail "every owned PR must start before a slow read completes: $out"
-  pass 'all owned PR reads start in one wave without rotating a backlog'
+    || fail "four owned PRs must read together and the rest follow: $out"
+  pass 'owned PR reads run four at a time without rotating a backlog'
+}
+
+test_owned_pr_reads_stay_within_the_concurrency_bound() {
+  local home n out peak
+  home=$(new_home bounded)
+  for n in $(seq 1 12); do
+    task "$home" "ship$n" "pr=https://github.com/o/r/pull/$n"
+    pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
+  done
+  : > "$home/forge/track-concurrency"
+  arm "$home"
+  out=$(pass_once "$home")
+  [ "$(printf '%s\n' "$out" | grep -c 'conflicts with its base')" = 12 ] || fail "every PR must still be read: $out"
+  peak=$(sort -n "$home/forge/inflight.log" | tail -n 1)
+  [ "$peak" -le 12 ] || fail "at most 4 PRs of 3 reads each may be in flight, saw $peak"
+  [ "$peak" -ge 9 ] || fail "the bound must not serialize reads, saw only $peak in flight"
+  pass 'at most 4 PR reads (12 gh calls) are in flight at once'
+}
+
+test_timed_out_pr_is_skipped_for_three_passes_then_read_again() {
+  local home out
+  home=$(new_home backoff)
+  task "$home" ship1 pr=https://github.com/o/r/pull/1
+  task "$home" ship2 pr=https://github.com/o/r/pull/2
+  pr "$home" 1 "$HEAD_A" "$BASE_1" false false
+  pr "$home" 2 "$HEAD_A" "$BASE_1" false false
+  : > "$home/forge/hang-1"
+  arm "$home"
+  out=$(pass_once "$home")
+  [ "$(reads "$home" 1)" = 1 ] || fail "the first pass must try the hanging PR once"
+  printf '%s\n' "$out" | grep -q 'pull/2 conflicts' || fail "the healthy PR must settle: $out"
+  rm -f "$home/forge/hang-1"
+  for _ in 1 2 3; do
+    pass_once "$home" >/dev/null
+    [ "$(reads "$home" 1)" = 1 ] || fail 'a timed-out PR must be skipped on each of the next three passes'
+  done
+  out=$(pass_once "$home")
+  [ "$(reads "$home" 1)" = 2 ] || fail 'the PR must be read again after the backoff'
+  printf '%s\n' "$out" | grep -q 'pull/1 conflicts' || fail "the recovered PR must report: $out"
+  jq -e '(.backoff // {}) | has("https://github.com/o/r/pull/1") | not' "$home/state/pr-health.json" >/dev/null \
+    || fail 'a settled read must clear the backoff'
+  pass 'a timed-out PR is skipped for three passes, then read and cleared'
 }
 
 feed() { # home : serve an empty notifications feed
@@ -976,7 +1028,7 @@ for test_name in test_maintainer_author_and_approval_states_are_distinct \
   test_unreadable_contribution_record_pauses_the_monitor_once \
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
-  test_all_owned_pr_reads_start_in_one_wave test_checks_on_later_pages \
+  test_all_owned_pr_reads_start_in_bounded_waves test_owned_pr_reads_stay_within_the_concurrency_bound test_timed_out_pr_is_skipped_for_three_passes_then_read_again test_checks_on_later_pages \
   test_unsupported_provider_has_no_github_reads test_final_contributions_are_not_enrolled_again \
   test_many_recorded_contributions_do_not_starve_a_new_branch_pr; do
   ( "$test_name" ) || failures=$((failures + 1))
