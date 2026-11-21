@@ -825,10 +825,9 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
-Either flag also lets `bin/fm-teardown.sh` read GitLab merge requests.
-It accepts a merged one, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work.
-It refuses to clean up a ship lane while its recorded merge request is still open or unreadable.
-With neither flag, teardown does not read GitLab merge requests.
+Either flag also makes `bin/fm-teardown.sh` refuse to clean up a ship lane while its recorded GitHub, Forgejo, or GitLab PR is open or unreadable.
+Either flag also lets teardown accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when its head contains the lane's work.
+With neither flag, teardown skips the open-PR check and keeps its existing landed-work checks, without reading GitLab merge requests.
 Both flags are home-local and not inherited by secondmate homes.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
 
