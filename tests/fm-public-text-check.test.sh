@@ -21,6 +21,15 @@ unsafe=(
   'Reproduced from "C:\Users\alice".'
   'Evidence at /private/var/folders/example/report.md'
   'Evidence: /private/tmp/claude-12345/proof.md'
+  'Evidence: /tmp/claude-501/proof.md'
+  'Working directory: /private/tmp/claude-501'
+  'Working directory: /tmp/claude-501'
+  'Working directory: `/private/tmp/claude-501`'
+  'Working directory: `/tmp/claude-501`'
+  'Working directory: (/private/tmp/claude-501).'
+  'Working directory: "/tmp/claude-501".'
+  'Working directory: /private/tmp/claude-501, then retry.'
+  'Working directory: /tmp/claude-501 is private.'
   'Evidence: /var/folders/example/session/proof.md'
   'Evidence: /workspace/firstmate/data/task/report.md'
   'Evidence: file:///Users/example/proof.md'
@@ -34,6 +43,20 @@ unsafe=(
   'Evidence: http://localhost#report'
   'Evidence: http://localhost'
   'Evidence: (http://localhost).'
+  'Evidence: **http://192.168.1.20**'
+  'Evidence: *http://localhost*'
+  'Evidence: __http://localhost__'
+  'Evidence: _http://localhost_'
+  'Evidence: ~~http://localhost~~'
+  '[http://localhost](https://example.org)'
+  '[http://192.168.1.20](https://example.org)'
+  '[http://proof.local](https://example.org)'
+  'Evidence: **http://[::1]**'
+  '[http://[fd12::1]](https://example.org)'
+  'Evidence: **http://reader:secret@[::ffff:c0a8:114]:8080**'
+  '[https://example.org]/Users/alice/report'
+  '**https://example.org**/home/alice/report'
+  '[https://example.org][http://localhost]'
   'Evidence: http://localhost./proof'
   'Evidence: http://reader:secret@localhost?report=1'
   'Evidence: http://169.254.1.20/report'
@@ -91,6 +114,10 @@ Public mapped hosts: http://[::ffff:808:808]/report, http://[::ffff:8.8.8.8]/rep
 Public mapped range boundaries: http://[::ffff:ac0f:ffff]/report, http://[::ffff:ac20:1]/report.
 Public table: |https://example.org/home/alice|https://example.net/Users/alice|
 Public link: [https://example.org/results](https://example.net/home/alice)
+Public Markdown: **https://example.org/home/alice**, _https://example.org/report_, ~~https://example.org/report~~.
+Public IPv6 Markdown: [https://[2606:4700:4700::1111]/home/alice](https://example.org/report).
+Public IPv6 credentials: https://reader:password@[2606:4700:4700::1111]/Users/alice
+Public URL underscores: https://example.org/some_report/home/alice
 Public authorities: https://localhost.example.org?report=1, https://proof.local.example.org/report.
 Public URL components: https://example.org?next=http-localhost, https://example.org/#localhost.
 Public URL credentials: https://localhost@example.org/report
@@ -100,6 +127,7 @@ Generic maintainer examples: ~/.factory/settings.json, ~/.factory/..., ~/.config
 Other generic examples: /usr/local, /etc, /tmp/example.txt, ~/.config/app/settings.json.
 Generic placeholders: /Users/<user>/project/notes.txt, /home/<name>/notes.txt, C:\Users\<name>\notes.txt, /private/tmp/claude-<uid>/notes.txt.
 Terminal placeholders: /Users/<user>, /home/<name>, C:\Users\<name>.
+Terminal session placeholders: /tmp/claude-<uid>, `/private/tmp/claude-<session>`.
 EOF
 "$CHECK" "$TMP_ROOT/public" || fail 'valid public explanation rejected'
 "$CHECK" - < "$TMP_ROOT/public" || fail 'stdin public explanation rejected'

@@ -41,13 +41,13 @@ awk '
   text = tolower($0)
   # URL paths are not filesystem paths. Reject explicitly local URL hosts first.
   unsafe = 0
-  while (match(text, /https?:\/\/[^[:space:]<>"`|()\047]+/)) {
+  while (match(text, /https?:\/\/([^][[:space:]<>"`|()*\047]+@)?(\[[^][:space:]<>"`|()*\047]+\]|[^][[:space:]<>"`|()*\047]+)[^][[:space:]<>"`|()*\047]*/)) {
     url = substr(text, RSTART, RLENGTH)
     text = substr(text, 1, RSTART - 1) substr(text, RSTART + RLENGTH)
     sub(/^https?:\/\//, "", url)
     sub(/[\/?#].*$/, "", url)
     sub(/^.*@/, "", url)
-    sub(/[,;!.]+$/, "", url)
+    sub(/[,;!.*_~]+$/, "", url)
     if (url ~ /^\[/) {
       sub(/\].*$/, "]", url)
       host = url
@@ -64,7 +64,7 @@ awk '
       text ~ /(^|[^[:alnum:]_.-])\/(users|home)\/[^\/[:space:]<>$]+([[:space:][:punct:]]|$)/ ||
       text ~ /(^|[^[:alnum:]_.-])\/root\// ||
       text ~ /(^|[^[:alnum:]_.-])\/(private\/)?var\/folders\// ||
-      text ~ /(^|[^[:alnum:]_.-])\/(private\/)?tmp\/claude-[[:alnum:]_-]+\// ||
+      text ~ /(^|[^[:alnum:]_.-])\/(private\/)?tmp\/claude-[[:alnum:]_-]+([[:space:][:punct:]]|$)/ ||
       text ~ /(^|[^[:alnum:]_.-])\/[^[:space:]<>]*firstmate\/(data|state|config|projects)\// ||
       text ~ /(^|[^[:alnum:]_.-])[a-z]:[\\\/]users[\\\/][^\\\/[:space:]<>$]+([[:space:][:punct:]]|$)/ ||
       text ~ /\\\\[[:alnum:]_.-]+\\/ ||
