@@ -109,10 +109,13 @@ Established in that run:
 - The interrupt verb refuses on an idle pane ("requires a proven running turn") and leaves the worker running, because the same key quits an idle wintermolt outright, draft included.
 - The exit verb types `/quit` into a proven-empty composer and reports `stopped`.
 
-Only a readable idle footer settles that cancellation claim: a pane that stays
-busy reports `pane-still-working` and one whose capture fails reports
-`pane-unreadable`, both unconfirmed. The lane exercised the cleared-footer case
-only; `tests/fm-control.test.sh` covers the other two.
+Any readable capture that no longer shows the working footer settles that
+cancellation claim, a readable capture with no footer row at all included: a
+pane that stays busy reports `pane-still-working` and one whose capture fails
+reports `pane-unreadable`, both unconfirmed, and the footerless confirmation is
+a known limitation of the read rather than proof that the turn ended. The lane
+exercised the cleared-footer case only; `tests/fm-control.test.sh` covers the
+other two.
 
 ## Spawn lane re-run (2026-11-21, wintermolt 0.7.0, tmux 3.8)
 

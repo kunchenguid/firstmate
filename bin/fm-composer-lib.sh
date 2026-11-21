@@ -667,9 +667,11 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # screen with a raised one. Wintermolt's full-screen TUI renders the anchored
 # `Type a message, or /help` inside its rounded bordered composer when idle,
 # and `working… (Esc stops, Ctrl+C quits)` in the same box while a turn runs
-# (verified live, wintermolt 0.7.0); the busy row carries real text, so it
-# reads pending and the doorbell defers on busy rather than empty. kiro's bare
-# `›` composer needs no entry here: see
+# (verified live, wintermolt 0.7.0); the busy row carries real text, so it never
+# reads empty - it reads `pending-unproven`, and bin/fm-task-inbox-lib.sh defers
+# a doorbell ring only on an exact `pending` verdict, so a wintermolt busy row
+# does not defer one: a ring into a working turn is attempted rather than
+# skipped. kiro's bare `›` composer needs no entry here: see
 # FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$|^Type a message, or /help$'

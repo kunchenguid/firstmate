@@ -639,9 +639,13 @@ deliver_interrupt() {
     # which made an immediately following exit read a busy composer and
     # refuse; with it, interrupt's own postcondition says the turn ended.
     if [ "$HARNESS" = wintermolt ]; then
-      # Only the readable idle footer settles the claim: an unreadable pane
-      # (a failed or missing capture) proves nothing about the turn, and a
-      # footer still showing busy means it has not ended.
+      # Every readable capture that no longer shows the working footer settles
+      # the claim, a capture with no footer row at all included (a half-painted
+      # stop redraw, or the shell after the TUI exits): only a failed or missing
+      # capture reports pane-unreadable, and a footer still showing busy means
+      # the turn has not ended. That footerless confirmation is a known
+      # limitation of this read, caught downstream by verify_interrupt_running
+      # rather than here.
       local elapsed=0 settled='' verdict
       while :; do
         verdict=$(fm_busy_classify "$BACKEND" "$T" wintermolt "$ID" "$STATE")
