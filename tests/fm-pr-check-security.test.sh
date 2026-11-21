@@ -2273,12 +2273,14 @@ arm_green_case() {  # <name> [<meta line>...]
 }
 
 # One watcher check sweep that must stay silent: it ends at the bound once the
-# sweep has run.
+# sweep has run. The long check interval keeps that the only sweep: a second
+# back-to-back sweep could read the poll while the detached merge attempt is
+# re-recording it and report a spurious rejected check.
 green_sweep_silent() {  # <dir> <label>
   local dir=$1 label=$2 rc=0
   rm -f "$dir/home/state/.last-check"
   set +e
-  FM_TEST_WATCH_STOP_WHEN="$dir/home/state/.last-check" \
+  FM_TEST_CHECK_INTERVAL=3600 FM_TEST_WATCH_STOP_WHEN="$dir/home/state/.last-check" \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err" || rc=$?
   set -e
   [ "$rc" -eq 124 ] || fail "$label: watcher ended before its bound on a sweep meant to stay silent: rc=$rc $(cat "$dir/$label.out")"
