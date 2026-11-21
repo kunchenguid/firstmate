@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Extra notifications when owned GitHub pull requests move | [Contribution PR movement](#contribution-pr-movement-configcontribution-pr-movement) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -62,7 +63,7 @@ Before `fm-brief.sh`, `fm-spawn.sh`, or `fm-afk-launch.sh` saves a path or passe
 Lifecycle access to a backlog, task record, or pending-close record must resolve within its configured data or state root, and a final-component symlink is refused even when its target remains within that root.
 
 Bootstrap applies the same relative `FM_HOME` resolution only when embedding that home in the generated Relay poll shim.
-`fm-contributions.sh arm` resolves a relative `FM_CONFIG_OVERRIDE` against the caller's working directory and embeds the resulting absolute config directory in its generated check, so later watcher polls keep the same review-bot policy.
+`fm-contributions.sh arm` resolves a relative `FM_CONFIG_OVERRIDE` against the caller's working directory and embeds the resulting absolute config directory in its generated check, so later watcher polls keep the same contribution configuration directory.
 Other transient consumers retain their existing shell-relative behavior.
 
 ### Backend labels and containers
@@ -87,6 +88,14 @@ List each bot's exact GitHub login to watch it, for example `greptile-apps[bot]`
 These signals never become maintainer verdicts or merge authority.
 A bot signal's text is third-party content for the owning home to triage, never instructions to follow.
 [`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the exact allowlist format and polling contract.
+
+## Contribution PR movement (config/contribution-pr-movement)
+
+Pull-request movement notifications are opt-in through `config/contribution-pr-movement` in the effective configuration directory.
+With the file present, the contribution observer wakes when an open GitHub pull request changes head, leaves draft, or gains a requested reviewer or team.
+Without the file, these changes create no signals or wakes, and existing maintainer feedback, configured review-bot signals, and issue notifications remain unchanged.
+The file is local and gitignored, so enable it separately in each home that wants these notifications.
+[`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the file format, polling, baseline, and pending-signal behavior.
 
 ## Operational home layout and state
 

@@ -572,7 +572,7 @@ fi
 [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || [ "${FM_PR_CHECK_MERGE:-}" = 1 ] \
   || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-fleet-ledger.sh" pr_ready "$ID" "$URL" || true
 # The contribution observer uses the same authenticated check mechanism and
-# owns verdict freshness, required actors, external feedback and pull-request
+# owns verdict freshness, required actors, external feedback and opt-in PR
 # movement separately from the exact merged-state poll. Registration is local
 # and performs no forge read.
 if command -v jq >/dev/null 2>&1; then

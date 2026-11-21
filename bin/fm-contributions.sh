@@ -115,12 +115,15 @@
 # ready-for-pr. Labels are matched case-insensitively and exactly.
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
-# contribution author), issue transitions to ready-for-pr, and open
-# pull-request movement since the previous observation - a replaced head,
-# leaving draft, or a newly requested reviewer or team - persist as pending
-# before any wake. A first observation is the movement baseline, never movement
-# itself, and a merged or closed observation reports no movement. On a PR,
-# comments, reviews and inline review comments whose
+# contribution author) and issue transitions to ready-for-pr persist as pending
+# before any wake. Open pull-request movement - a replaced head, leaving draft,
+# or a newly requested reviewer or team - is opt-in: only a regular file at
+# $CONFIG/contribution-pr-movement enables these signals (contents ignored).
+# Each poll reads the setting; removing the file stops new movement signals,
+# without deleting pending signals. Observations still refresh while disabled,
+# so enabling it does not replay already observed changes. A first observation
+# is the movement baseline, and merged or closed observations report no movement.
+# On a PR, comments, reviews and inline review comments whose
 # author login is listed in the effective config/contribution-review-bots (one
 # exact login per line; blank and # lines ignored) are admitted too, marked
 # review_bot:true. Review-bot watching is opt-in: an absent or empty file admits
@@ -644,9 +647,10 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why unreported=$'\n'
+  local task url old kind error observed why unreported=$'\n' pr_movement=false
   local -a row
   acquire
+  [ ! -f "$CONFIG/contribution-pr-movement" ] || pr_movement=true
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
@@ -719,11 +723,11 @@ poll() {
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$observed" -eq 0 ]; then
         jq_lib -n --arg now "$NOW" --argjson epoch "$EPOCH" --argjson reply_age "$REPLY_AGE" --argjson track "$TRACK_THREADS" \
-          --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
+          --argjson pr_movement "$pr_movement" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
-              else [] end) + movement($old.observation; $o; $old.url; $now)) as $events
+              else [] end) + (if $pr_movement then movement($old.observation; $o; $old.url; $now) else [] end)) as $events
           | [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] as $arrived
           # An acknowledgement removes the signal, not the thread: a thread
           # with no author reply or resolution is raised again after reply_age.
