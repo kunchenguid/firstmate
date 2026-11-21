@@ -52,9 +52,13 @@ provider), driving the shipped `fm_backend_send_text_submit` - the exact call
   typed state `held`) and the identical single write into a pane running `cat`
   arrived intact - so the loss is the TUI's input handling, not tmux. A
   wintermolt burst is therefore written in chunks (`FM_WINTERMOLT_TYPE_CHUNK`,
-  8 characters by default, spaced `FM_WINTERMOLT_TYPE_INTERVAL`) behind tmux's
-  own `--` end-of-flags marker, because a chunk can begin with `-` wherever the
-  text happens to break; every other pane keeps the one-shot write.
+  8 characters by default, spaced `FM_WINTERMOLT_TYPE_INTERVAL`), and a chunk
+  that begins with `-` is written behind tmux's own `--` end-of-flags marker,
+  because a chunk boundary can fall just before one wherever the text happens
+  to break; every other pane keeps the one-shot write. The marker is passed
+  only for those option-shaped writes: an ordinary payload is a positional
+  argument to `send-keys` however many dashes it carries later on, and `-x y`
+  without the marker is refused by tmux itself (`unknown flag -x`).
 - The composer is one row that scrolls horizontally: a wholly landed draft
   wider than the row shows only its tail. Measured on 0.7.0, 80 columns showed
   73 characters, 60 columns showed 53, and the box chrome is 7 columns, so a
