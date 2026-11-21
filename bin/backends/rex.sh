@@ -570,10 +570,14 @@ fm_backend_rex_current_path() {  # <target> [expected-label]
 # still holds the whole payload as proof of delivery. A truncated write lands as
 # a SUFFIX of the payload (`ef.md` for the 86-character path), so a mere suffix
 # is never accepted as a scrolled or wrapped tail: that shape is reported as a
-# fragment and no Enter is pressed, exactly as the tmux path refuses it.
+# fragment and no Enter is pressed.
 #
 # This is tmux's shape (bin/fm-tmux-lib.sh fm_tmux_type_literal and its submit
-# read-back) at the two rex seams that carry literal input:
+# read-back) at the two rex seams that carry literal input, with one documented
+# difference: tmux accepts a row-filling suffix as proof that a payload wider
+# than the composer row landed, while this read accepts no suffix at all and
+# reports such a payload send-failed. A payload wider than the visible row is a
+# known gap on both backends rather than a covered case.
 # fm_backend_rex_type_literal is the chunked writer behind
 # fm_backend_rex_send_literal, and fm_backend_rex_send_text_submit is the
 # verified submit. The pane launch line goes through send_literal too
@@ -1220,7 +1224,7 @@ fm_backend_rex_submit_busy_confirm() {  # <target> <retries> <enter-sleep> [foot
 # failure from an unreadable pane would refuse deliveries that did land.
 fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} verdict
-  local chunk interval max_attempts attempts=0 typed
+  local chunk interval max_attempts attempts=0 typed before=''
   local owner='' baseline_idle=''
   fm_backend_rex_parse_target "$target" || { printf 'unknown'; return 0; }
   owner=$(fm_backend_rex_foreground_owner "$target" 2>/dev/null || true)
@@ -1236,26 +1240,33 @@ fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   interval=$(fm_backend_rex_type_interval)
   max_attempts=${FM_BACKEND_REX_TYPE_ATTEMPTS:-3}
   case "$max_attempts" in '' | *[!0-9]* | 0*) max_attempts=3 ;; esac
+  # The baseline is read before the first key, exactly as the function contract
+  # says: the words our burst adds are judged against what the composer already
+  # held. An `empty` verdict is the one positive proof that it held nothing, and
+  # there the baseline is empty rather than the idle placeholder the raw row
+  # carries - the same rule the tmux wintermolt path applies. A pane whose
+  # composer cannot be read yields no baseline and keeps the unverified path.
+  if [ "$(fm_backend_rex_composer_state "$target" "$expected_label")" = empty ]; then
+    before=''
+  elif before=$(fm_backend_rex_composer_text "$target" "$expected_label"); then
+    :
+  else
+    before=''
+  fi
   while :; do
     fm_backend_rex_type_literal "$target" "$text" "$chunk" "$interval" || {
       printf 'send-failed'
       return 0
     }
     sleep "$settle"
-    # The baseline is empty: a rex submit is only ever made into a composer that
-    # holds nothing, and the read-back already reads the harness's idle
-    # placeholder as empty. A row that carried a draft or a working line before
-    # the write is never taken as the baseline our words are judged against, so
-    # content that was already there arrives as `other` and refuses the submit
-    # instead of being submitted along with our text.
-    typed=$(fm_backend_rex_typed_state "$target" '' "$text" "$expected_label")
+    typed=$(fm_backend_rex_typed_state "$target" "$before" "$text" "$expected_label")
     case "$typed" in
       held) break ;;
       nothing)
         # A render can trail the keys; re-read before deciding the burst is
         # missing, so a slow echo never replays text that already landed.
         sleep "$sleep_s"
-        typed=$(fm_backend_rex_typed_state "$target" '' "$text" "$expected_label")
+        typed=$(fm_backend_rex_typed_state "$target" "$before" "$text" "$expected_label")
         case "$typed" in
           held) break ;;
           nothing) ;;
@@ -1266,7 +1277,16 @@ fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
         continue
         ;;
       unknown) break ;;
-      *) printf 'send-failed'; return 0 ;;
+      *)
+        # A render can trail the keys by a moment, exactly as the tmux read-back
+        # documents, so one grace re-read decides an `other` verdict. Content
+        # that is still neither ours nor the pre-typing baseline after that
+        # grace is a fragment and is never submitted.
+        sleep "$sleep_s"
+        [ "$(fm_backend_rex_typed_state "$target" "$before" "$text" "$expected_label")" = held ] && break
+        printf 'send-failed'
+        return 0
+        ;;
     esac
   done
   verdict=$(fm_composer_submit_retry_core fm_backend_rex_send_key fm_backend_rex_composer_state \
