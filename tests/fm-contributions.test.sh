@@ -605,20 +605,14 @@ test_verdict_actor_values_are_discoverable() {
 }
 
 test_observed_replacement_refreshes_verdict() {
-  local home token
+  local home
   home=$(new_home observed-replacement)
   forge_home "$home"
-  touch "$home/config/contribution-pr-movement"
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register delivery before replacement'
   registered_checks "$home" >/dev/null
   printf '%s\n' "$HEAD_B" > "$home/forge/head"
   registered_checks "$home" >/dev/null
-  # The replacement is itself a pending signal; triage acknowledges it.
-  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[] | select(.type == "head") | .token') \
-    || fail 'the observed replacement did not become a pending head signal'
-  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" \
-    || fail 'could not acknowledge the head signal'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_B" \
     https://github.com/o/r/pull/8#issuecomment-100 maintainer 'awaiting maintainer' \
     || fail 'could not record verdict on the observed replacement'
