@@ -1733,9 +1733,11 @@ EOF
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
 # forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), a recorded GitLab merge request through glab
+# the CLI the project registered (fm_pr_forgejo_cli_preference) and that CLI's
+# login, which is tea when the binding named none (fm_pr_forgejo_read_record,
+# resolved by bin/fm-pr-lib.sh); a recorded GitLab merge request through glab
 # (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
-# squash or merge-train commit main received) when gitlab_mr_landing_opted_in,
+# squash or merge-train commit main received) when gitlab_mr_landing_opted_in;
 # and everything else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
@@ -1756,7 +1758,11 @@ pr_is_merged() {
   fi
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    # A binding the registry parser refuses leaves the read on `auto`, as it
+    # always has here: teardown's merged proof is a read of what was already
+    # merged, not the arming or merge decision that refuses such a binding.
+    fm_pr_forgejo_cli_preference "$META" || true
+    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" "$FM_PR_FORGEJO_CLI_PREFERENCE" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
