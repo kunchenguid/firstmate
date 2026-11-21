@@ -70,7 +70,8 @@
 # its cap; a PR not reached before the pass deadline stays pending for the next
 # pass. A PR whose read hit the 5 second cap is skipped for BACKOFF_PASSES
 # passes (kept pending, counted down in the .backoff map of the fingerprint
-# file) and a settled read clears it. There is no rotating PR backlog or serial
+# file). New reads stop a sixth of the budget before the deadline so the pass can
+# record state. There is no rotating PR backlog or serial
 # network wait per PR.
 # Fingerprints and the notifications cursor (Last-Modified, newest seen
 # updated_at, unsettled PRs, last full sweep) are fm-pr-health.v1 in
@@ -389,13 +390,14 @@ read_notifications() { # deadline
 }
 
 poll() {
-  local deadline timeout url step pid index=0 read_dir now full
+  local deadline launch_by timeout url step pid index=0 read_dir now full
   local pids=()
   flag_on || exit 0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'state directory unavailable'
   timeout=${FM_CHECK_TIMEOUT:-30}
   case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
   deadline=$(( $(date +%s) + (timeout > 10 ? timeout - 5 : 5) ))
+  launch_by=$(( deadline - (timeout > 10 ? (timeout - 5) / 6 : 0) ))
   FM_WAKE_QUEUE="$STATE/.wake-queue"
   FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
   # shellcheck source=bin/fm-wake-lib.sh
@@ -451,13 +453,13 @@ poll() {
   jq --rawfile urls "$TMP/urls" '.notifications.pending = ($urls | split("\n") | map(select(length > 0)))' \
     "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
   jq -r '(.backoff // {}) | to_entries[] | select(.value > 0) | .key' "$TMP/health.json" > "$TMP/backed-off"
-  : > "$TMP/skipped"; : > "$TMP/timedout"; : > "$TMP/cleared"
+  : > "$TMP/skipped"; : > "$TMP/timedout"
   while IFS= read -r url; do
     index=$((index + 1))
     read_dir="$TMP/read-$index"
     mkdir "$read_dir"
     if grep -Fxq -- "$url" "$TMP/backed-off"; then printf '%s\n' "$url" >> "$TMP/skipped"; continue; fi
-    [ "$(date +%s)" -lt "$deadline" ] || continue
+    [ "$(date +%s)" -lt "$launch_by" ] || continue
     [ "${#pids[@]}" -lt "$READ_CONCURRENCY" ] || { wait "${pids[$((${#pids[@]} - READ_CONCURRENCY))]}" || true; }
     (
       read_pr "$url" "$deadline" "$read_dir" && : > "$read_dir/ok"
@@ -474,7 +476,6 @@ poll() {
       printf '%s\n' "$url" >> "$TMP/unsettled"
       continue
     fi
-    printf '%s\n' "$url" >> "$TMP/cleared"
     jq -L "$SCRIPT_DIR" -n --arg url "$url" --slurpfile rest "$read_dir/rest.json" --slurpfile gql "$read_dir/gql.json" \
       --slurpfile prev <(jq --arg url "$url" '.prs[$url] // {}' "$TMP/health.json") \
       --argjson tasks "$(jq -c --arg url "$url" '[.[] | select(.url == $url) | .tasks[]] | unique' "$TMP/owned.json")" \
@@ -491,11 +492,11 @@ poll() {
     fi
   done < "$TMP/urls"
   jq --argjson full "$full" --argjson now "$now" --argjson passes "$BACKOFF_PASSES" --rawfile unsettled "$TMP/unsettled" \
-    --rawfile skipped "$TMP/skipped" --rawfile timedout "$TMP/timedout" --rawfile cleared "$TMP/cleared" '
+    --rawfile skipped "$TMP/skipped" --rawfile timedout "$TMP/timedout" '
     def lines: split("\n") | map(select(length > 0));
     .backoff = (((.backoff // {})
         | with_entries(if (.key | IN(($skipped | lines)[])) then .value -= 1 else . end)
-        | with_entries(select(.value > 0 and (.key | IN(($cleared | lines)[]) | not))))
+        | with_entries(select(.value > 0)))
       + (($timedout | lines) | map({key: ., value: $passes}) | from_entries))
     | if has("notifications") then
       .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
