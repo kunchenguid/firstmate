@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|commandcode|polytoken|cortex|kiro|hermes|wintermolt|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate [id]  print the harness the PRIMARY uses to launch
@@ -153,8 +153,8 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, agy, devin, commandcode, polytoken, cortex, and kiro publish no harness-identity marker at all, so
-  # they are never named here and are identified by ancestry alone. That is the
+  # codex, opencode, kimi, muse, agy, devin, commandcode, polytoken, cortex, kiro, and wintermolt publish no harness-identity
+  # marker at all, so they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
   # muse's only documented child variable is MUSE_CURRENT_SESSION_LOG, a
@@ -293,6 +293,19 @@ harness_process_verdict() {  # <pid>
     # crewmate/scout adapter only and is never a primary or secondmate, so
     # this arm only lets a kiro crewmate identify its own harness.
     kiro-cli) echo "comm kiro"; return ;;
+    # wintermolt is a Zig-compiled single binary whose process name is exactly
+    # `wintermolt` (verified, wintermolt 0.7.0: `ps -o comm=` reports wintermolt
+    # and a bash tool subprocess is its direct child, so the walk from a real
+    # tool subprocess reaches it at hop one). It publishes no harness-identity
+    # variable of its own: a live tool subprocess carried only backend-config
+    # variables (WINTERMOLT_BACKEND, WINTERMOLT_MODEL, and provider URL/key
+    # names), never an identity marker, so like kimi, muse, agy, devin, kiro,
+    # and cortex it is detected by ancestry alone. Anchored, never *wintermolt*,
+    # so an unrelated command containing that fragment cannot be misread as
+    # this harness. wintermolt is a crewmate/scout adapter only and is never a
+    # primary or secondmate, so this arm only lets a wintermolt worker identify
+    # its own harness.
+    wintermolt) echo "comm wintermolt"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)

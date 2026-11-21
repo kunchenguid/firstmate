@@ -68,6 +68,7 @@ Cortex is anchored to the exact `cortex` identity for the same reason.
 Hermes uses anchored native TUI script or Python module argv through `bin/fm-hermes-process-lib.sh`; [Hermes verification](verification/hermes.md) owns the current process and composer evidence.
 An unrelated tool that ships a binary named exactly `cortex` is still classified as an agent when it is a pane's foreground process, because the exact name is the only identity Cortex Code carries.
 Kiro is anchored to the exact `kiro-cli` foreground identity for the same reason (its toolbox/aim-sandbox wrapper is the foreground process, with the compiled binary a descendant), so unrelated names containing that fragment remain ambiguous.
+Wintermolt is anchored to the exact `wintermolt` foreground identity for the same reason, so unrelated names containing that fragment remain ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
@@ -92,11 +93,12 @@ The submit acknowledgement and away-mode supervisor-pane busy guard below still 
 The supervisor guard selects only the detected primary harness's signature rather than a global union of vendor patterns.
 
 `bin/fm-tmux-lib.sh` owns exact type-and-submit mechanics.
-It types a message once and retries Enter only until the composer clears.
+It types a message and retries Enter only until the composer clears.
+A harness whose TUI drops a burst before submission is the one exception: its burst is written in small chunks its input loop keeps, and it is verified against the composer's own text before Enter - each replay is authorised by a read taken immediately before it, so a replay can only ever add text to a composer that provably holds nothing of ours at that moment, and a late echo or a fragment refuses the submit instead.
 Only a proven empty composer is a positive delivery acknowledgement.
 Text left in established structure remains `pending`, text in ambiguous structure remains unproven, and unreadable or unsafe state remains unknown.
 An ordinary local `fm-send.sh` text steer and every remote text steer no longer ride this verified submit at all: they become durable steering-inbox records plus best-effort constant doorbell lines (`bin/fm-task-inbox-lib.sh`).
-The verdicts above are delivery-critical only for the local typed plane - harness-native invocations and explicit backend targets - where `fm-send.sh` still never retypes or assumes a confirmed submit for an unconfirmed verdict; its header owns the distinct delivered-unconfirmed exit status and operator response.
+The verdicts above are delivery-critical only for the local typed plane - harness-native invocations and explicit backend targets - where `fm-send.sh` still never assumes a confirmed submit for an unconfirmed verdict and never retypes onto text that may already be there (a composer proven to hold nothing of the burst is replayed before Enter, never after it); its header owns the distinct delivered-unconfirmed exit status and operator response.
 
 OpenCode has one busy-queue exception.
 While OpenCode is mid-turn, Enter queues the message but leaves its text visible until the turn completes.
@@ -104,6 +106,8 @@ After the normal retry budget, only structurally proven pending text in a provab
 Ambiguous pending text never receives the busy-queue conversion.
 A second, baseline-gated conversion covers harnesses whose mid-turn screen the classifier cannot identify (Pi replaces its separated composer while working): when and only when the pane was idle before the text was typed, an idle-to-busy transition across the submit's own Enter confirms delivery, the same turn-started signal Herdr reads natively.
 Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
+Wintermolt needs that same baseline-gated transition for a different composer shape: it renders its working line inside the composer box, so a submitted turn reads `pending-unproven` rather than `pending`, the queue exception above can never fire for it, and only that wintermolt-scoped confirmation may turn the unproven read into `empty`; every other harness keeps `pending-unproven` unproven.
+The confirmation that follows a submitted turn then polls on the adapter's own budget - a Wintermolt footer renders later than the shared Enter budget, so it reads across `FM_WINTERMOLT_DELIVERY_POLLS` x `FM_WINTERMOLT_POLL_INTERVAL`, the budget the spawn gate grants the same verdict - while the unread-composer case above keeps the caller's retry budget, so a composer that became unreadable never stretches a submit.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
 ## Limits and regression entry points

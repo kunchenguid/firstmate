@@ -65,6 +65,11 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # #{pane_current_command} both read kiro-cli), and a glob would claim
     # unrelated commands containing that fragment.
     kiro-cli) printf 'agent' ;;
+    # wintermolt is anchored for the same reason (verified, wintermolt 0.7.0: a
+    # Zig-compiled single binary whose pane foreground process name is exactly
+    # `wintermolt`, and whose bash tool subprocess is its direct child), so a
+    # `*wintermolt*` glob never claims an unrelated command.
+    wintermolt) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

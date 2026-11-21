@@ -1494,6 +1494,33 @@ test_cursorless_container_rejects_contiguous_lower_activity() {
   pass "fm_composer_classify_screen: cursorless containers reject only contiguous unclaimed activity"
 }
 
+test_cursorless_furniture_exemption_is_wintermolt_only() {
+  # Rows recognized as harness furniture by the shared helper must not gain a
+  # glyph-free staleness exemption: on every cursorless backend they still
+  # stale the envelope above them, exactly as they did before the wintermolt
+  # adapter added its own anchored keybind-footer signature.
+  local box draftbox framed row out
+  box=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯'
+  draftbox=$'╭────────────────────────╮\n│ ❯ my draft             │\n╰────────────────────────╯'
+  for row in '⠋⠙⠹' ' ⏵⏵ auto-accept edits on' '  ▣ Build · Big Pickle · 3.4s' \
+             "\$0.000 (sub) 5.4%/272k (auto)"; do
+    for framed in "$box" "$draftbox"; do
+      for caps in "$CAPS_STYLED" "$CAPS_STYLED_NOID" "$CAPS_PLAIN" \
+                  "$CAPS_TMUX"; do
+        out=$(fm_composer_classify_screen "$caps" "$framed
+$row")
+        [ "$out" = unknown ] \
+          || fail "furniture row '$row' below a box must stale it on every backend, got '$out'"
+      done
+    done
+  done
+  # The one exempted signature: wintermolt's anchored keybind footer bounds the
+  # glyphless box above it, so that behavior is intact.
+  FM_COMPOSER_HARNESS=wintermolt assert_screen "wintermolt keybind footer bounds its box" empty \
+    "$CAPS_STYLED" "$box"$'\n Enter send  ↑↓ PgUp/PgDn scroll  Esc quit'
+  pass "fm_composer_classify_screen: only wintermolt's keybind footer exempts a row from the staleness probe"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -1741,6 +1768,7 @@ test_contiguous_transcript_reanchors_on_live_prompt
 test_lower_dead_shell_invalidates_cursorless_candidate
 test_cursorless_bare_wrap_region_classifies
 test_cursorless_container_rejects_contiguous_lower_activity
+test_cursorless_furniture_exemption_is_wintermolt_only
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
