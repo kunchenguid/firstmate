@@ -3745,6 +3745,11 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
+# A sweep's checks are bounded one by one, not in total, so it beats between
+# them; a replaced watcher must not vouch for its successor.
+sweep_beat() {
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ] || touch "$BEAT"
+}
 while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
     # The reclaim helper releases its steal and marker locks on publish
@@ -4227,6 +4232,7 @@ while :; do
     fi
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      sweep_beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -4430,6 +4436,7 @@ EOF
     # the outcomes of detached park, relaunch, and cleanup actions
     # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
     # wake before printing it, so the watcher only rings).
+    sweep_beat
     park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
     if [ -n "$park_out" ]; then

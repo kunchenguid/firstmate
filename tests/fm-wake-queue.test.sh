@@ -336,6 +336,35 @@ test_printing_check_does_not_skip_park_tick() {
   pass "a printing check does not skip the park-on-review tick"
 }
 
+# A sweep can outlast the stall bound in total while each check stays bounded,
+# so the liveness beacon must advance between checks and before the park tick.
+test_sweep_refreshes_beacon_between_checks() {
+  local dir state fakebin out beat ref refreshed first second
+  dir=$(make_case sweep-beacon)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  beat="$state/.last-watcher-beat"
+  ref="$dir/beacon-reference"
+  refreshed="$dir/beacon-refreshed"
+  first="$state/a-news.check.sh"
+  second="$state/b-quiet.check.sh"
+  touch -t 200101010000 "$ref"
+  printf '#!/usr/bin/env bash\ntouch -t 200001010000 %q\nprintf "memory-low\\n"\n' "$beat" > "$first"
+  printf '#!/usr/bin/env bash\n[ ! %q -nt %q ] || : > %q\ntouch -t 200001010000 %q\n' \
+    "$beat" "$ref" "$refreshed" "$beat" > "$second"
+  chmod 0700 "$first" "$second"
+  for id in a-news b-quiet; do
+    FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+      || fail "could not register custom check $id"
+  done
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not exit after one check sweep"
+  [ -e "$refreshed" ] || fail "the beacon was not refreshed between checks"
+  [ "$beat" -nt "$ref" ] || fail "the beacon was not refreshed before the park tick"
+  pass "a sweep refreshes the liveness beacon between checks and before the park tick"
+}
+
 test_multiline_check_output_wakes_as_one_line() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check-multiline)
@@ -3916,6 +3945,7 @@ test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
 test_one_sweep_queues_every_printing_check
 test_printing_check_does_not_skip_park_tick
+test_sweep_refreshes_beacon_between_checks
 test_multiline_check_output_wakes_as_one_line
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates
