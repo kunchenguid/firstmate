@@ -372,10 +372,10 @@ fm_pane_is_busy() {  # <target> [harness]
 # harness that renders its own working line in the composer box (wintermolt's
 # `working…` row) reads `pending-unproven`, never `pending`, so the queue
 # exception above can never fire for it. The same idle baseline plus the same
-# harness-scoped busy read confirm that submit, and only for a pane whose own
-# busy signature is anchored ([busy-harness] below): a harness-less union match
-# is not transition evidence for any harness, and without the baseline an
-# unproven read stays unproven.
+# harness-scoped busy read confirm that submit, for a wintermolt pane alone: no
+# other harness renders its working row in the composer, and without the
+# baseline an unproven read stays unproven ([busy-harness] below scopes the
+# read, so a harness-less union match is not transition evidence for anyone).
 # [busy-harness] scopes every busy read to one harness signature; the submit
 # core passes polytoken for a pane whose composer identity is polytoken (its
 # `Running for` row is outside the harness-less union), wintermolt for a pane
@@ -385,12 +385,15 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_busy_confirm: poll the submit's busy read across the retry
 # budget, because a turn takes a beat to render; 0 only when the pane proves it
 # is busy under the signature the caller scoped. A wintermolt footer renders
-# well after the shared Enter budget, so its reads use the same poll budget the
-# adapter's spawn gate already grants that verdict (FM_WINTERMOLT_DELIVERY_POLLS
-# and FM_WINTERMOLT_POLL_INTERVAL); no other harness's budget moves.
-fm_tmux_submit_busy_confirm() {  # <target> <retries> <enter-sleep> [busy-harness]
-  local target=$1 retries=$2 sleep_s=$3 busy_harness=${4:-} j=0
-  if [ "$busy_harness" = wintermolt ]; then
+# well after the shared Enter budget, so the confirmation that follows a
+# submitted turn ([footer-budget] = 1) uses the same poll budget the adapter's
+# spawn gate already grants that verdict (FM_WINTERMOLT_DELIVERY_POLLS and
+# FM_WINTERMOLT_POLL_INTERVAL); every other read, including one on a pane whose
+# composer is no longer readable (a `/quit` that left a shell prompt), keeps the
+# caller's own retries. No other harness's budget moves.
+fm_tmux_submit_busy_confirm() {  # <target> <retries> <enter-sleep> [busy-harness] [footer-budget]
+  local target=$1 retries=$2 sleep_s=$3 busy_harness=${4:-} footer_budget=${5:-} j=0
+  if [ "$busy_harness" = wintermolt ] && [ "$footer_budget" = 1 ]; then
     retries=${FM_WINTERMOLT_DELIVERY_POLLS:-60}
     sleep_s=${FM_WINTERMOLT_POLL_INTERVAL:-0.5}
   fi
@@ -431,9 +434,10 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   done
   # A composer the classifier refused to prove (wintermolt's working row)
   # confirms through the turn-started transition, never through the
-  # harness-less union.
-  if [ "$state" = pending-unproven ] && [ "$baseline_idle" = 1 ] && [ -n "$busy_harness" ] \
-     && fm_tmux_submit_busy_confirm "$target" "$retries" "$sleep_s" "$busy_harness"; then
+  # harness-less union. Only wintermolt renders that working row in its
+  # composer; every other harness keeps pending-unproven unproven.
+  if [ "$state" = pending-unproven ] && [ "$busy_harness" = wintermolt ] && [ "$baseline_idle" = 1 ] \
+     && fm_tmux_submit_busy_confirm "$target" "$retries" "$sleep_s" "$busy_harness" 1; then
     printf 'empty'
     return 0
   fi

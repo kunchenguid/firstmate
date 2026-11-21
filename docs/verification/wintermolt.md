@@ -11,7 +11,6 @@ The token-spending guard drives the real TUI on a private tmux socket in a throw
 
 ```bash
 FM_WINTERMOLT_SIGNALS_LIVE=1 \
-FM_WINTERMOLT_LIVE_HOME="$throwaway_root" \
 FM_WINTERMOLT_LIVE_ENV="$script_exporting_WINTERMOLT_BACKEND_and_its_key" \
 bash bin/fm-test-run.sh tests/fm-wintermolt-signals-live-e2e.test.sh
 

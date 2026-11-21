@@ -239,6 +239,32 @@ test_busy_pane_ambiguous_pending_retries_without_conversion() {
   pass "fm_tmux_submit_enter_core: pending-unproven retries without busy conversion"
 }
 
+test_polytoken_ambiguous_pending_is_not_confirmed_by_busy() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/polytoken-ambiguous-pending"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  : > "$sent"
+  # A polytoken worker renders ambiguous composer geometry, so its composer is
+  # pending-unproven. Only wintermolt draws its working row in the composer and
+  # is confirmed by the idle-to-busy transition; a busy polytoken pane must
+  # leave the unproven verdict untouched so the caller keeps treating the
+  # steer as unconfirmed.
+  printf '╭────────────╮\n│ > fix  │\n╰────────────╯\n' > "$composer"
+  touch "$dir/.swallow"
+  (
+    fm_pane_is_busy() { return 0; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+      fm_tmux_submit_enter_core "win" 3 0.05 1 polytoken
+  ) > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending-unproven ] \
+    || fail "a busy polytoken pane must not confirm an unproven composer, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: a busy pane never confirms another harness's pending-unproven"
+}
+
 test_unrecognized_state_skips_busy_conversion() {
   local dir fakebin composer busy_called vfile
   dir="$TMP_ROOT/unrecognized-state"
@@ -419,5 +445,6 @@ test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
 test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
+test_polytoken_ambiguous_pending_is_not_confirmed_by_busy
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes

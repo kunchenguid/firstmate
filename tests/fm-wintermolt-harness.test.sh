@@ -574,6 +574,30 @@ test_wintermolt_late_echo_is_not_replayed() {
   pass "fm-tmux-lib: a wintermolt burst the TUI echoes late is never replayed"
 }
 
+test_wintermolt_unreadable_composer_keeps_the_caller_retry_budget() {
+  local case_dir vfile polls
+  case_dir="$TMP_ROOT/unknown-composer-budget"; mkdir -p "$case_dir"
+  vfile="$case_dir/verdict"
+  polls="$case_dir/polls"
+  : > "$polls"
+  # `bin/fm-control.sh exit` types /quit and the TUI leaves a shell whose bare
+  # prompt reads unknown. That branch keeps the caller's Enter-retry budget: the
+  # enlarged footer budget is only for the confirmation that follows a
+  # submitted turn, so an exit must not poll a footer that can never render 60
+  # times (~30s) before reporting the pane gone.
+  (
+    unset FM_COMPOSER_DIALOG_SINK
+    fm_tmux_composer_state() { printf 'unknown'; }
+    fm_pane_is_busy() { printf 'poll\n' >> "$polls"; return 1; }
+    fm_tmux_submit_enter_core win 2 0.01 1 wintermolt
+  ) > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = unknown ] \
+    || fail "an unreadable wintermolt composer must keep its unknown verdict, got '$(cat "$vfile")'"
+  [ "$(wc -l < "$polls" | tr -d ' ')" = 2 ] \
+    || fail "the unreadable-composer branch must keep the caller's retry budget, polled $(wc -l < "$polls") times"
+  pass "fm-tmux-lib: an unreadable wintermolt composer keeps the caller retry budget"
+}
+
 test_wintermolt_last_permitted_burst_gets_the_grace_read() {
   local case_dir fakebin state verdict bursts
   case_dir="$TMP_ROOT/submit-last-burst"; mkdir -p "$case_dir"
@@ -1206,6 +1230,7 @@ test_wintermolt_steer_confirmation_uses_the_busy_transition
 test_wintermolt_swallowed_burst_is_retyped_before_submit
 test_wintermolt_slow_footer_still_confirms_the_steer
 test_wintermolt_late_echo_is_not_replayed
+test_wintermolt_unreadable_composer_keeps_the_caller_retry_budget
 test_wintermolt_last_permitted_burst_gets_the_grace_read
 test_wintermolt_burst_that_never_lands_does_not_confirm
 test_wintermolt_truncated_burst_is_never_submitted
