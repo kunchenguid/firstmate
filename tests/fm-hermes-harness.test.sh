@@ -44,8 +44,18 @@ for _ in $(seq 1 100); do [ -f "$TMP_ROOT/process/tui_gateway/ready" ] && break;
 native_args=$(ps -o args= -p "$process_pid")
 native_name=$(ps -o comm= -p "$process_pid")
 [ "$native_name" != hermes ] || fail 'identity fixture failed to separate name and module argv'
-[ "$(fm_agent_process_classify unrelated unrelated '' "$process_pid")" = agent ] || fail 'NUL argv identity lost when names/ps args are blind'
-[ "$(fm_agent_process_classify "$native_name" '' "$native_args")" = agent ] || fail 'ps argv identity lost when NUL argv is absent'
+if [ -r "/proc/$process_pid/cmdline" ]; then
+  nul_argv_expected=agent
+else
+  nul_argv_expected=other
+fi
+[ "$(fm_agent_process_classify unrelated unrelated '' "$process_pid")" = "$nul_argv_expected" ] || fail 'NUL argv identity lost when names/ps args are blind'
+native_argv0=${native_args%% *}
+case "${native_argv0##*/}" in
+  python|python[0-9]*) ps_argv_expected=agent ;;
+  *) ps_argv_expected=other ;;
+esac
+[ "$(fm_agent_process_classify "$native_name" '' "$native_args")" = "$ps_argv_expected" ] || fail 'ps argv identity lost when NUL argv is absent'
 [ "$(fm_agent_process_classify "$native_name" '' '')" = other ] || fail 'bare interpreter falsely identified without either argv source'
 kill "$process_pid"
 wait "$process_pid" 2>/dev/null || true
