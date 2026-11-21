@@ -41,11 +41,33 @@ awk '
   text = tolower($0)
   # URL paths are not filesystem paths. Reject explicitly local URL hosts first.
   unsafe = 0
-  while (match(text, /https?:\/\/([^][[:space:]<>"`|()*\047]+@)?(\[[^][:space:]<>"`|()*\047]+\]|[^][[:space:]<>"`|()*\047]+)[^][[:space:]<>"`|()*\047]*/)) {
-    url = substr(text, RSTART, RLENGTH)
-    text = substr(text, 1, RSTART - 1) substr(text, RSTART + RLENGTH)
+  while (match(text, /https?:\/\/([[:alnum:]_.~%!$&\047()*+,;=:-]*@)?(\[[[:alnum:]:.%_-]+\]|[[:alnum:]_.%~-]+)(:[0-9]+)?/)) {
+    start = RSTART
+    url = substr(text, start, RLENGTH)
+    prefix = substr(text, 1, start - 1)
+    wrapper = match(prefix, /(\*+|_+|~+)$/) ? substr(prefix, RSTART, RLENGTH) : ""
+    quote = substr(prefix, length(prefix), 1)
+    if (wrapper != "" && substr(url, length(url) - length(wrapper) + 1) == wrapper)
+      url = substr(url, 1, length(url) - length(wrapper))
+    end = start + length(url)
+    depth = 0
+    if (substr(text, end, 1) ~ /[\/?#]/) {
+      for (; end <= length(text); end++) {
+        char = substr(text, end, 1)
+        if (char ~ /[][[:space:]<>"`|]/ || (quote == "\047" && char == quote)) break
+        if (wrapper != "" && substr(text, end, length(wrapper)) == wrapper &&
+            (wrapper !~ /^_+$/ || substr(text, end + length(wrapper), 1) !~ /[[:alnum:]]/)) break
+        if (char == "(") depth++
+        if (char == ")") {
+          if (depth == 0 && quote == "(") break
+          if (depth > 0) depth--
+        }
+      }
+    }
+    if (wrapper != "" && substr(text, end, length(wrapper)) == wrapper)
+      end += length(wrapper)
+    text = prefix " " substr(text, end)
     sub(/^https?:\/\//, "", url)
-    sub(/[\/?#].*$/, "", url)
     sub(/^.*@/, "", url)
     sub(/[,;!.*_~]+$/, "", url)
     if (url ~ /^\[/) {

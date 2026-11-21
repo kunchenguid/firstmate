@@ -71,6 +71,24 @@ unsafe=(
   '[https://example.org][http://localhost]'
   'Evidence: http://localhost./proof'
   'Evidence: http://reader:secret@localhost?report=1'
+  'Evidence: http://reader:p*ss@192.168.1.20/report'
+  'Evidence: http://reader:p(ss)@192.168.1.20/report'
+  "Evidence: http://reader:p'ss@192.168.1.20/report"
+  'Evidence: http://reader:p!$&()*+,;=:%40-._~ss@192.168.1.20/report'
+  'Evidence: http://reader:p*ss@localhost/report'
+  'Evidence: http://@localhost/report'
+  'Evidence: https://reader:p(ss)@benchmark.localhost/report'
+  "Evidence: http://reader:p'ss@[fd12::1]/report"
+  'Evidence: http://reader:p*ss@[::ffff:c0a8:114]:8080/report'
+  'Evidence: **http://reader:p*ss@192.168.1.20/report**'
+  '[http://reader:p(ss)@192.168.1.20/report](https://example.org)'
+  '|https://example.org/report|http://reader:p*ss@192.168.1.20/report|'
+  '**https://example.org/report**/home/alice/report'
+  '_https://example.org/report_/home/alice/report'
+  '_https://example.org_/home/alice/report'
+  '(https://example.org/docs/(v1))/home/alice/report'
+  '[public](https://example.org/docs/(v1))/home/alice/report'
+  "'https://example.org/report'/home/alice/report"
   'Evidence: http://169.254.1.20/report'
   'Evidence: http://[fd12::1]/report'
   'Evidence: https://[fc00::1]:8080?report=1'
@@ -135,6 +153,17 @@ Public localhost lookalikes: https://benchmark.localhost.example.org/report, htt
 Public localhost path: https://example.org/benchmark.localhost/report.
 Public URL components: https://example.org?next=http-localhost, https://example.org/#localhost.
 Public URL credentials: https://localhost@example.org/report
+Public credential punctuation: https://reader:p*ss@example.org/home/alice, https://reader:p(ss)@example.org/home/alice, https://reader:p'ss@example.org/home/alice.
+Public credential subdelimiters: https://reader:p!$&'()*+,;=:%40-._~ss@example.org/home/alice.
+Public credential IPv6: https://reader:p*ss@[2606:4700:4700::1111]/home/alice.
+Public empty userinfo: https://@example.org/home/alice.
+Public path punctuation: https://example.org/docs/(v1)/home/alice, https://example.org/docs/*/home/alice, https://example.org/docs/o'brien/home/alice.
+Public nested parentheses: https://example.org/docs/(v1(test))/home/alice.
+Public unwrapped parentheses: https://example.org/docs/)v1/home/alice, https://example.org/docs/(v1/home/alice.
+Public query and fragment: https://example.org?next=(v1)/home/alice, https://example.org#section'(v1)/home/alice.
+Public wrapped paths: (https://example.org/docs/(v1)/home/alice), 'https://example.org/docs/(v1)/home/alice'.
+Public Markdown paths: **https://example.org/docs/(v1)/home/alice**, _https://example.org/some_report/home/alice_.
+Public Markdown credentials: [http://reader:p(ss)@example.org/home/alice](https://example.org/report).
 Intended system examples: /usr/bin/env, /etc/hosts and /dev/null.
 Web route example: /api/v1/users.
 Generic maintainer examples: ~/.factory/settings.json, ~/.factory/..., ~/.config/..., /opt/homebrew, /tmp/.
@@ -165,12 +194,16 @@ for method in answer followup; do
   mkdir -p "$home"
   args=()
   [ "$method" = answer ] || args=(--followup)
-  if FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" example-request "${args[@]}" \
-    'Private proof: /Users/example/private/report.md' > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"; then
-    fail "$method accepted private proof"
-  fi
-  [ ! -e "$home/state/x-outbox" ] || fail "$method recorded unsafe outbound text"
-  ! grep -q '/Users/example' "$TMP_ROOT/err" || fail "$method disclosed rejected text"
+  for text in 'Private proof: /Users/example/private/report.md' \
+    'Evidence: http://reader:p*ss@192.168.1.20/report'; do
+    if FM_HOME="$home" FMX_DRY_RUN=1 "$ROOT/bin/fm-x-reply.sh" example-request "${args[@]}" \
+      "$text" > "$TMP_ROOT/out" 2> "$TMP_ROOT/err"; then
+      fail "$method accepted private proof"
+    fi
+    [ ! -e "$home/state/x-outbox" ] || fail "$method recorded unsafe outbound text"
+    ! grep -q '/Users/example' "$TMP_ROOT/err" || fail "$method disclosed rejected text"
+    ! grep -Fq '192.168.1.20' "$TMP_ROOT/err" || fail "$method disclosed rejected host"
+  done
   FM_HOME="$home" FMX_DRY_RUN=1 FMX_REPLY_PLATFORM=x FMX_REPLY_MAX_CHARS=280 \
     "$ROOT/bin/fm-x-reply.sh" example-request "${args[@]}" \
     'Benchmark: 50 iterations passed without oracle mismatches.' > "$TMP_ROOT/out" 2> "$TMP_ROOT/err" \
