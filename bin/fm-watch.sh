@@ -229,8 +229,8 @@ PR_DEGRADED_WATCH_ENABLED=0
 [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
 PR_GREEN_WATCH_ENABLED=0
 [ ! -e "$CONFIG/pr-merge-on-green" ] || PR_GREEN_WATCH_ENABLED=1
-# Seconds a recorded task PR may stay green and mergeable but unmerged before
-# one wake names it (pr_green_handle below).
+# Seconds a recorded task PR may stay green but unmerged, in any merge state,
+# before one wake names it (pr_green_handle below).
 PR_GREEN_ALARM_SECS=${FM_PR_GREEN_ALARM_SECS:-600}
 case $PR_GREEN_ALARM_SECS in
   ''|*[!0-9]*) PR_GREEN_ALARM_SECS=600 ;;
@@ -4017,13 +4017,14 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
-# pr_green_handle acts on a validated poll's "green head=<sha> since=<epoch>"
-# result (bin/fm-pr-poll.sh, only with config/pr-merge-on-green). It is called
+# pr_green_handle acts on a validated poll's
+# "green head=<sha> since=<epoch> state=<merge state>" result (bin/fm-pr-poll.sh, only with config/pr-merge-on-green). It is called
 # with the task's control lock held and releases it before returning, because
 # bin/fm-pr-merge.sh takes that same lock. Per head, recorded in the green
 # marker (bin/fm-pr-lib.sh owns its format), it does at most two things:
 #   - for a ship task recorded yolo=on, the merge authority under which
-#     firstmate already merges green work itself, it starts one detached
+#     firstmate already merges green work itself, while the merge state is
+#     CLEAN or HAS_HOOKS (never an automatic update-branch), it starts one detached
 #     bin/fm-pr-merge.sh <id> <url> --expected-head <head>, so every live merge
 #     guard, captain hold, and away-posture rule still decides, and a landed
 #     merge reports through that script's own merge outcome; the marker is
@@ -4031,21 +4032,26 @@ retire_merged_pr_poll() {  # <id>
 #   - for any task, once the head has been green PR_GREEN_ALARM_SECS (the
 #     forge's newest check completion, else this watcher's first sight) and
 #     any merge attempt it started is itself that old, it queues one check
-#     wake naming the PR, the wake before the marker so a crash can only
-#     repeat it.
+#     wake naming the PR and its merge state, whatever that state is, the
+#     wake before the marker so a crash can only repeat it.
 # A refused or failed attempt is not retried; that wake is the backstop, and
 # the attempt's output stays in state/<id>.pr-poll-green.log for it.
 # Sets PR_GREEN_WAKE_REASON to the queued wake's reason, or leaves it empty.
 PR_GREEN_WAKE_REASON=
 pr_green_handle() {  # <id> <provider> <url> <host> <path> <number> <check> <result>
   local id=$1 provider=$2 url=$3 host=$4 path=$5 number=$6 check=$7 out=$8
-  local head since now meta kind merge alarm launch=0 reason='' log
+  local head since merge_state now meta kind merge alarm launch=0 reason='' log
   PR_GREEN_WAKE_REASON=
   head=${out#'green head='}
   since=${head#* since=}
+  merge_state=${since#* state=}
+  since=${since%% *}
   head=${head%% *}
   case $out in
     *$'\n'*) head= ;;
+  esac
+  case $merge_state in
+    ''|*[!A-Z_]*) head= ;;
   esac
   if ! fm_pr_poll_green_head_valid "$head" || ! fm_pr_poll_green_field_valid "$since"; then
     pr_poll_control_release || exit 1
@@ -4071,14 +4077,15 @@ pr_green_handle() {  # <id> <provider> <url> <host> <path> <number> <check> <res
     merge=-
     alarm=-
   fi
-  if [ "$merge" = - ] && [ "$(fm_meta_get "$meta" yolo)" = on ]; then
+  if [ "$merge" = - ] && [ "$(fm_meta_get "$meta" yolo)" = on ] \
+    && { [ "$merge_state" = CLEAN ] || [ "$merge_state" = HAS_HOOKS ]; }; then
     merge=$now
     launch=1
   fi
   if [ "$alarm" = - ] && [ $((now - since)) -ge "$PR_GREEN_ALARM_SECS" ] \
     && { [ "$merge" = - ] || [ $((now - merge)) -ge "$PR_GREEN_ALARM_SECS" ]; }; then
     log="$STATE/$id.pr-poll-green.log"
-    reason="check: PR $url green and mergeable but still unmerged after $(( (now - since) / 60 ))m: head=$head"
+    reason="check: PR $url green but still unmerged after $(( (now - since) / 60 ))m: head=$head merge_state=$merge_state"
     [ "$merge" = - ] || reason="$reason; automatic merge attempt did not land (log $log)"
     fm_wake_append check "$check" "$reason" || exit 1
     alarm=$now

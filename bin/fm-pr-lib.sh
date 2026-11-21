@@ -1871,8 +1871,8 @@ fm_pr_poll_train_clear() {  # <state> <id>
 }
 
 # --- green ready-PR marker ----------------------------------------------------
-# With config/pr-merge-on-green, the static poll reports a GitHub pull request
-# that is green and mergeable as "green head=<sha> since=<epoch>", and
+# With config/pr-merge-on-green, the static poll reports an open GitHub pull
+# request that is green as "green head=<sha> since=<epoch> state=<merge state>", and
 # bin/fm-watch.sh acts on it at most once per head: one detached merge attempt
 # for a task whose merge authority already lets firstmate merge it, and one
 # unmerged-too-long wake. This marker is that per-head memory:

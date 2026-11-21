@@ -21,11 +21,12 @@
 # train=dropped line once the car is gone from a still-open merge request; the
 # watcher wakes on a drop only after it saw the car on the train.
 # With config/pr-merge-on-green present, a GitHub poll also emits one
-# "green head=<sha> since=<epoch>" line for an open, non-draft pull request
-# whose mergeability is computed clean and whose newest run of every check is
-# green; since is the newest check completion time the forge reports (0 when
-# none is readable), so a restarted watcher sees how long the PR has really
-# been green. The line is only a trigger: bin/fm-watch.sh owns what follows,
+# "green head=<sha> since=<epoch> state=<merge state>" line for an open,
+# non-draft pull request whose newest run of every check is green, whatever its
+# merge state; since is the newest check completion time the forge reports (0
+# when none is readable), so a restarted watcher sees how long the PR has really
+# been green, and state is the forge's merge state status (CLEAN, BEHIND,
+# BLOCKED, ...) or, when GitHub does not call it mergeable, its mergeability. The line is only a trigger: bin/fm-watch.sh owns what follows,
 # and bin/fm-pr-merge.sh re-reads every merge condition live before any merge.
 set -u
 LC_ALL=C
@@ -120,15 +121,39 @@ case "$provider" in
     # flag is present. Green mirrors bin/fm-pr-merge.sh's github_checks_not_green
     # closely enough to trigger: every status context SUCCESS, and the newest
     # run of each named check run completed SUCCESS, NEUTRAL, or SKIPPED, so a
-    # cancelled run a passing re-run replaced does not hide a green PR. It never
-    # reads required checks; an unreported required check leaves the merge
-    # state BLOCKED rather than CLEAN, and the merge path re-reads them anyway.
+    # cancelled or failed run a passing re-run replaced does not hide a green
+    # PR; green is therefore tested before degraded. It never reads required
+    # checks; an unreported required check leaves the merge state BLOCKED
+    # rather than CLEAN, and the merge path re-reads them anyway.
     # shellcheck disable=SC2016  # The filter's $f and $r are jq variables, expanded by jq, not the shell.
     result=$(GH_HOST=$host gh pr view "$url" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,statusCheckRollup --jq '
       def is_run: .__typename == "CheckRun"
         or (.__typename == null and (.status != null or .conclusion != null));
       if .state == "MERGED" then
         "merged"
+      elif .state == "OPEN" and .isDraft == false
+        and ([.statusCheckRollup[]?] | length) > 0
+        and ([.statusCheckRollup[]? | select(is_run | not) | select(.state != "SUCCESS")]
+             | length) == 0
+        and ([.statusCheckRollup[]? | select(is_run)]
+             | group_by(.name // "")
+             | all(.[]; max_by(.startedAt // "")
+                 | .status == "COMPLETED"
+                   and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL"
+                        or .conclusion == "SKIPPED")))
+      then
+        "green head=" + (.headRefOid // "") + " since="
+          + ([.statusCheckRollup[]?
+              | (.completedAt // .startedAt // "")
+              | select(type == "string"
+                       and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))
+              | sub("\\.[0-9]+Z$"; "Z")
+              | fromdateiso8601]
+             | max // 0 | floor | tostring)
+          + " state="
+          + (if .mergeable == "MERGEABLE" then (.mergeStateStatus // "UNKNOWN")
+             else (.mergeable // "UNKNOWN") end
+             | tostring | gsub("[^A-Z_]"; "_") | .[:32])
       elif .state == "OPEN"
         and ([.statusCheckRollup[]?
                 | select((.conclusion // .state // "") as $r
@@ -148,26 +173,6 @@ case "$provider" in
                           | gsub("[\\n\\r\\t]"; " ")))]
             | join(",") | .[:300])
           + (if $u == "" then "" else " url=" + ($u | gsub("[\\n\\r\\t]"; " ")) end)
-      elif .state == "OPEN" and .isDraft == false and .mergeable == "MERGEABLE"
-        and (.mergeStateStatus == "CLEAN" or .mergeStateStatus == "HAS_HOOKS")
-        and ([.statusCheckRollup[]?] | length) > 0
-        and ([.statusCheckRollup[]? | select(is_run | not) | select(.state != "SUCCESS")]
-             | length) == 0
-        and ([.statusCheckRollup[]? | select(is_run)]
-             | group_by(.name // "")
-             | all(.[]; max_by(.startedAt // "")
-                 | .status == "COMPLETED"
-                   and (.conclusion == "SUCCESS" or .conclusion == "NEUTRAL"
-                        or .conclusion == "SKIPPED")))
-      then
-        "green head=" + (.headRefOid // "") + " since="
-          + ([.statusCheckRollup[]?
-              | (.completedAt // .startedAt // "")
-              | select(type == "string"
-                       and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"))
-              | sub("\\.[0-9]+Z$"; "Z")
-              | fromdateiso8601]
-             | max // 0 | floor | tostring)
       else
         ""
       end' 2>/dev/null) || exit $unknown
@@ -182,6 +187,8 @@ case "$provider" in
         esac
         head=${result#'green head='}
         since=${head#* since=}
+        merge_state=${since#* state=}
+        since=${since%% *}
         head=${head%% *}
         case $head in
           ''|*[!0-9a-f]*) exit 0 ;;
@@ -191,7 +198,11 @@ case "$provider" in
           ''|*[!0-9]*) exit 0 ;;
         esac
         [ "${#since}" -le 12 ] || exit 0
-        printf 'green head=%s since=%s\n' "$head" "$since"
+        case $merge_state in
+          ''|*[!A-Z_]*) exit 0 ;;
+        esac
+        [ "${#merge_state}" -le 32 ] || exit 0
+        printf 'green head=%s since=%s state=%s\n' "$head" "$since" "$merge_state"
         ;;
       'degraded head='*)
         [ "$degraded_enabled" = 1 ] || exit 0
