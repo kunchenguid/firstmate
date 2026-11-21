@@ -3360,12 +3360,14 @@ fi
 
 # Hermes is verified only as a visible tmux worker. Other backends do not
 # yet prove its profile-prefixed composer or native process identity.
-# Wintermolt is verified only as a visible tmux worker: its rendered busy
-# signature lives in the full-screen TUI's pinned footer row, which only a
-# pane capture reads, and its launch is a pane-attached full-screen view with
-# no headless or transcript surface.
-if [ "$HARNESS" = wintermolt ] && [ "$BACKEND" != tmux ]; then
-  echo "error: wintermolt is verified on the tmux backend only; backend=$BACKEND is unsupported" >&2
+# Wintermolt is verified as a visible worker on tmux and rex: its rendered busy
+# signature lives in the full-screen TUI's pinned footer row, which the rex
+# adapter reads from the block's plain capture exactly as the tmux adapter reads
+# a pane capture, and its composer, chunked write and submit read-back have rex
+# equivalents in bin/backends/rex.sh (docs/verification/wintermolt.md owns the
+# evidence). No other backend proves those surfaces, so they stay refused.
+if [ "$HARNESS" = wintermolt ] && [ "$BACKEND" != tmux ] && [ "$BACKEND" != rex ]; then
+  echo "error: wintermolt is verified on the tmux and rex backends only; backend=$BACKEND is unsupported" >&2
   exit 1
 fi
 if [ "$HARNESS" = wintermolt ]; then

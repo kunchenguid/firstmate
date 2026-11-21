@@ -1435,7 +1435,7 @@ Hermes Agent is verified for crewmate and scout TUI launches on tmux only; prima
 Its native profile selects the model and reasoning, and the profile's own gateway may run only if it is idle at dispatch.
 The [Hermes adapter reference](../.agents/skills/harness-adapters/references/harness/hermes.md) owns operating limits, [`fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the per-spawn profile flag, and [Hermes verification](verification/hermes.md) owns live evidence.
 
-Wintermolt is verified for crewmate and scout TUI launches on tmux only; primary and secondmate use and other backends are refused.
+Wintermolt is verified for crewmate and scout TUI launches on tmux and rex; primary and secondmate use and other backends are refused.
 Its backend and provider are selected by wintermolt's own documented environment (`WINTERMOLT_BACKEND` plus the chosen backend's URL/key variables) inherited from the worker environment, and `--model` carries the backend's own model id through `WINTERMOLT_MODEL` exactly as given - a gateway-namespaced id such as `anthropic/claude-sonnet-4` is the backend's id, not a firstmate provider prefix, so no model id is refused for containing a slash - effort is recorded and omitted because wintermolt has no such setting, and the launch pins `WINTERMOLT_NO_FALLBACK=1` so a failed request fails visibly instead of being answered by a fallback model nobody selected.
 [The Wintermolt adapter reference](../.agents/skills/harness-adapters/references/harness/wintermolt.md) owns the operating contract, including why the interrupt verb requires a proven running turn, and [Wintermolt verification](verification/wintermolt.md) owns the live evidence.
 

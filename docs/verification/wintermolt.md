@@ -1,8 +1,9 @@
 # Wintermolt TUI worker verification
 
 Verified on 2026-11-20 on macOS arm64 with the wintermolt 0.7.0 release binary (built from upstream lupin4/wintermolt revision 8b1a8a2), tmux 3.6, and an OpenAI-compatible cloud provider through the stock `openai` backend (`WINTERMOLT_BACKEND=openai`, `WINTERMOLT_OPENAI_URL`, that backend's key variable, `WINTERMOLT_MODEL`).
+Rex carries the same claim from 2026-11-21 against rex 0.1.0-preview.21 (server API revision 18); [Rex](#rex-2026-11-21-wintermolt-070-rex-010-preview21) owns that evidence and the two wiring gaps it closed.
 The [adapter reference](../../.agents/skills/harness-adapters/references/harness/wintermolt.md) owns operating limits; the [spawn header](../../bin/fm-spawn.sh) owns concrete launch mechanics.
-Primary, secondmate, non-tmux backends, `--plain`, `-e`, `--web`, `--chat`, `--gateway`, and `--mcp-server` were not exercised and remain unsupported.
+Primary, secondmate, every other backend, `--plain`, `-e`, `--web`, `--chat`, `--gateway`, and `--mcp-server` were not exercised and remain unsupported.
 The installed binary carries the operator's local `forai` HTTP bearer patch; every fact below was re-checked against that patched binary and against upstream main's `docs/BACKENDS.md` at the fork-synced revision 954262b, and the adapter deliberately uses only the stock upstream `openai` backend surface that both share.
 
 ## Reusable guards
@@ -139,6 +140,25 @@ lane against a tmux server without that backend environment starts the TUI on
 its own default backend (`ollama` in its footer), so a lane run there measures
 the stub, not the adapter.
 
+## Rex (2026-11-21, wintermolt 0.7.0, rex 0.1.0-preview.21)
+
+Measured on macOS arm64 with wintermolt 0.7.0 in a private rex session the run created for itself (the captain's own session was never touched), blocks sized exactly as a rex task tab is sized (200x50 and 80x50), and a local OpenAI-compatible endpoint that accepts a request, opens a stream and holds it, so a genuine running turn costs no model and no credential.
+Every read and write below went through the shipped functions (`fm_backend_rex_composer_state`, `fm_backend_rex_rendered_busy_state`, `fm_backend_rex_delivery_busy`, `fm_backend_rex_send_text_submit`, `fm_backend_rex_send_key`, `fm_backend_rex_agent_state`), not a reimplementation.
+
+- The block's plain capture ends with wintermolt's pinned footer row, so the rendered-tail busy contract reads the same row it reads in a tmux pane: `Enter send ... Esc quit` while idle and `Esc stop ... working` during a turn, and `fm_backend_rex_rendered_busy_state` answers `busy` only for the second.
+- The composer is the same rounded box, but the idle pane classifies `pending` under the tmux shape because rex resets the styling between wintermolt's reverse-video cursor cell and its dim placeholder run, and because the terminal cursor parks on the keybind row rather than in the box.
+  Reading the viewport cursorlessly under the wintermolt composer scope, gated on the block's foreground process being wintermolt, makes the identical shared classifier answer `empty`; every other foreground process keeps its previous verdict.
+- A 104-character brief pointer written once loses its head on this backend, which is why literal input is chunked (8 characters, 50 ms) and the composer is read back before Enter.
+  Driving that submit against the idle pane returned `empty`, and the endpoint received the pointer exactly once in a 6179-byte request body.
+- The same payload through an 80-column block (scroll capacity 70) also returned `empty` and arrived once, because a wholly landed payload wider than the composer row is judged by the row-filling tail it leaves behind.
+- A first attempt at that narrow block delivered the pointer twice (6312-byte body, the text twice in one message): a composer the classifier called a draft but the extractor read as empty was taken as proof that nothing had landed, so the burst was replayed.
+  That read now returns `unknown` instead, which never replays, and the rerun above is the evidence for the corrected behaviour.
+- One Escape on a proven-busy turn stopped it: the footer returned to `Esc quit`, the composer read `empty`, and the agent stayed `alive`.
+- `/quit` submitted through the shared submit core ended the TUI, and `fm_backend_rex_agent_state` then read `missing`.
+- One Escape on an **idle** pane prints `Goodbye.` and exits the TUI outright, the same hazard the tmux adapter documents, so the interrupt verb's proven-running-turn gate is required on rex exactly as it is on tmux.
+
+The rex adapter's own contract and facility map live in [`rex-backend.md`](../rex-backend.md).
+
 ## Non-interactive backend surface (2026-11-20)
 
 Established with `wintermolt -e` on the same binary and provider:
@@ -151,6 +171,6 @@ Established with `wintermolt -e` on the same binary and provider:
 
 ## Unverified
 
-- No primary Stop guard, secondmate hook, Herdr lifecycle, resume, `--plain`/`-e` lane surface, or non-tmux backend was exercised.
+- No primary Stop guard, secondmate hook, Herdr lifecycle, resume, `--plain`/`-e` lane surface, or backend other than tmux and rex was exercised.
 - `config/crew-exclude-tools` is not mapped to `WINTERMOLT_TOOL_BLOCKLIST`; a home that lists exclusions refuses a wintermolt spawn.
 - The launch-pinned variables were verified against the operator's environment only for the `openai` backend; the other stock backends inherit their own documented variables untested.

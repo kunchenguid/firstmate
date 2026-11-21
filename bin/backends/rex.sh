@@ -701,13 +701,51 @@ _fm_backend_rex_squeeze() {  # <text>
 # `unknown` when the composer cannot be read back at all.
 # A proper suffix of <text> is `other`, never `held`: a head-truncated write and
 # a scrolled tail are the same shape, so only the whole payload proves delivery.
+# fm_backend_rex_composer_scroll_capacity: the widest payload the composer can
+# show at once, from the block's own column count less the composer's chrome and
+# a conservative margin, the same shape bin/fm-tmux-lib.sh's tmux capacity uses.
+# A payload wider than this scrolls, so only its tail stays readable.
+# Fails when the geometry cannot be read.
+fm_backend_rex_composer_scroll_capacity() {  # <target>
+  local target=$1 out columns
+  fm_backend_rex_parse_target "$target" || return 1
+  out=$(fm_backend_rex_read block call -s "$FM_BACKEND_REX_SESSION" -b "$FM_BACKEND_REX_BLOCK" size 2>/dev/null) || return 1
+  columns=$(printf '%s' "$out" | jq -r '.columns // empty' 2>/dev/null) || return 1
+  case "$columns" in '' | *[!0-9]*) return 1 ;; esac
+  columns=$((columns - 10))
+  [ "$columns" -gt 0 ] || return 1
+  printf '%s' "$columns"
+}
+
 fm_backend_rex_typed_state() {  # <target> <before> <text> [expected-label]
-  local held before_n expect_n
-  held=$(fm_backend_rex_composer_text "$1" "${4:-}") || { printf 'unknown'; return 0; }
+  local held visible='' before_n expect_n capacity=${FM_BACKEND_REX_SCROLL_CAPACITY:-0}
+  # An `empty` verdict is the classifier's own positive proof that nothing is
+  # held; the raw row it reads there is the harness's idle placeholder, not a
+  # draft. Without this the baseline would carry that placeholder and every
+  # burst written over it would read as a fragment.
+  case "$(fm_backend_rex_composer_state "$1" "${4:-}")" in
+    empty) held='' ;;
+    *)
+      visible=$(fm_backend_rex_composer_text "$1" "${4:-}") || { printf 'unknown'; return 0; }
+      # A composer the classifier calls a draft but the extractor reads as
+      # nothing is a read this seam cannot judge, never proof that the burst
+      # was lost: replaying on it would type a payload that is already there.
+      [ -n "$(_fm_backend_rex_squeeze "$visible")" ] || { printf 'unknown'; return 0; }
+      held=$visible
+      ;;
+  esac
   held=$(_fm_backend_rex_squeeze "$held")
   before_n=$(_fm_backend_rex_squeeze "$2")
   expect_n=$(_fm_backend_rex_squeeze "$2$3")
   if [ "$held" = "$expect_n" ]; then
+    printf 'held'
+  elif [ "$capacity" -gt 0 ] && [ "${#expect_n}" -gt "${#held}" ] \
+       && [ "${#visible}" -ge "$capacity" ] \
+       && case "$expect_n" in *"$held") true ;; *) false ;; esac; then
+    # The composer row scrolls: a wholly landed payload wider than the row shows
+    # only its tail, and a tail that fills the row and ends the payload is that
+    # payload. A truncated write cannot fill the row this way, because its head
+    # is missing rather than its tail.
     printf 'held'
   elif [ "$held" = "$before_n" ]; then
     printf 'nothing'
@@ -1041,13 +1079,14 @@ fm_backend_rex_rendered_busy_state() {  # <target> [harness]
   fi
 }
 
-# fm_backend_rex_composer_identity: the identity probe behind the separated
-# (pi, polytoken) composer shape and Command Code's placeholder ceiling.
-# Prints "<owner>\t<status>" when the foreground process is one of those
-# owners; status is the trusted native state, else the owner's own rendered
-# busy footer.
-fm_backend_rex_composer_identity() {  # <target>
-  local role pid name path argv0 owner='' base native rendered
+# fm_backend_rex_foreground_owner: the composer owner named by the block's
+# FOREGROUND process, or nothing when it is not one of the harnesses whose
+# composer needs its own identity. Wintermolt is included because its TUI draws
+# its own reverse-video cursor cell and parks the terminal cursor on its keybind
+# row, so only its anchored process name can scope its placeholder rule; the
+# same word reaches the delivery and submit se reads below.
+fm_backend_rex_foreground_owner() {  # <target>
+  local role pid name path argv0 owner='' base
   fm_backend_rex_process_chain "$1" || return 1
   while IFS=$'\t' read -r role pid name path argv0; do
     [ "$role" = foreground ] || continue
@@ -1056,6 +1095,7 @@ fm_backend_rex_composer_identity() {  # <target>
         pi|pi-signed|pi-launcher|Pi) owner=pi ;;
         polytoken) owner=polytoken ;;
         command-code) owner=commandcode ;;
+        wintermolt) owner=wintermolt ;;
       esac
       [ -z "$owner" ] || break
     done
@@ -1063,6 +1103,17 @@ fm_backend_rex_composer_identity() {  # <target>
 $FM_BACKEND_REX_CHAIN
 EOF
   [ -n "$owner" ] || return 1
+  printf '%s' "$owner"
+}
+
+# fm_backend_rex_composer_identity: the identity probe behind the separated
+# (pi, polytoken) composer shape and Command Code's placeholder ceiling.
+# Prints "<owner>\t<status>" when the foreground process is one of those
+# owners; status is the trusted native state, else the owner's own rendered
+# busy footer.
+fm_backend_rex_composer_identity() {  # <target>
+  local owner native rendered
+  owner=$(fm_backend_rex_foreground_owner "$1") || return 1
   native=$(fm_backend_rex_native_state "$1")
   case "$native" in
     working|blocked|idle|done) printf '%s\t%s' "$owner" "$native"; return 0 ;;
@@ -1110,8 +1161,22 @@ fm_backend_rex_composer_classify() {  # <target> <screen> <cursor-row>
 # that picks the bottom-most shape decides, exactly as Rex classified every
 # screen before it read the cursor.
 fm_backend_rex_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
-  local target=$1 verdict=unknown
+  local target=$1 owner verdict=unknown
   fm_backend_rex_screen_read "$target" 2>/dev/null || { printf 'unknown'; return 0; }
+  owner=$(fm_backend_rex_foreground_owner "$target" 2>/dev/null || true)
+  # Wintermolt draws its own reverse-video cursor cell and parks the terminal
+  # cursor on its keybind row (verified live, wintermolt 0.7.0 on rex), so only
+  # the cursorless read can name its composer, and its palette-dim placeholder
+  # row resolves only under the wintermolt composer scope in
+  # bin/fm-composer-lib.sh. Read it that way whenever the foreground process is
+  # wintermolt, mirroring bin/fm-tmux-lib.sh's wintermolt reclassification; every
+  # other pane keeps the cursor-anchored read and its `unknown` fallback below.
+  if [ "$owner" = wintermolt ]; then
+    verdict=$(FM_COMPOSER_HARNESS=wintermolt \
+      fm_backend_rex_composer_classify "$target" "$FM_BACKEND_REX_SCREEN" '')
+    printf '%s' "$verdict"
+    return 0
+  fi
   if [ -n "$FM_BACKEND_REX_CURSOR_Y" ]; then
     verdict=$(fm_backend_rex_composer_classify "$target" "$FM_BACKEND_REX_SCREEN" "$FM_BACKEND_REX_CURSOR_Y")
   fi
@@ -1122,10 +1187,36 @@ fm_backend_rex_composer_state() {  # <target> [expected-label] -> empty|pending|
 }
 
 # fm_backend_rex_delivery_busy: busy|idle|unknown for the queued-Enter
-# conversion: a trusted native working state, else the rendered busy footer.
+# conversion: a trusted native working state, else the rendered busy footer,
+# scoped to wintermolt's own pinned footer row when the foreground process is
+# wintermolt, so that agreement is evidence rather than a borrowed wording.
 fm_backend_rex_delivery_busy() {  # <target>
+  local harness=''
   [ "$(fm_backend_rex_busy_state "$1")" != busy ] || { printf 'busy'; return 0; }
-  fm_backend_rex_rendered_busy_state "$1"
+  [ "$(fm_backend_rex_foreground_owner "$1" 2>/dev/null || true)" != wintermolt ] || harness=wintermolt
+  fm_backend_rex_rendered_busy_state "$1" "$harness"
+}
+
+# fm_backend_rex_submit_busy_confirm: poll wintermolt's own rendered footer
+# across the budget the caller grants, and report success only when the pane
+# proves busy under that scoped signature. A wintermolt footer renders well
+# after the shared Enter budget, so the confirmation that follows a submitted
+# turn ([footer-budget] = 1) uses the same poll budget the adapter's spawn gate
+# already grants that verdict (FM_WINTERMOLT_DELIVERY_POLLS and
+# FM_WINTERMOLT_POLL_INTERVAL), exactly as bin/fm-tmux-lib.sh's
+# fm_tmux_submit_busy_confirm does. Every other read keeps the caller's retries.
+fm_backend_rex_submit_busy_confirm() {  # <target> <retries> <enter-sleep> [footer-budget]
+  local target=$1 retries=$2 sleep_s=$3 footer_budget=${4:-} j=0
+  if [ "$footer_budget" = 1 ]; then
+    retries=${FM_WINTERMOLT_DELIVERY_POLLS:-60}
+    sleep_s=${FM_WINTERMOLT_POLL_INTERVAL:-0.5}
+  fi
+  while [ "$j" -lt "$retries" ]; do
+    [ "$(fm_backend_rex_rendered_busy_state "$target" wintermolt)" != busy ] || return 0
+    j=$((j + 1))
+    [ "$j" -ge "$retries" ] || sleep "$sleep_s"
+  done
+  return 1
 }
 
 # fm_backend_rex_send_text_submit: write <text> in chunks, prove it landed in
@@ -1147,16 +1238,39 @@ fm_backend_rex_delivery_busy() {  # <target>
 fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected_label=${6:-} verdict
   local chunk interval max_attempts attempts=0 before='' verify=0 typed
+  local owner='' baseline_idle='' capacity
   fm_backend_rex_parse_target "$target" || { printf 'unknown'; return 0; }
+  owner=$(fm_backend_rex_foreground_owner "$target" 2>/dev/null || true)
+  # A wintermolt submit needs the pane's pre-typing idle state: its working row
+  # reads `pending-unproven` for the whole turn, so only a pane that provably
+  # stood idle before the write may be confirmed through the turn-started
+  # transition below, never through a guess.
+  if [ "$owner" = wintermolt ] \
+     && [ "$(fm_backend_rex_rendered_busy_state "$target" wintermolt)" = idle ]; then
+    baseline_idle=1
+  fi
   chunk=$(fm_backend_rex_type_chunk)
   interval=$(fm_backend_rex_type_interval)
   max_attempts=${FM_BACKEND_REX_TYPE_ATTEMPTS:-3}
   case "$max_attempts" in '' | *[!0-9]* | 0*) max_attempts=3 ;; esac
   # The pre-typing read is the baseline the words are judged against, and it
-  # must be taken before the first write. A pane whose composer cannot be read
-  # yields no baseline and keeps the unverified path.
-  if before=$(fm_backend_rex_composer_text "$target" "$expected_label"); then
+  # must be taken before the first write. An `empty` verdict is positive proof
+  # that the composer holds nothing, so the baseline is empty there rather than
+  # the idle placeholder the raw row carries; a pane whose composer cannot be
+  # read at all yields no baseline and keeps the unverified path.
+  if [ "$(fm_backend_rex_composer_state "$target" "$expected_label")" = empty ]; then
+    before=''
     verify=1
+  elif before=$(fm_backend_rex_composer_text "$target" "$expected_label"); then
+    verify=1
+  fi
+  # A scrolling composer (wintermolt's, measured live at `columns - 7` visible
+  # characters) keeps only the tail of a payload wider than its row, so the
+  # read-back needs that width to tell that tail from a fragment. Exported, so
+  # the typed-state read in its command substitution sees it too.
+  if capacity=$(fm_backend_rex_composer_scroll_capacity "$target" 2>/dev/null); then
+    FM_BACKEND_REX_SCROLL_CAPACITY=$capacity
+    export FM_BACKEND_REX_SCROLL_CAPACITY
   fi
   while :; do
     fm_backend_rex_type_literal "$target" "$text" "$chunk" "$interval" || {
@@ -1188,6 +1302,16 @@ fm_backend_rex_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <
   done
   verdict=$(fm_composer_submit_retry_core fm_backend_rex_send_key fm_backend_rex_composer_state \
     "$target" "$retries" "$sleep_s" "$expected_label")
+  # Wintermolt's composer never proves empty after a submitted turn: its working
+  # row reads `pending-unproven` whatever the turn is doing. A pane that stood
+  # idle before the write and now renders its own busy footer has started the
+  # turn, which is exactly the delivery the caller asked to confirm. This is the
+  # conversion bin/fm-tmux-lib.sh's enter core makes for the same pane; every
+  # other harness keeps `pending-unproven` unproven.
+  if [ "$verdict" = pending-unproven ] && [ "$owner" = wintermolt ] && [ "$baseline_idle" = 1 ] \
+     && fm_backend_rex_submit_busy_confirm "$target" "$retries" "$sleep_s" 1; then
+    verdict=empty
+  fi
   if [ "$verdict" = pending ]; then
     verdict=$(fm_composer_queued_enter_verdict "$verdict" "$(fm_backend_rex_delivery_busy "$target")")
   fi

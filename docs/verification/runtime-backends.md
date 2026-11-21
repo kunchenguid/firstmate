@@ -178,7 +178,7 @@ The crewmate/scout-only Command Code 1.74.1 adapter was verified on 2026-10-05 a
 Its node process sets its title to `command-code`, the anchored foreground identity that classified `alive` on both backends, while `command-code-helper` remained ambiguous in the portable regression.
 [`commandcode.md`](commandcode.md) owns that evidence, and `FM_COMMANDCODE_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-commandcode-signals-live-e2e.test.sh` refreshes it.
 
-The crewmate/scout-only Wintermolt 0.7.0 adapter was verified on 2026-11-20 against tmux 3.6 on macOS arm64 in a private lab session.
+The crewmate/scout-only Wintermolt 0.7.0 adapter was verified on 2026-11-20 against tmux 3.6 and on 2026-11-21 against rex 0.1.0-preview.21 (server API revision 18) on macOS arm64 in private lab sessions.
 Its Zig-compiled binary runs as the exact foreground `comm` `wintermolt`, the anchored identity that classified `alive`, while `wintermolt-tools` and `wm-helper` remained ambiguous in the portable regression; a bash tool subprocess is a direct child of the `wintermolt` process, so the tool-side harness detector reaches that ancestor at hop one and reports `wintermolt`.
 [`wintermolt.md`](wintermolt.md) owns that evidence, including the rendered-tail busy fallback anchored to the TUI's pinned footer row and the no-fallback launch pin, and `FM_WINTERMOLT_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-wintermolt-signals-live-e2e.test.sh` refreshes it.
 This summary follows the owner record for that session's tmux version.

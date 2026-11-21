@@ -75,7 +75,8 @@ The defaults are tmux's measured ones, 8 characters per write with a 50 ms gap; 
 That covers every literal write, including the pane launch line spawn types.
 
 Verified submit then reads the composer back before pressing Enter, and treats only content that still holds the whole payload as delivered.
-A truncated write lands as a suffix of the payload, so a suffix is never accepted as a wrapped or scrolled tail: it is reported `send-failed` with no Enter sent, leaving the fragment visible instead of submitting it.
+A truncated write lands as a suffix of the payload, so a bare suffix is never read as a wrapped tail: it is reported `send-failed` with no Enter sent, leaving the fragment visible instead of submitting it.
+The one suffix that does prove delivery is the scrolling-composer tail, and only under both conditions that make it unambiguous: the payload is wider than the block's composer row (`size.columns` less the row's chrome and a conservative margin) and the visible text fills that row and ends the payload.
 That fragment is deliberately not typed over, because clearing a composer means guessing a harness's own key semantics: inspect the pane with `bin/fm-peek.sh` and clear it before re-sending.
 A burst is replayed only when the composer provably holds nothing of it, up to `FM_BACKEND_REX_TYPE_ATTEMPTS` bursts (default 3), so a replay can never duplicate text.
 A composer that cannot be read back at all keeps the chunked write as its only protection rather than guessing a failure.
@@ -87,6 +88,11 @@ The vt grid joins rows with CRLF, so an empty bottom row leaves the content endi
 A full-screen program's grid is the screen alone, so the derivation holds on both screens; a resize landing between the size read and the grid read can skew it by the size difference.
 The composer classifier reads that styled viewport with styling, row count, process identity, and the cursor row available, the same evidence tmux gives it: the shape holding the cursor is the composer, so furniture a harness draws below its composer cannot decide the verdict.
 Where that cursor-anchored read is `unknown`, as for a harness that parks its cursor outside its composer, the cursorless read that takes the bottom-most shape decides instead.
+Wintermolt is the one verified harness that takes a composer scope on this backend: its TUI draws its own reverse-video cursor cell and parks the terminal cursor on its keybind row, so a block whose foreground process is exactly `wintermolt` is read cursorlessly under the wintermolt scope in [`fm-composer-lib.sh`](../bin/fm-composer-lib.sh), which is what lets its idle placeholder read `empty`.
+That scope is gated on that anchored foreground process and never on a verdict, so no other harness's read moves.
+Its busy footer is the block's last non-empty capture row, read through the same rendered-tail contract the tmux adapter uses, and its delivery read is scoped to that footer rather than the harness-less union.
+A wintermolt submit that still reads `pending-unproven` is confirmed through the idle-to-busy transition on that footer, with the adapter's own budget (`FM_WINTERMOLT_DELIVERY_POLLS`, `FM_WINTERMOLT_POLL_INTERVAL`), and only for a block that provably stood idle before the write.
+[`verification/wintermolt.md`](verification/wintermolt.md) owns the live evidence for both backends.
 
 The `process` block method reports the foreground process with its cwd, its ancestors, and the last exit.
 Spawn's worktree discovery reads the foreground cwd, which follows the nested subshell `treehouse get` opens.

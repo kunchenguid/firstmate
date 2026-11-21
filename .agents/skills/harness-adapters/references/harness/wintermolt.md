@@ -1,7 +1,7 @@
 # Wintermolt
 
 Wintermolt's full-screen TUI, verified end to end on 2026-11-20 with the wintermolt 0.7.0 release binary (built from upstream lupin4/wintermolt revision 8b1a8a2) on macOS through tmux, on an OpenAI-compatible cloud provider.
-Verified as a CREWMATE and SCOUT adapter on tmux only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch and any non-tmux backend because the rendered busy signature lives in the full-screen footer only a pane capture reads.
+Verified as a CREWMATE and SCOUT adapter on tmux and rex; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch and every other backend because the rendered busy signature lives in the full-screen footer that only a pane or block capture reads, and only those two adapters prove that capture, the composer read, the chunked write and the submit read-back together.
 `../../../../../docs/verification/wintermolt.md` owns how every fact below was established and what is still unproven.
 
 ## Operating facts
@@ -32,8 +32,9 @@ A provider error inside a `200` stream is treated as a failed request, so a quot
 
 ## Limits
 
-Only the full-screen TUI on tmux was verified; `--plain`, `-e`, `--web`, `--chat`, `--gateway`, and `--mcp-server` are other surfaces firstmate never drives.
+Only the full-screen TUI on tmux and rex was verified; `--plain`, `-e`, `--web`, `--chat`, `--gateway`, and `--mcp-server` are other surfaces firstmate never drives.
 `config/crew-exclude-tools` is not mapped to wintermolt's `WINTERMOLT_TOOL_BLOCKLIST`; a home that lists exclusions refuses a wintermolt spawn rather than running with the tools available, and mapping the list is follow-up work.
 The operator's `~/.wintermolt/` startup environment file is loaded on every startup, and shell variables take precedence over it, so the launch-pinned variables above always win.
 No primary Stop guard, pre-tool protection, secondmate hook, Herdr lifecycle, or Orca/other-backend surface was verified.
+On rex the whole verified surface is the same claim: the pinned footer is the block's last non-empty capture row, the composer resolves under the wintermolt scope gated on the block's foreground process, literal input is chunked and read back before Enter, and interrupt and exit ride the rex control plane (verification record: `docs/verification/wintermolt.md`).
 The installed 0.7.0 binary carries a local `forai` HTTP bearer patch (kept in the operator's own packaging); firstmate's adapter deliberately uses only the stock upstream `openai` backend surface, which exists in both the installed binary and current upstream main, so the adapter does not depend on the patch.

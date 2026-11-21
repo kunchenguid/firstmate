@@ -56,6 +56,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tmux-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/backends/rex.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
@@ -888,6 +890,119 @@ rows=8" "$screen")
   pass "fm-composer-lib: the wintermolt footer exemption stays anchored"
 }
 
+# The rex backend surfaces the same claim depends on (docs/verification/
+# wintermolt.md owns the live evidence): the idle placeholder resolves through
+# the same scoped rule on rex's reset-separated cell shape, the composer reads
+# empty only when the block's foreground process is wintermolt, and a wintermolt
+# submit is confirmed through the turn-started transition on its own footer
+# rather than through any other harness's verdict.
+REX_IDLE_COMPOSER_RAW="│${WM_ESC}[0m${WM_ESC}[38;5;8m  ${WM_ESC}[0m${WM_ESC}[48;5;6mT${WM_ESC}[0m${WM_ESC}[38;5;8mype a message, or /help${WM_ESC}[0m$(wm_pad 14)│"
+REX_DRAFT_COMPOSER_RAW="│${WM_ESC}[0m${WM_ESC}[38;5;8m  ${WM_ESC}[0mType a message, or /help${WM_ESC}[0m${WM_ESC}[48;5;6m ${WM_ESC}[49m$(wm_pad 12)│"
+
+# _rex_foreground: one fake rex process chain for <name>.
+_rex_foreground() {  # <name>
+  printf 'foreground\t4242\t%s\t/tmp/%s\t%s\n' "$1" "$1" "$1"
+}
+
+test_wintermolt_rex_idle_placeholder_reads_empty_and_draft_stays_pending() {
+  local screen verdict
+  screen=$(wm_composer_screen "$REX_IDLE_COMPOSER_RAW" "$WM_FOOTER_IDLE")
+  verdict=$(
+    RSTATE_SCREEN=$screen
+    fm_backend_rex_screen_read() { FM_BACKEND_REX_SCREEN=$RSTATE_SCREEN; FM_BACKEND_REX_CURSOR_Y=''; }
+    fm_backend_rex_process_chain() { FM_BACKEND_REX_CHAIN=$(printf 'foreground\t4242\twintermolt\t/tmp/wintermolt\twintermolt'); }
+    fm_backend_rex_composer_state probe
+  )
+  [ "$verdict" = empty ] \
+    || fail "a rex wintermolt pane on its idle placeholder must read empty, got '$verdict'"
+  screen=$(wm_composer_screen "$REX_DRAFT_COMPOSER_RAW" "$WM_FOOTER_IDLE")
+  verdict=$(
+    RSTATE_SCREEN=$screen
+    fm_backend_rex_screen_read() { FM_BACKEND_REX_SCREEN=$RSTATE_SCREEN; FM_BACKEND_REX_CURSOR_Y=''; }
+    fm_backend_rex_process_chain() { FM_BACKEND_REX_CHAIN=$(printf 'foreground\t4242\twintermolt\t/tmp/wintermolt\twintermolt'); }
+    fm_backend_rex_composer_state probe
+  )
+  # The draft carries rex's trailing cursor cell, so the shared classifier may
+  # answer pending or pending-unproven; what must never happen is empty.
+  [ "$verdict" = pending ] || [ "$verdict" = pending-unproven ] \
+    || fail "a rex draft spelling the placeholder must read its own draft, got '$verdict'"
+  pass "rex: the wintermolt idle placeholder reads empty and a draft never does"
+}
+
+test_wintermolt_rex_scope_is_gated_on_its_own_foreground_process() {
+  local screen verdict
+  screen=$(wm_composer_screen "$REX_IDLE_COMPOSER_RAW" "$WM_FOOTER_IDLE")
+  # A pane whose foreground process is another harness keeps the plain read, so
+  # the wintermolt placeholder rule never moves that harness's verdict.
+  verdict=$(
+    RSTATE_SCREEN=$screen
+    fm_backend_rex_screen_read() { FM_BACKEND_REX_SCREEN=$RSTATE_SCREEN; FM_BACKEND_REX_CURSOR_Y=''; }
+    fm_backend_rex_process_chain() { FM_BACKEND_REX_CHAIN=$(printf 'foreground\t4242\tbash\t/bin/bash\tbash'); }
+    fm_backend_rex_composer_state probe
+  )
+  [ "$verdict" != empty ] \
+    || fail "only a wintermolt foreground may take the wintermolt composer scope, got '$verdict'"
+  pass "rex: the wintermolt composer scope is gated on the block's foreground process"
+}
+
+test_wintermolt_rex_delivery_busy_is_scoped_to_its_own_footer() {
+  local seen
+  seen=$(
+    fm_backend_rex_busy_state() { printf 'unknown'; }
+    fm_backend_rex_rendered_busy_state() { printf '%s' "${2:-}"; }
+    fm_backend_rex_process_chain() { FM_BACKEND_REX_CHAIN=$(printf 'foreground\t4242\twintermolt\t/tmp/wintermolt\twintermolt'); }
+    fm_backend_rex_delivery_busy probe
+  )
+  [ "$seen" = wintermolt ] \
+    || fail "a wintermolt pane must read its own footer signature, got '$seen'"
+  seen=$(
+    fm_backend_rex_busy_state() { printf 'unknown'; }
+    fm_backend_rex_rendered_busy_state() { printf '[%s]' "${2:-}"; }
+    fm_backend_rex_process_chain() { FM_BACKEND_REX_CHAIN=$(printf 'foreground\t4242\tbash\t/bin/bash\tbash'); }
+    fm_backend_rex_delivery_busy probe
+  )
+  [ "$seen" = '[]' ] \
+    || fail "a non-wintermolt pane must keep the harness-less busy union, got '$seen'"
+  pass "rex: the delivery busy read is wintermolt-scoped only on a wintermolt pane"
+}
+
+# _rex_submit_verdict <composer-state-after-enter> <busy-after-enter> <foreground>
+# The pane stands idle before the write and renders <busy-after-enter> after it.
+_rex_submit_verdict() {  # <after-enter> <after-busy> <foreground>
+  local after=$1 after_busy=$2 fg=$3 phase=before
+  (
+    fm_backend_rex_parse_target() { return 0; }
+    fm_backend_rex_process_chain() { FM_BACKEND_REX_CHAIN=$(printf 'foreground\t4242\t%s\t/tmp/%s\t%s' "$fg" "$fg" "$fg"); }
+    fm_backend_rex_type_literal() { phase=after; return 0; }
+    fm_backend_rex_composer_text() { printf ''; }
+    fm_backend_rex_typed_state() { printf 'held'; }
+    fm_backend_rex_send_key() { return 0; }
+    fm_backend_rex_composer_state() { printf '%s' "$after"; }
+    fm_backend_rex_busy_state() { printf 'unknown'; }
+    fm_backend_rex_rendered_busy_state() {
+      case "$phase" in
+        before) printf 'idle' ;;
+        *) printf '%s' "$after_busy" ;;
+      esac
+    }
+    fm_backend_rex_send_text_submit probe 'the brief pointer' 1 0.01 0.01
+  )
+}
+
+test_wintermolt_rex_submit_confirms_through_the_turn_started_transition() {
+  local verdict
+  verdict=$(_rex_submit_verdict pending-unproven busy wintermolt)
+  [ "$verdict" = empty ] \
+    || fail "an idle wintermolt pane that goes busy across our Enter must confirm, got '$verdict'"
+  verdict=$(_rex_submit_verdict pending-unproven idle wintermolt)
+  [ "$verdict" = pending-unproven ] \
+    || fail "a wintermolt pane that never goes busy must stay unproven, got '$verdict'"
+  verdict=$(_rex_submit_verdict pending-unproven busy bash)
+  [ "$verdict" = pending-unproven ] \
+    || fail "another harness's pending-unproven must never be converted, got '$verdict'"
+  pass "rex: a wintermolt submit confirms only on the idle-to-busy transition"
+}
+
 test_wintermolt_idle_placeholder_is_fleet_wide() {
   fm_composer_idle_matches 'Type a message, or /help' \
     "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive \
@@ -1181,8 +1296,9 @@ test_wintermolt_refuses_a_secondmate_and_other_backends() {
   out=$(run_wintermolt_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --backend herdr)
   rc=$?
-  expect_code 1 "$rc" "a wintermolt launch on a non-tmux backend must be refused"
-  assert_contains "$out" "verified on the tmux backend only" "the refusal must name the tmux-only boundary"
+  expect_code 1 "$rc" "a wintermolt launch on a backend without proven surfaces must be refused"
+  assert_contains "$out" "verified on the tmux and rex backends only" "the refusal must name the verified-backend boundary"
+  assert_not_contains "$out" "backend=rex is unsupported" "rex must not be refused any more"
   pass "fm-spawn: wintermolt refuses secondmates and non-tmux backends"
 }
 
@@ -1247,6 +1363,10 @@ test_wintermolt_idle_composer_reads_empty_only_through_the_scope
 test_wintermolt_draft_and_busy_rows_stay_pending
 test_wintermolt_footer_furniture_bounds_the_box
 test_wintermolt_idle_placeholder_is_fleet_wide
+test_wintermolt_rex_idle_placeholder_reads_empty_and_draft_stays_pending
+test_wintermolt_rex_scope_is_gated_on_its_own_foreground_process
+test_wintermolt_rex_delivery_busy_is_scoped_to_its_own_footer
+test_wintermolt_rex_submit_confirms_through_the_turn_started_transition
 test_wintermolt_launch_pins_the_env_contract_and_delivers_the_pointer
 test_wintermolt_accepts_a_slash_namespaced_model_id
 test_wintermolt_refuses_a_secondmate_and_other_backends

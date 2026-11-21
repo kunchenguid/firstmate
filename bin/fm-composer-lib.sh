@@ -1521,7 +1521,14 @@ _fm_composer_wintermolt_placeholder_row() {  # <raw-styled-row> <plain-content>
   local raw=$1 plain=$2
   fm_composer_idle_matches "$plain" \
     "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive || return 1
-  printf '%s' "$raw" | grep -qE $'\x1b\[[0-9;]*m[[:space:]]*\x1b\[48;[0-9;]*m.\x1b\[38;5;[0-9]+m(\x1b\[49m)?'
+  # tmux paints the reverse-video cursor cell on the placeholder's first
+  # character and the dim run immediately after it. rex paints the dim border
+  # run first, resets before the cell, and resets again between the cell and
+  # the dim run (verified live: wintermolt 0.7.0 on rex, tmux 3.8). The
+  # tolerance covers both shapes and stays inside a row whose plain content is
+  # already exactly the idle placeholder, under the wintermolt scope only.
+  printf '%s' "$raw" \
+    | grep -qE $'\x1b\[[0-9;]*m(\x1b\[38;5;[0-9]+m)?[^[:space:]]?[[:space:]]*(\x1b\[0m)?\x1b\[48;[0-9;]*m.(\x1b\[0m)?\x1b\[38;5;[0-9]+m(\x1b\[49m)?'
 }
 
 _fm_composer_classify_rows() {  # <screen> <styled> <ambiguous> <first-row> <last-row>
