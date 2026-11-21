@@ -116,7 +116,14 @@
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
-# before any wake. On a PR, comments, reviews and inline review comments whose
+# before any wake. Open pull-request movement - a replaced head, leaving draft,
+# or a newly requested reviewer or team - is opt-in: only a regular file at
+# $CONFIG/contribution-pr-movement enables these signals (contents ignored).
+# Each poll reads the setting; removing the file stops new movement signals,
+# without deleting pending signals. Observations still refresh while disabled,
+# so enabling it does not replay already observed changes. A first observation
+# is the movement baseline, and merged or closed observations report no movement.
+# On a PR, comments, reviews and inline review comments whose
 # author login is listed in the effective config/contribution-review-bots (one
 # exact login per line; blank and # lines ignored) are admitted too, marked
 # review_bot:true. Review-bot watching is opt-in: an absent or empty file admits
@@ -489,6 +496,8 @@ observe() { # canonical GitHub URL -> normalized JSON
         + [$reviews[] | select(.user.login == $c.user.login and ((.body // "") != "")) | .submitted_at]) as $replied_at
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
+          review_requests:(([$c.requested_reviewers[]? | .login | strings]
+            + [$c.requested_teams[]? | .slug | strings | "team:" + .]) | unique),
           can_merge:($repo[0].permissions.push // false),
           review_decision:($after[0].reviewDecision // ""),
           reviews:($reviews | map({id,state,submitted_at,commit_id,user:{login:.user.login}})),
@@ -638,9 +647,10 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why unreported=$'\n'
+  local task url old kind error observed why unreported=$'\n' pr_movement=false
   local -a row
   acquire
+  [ ! -f "$CONFIG/contribution-pr-movement" ] || pr_movement=true
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
@@ -713,11 +723,11 @@ poll() {
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$observed" -eq 0 ]; then
         jq_lib -n --arg now "$NOW" --argjson epoch "$EPOCH" --argjson reply_age "$REPLY_AGE" --argjson track "$TRACK_THREADS" \
-          --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
+          --argjson pr_movement "$pr_movement" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
-              else [] end)) as $events
+              else [] end) + (if $pr_movement then movement($old.observation; $o; $old.url; $now) else [] end)) as $events
           | [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] as $arrived
           # An acknowledgement removes the signal, not the thread: a thread
           # with no author reply or resolution is raised again after reply_age.
