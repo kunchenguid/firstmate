@@ -1940,8 +1940,6 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
   _fm_composer_row_is_braille_furniture "$row" && return 0
   fm_composer_idle_matches "$row" \
     "${FM_COMPOSER_MODE_HINT_RE:-$FM_COMPOSER_MODE_HINT_RE_DEFAULT}" sensitive && return 0
-  fm_composer_idle_matches "$row" \
-    "${FM_COMPOSER_WINTERMOLT_FOOTER_RE:-$FM_COMPOSER_WINTERMOLT_FOOTER_RE_DEFAULT}" insensitive && return 0
   fm_composer_leading_agent_glyph_var glyph "$row" || return 1
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
 }
@@ -2182,13 +2180,11 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     fi
     # The same footer zone, read from the other side: rows this envelope's own
     # glyph proved to be its furniture are not the lower live shape that makes
-    # the envelope stale, so the staleness probe resumes past them. A row
-    # recognized as harness furniture by its own anchored signature claims the
-    # same exemption without a glyph proof, because a glyphless envelope
-    # (wintermolt's rounded box) still owns the row its harness draws below
-    # it; the exemption may only ever keep an envelope selectable, never turn
-    # its content empty, and the recognized signature is the composer's own
-    # furniture text rather than anything a draft could render there.
+    # the envelope stale, so the staleness probe resumes past them. Wintermolt's
+    # anchored keybind footer claims the same exemption without a glyph proof,
+    # because its glyphless rounded box still owns the one row the TUI draws
+    # below it; no other harness's furniture is exempted here, so every
+    # staleness verdict those rows carry is unchanged.
     next=$((boundary + 1))
     if [ "$footer" = 1 ] && [ "$FM_COMPOSER_FOOTER_AFTER" = "$boundary" ]; then
       next=$((FM_COMPOSER_FOOTER_LAST + 1))
@@ -2197,7 +2193,8 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed" \
-       && ! _fm_composer_row_is_composer_furniture "$trimmed" ''; then
+       && ! fm_composer_idle_matches "$trimmed" \
+            "${FM_COMPOSER_WINTERMOLT_FOOTER_RE:-$FM_COMPOSER_WINTERMOLT_FOOTER_RE_DEFAULT}" insensitive; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi

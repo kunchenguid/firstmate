@@ -587,7 +587,9 @@ test_wintermolt_unreadable_composer_keeps_the_caller_retry_budget() {
   # times (~30s) before reporting the pane gone.
   (
     unset FM_COMPOSER_DIALOG_SINK
+    # shellcheck disable=SC2329 # Invoked by fm_tmux_submit_enter_core below.
     fm_tmux_composer_state() { printf 'unknown'; }
+    # shellcheck disable=SC2329 # Invoked by fm_tmux_submit_enter_core below.
     fm_pane_is_busy() { printf 'poll\n' >> "$polls"; return 1; }
     fm_tmux_submit_enter_core win 2 0.01 1 wintermolt
   ) > "$vfile" 2>/dev/null
@@ -727,6 +729,7 @@ test_wintermolt_malformed_chunk_setting_still_delivers() {
     fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
     state="$case_dir/wm.state"
     printf 'idle\n' > "$state"
+    # shellcheck disable=SC2016 # $1/$2 expand inside the child shell.
     verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_HEAD_DROP=16 \
       FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
       FM_WINTERMOLT_TYPE_INTERVAL=0 FM_WINTERMOLT_TYPE_CHUNK="$bad" \
@@ -798,7 +801,7 @@ $WM_FOOTER_IDLE")
 # wintermolt-scoped placeholder rule reads the idle row empty, and neither the
 # draft nor the busy row can reach empty.
 wm_composer_screen() {  # <composer-raw-row> <footer-row>
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n' \
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
     "$(wm_transcript_top)" \
     "$(wm_inner_plain '  conversation history')" \
     "$WM_BOTTOM" \
