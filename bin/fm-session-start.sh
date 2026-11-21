@@ -1057,6 +1057,9 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+if [ -e "$CONFIG/pr-follow" ]; then
+  printf 'PR following is enabled: for follow or unfollow requests, read %s/docs/configuration.md (Explicit PR follows).\n' "$FM_ROOT"
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

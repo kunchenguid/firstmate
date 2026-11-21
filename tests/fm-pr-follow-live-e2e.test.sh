@@ -17,12 +17,15 @@ SH
 chmod +x "$TMP_ROOT/tools/gh"
 cat > "$TMP_ROOT/fixture.ts" <<'TS'
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 export default function(pi) {
   pi.on("session_start", (_event, ctx) => {
     const state = `${process.env.FM_HOME}/state`;
     mkdirSync(state, {recursive:true});
     writeFileSync(`${state}/.lock`, `${process.pid}\n`);
     writeFileSync(`${state}/.lock-session`, `${ctx.sessionManager.getSessionId()}\n`);
+    writeFileSync(`${process.env.FM_HOME}/project-skills.json`, JSON.stringify(
+      loadSkillsFromDir({dir: `${process.env.FM_ROOT_OVERRIDE}/.agents/skills`, source: "project"}).skills));
     // Pi keeps a never-prompted session in memory, so inspect its live entries.
     setInterval(() => writeFileSync(`${process.env.FM_HOME}/entries.json`,
       JSON.stringify(ctx.sessionManager.getEntries())), 100).unref();
@@ -90,6 +93,10 @@ for harness in pi pi-signed claude; do
     "export FM_HOME='$home' FM_ROOT_OVERRIDE='$ROOT' FM_STATE_OVERRIDE='$home/state' FM_DATA_OVERRIDE='$home/data' FM_CONFIG_OVERRIDE='$home/config' FM_FOLLOW_FIXTURE='$home/forge.json' PATH='$PATH'; $command"
   if [ "$harness" = claude ]; then tmux -L "$SOCKET" display-message -p -t subject '#{pane_pid}' > "$home/state/.lock"; fi
   wait_marker
+  if [ "$harness" != claude ]; then
+    jq -e 'length > 0 and all(.[]; .name != "pr-follow")' "$home/project-skills.json" >/dev/null \
+      || fail "$harness advertised a follow trigger in the unconditional skill index"
+  fi
   for event in merged closed failed; do
     case "$event" in merged) number=1; word=MERGED ;; closed) number=2; word=CLOSED ;; failed) number=3; word=FAILURE ;; esac
     url="https://github.com/example/project/pull/$number"

@@ -3143,12 +3143,14 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 ## Explicit PR-follow outcome display
 
-Verified on 2026-11-19 with Pi 1.5.2 and Claude Code 2.1.328 on Linux.
+Verified on 2026-11-21 with Pi 1.5.2 and Claude Code 2.1.330 on Linux.
 [Explicit PR follows](../configuration.md#explicit-pr-follows-configpr-follow) owns the opt-in setup and supported presentation boundary.
 The guard opens real terminal sessions and substitutes only forge reads.
 It submits no prompt and changes no real PR.
 Each taskless merge, closure, and failing check on a new commit produces one URL-bearing transcript line.
 The guard also checks that no primary model turn or supervision wake starts.
+Pi's native skill discovery verifies that no follow trigger enters the unconditional skill index.
+`tests/fm-session-start.test.sh` checks that the flag adds only one guidance line and removing it restores the original digest bytes.
 
 ```sh
 bash bin/fm-test-run.sh tests/fm-pr-follow-live-e2e.test.sh
@@ -3157,7 +3159,7 @@ bash bin/fm-test-run.sh tests/fm-pr-follow-live-e2e.test.sh
 ```text
 ok - pi 1.5.2: three taskless forge changes produced three visible lines, no primary turn or wake
 skip: pi-signed is not installed for the live PR-follow proof
-ok - claude 2.1.328 (Claude Code): three taskless forge changes produced three visible lines, no primary turn or wake
+ok - claude 2.1.330 (Claude Code): three taskless forge changes produced three visible lines, no primary turn or wake
 ```
 
 Pi-signed was not separately exercised in this run.

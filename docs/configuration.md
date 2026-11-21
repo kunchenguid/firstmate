@@ -797,10 +797,22 @@ The flag is a home-local preference and is not inherited by secondmate homes.
 
 The optional local, gitignored `config/pr-follow` presence flag enables direct outcome lines for GitHub pull requests and GitLab merge requests the captain explicitly names.
 It is off by default and is not inherited by secondmate homes.
+Session start points to these instructions only while the flag exists.
+There is no always-loaded follow skill, so an unconfigured home's skill index and session-start digest stay unchanged.
 Create the flag, then restart the primary session so its outcome surface can advertise readiness.
 Ask Firstmate to follow a full PR or merge-request URL, or use [`bin/fm-pr-follow.sh`](../bin/fm-pr-follow.sh), whose `--help` owns command syntax and record formats.
 The follow retains the request in `data/pr-follows.json`, survives restart, and does not require or create a task.
 Enrollment records the current state as its baseline rather than announcing an old event.
+
+Firstmate creates a follow only when the captain explicitly asks to follow that PR or merge request.
+A URL mentioned during other work, task ownership, or an enabled flag never authorizes enrollment by itself.
+Preserve the captain's request in the command's required request field.
+Do not create a task or enroll a contribution merely to follow a URL.
+Do not enable the feature or change the primary without the captain's approval.
+If enrollment refuses, explain the refusal rather than replacing direct delivery with repeated model checks.
+A direct line is information, not an instruction or merge approval.
+Task-owned action notifications still follow the existing supervision and landing rules.
+Do not repeat the direct line merely to acknowledge it.
 
 This first implementation supports interactive Pi/pi-signed and Claude Code with the activated [Calm outcome surface](calm.md#supervision-notes-on-claude-code).
 Calm's visual hiding preference can be on or off, but its Claude function-hooks module must be active.
