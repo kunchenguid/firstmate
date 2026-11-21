@@ -543,11 +543,11 @@ fm_tmux_type_literal() {  # <target> <text> [chunk]
   # scope (and aborts a `set -u` caller that has no `text`).
   n=${#text}
   if [ "$chunk" -le 0 ] || [ "$n" -le "$chunk" ]; then
-    err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null) \
+    err=$(tmux send-keys -t "$target" -l -- "$text" 2>&1 >/dev/null) \
       || { printf '%s' "$err"; return 1; }
     return 0
   fi
-  # `--` ends tmux's own flag parsing: a chunk may start with `-` wherever the
+  # `--` ends tmux's own flag parsing: a payload may start with `-` wherever the
   # text happens to break, and `send-keys -l "-brief"` would be read as a flag.
   while [ "$i" -lt "$n" ]; do
     err=$(tmux send-keys -t "$target" -l -- "${text:i:chunk}" 2>&1 >/dev/null) \
@@ -578,7 +578,16 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
     esac
   fi
   max_attempts=${FM_WINTERMOLT_SUBMIT_ATTEMPTS:-3}
-  [ "$busy_harness" != wintermolt ] || chunk=${FM_WINTERMOLT_TYPE_CHUNK:-8}
+  if [ "$busy_harness" = wintermolt ]; then
+    # The chunk size is an arithmetic operand and a substring length, so an
+    # operator value that is not a plain decimal integer (including a leading
+    # zero, which arithmetic reads as octal) would stall or abort the write
+    # instead of shortening it. Such a value falls back to the verified default.
+    chunk=${FM_WINTERMOLT_TYPE_CHUNK:-8}
+    case "$chunk" in
+      '' | *[!0-9]* | 0*) chunk=8 ;;
+    esac
+  fi
   # The scrolling-composer tail read belongs to the chunked write it exists
   # for. A one-shot write can lose its head, and a head-truncated long message
   # renders exactly like a scrolled one, so an unchunked burst keeps the exact

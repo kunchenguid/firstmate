@@ -55,6 +55,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 . "$ROOT/bin/fm-composer-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tmux-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -665,6 +667,58 @@ test_wintermolt_long_steer_is_typed_in_chunks_that_land() {
   pass "fm-tmux-lib: a long wintermolt steer is typed in chunks the TUI keeps"
 }
 
+test_wintermolt_short_dash_steer_is_delivered() {
+  local case_dir fakebin state verdict text submitted
+  case_dir="$TMP_ROOT/submit-dash-steer"; mkdir -p "$case_dir"
+  fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+  state="$case_dir/wm.state"
+  printf 'idle\n' > "$state"
+  # A short steer - at most the chunk size, so it takes the one-shot write -
+  # that begins with a dash must still be delivered: tmux reads a leading `-`
+  # as a flag unless the payload follows the end-of-flags marker.
+  text='-1 retry'
+  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" \
+    FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+    fm_tmux_submit_core win "$text" 2 0.05 0.05)
+  [ "$verdict" = empty ] \
+    || fail "a short steer beginning with a dash must submit, got '$verdict'"
+  submitted=$(cat "$state.submitted")
+  [ "$submitted" = "$text" ] \
+    || fail "the model must receive the dash-initial steer verbatim, got '$submitted'"
+  pass "fm-tmux-lib: a short wintermolt steer beginning with a dash is delivered"
+}
+
+test_wintermolt_malformed_chunk_setting_still_delivers() {
+  local bad case_dir fakebin state verdict text submitted
+  text='Read the brief at /tmp/wm/launch-brief.md and follow it exactly.'
+  # The chunk size is an operator knob, and its value is used both as a
+  # substring length and as an arithmetic operand. A value that is not a plain
+  # decimal integer used to stall the write loop (abc) or abort the process
+  # (8x), wedging every wintermolt submit. It falls back to the verified
+  # default instead, and the head-drop fixture proves the fallback still
+  # chunks: a write longer than 16 characters loses its head and the message
+  # would reach the model as a fragment.
+  for bad in abc 8x 08 -8; do
+    case_dir="$TMP_ROOT/submit-bad-chunk-$bad"; mkdir -p "$case_dir"
+    fakebin=$(make_wintermolt_pane_fakebin "$case_dir")
+    state="$case_dir/wm.state"
+    printf 'idle\n' > "$state"
+    verdict=$(PATH="$fakebin:$PATH" FM_FAKE_WM_STATE="$state" FM_FAKE_WM_HEAD_DROP=16 \
+      FM_WINTERMOLT_DELIVERY_POLLS=2 FM_WINTERMOLT_POLL_INTERVAL=0 \
+      FM_WINTERMOLT_TYPE_INTERVAL=0 FM_WINTERMOLT_TYPE_CHUNK="$bad" \
+      fm_run_timed 30 bash -c '. "$1/bin/fm-tmux-lib.sh"; fm_tmux_submit_core win "$2" 2 0.05 0.05' \
+      _ "$ROOT" "$text")
+    [ "$verdict" = empty ] \
+      || fail "chunk setting '$bad' must fall back to the default and submit, got '$verdict'"
+    submitted=$(cat "$state.submitted")
+    [ "$submitted" = "$text" ] \
+      || fail "chunk setting '$bad' must still deliver the whole message, got '$submitted'"
+    [ "$(wc -l < "$state.submitted" | tr -d ' ')" = 1 ] \
+      || fail "chunk setting '$bad' must submit the message exactly once"
+  done
+  pass "fm-tmux-lib: a malformed wintermolt chunk setting falls back and still delivers"
+}
+
 test_wintermolt_scrolled_composer_confirms_the_whole_steer() {
   local case_dir fakebin state verdict text submitted
   case_dir="$TMP_ROOT/submit-scrolled"; mkdir -p "$case_dir"
@@ -883,14 +937,19 @@ case "\${1:-}" in
     # Two shapes reach this stub: send-keys -t <target> -l <literal> from
     # the submit cores, and send-keys -t <target> <text> Enter from the
     # spawn's typed lines (bin/backends/tmux.sh fm_backend_tmux_send_text_line),
-    # where the whole text is ONE positional argument.
+    # where the whole text is ONE positional argument. tmux ends flag parsing
+    # at the double-dash marker, so a literal write's marker is consumed and
+    # the argument after it is still the payload, never a positional.
     literal=
     prev=
     skip=
     pos=()
     for arg in "\$@"; do
       if [ -n "\$skip" ]; then skip=""; continue; fi
-      if [ "\$prev" = "-l" ]; then literal=\$arg; prev=""; continue; fi
+      if [ "\$prev" = "-l" ]; then
+        [ "\$arg" = "--" ] && continue
+        literal=\$arg; prev=""; continue
+      fi
       case "\$arg" in
         -t) skip=1; continue ;;
         -l) prev=\$arg; continue ;;
@@ -1151,6 +1210,8 @@ test_wintermolt_last_permitted_burst_gets_the_grace_read
 test_wintermolt_burst_that_never_lands_does_not_confirm
 test_wintermolt_truncated_burst_is_never_submitted
 test_wintermolt_long_steer_is_typed_in_chunks_that_land
+test_wintermolt_short_dash_steer_is_delivered
+test_wintermolt_malformed_chunk_setting_still_delivers
 test_wintermolt_scrolled_composer_confirms_the_whole_steer
 test_wintermolt_busy_classification_reads_only_the_last_row
 test_wintermolt_classify_reads_the_rendered_tail
