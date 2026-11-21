@@ -39,6 +39,18 @@ unsafe=(
   'Private evidence: state/example-task.status'
   'Evidence: .no-mistakes/runs/example/proof.md'
   'Evidence: http://localhost:8080/proof'
+  'Evidence: http://benchmark.localhost:8080/report'
+  'Evidence: https://benchmark.localhost/report'
+  'Evidence: http://nested.benchmark.localhost'
+  'Evidence: HTTP://BENCHMARK.LOCALHOST/report'
+  'Evidence: http://benchmark.localhost./report'
+  'Evidence: http://benchmark.localhost.:8080/report'
+  'Evidence: http://benchmark.localhost?report=1'
+  'Evidence: http://benchmark.localhost#report'
+  'Evidence: https://reader:secret@benchmark.localhost/report'
+  'Evidence: **http://benchmark.localhost**'
+  '[http://benchmark.localhost](https://example.org)'
+  '|https://example.org/report|http://benchmark.localhost/report|'
   'Evidence: http://localhost?report=1'
   'Evidence: http://localhost#report'
   'Evidence: http://localhost'
@@ -119,6 +131,8 @@ Public IPv6 Markdown: [https://[2606:4700:4700::1111]/home/alice](https://exampl
 Public IPv6 credentials: https://reader:password@[2606:4700:4700::1111]/Users/alice
 Public URL underscores: https://example.org/some_report/home/alice
 Public authorities: https://localhost.example.org?report=1, https://proof.local.example.org/report.
+Public localhost lookalikes: https://benchmark.localhost.example.org/report, https://notlocalhost.example.org/report.
+Public localhost path: https://example.org/benchmark.localhost/report.
 Public URL components: https://example.org?next=http-localhost, https://example.org/#localhost.
 Public URL credentials: https://localhost@example.org/report
 Intended system examples: /usr/bin/env, /etc/hosts and /dev/null.
