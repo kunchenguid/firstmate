@@ -72,12 +72,13 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# With config/park-on-review or config/auto-land, a ship task with a recorded
-# pr= on GitHub, Forgejo, or GitLab also REFUSES while the forge reports it open,
+# With config/retain-open-pr, a ship task with a recorded pr= on GitHub,
+# Forgejo, or GitLab also REFUSES while the forge reports it open,
 # even when the proofs above hold, because the guarded merge command needs this
 # record. A merged or closed PR takes the checks above unchanged.
 # An unreadable record refuses, and --force skips this gate.
-# Without either opt-in, this gate skips all three forges without a read.
+# Without that flag, this gate skips all three forges without a read.
+# The existing landed-work checks above, including the GitLab opt-in, are unchanged.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -1741,7 +1742,7 @@ EOF
 # forge for both the PR state and head: a recorded Forgejo URL is read through
 # tea (fm_pr_forgejo_read_record), a recorded GitLab merge request through glab
 # (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
-# squash or merge-train commit main received) when pr_review_opted_in,
+# squash or merge-train commit main received) when gitlab_mr_landing_opted_in,
 # and everything else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
@@ -1749,7 +1750,7 @@ EOF
 # The GitLab merged-MR read is opt-in with the park-on-review flags
 # (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
 # GitLab MR goes through the GitHub read like any other target.
-pr_review_opted_in() {
+gitlab_mr_landing_opted_in() {
   [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
 }
 
@@ -1767,7 +1768,7 @@ pr_is_merged() {
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
     resolved_url=$FM_PR_URL
-  elif pr_review_opted_in && fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+  elif gitlab_mr_landing_opted_in && fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
     fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
@@ -3803,7 +3804,7 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
 fi
 
 if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ "$FORCE" != "--force" ] \
-    && pr_review_opted_in && fm_pr_url_parse "$PR_URL"; then
+    && [ -e "$CONFIG/retain-open-pr" ] && fm_pr_url_parse "$PR_URL"; then
   PR_RECORD_CHECKED=1
   case "$FM_PR_PROVIDER" in
     github) fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || true ;;

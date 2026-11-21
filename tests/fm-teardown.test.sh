@@ -765,7 +765,7 @@ test_local_only_fork_remote_allows() {
 test_unmerged_pr_refuses_cleanup_until_merge_is_confirmed() {
   local case_dir out rc url=https://github.com/example/repo/pull/7 head
   case_dir=$(make_case unmerged-pr-retained)
-  : > "$case_dir/config/park-on-review"
+  : > "$case_dir/config/retain-open-pr"
   write_meta "$case_dir" no-mistakes ship
   wt_commit "$case_dir" "ready PR"
   add_fork_with_pushed_branch "$case_dir"
@@ -792,50 +792,53 @@ test_unmerged_pr_refuses_cleanup_until_merge_is_confirmed() {
 }
 
 test_open_pr_gate_follows_the_opt_in() {
-  local case_dir out rc flag head forge url log
-  for forge in github forgejo gitlab; do
-    for flag in none park-on-review auto-land; do
-      case_dir=$(make_case "open-$forge-$flag")
-      case "$forge" in
-        github) url=https://github.com/example/repo/pull/7; log=gh ;;
-        forgejo) url=https://git.example.org/team/repo/pulls/7; log=tea ;;
-        gitlab) url=https://gitlab.example.com/team/sub/repo/-/merge_requests/7; log=glab ;;
-      esac
-      write_meta "$case_dir" no-mistakes ship
-      wt_commit "$case_dir" "ready MR"
-      add_fork_with_pushed_branch "$case_dir"
-      printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
-      seed_backlog_in_flight "$case_dir"
-      head=$(git -C "$case_dir/wt" rev-parse HEAD)
-      case "$forge" in
-        github) add_gh_pr_open_for_head "$case_dir" "$head" ;;
-        forgejo) add_tea_pull_for_head "$case_dir" false "$head" git.example.org open ;;
-        gitlab) add_glab_mr_for_head "$case_dir" opened "$head" ;;
-      esac
-      [ "$flag" = none ] || : > "$case_dir/config/$flag"
+  local case_dir out rc flag head forge url log retain
+  for retain in no yes; do
+    for forge in github forgejo gitlab; do
+      for flag in none park-on-review auto-land; do
+        case_dir=$(make_case "open-$forge-$flag-retain-$retain")
+        case "$forge" in
+          github) url=https://github.com/example/repo/pull/7; log=gh ;;
+          forgejo) url=https://git.example.org/team/repo/pulls/7; log=tea ;;
+          gitlab) url=https://gitlab.example.com/team/sub/repo/-/merge_requests/7; log=glab ;;
+        esac
+        write_meta "$case_dir" no-mistakes ship
+        wt_commit "$case_dir" "ready MR"
+        add_fork_with_pushed_branch "$case_dir"
+        printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+        seed_backlog_in_flight "$case_dir"
+        head=$(git -C "$case_dir/wt" rev-parse HEAD)
+        case "$forge" in
+          github) add_gh_pr_open_for_head "$case_dir" "$head" ;;
+          forgejo) add_tea_pull_for_head "$case_dir" false "$head" git.example.org open ;;
+          gitlab) add_glab_mr_for_head "$case_dir" opened "$head" ;;
+        esac
+        [ "$flag" = none ] || : > "$case_dir/config/$flag"
+        [ "$retain" = no ] || : > "$case_dir/config/retain-open-pr"
 
-      rc=0
-      out=$(run_teardown "$case_dir" 2>&1) || rc=$?
-      if [ "$flag" = none ]; then
-        assert_absent "$case_dir/$log.log" "without opt-in, teardown must not read the $forge pull request"
-        expect_code 0 "$rc" "without opt-in, published work must follow existing cleanup checks: $out"
-        assert_absent "$case_dir/state/task-x1.meta" "without opt-in, cleanup retained published work"
-      else
-        expect_code 1 "$rc" "$flag must retain an open merge request: $out"
-        assert_contains "$out" "open or unreadable PR at $url" "$flag must explain the open-PR refusal"
-        assert_present "$case_dir/$log.log" "$flag must read the $forge pull request"
-        assert_present "$case_dir/state/task-x1.meta" "$flag removed the task record"
-        assert_present "$case_dir/wt" "$flag removed the isolated copy"
-      fi
+        rc=0
+        out=$(run_teardown "$case_dir" 2>&1) || rc=$?
+        if [ "$retain" = no ]; then
+          assert_absent "$case_dir/$log.log" "without retain-open-pr, $forge teardown with $flag must not read the published PR"
+          expect_code 0 "$rc" "without retain-open-pr, published work with $flag must follow existing cleanup checks: $out"
+          assert_absent "$case_dir/state/task-x1.meta" "without retain-open-pr, cleanup with $flag retained published work"
+        else
+          expect_code 1 "$rc" "retain-open-pr with $flag must retain an open PR: $out"
+          assert_contains "$out" "open or unreadable PR at $url" "retain-open-pr must explain the open-PR refusal"
+          assert_present "$case_dir/$log.log" "retain-open-pr must read the $forge pull request"
+          assert_present "$case_dir/state/task-x1.meta" "retain-open-pr removed the task record"
+          assert_present "$case_dir/wt" "retain-open-pr removed the isolated copy"
+        fi
+      done
     done
   done
-  pass "the open PR gate reads and retains tasks on all three forges only with either existing opt-in"
+  pass "only retain-open-pr enables the open-PR gate on all three forges, independently of existing review flags"
 }
 
 test_forced_cleanup_discards_an_open_pr() {
   local case_dir out rc url=https://github.com/example/repo/pull/7 head
   case_dir=$(make_case open-pr-forced)
-  : > "$case_dir/config/park-on-review"
+  : > "$case_dir/config/retain-open-pr"
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" abandoned.txt draft "abandoned PR"
   add_fork_with_pushed_branch "$case_dir"
@@ -860,7 +863,7 @@ test_forced_cleanup_discards_an_open_pr() {
 test_closed_pr_takes_the_existing_landed_work_checks() {
   local case_dir out rc url=https://github.com/example/repo/pull/7 head
   case_dir=$(make_case closed-pr-landed-elsewhere)
-  : > "$case_dir/config/auto-land"
+  : > "$case_dir/config/retain-open-pr"
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
@@ -1666,7 +1669,7 @@ SH
 # through glab and teardown refuses on the inconclusive content check.
 test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
   local case_dir rc local_head pr_head tmp scenario state expected
-  for scenario in merged:park-on-review merged:auto-land opened:park-on-review merged:; do
+  for scenario in merged:park-on-review merged:auto-land opened:park-on-review opened:auto-land merged:; do
     state=${scenario%%:*}
     case_dir=$(make_case "gitlab-mr-$state-${scenario#*:}")
     write_meta "$case_dir" no-mistakes ship
@@ -1715,7 +1718,10 @@ test_squash_merged_gitlab_mr_allows_when_main_moved_on() {
     if [ "$state" = merged ]; then
       ! grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-merged: teardown printed a REFUSED line"
     else
-      grep -q REFUSED "$case_dir/stderr" || fail "gitlab-mr-opened: no REFUSED line in stderr"
+      assert_grep 'has work not on any remote and not landed' "$case_dir/stderr" \
+        "without retain-open-pr, an open GitLab MR must reach the existing landed-work refusal"
+      assert_no_grep 'open or unreadable PR' "$case_dir/stderr" \
+        "existing review flags must not enable the new open-PR refusal"
       assert_refusal_retained_task_state "$case_dir" gitlab-mr-opened "$local_head"
     fi
   done

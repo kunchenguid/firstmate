@@ -839,11 +839,19 @@ The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#poli
 
 The optional local, gitignored `config/park-on-review` presence flag opts this home into stopping the idle agent of a ship lane whose PR or merge request only awaits human review.
 `config/auto-land` opts into merge-time cleanup of unparked ship lanes.
-Either flag also makes `bin/fm-teardown.sh` refuse to clean up a ship lane while its recorded GitHub, Forgejo, or GitLab PR is open or unreadable.
-Either flag also lets teardown accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when its head contains the lane's work.
-With neither flag, teardown skips the open-PR check and keeps its existing landed-work checks, without reading GitLab merge requests.
+Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request as landed work when its head contains the lane's work.
+This includes squash and merge-train merges.
+Without either review flag, that landed-work check does not read GitLab merge requests.
 Both flags are home-local and not inherited by secondmate homes.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
+
+## Retain open PR tasks (config/retain-open-pr)
+
+The optional local, gitignored `config/retain-open-pr` presence flag opts this home into refusing ship-task cleanup while its recorded GitHub, Forgejo, or GitLab PR is open or unreadable.
+Create the empty file to enable the refusal on the next teardown invocation.
+With the file absent, teardown keeps its existing checks unchanged, including in homes with `config/park-on-review` or `config/auto-land`.
+This flag controls only the open-PR refusal, not the existing GitLab landed-work check or worker parking.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the safety checks and the `--force` escape after explicit discard approval.
 
 ## PR registration scan (config/pr-register-scan)
 
