@@ -726,7 +726,7 @@ test_legacy_escalation_closes_default_decision() {
   printf 'done [corr=%s]: delayed legacy reply\n' "$corr" >> "$state/hibit.status"
 
   fm_pending_reply_try_resolve "$state" "$corr" || fail "legacy reply should resolve its record"
-  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$state/hibit.status" | grep -Fc "resolved [key=default]: pending-reply-resolved: task=hibit pending-reply-id=$corr via=status child=- child-state=unknown overall=unknown")" -eq 1 ] \
+  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$state/hibit.status" | grep -Fxc "resolved [key=default]: pending-reply-resolved: task=hibit pending-reply-id=$corr via=status")" -eq 1 ] \
     || fail "legacy escalation did not append one guarded default-key resolution"
   open=$(status_open_decisions "$state/hibit.status")
   [ -z "$open" ] || fail "resolved legacy escalation remained open: $open"
@@ -811,7 +811,7 @@ test_concurrent_resolution_closes_escalation_once() {
 
   [ "$(phase_of "$state" "$corr")" = resolved ] \
     || fail "concurrent resolvers left the expectation unresolved"
-  [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr via=status child=- child-state=unknown overall=unknown" "$state/hibit.status")" -eq 1 ] \
+  [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
     || fail "concurrent resolvers did not append exactly one decision close"
   [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
     || fail "concurrent resolution did not record the closed escalation"
@@ -2181,6 +2181,8 @@ recorded_child_result() {  # <state> <corr>
 received_result() {  # <fakebin> <mate-home> <parent-home> <mate-id> <task> <doc>
   local fb=$1 mate=$2 home=$3 mate_id=$4 task=$5 doc=$6 corr
   local -a flags=() tail=()
+  mkdir -p "$home/config" "$mate/config"
+  touch "$home/config/reply-child-state" "$mate/config/reply-child-state"
   [ -z "$task" ] || flags+=(--task "$task")
   [ -z "$doc" ] || { flags+=(--doc); tail+=("$doc"); }
   corr=$(FM_PENDING_REPLY_NOW=9300 fm_pending_reply_create "$home" "$home/state" "$mate_id" "how far is the repacking")
@@ -2267,6 +2269,8 @@ test_escalation_close_note_carries_child_result() {
   home=$(setup_parent escalation-child-result)
   state="$home/state"
   mate=$(bind_local_mate "$home" kid)
+  mkdir -p "$home/config" "$mate/config"
+  touch "$home/config/reply-child-state" "$mate/config/reply-child-state"
   fb=$(make_child_stubs "$mate")
   make_child "$mate" repack scout busy 'working: repacking panels'
   export FM_PENDING_REPLY_SEND_HOOK='true'
@@ -2291,6 +2295,8 @@ test_escalation_close_note_carries_child_result() {
 test_hand_written_reply_and_forged_note_read_unknown() {
   local home state corr out
   home=$(setup_parent child-forged)
+  mkdir -p "$home/config"
+  touch "$home/config/reply-child-state"
   state="$home/state"
   corr=$(FM_PENDING_REPLY_NOW=9400 fm_pending_reply_create "$home" "$state" "kid" "how far")
   FM_PENDING_REPLY_NOW=9400 fm_pending_reply_mark_delivered "$state" "$corr"
@@ -2309,8 +2315,64 @@ test_hand_written_reply_and_forged_note_read_unknown() {
   pass "a hand-written line quoting a child result, or a no-child marker with a verdict, records unknown"
 }
 
+test_child_results_are_off_by_default() {
+  local home state mate setting corr rec out expected close
+  for setting in none wait-no-turns fleet-ledger ready-after-green; do
+    home=$(setup_parent "child-default-$setting")
+    state="$home/state"
+    mate=$(bind_local_mate "$home" kid)
+    if [ "$setting" != none ]; then
+      mkdir -p "$home/config" "$mate/config"
+      touch "$home/config/$setting" "$mate/config/$setting"
+    fi
+    corr=$(fm_pending_reply_create "$home" "$state" kid question)
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    assert_no_grep 'reply_child_' "$rec" "default creation added child fields ($setting)"
+    assert_no_grep 'reply_overall=' "$rec" "default creation added an overall field ($setting)"
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    out=$(FM_HOME="$mate" "$REPORT" 2>&1) && fail "empty helper invocation should fail"
+    expected=$(printf 'Usage:\n  fm-secondmate-report.sh <verb> <corr_id> <note...>\n  fm-secondmate-report.sh --doc <verb> <corr_id> <doc-path> <note...>')
+    [ "$out" = "$expected" ] || fail "default usage changed ($setting): $out"
+    out=$(FM_HOME="$mate" "$REPORT" --task repack "done" "$corr" answered 2>&1) \
+      && fail "--task must not be accepted without opt-in"
+    [ "$out" = "error: corr_id must be 16 hex characters (got 'repack')" ] \
+      || fail "default argument parsing changed ($setting): $out"
+    FM_HOME="$mate" "$REPORT" "done" "$corr" answered || fail "default helper failed"
+    out=$(tail -1 "$state/kid.status" | sed -E 's/ \[at=[0-9]+\]//')
+    [ "$out" = "done [corr=$corr]: answered (via-helper)" ] \
+      || fail "default helper output changed ($setting): $out"
+    FM_HOME="$mate" "$REPORT" --doc "done" "$corr" data/report.md answered || fail "default document helper failed"
+    out=$(tail -1 "$state/kid.status" | sed -E 's/ \[at=[0-9]+\]//')
+    [ "$out" = "done [corr=$corr]: answered (data/report.md via-helper)" ] \
+      || fail "default document output changed ($setting): $out"
+    FM_HOME="$mate" "$REPORT" --doc "done" "$corr" data/report.md || fail "default bare document helper failed"
+    out=$(tail -1 "$state/kid.status" | sed -E 's/ \[at=[0-9]+\]//')
+    [ "$out" = "done [corr=$corr]: data/report.md (via-helper)" ] \
+      || fail "default bare document output changed ($setting): $out"
+    fm_pending_reply_try_resolve "$state" "$corr" || fail "default reply did not resolve"
+    assert_no_grep 'reply_child_' "$rec" "default resolution added child fields ($setting)"
+    assert_no_grep 'reply_overall=' "$rec" "default resolution added an overall field ($setting)"
+
+    corr=$(fm_pending_reply_create "$home" "$state" kid "late reply")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" request
+    FM_PENDING_REPLY_SEND_HOOK=true fm_pending_reply_send_recovery "$state" "$corr" || fail "default recovery failed"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+    fm_pending_reply_maybe_escalate "$state" "$corr" || fail "default escalation failed"
+    printf 'done [corr=%s]: answered (via-helper child=repack child-state=working)\n' "$corr" >> "$state/kid.status"
+    fm_pending_reply_try_resolve "$state" "$corr" || fail "marked reply did not resolve with recording disabled"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    assert_no_grep 'reply_child_' "$rec" "default resolution recorded an opted-in sender ($setting)"
+    close=$(tail -1 "$state/kid.status" | sed -E 's/ \[at=[0-9]+\]//')
+    expected="resolved [key=pending-reply-$corr]: $(fm_pending_reply_resolved_note kid "$corr" helper)"
+    [ "$close" = "$expected" ] || fail "default escalation close changed ($setting): $close"
+  done
+  pass "unconfigured and existing-setting homes retain the original reply and record outputs"
+}
+
 # --- run --------------------------------------------------------------------
 
+test_child_results_are_off_by_default
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_waits_while_the_mate_has_an_open_decision

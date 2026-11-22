@@ -63,7 +63,7 @@
 #                           lifecycle note below); empty until then
 #   resolved_epoch=
 #   resolved_via=           status | document | helper | empty
-#   reply_child_id=         child task the resolving reply reported on, or "-"
+#   reply_child_id=         opt-in resolving child's task id, or "-"
 #   reply_child_state=      that child's fm-crew-state verdict as the reply
 #                           recorded it, or "unknown" (see the child result
 #                           note below)
@@ -78,8 +78,10 @@
 #                           from the relevant turn's completion (request or
 #                           recovery), never from delivery or send time
 #
-# Child result: answering a request is not finishing the work behind it. A mate
-# may report a completed investigation or a passing test while the child task is
+# Child result (config/reply-child-state, off by default): these three fields
+# are added only at resolution in an opted-in parent home. Answering a request
+# is not finishing the work behind it. A mate may report a completed
+# investigation or a passing test while the child task is
 # still unfinished, so the reply verb says only that the request was answered.
 # bin/fm-secondmate-report.sh --task <child> appends the child's bin/fm-crew-state.sh
 # verdict as a trailing marker (fm_pending_reply_child_marker), and the resolve
@@ -396,9 +398,6 @@ recovery_turn_completed_epoch=
 escalated_epoch=
 resolved_epoch=
 resolved_via=
-reply_child_id=
-reply_child_state=
-reply_overall=
 wrong_home_hits=0
 wrong_home_first_sighting=
 wrong_home_sightings=
@@ -681,6 +680,10 @@ fm_pending_reply_resolve_via_of_line() {  # <line>
   esac
 }
 
+fm_pending_reply_child_result_enabled() {  # <home>
+  [ -e "${FM_CONFIG_OVERRIDE:-$1/config}/reply-child-state" ]
+}
+
 # A plain task id the helper may read a verdict for; "-" is the no-child id.
 fm_pending_reply_child_id_valid() {  # <id>
   case "$1" in ''|-|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -782,11 +785,13 @@ _fm_pending_reply_try_resolve_locked() {  # <state-dir> <corr_id> [status-file-o
     return 1
   fi
   via=$(fm_pending_reply_resolve_via_of_line "$line")
-  child=$(fm_pending_reply_child_result_of_line "$line")
   now=$(fm_pending_reply_now)
-  fm_pending_reply_set "$rec" reply_child_id "${child% *}" || return 1
-  fm_pending_reply_set "$rec" reply_child_state "${child#* }" || return 1
-  fm_pending_reply_set "$rec" reply_overall "$(fm_pending_reply_overall_label "${child#* }")" || return 1
+  if fm_pending_reply_child_result_enabled "$(fm_pending_reply_get "$rec" parent_home)"; then
+    child=$(fm_pending_reply_child_result_of_line "$line")
+    fm_pending_reply_set "$rec" reply_child_id "${child% *}" || return 1
+    fm_pending_reply_set "$rec" reply_child_state "${child#* }" || return 1
+    fm_pending_reply_set "$rec" reply_overall "$(fm_pending_reply_overall_label "${child#* }")" || return 1
+  fi
   fm_pending_reply_set "$rec" phase resolved || return 1
   if [ -z "$delivered" ]; then
     fm_pending_reply_mark_delivered "$state" "$corr" "$now" || return 1
@@ -1306,11 +1311,14 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       # OPEN above stays a plain append because a new blocker must wake.
       _task=$(fm_pending_reply_get "$rec" task_id)
       _via=$(fm_pending_reply_get "$rec" resolved_via)
-      _child_id=$(fm_pending_reply_get "$rec" reply_child_id)
-      _child_state=$(fm_pending_reply_get "$rec" reply_child_state)
-      _overall=$(fm_pending_reply_get "$rec" reply_overall)
-      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via" \
-        "child=${_child_id:--} child-state=${_child_state:-unknown} overall=${_overall:-unknown}")"
+      note=
+      if fm_pending_reply_child_result_enabled "$(fm_pending_reply_get "$rec" parent_home)"; then
+        _child_id=$(fm_pending_reply_get "$rec" reply_child_id)
+        _child_state=$(fm_pending_reply_get "$rec" reply_child_state)
+        _overall=$(fm_pending_reply_get "$rec" reply_overall)
+        note="child=${_child_id:--} child-state=${_child_state:-unknown} overall=${_overall:-unknown}"
+      fi
+      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via" "$note")"
       close_rc=0
       fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
         2>/dev/null || close_rc=$?

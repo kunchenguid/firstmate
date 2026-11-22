@@ -15,11 +15,15 @@
 # set to that home.
 #
 # The verb says the request was answered, not that the work behind it is
-# finished. --task <child> names the child task the request concerns: the helper
+# finished. With config/reply-child-state present in this home, --task <child>
+# names the child task the request concerns: the helper
 # reads that child's current state through bin/fm-crew-state.sh in this home and
 # appends it to the line as "child=<id> child-state=<verdict>", which the parent
 # records beside the request outcome (bin/fm-pending-reply-lib.sh). Without
 # --task, or when the child cannot be read, the verdict is unknown.
+# Without the flag, the helper emits its original line with no child marker
+# and accepts only the original arguments. The parent opts in separately to
+# recording the result (docs/configuration.md).
 #
 # Usage:
 #   fm-secondmate-report.sh [--task <child>] <verb> <corr_id> <note...>
@@ -38,28 +42,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
+CHILD_RESULTS=0
+TASK_USAGE=
+if fm_pending_reply_child_result_enabled "$CALLER_FM_HOME"; then
+  CHILD_RESULTS=1
+  TASK_USAGE='[--task <child>] '
+fi
+
 usage() {
-  cat <<'EOF' >&2
+  cat <<EOF >&2
 Usage:
-  fm-secondmate-report.sh [--task <child>] <verb> <corr_id> <note...>
-  fm-secondmate-report.sh [--task <child>] --doc <verb> <corr_id> <doc-path> <note...>
+  fm-secondmate-report.sh ${TASK_USAGE}<verb> <corr_id> <note...>
+  fm-secondmate-report.sh ${TASK_USAGE}--doc <verb> <corr_id> <doc-path> <note...>
 EOF
   exit 2
 }
 
 DOC_MODE=0
 CHILD=
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --doc) DOC_MODE=1; shift ;;
-    --task)
-      [ $# -ge 2 ] && [ -n "$2" ] || usage
-      CHILD=$2
-      shift 2
-      ;;
-    *) break ;;
-  esac
-done
+if [ "$CHILD_RESULTS" = 1 ]; then
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --doc) DOC_MODE=1; shift ;;
+      --task)
+        [ $# -ge 2 ] && [ -n "$2" ] || usage
+        CHILD=$2
+        shift 2
+        ;;
+      *) break ;;
+    esac
+  done
+elif [ "${1:-}" = "--doc" ]; then
+  DOC_MODE=1
+  shift
+fi
 
 [ $# -ge 2 ] || usage
 VERB=$1
@@ -105,14 +121,17 @@ if [ ! -d "$(dirname "$DESTINATION")" ]; then
 fi
 
 # The child's state is read last, immediately before the line is written.
-CHILD_STATE=unknown
-if fm_pending_reply_child_id_valid "$CHILD"; then
-  CHILD_RAW=$(FM_HOME="$HOME_DIR" "$SCRIPT_DIR/fm-crew-state.sh" "$CHILD" 2>/dev/null | head -1) || true
-  case "$CHILD_RAW" in
-    'state: '*) CHILD_STATE=${CHILD_RAW#state: }; CHILD_STATE=${CHILD_STATE%% *} ;;
-  esac
+CHILD_MARKER=
+if [ "$CHILD_RESULTS" = 1 ]; then
+  CHILD_STATE=unknown
+  if fm_pending_reply_child_id_valid "$CHILD"; then
+    CHILD_RAW=$(FM_HOME="$HOME_DIR" "$SCRIPT_DIR/fm-crew-state.sh" "$CHILD" 2>/dev/null | head -1) || true
+    case "$CHILD_RAW" in
+      'state: '*) CHILD_STATE=${CHILD_RAW#state: }; CHILD_STATE=${CHILD_STATE%% *} ;;
+    esac
+  fi
+  CHILD_MARKER=" $(fm_pending_reply_child_marker "$CHILD" "$CHILD_STATE")"
 fi
-CHILD_MARKER=$(fm_pending_reply_child_marker "$CHILD" "$CHILD_STATE")
 
 token=$(fm_pending_reply_corr_token "$CORR")
 if [ "$DOC_MODE" = 1 ]; then
@@ -120,12 +139,12 @@ if [ "$DOC_MODE" = 1 ]; then
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf -v line '%s [%s]: %s (%s via-helper %s)' "$VERB" "$token" "$NOTE" "$DOC_PATH" "$CHILD_MARKER"
+    printf -v line '%s [%s]: %s (%s via-helper%s)' "$VERB" "$token" "$NOTE" "$DOC_PATH" "$CHILD_MARKER"
   else
-    printf -v line '%s [%s]: %s (via-helper %s)' "$VERB" "$token" "$DOC_PATH" "$CHILD_MARKER"
+    printf -v line '%s [%s]: %s (via-helper%s)' "$VERB" "$token" "$DOC_PATH" "$CHILD_MARKER"
   fi
 else
   NOTE=$*
-  printf -v line '%s [%s]: %s (via-helper %s)' "$VERB" "$token" "$NOTE" "$CHILD_MARKER"
+  printf -v line '%s [%s]: %s (via-helper%s)' "$VERB" "$token" "$NOTE" "$CHILD_MARKER"
 fi
 printf '%s\n' "$(status_stamp_line "$line")" >> "$DESTINATION"
