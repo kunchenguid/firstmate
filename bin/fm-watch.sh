@@ -4826,12 +4826,13 @@ EOF
             else
               last=$(status_declared_wait_line "$STATE/$task.status")
               now=$(date +%s)
-              pause_age=$(status_pause_age "$last" "$(age_of "$STATE/$task.status")" "$now")
+              status_age=$(age_of "$STATE/$task.status")
+              pause_age=$(status_pause_age "$last" "$status_age" "$now")
               if { status_is_paused "$last" && status_pause_is_overdue "$last" "$pause_age" "$now"; } \
-                || [ "$(age_of "$STATE/$task.status")" -ge "$PAUSE_RESURFACE_SECS" ] \
+                || [ "$status_age" -ge "$PAUSE_RESURFACE_SECS" ] \
                 || { [ "$churning" -eq 0 ] \
-                  && until=$(status_paused_until "$(status_declared_wait_line "$STATE/$task.status")") \
-                  && [ "$(date +%s)" -ge "$until" ]; }; then
+                  && until=$(status_paused_until "$last") \
+                  && [ "$now" -ge "$until" ]; }; then
                 handle_paused_stale "$w" "$task" "$h"
               fi
               clear_stale_hash_tracking "$key"
