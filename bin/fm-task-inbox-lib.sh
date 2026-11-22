@@ -374,7 +374,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 }
 
 # Only harnesses verified to queue a pasted doorbell and its Enter while busy
-# may use the ordered submission path and retry a held line during a turn.
+# may use the ordered submission path.
 FM_TASK_INBOX_PASTE_HARNESSES='claude'
 
 fm_task_inbox_paste_harness() {  # <backend>
@@ -400,9 +400,10 @@ fm_task_inbox_paste_harness() {  # <backend>
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-# A pending composer holding our own doorbell is submitted instead of skipped.
-# A verified paste harness can queue that Enter while the agent is busy.
-# Every held-line path retries one lost Enter after a composer check.
+# A pending composer holding exactly our own doorbell line is a previous ring
+# whose Enter never landed, so on an agent not reported busy it is submitted
+# rather than skipped; skipping it would block every later ring. Every
+# held-line path retries one lost Enter after a composer check.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict paste_rc
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -414,9 +415,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 1
-      fm_task_inbox_paste_harness "$backend" \
-        || [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
+      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
+        && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         || return 1
       fm_task_inbox_submit_held "$backend" "$target" "$line" "$label"
       return

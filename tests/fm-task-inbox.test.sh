@@ -555,9 +555,8 @@ SH
 }
 
 # Herdr's `agent prompt` is the ordered paste path for Claude. A pane whose
-# agent Herdr cannot find falls back to the typed path; a held doorbell is
-# submitted while a verified paste harness is busy, but a busy pane of any
-# other harness keeps the documented skip.
+# agent Herdr cannot find falls back to the typed path; a busy pane holding
+# our doorbell keeps the documented skip so the watcher re-rings later.
 test_herdr_ring_pastes_and_falls_back() {
   local dir state rec doorbell log ops composer rc
   command -v jq >/dev/null 2>&1 || { pass "inbox: skip Herdr ring cases without jq"; return 0; }
@@ -595,16 +594,10 @@ test_herdr_ring_pastes_and_falls_back() {
 
   : > "$log"; : > "$ops"; printf '%s' "$doorbell" > "$composer"
   rc=0; ring claude FM_FAKE_HERDR_STATUS=working || rc=$?
-  [ "$rc" = 0 ] || fail "a busy Claude pane holding our doorbell should be submitted, got rc $rc"
-  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
-    || fail "a busy Claude pane should queue the held doorbell once:"$'\n'"$(cat "$log")"
-
-  : > "$log"; : > "$ops"; printf '%s' "$doorbell" > "$composer"
-  rc=0; ring codex FM_FAKE_HERDR_STATUS=working || rc=$?
-  [ "$rc" = 1 ] || fail "a busy non-paste pane holding our doorbell should skip, got rc $rc"
-  [ ! -s "$ops" ] || fail "a busy non-paste pane received input:"$'\n'"$(cat "$ops")"
-  [ "$(cat "$composer")" = "$doorbell" ] || fail "a busy non-paste pane's composer was changed"
-  pass "inbox: Herdr rings paste through agent prompt, fall back when no agent is found, and gate busy submits by harness"
+  [ "$rc" = 1 ] || fail "a busy Claude pane holding our doorbell should skip, got rc $rc"
+  [ ! -s "$ops" ] || fail "a busy Claude pane holding our doorbell received input:"$'\n'"$(cat "$ops")"
+  [ "$(cat "$composer")" = "$doorbell" ] || fail "a busy Claude pane's held composer was changed"
+  pass "inbox: Herdr rings paste through agent prompt, fall back when no agent is found, and skip busy held doorbells"
 }
 
 test_idempotent_write_dedups_exact_body() {
