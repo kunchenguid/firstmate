@@ -89,8 +89,12 @@ wait_ready() {  # <backend> <target>
           fm_backend_send_key "$backend" "$target" Enter >/dev/null 2>&1 || true
         fi ;;
       *'bypass permissions on'*)
+        # A held doorbell is submitted only on an idle agent, so the
+        # previous turn must finish, not just leave an empty composer.
         state=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null || true)
-        [ "$state" = empty ] && return 0 ;;
+        [ "$state" = empty ] \
+          && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)" != busy ] \
+          && return 0 ;;
     esac
     i=$((i + 1))
     sleep 1
