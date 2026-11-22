@@ -455,11 +455,9 @@ SECONDMATE_LIVENESS_WINDOW_SECS=${FM_SECONDMATE_LIVENESS_WINDOW_SECS:-}
 case "$SECONDMATE_LIVENESS_WINDOW_SECS" in ''|*[!0-9]*|0) SECONDMATE_LIVENESS_WINDOW_SECS=3600 ;; esac
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
-# A standing paused: or captain-held declaration keeps that bounded cadence
-# whatever the agent's liveness, and only a provably working crew outranks it
-# (pause_state_class). An ordinary crew's idle pane still surfaces once on first
-# sight before the cadence holds it (surface_nonterminal_stale); a secondmate
-# takes the cadence from its first sight.
+# By default an ordinary crew must pass the liveness gate in pause_state_class.
+# config/pause-cadence opts into honoring declarations regardless of liveness,
+# with one first-sight wake before an ordinary crew takes the bounded cadence.
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten wait cannot rot
 # invisibly - except an item held for the captain while the away-posture record
@@ -2709,14 +2707,12 @@ reconcile_overdue_pauses() {
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# A standing declaration keeps the bounded cadence whatever the agent's liveness.
-# Only positive evidence that the crew is working overrides it. This function
-# deliberately never reads endpoint liveness: dead-or-missing recovery for a
-# secondmate stays on the dedicated liveness tick, and an ordinary crew's agent
-# being alive or unreadable is not evidence the declaration ended.
+# Without config/pause-cadence an ordinary crew must be confidently dead before
+# its declaration can recover paused classification. Secondmates never consult
+# endpoint liveness here; their dedicated liveness tick owns dead-agent recovery.
 pause_state_class() {  # <window> <task>
-  local task=$2 key last recheck_file class statusf rc
-  key=$(window_key "$1")
+  local win=$1 task=$2 key last recheck_file class agent_alive kind statusf rc
+  key=$(window_key "$win")
   statusf="$STATE/$task.status"
   pause_overdue_reconcile "$task" "$statusf"; rc=$?
   if [ "$rc" -eq 0 ]; then printf 'paused'; return; fi
@@ -2734,7 +2730,16 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  kind=$(window_kind "$win")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    if [ ! -e "$CONFIG/pause-cadence" ] && [ "$kind" != secondmate ]; then
+      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+      if [ "$agent_alive" != dead ]; then
+        rm -f "$recheck_file"
+        printf 'none'
+        return
+      fi
+    fi
     printf 'paused'
     return
   fi
@@ -2744,8 +2749,16 @@ pause_state_class() {  # <window> <task>
     printf 'working'
     return
   fi
-  # Authoritative crew state could not name a current state. The declaration
-  # still stands, so the bounded cadence applies instead of an inconclusive surface.
+  if [ ! -e "$CONFIG/pause-cadence" ] && [ "$kind" != secondmate ]; then
+    agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
+    if [ "$agent_alive" != dead ]; then
+      rm -f "$recheck_file"
+      printf 'none'
+      return
+    fi
+  fi
+  # Recover the declaration only after the default liveness gate admits it,
+  # or when the home explicitly opts out of that gate.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;
@@ -2966,9 +2979,8 @@ captain_call_stale_bound() {  # <window-key> <task>
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
-# a decision, or be wedged. An ordinary crew's standing paused: or captain-held
-# declaration also arrives here on the first stable sight of a new hash, whatever
-# the agent's liveness, so that one wake is not reserved for a live agent.
+# a decision, or be wedged. The default liveness gate sends live or unknown
+# declared waits here; config/pause-cadence also sends dead agents' first sights.
 #
 # So a legitimate wait bounds this path to the same once-per-PAUSE_RESURFACE_SECS
 # cadence resurface_absorbed owns for the absorbed paths, throttled by this
@@ -4578,9 +4590,9 @@ EOF
           #   - working: an actively-running pipeline legitimately sits on a static
           #     pane (e.g. waiting on CI), so absorb and start the wedge timer so a
           #     genuinely frozen run still escalates past STALE_ESCALATE_SECS;
-          #   - paused: a standing declared wait, whatever the agent's liveness.
-          #     An ordinary crew's new hash takes one plain stale wake here, then
-          #     the long PAUSE_RESURFACE_SECS cadence, instead of wedge-escalating;
+          #   - paused: a declared wait admitted by pause_state_class. With
+          #     config/pause-cadence, an ordinary crew's new hash surfaces once
+          #     before the long cadence, instead of wedge-escalating;
           #   - none: no running pipeline, no exact busy verdict, no admitted declared wait.
           #     Surface immediately so firstmate inspects the inconclusive state
           #     (it may be done via an interactive menu that wrote no done: status,
@@ -4599,15 +4611,19 @@ EOF
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
-                last=$(status_declared_wait_line "$STATE/$task.status")
-                now=$(date +%s)
-                pause_age=$(status_pause_age "$last" "$(age_of "$STATE/$task.status")" "$now")
-                if status_is_paused "$last" && status_pause_is_overdue "$last" "$pause_age" "$now"; then
+                if [ ! -e "$CONFIG/pause-cadence" ]; then
                   handle_paused_stale "$w" "$task" "$h"
                 else
-                  # First stable sight of an ordinary idle declaration. Later
-                  # sights of this same hash use the cadence arm below.
-                  surface_nonterminal_stale "$w" "$h" "$dialog"
+                  last=$(status_declared_wait_line "$STATE/$task.status")
+                  now=$(date +%s)
+                  pause_age=$(status_pause_age "$last" "$(age_of "$STATE/$task.status")" "$now")
+                  if status_is_paused "$last" && status_pause_is_overdue "$last" "$pause_age" "$now"; then
+                    handle_paused_stale "$w" "$task" "$h"
+                  else
+                    # First stable sight of an ordinary idle declaration. Later
+                    # sights of this same hash use the cadence arm below.
+                    surface_nonterminal_stale "$w" "$h" "$dialog"
+                  fi
                 fi
                 ;;
               *)
@@ -4685,7 +4701,7 @@ EOF
             # fires it once per declaration. It still waits for a second churned
             # poll, because a pane that changed once and settles takes its plain
             # first sight at the stable-hash surface two polls later.
-            if [ "$kind" = secondmate ]; then
+            if [ ! -e "$CONFIG/pause-cadence" ] || [ "$kind" = secondmate ]; then
               handle_paused_stale "$w" "$task" "$h"
             else
               last=$(status_declared_wait_line "$STATE/$task.status")

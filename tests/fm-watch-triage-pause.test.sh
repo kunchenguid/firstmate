@@ -19,6 +19,77 @@ mkdir -p "$TMP_ROOT/crew-state-bin"
 FM_CREW_STATE_BIN=$(make_fake_crew_state "$TMP_ROOT/crew-state-bin")
 export FM_CREW_STATE_BIN
 
+mkdir -p "$TMP_ROOT/opt-in-config"
+: > "$TMP_ROOT/opt-in-config/pause-cadence"
+
+test_pause_cadence_default_keeps_liveness_gate() {
+  local settings command cached dir state fakebin out capture_file window key sig pid flag class
+  for settings in unconfigured existing; do
+    for command in zsh grok node; do
+      for cached in fresh cached; do
+        dir=$(make_case "default-$settings-$command-$cached")
+        state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+        capture_file="$dir/pane.txt"; window="test:fm-default"; key=$(watch_window_key "$window")
+        mkdir -p "$dir/config"
+        if [ "$settings" = existing ]; then
+          for flag in pause-ceiling wedge-defer-worker-wait wedge-defer-parked-gate wedge-defer-validating turnend-churn-absorb; do
+            : > "$dir/config/$flag"
+          done
+          printf 'FM_PAUSE_RESURFACE_SECS=999\n' > "$dir/config/watch.env"
+        fi
+        printf 'idle declared wait\n' > "$capture_file"
+        printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/default.meta"
+        printf 'paused: waiting for an external result\n' > "$state/default.status"
+        sig=$(seen_sig "$state/default.status"); printf '%s' "$sig" > "$state/.seen-default_status"
+        printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+        printf '1\n' > "$state/.count-$key"
+        if [ "$cached" = cached ]; then
+          : > "$state/.paused-$key"
+          date +%s > "$state/.paused-rechecked-$key"
+        fi
+        PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+          FM_CONFIG_OVERRIDE="$dir/config" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+          FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting' \
+          watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=999
+        pid=$!
+        if [ "$command" = zsh ]; then
+          wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$settings/$cached: default dead-agent wait surfaced: $(cat "$out")"; }
+          reap "$pid"
+          [ ! -s "$out" ] && [ ! -s "$state/.wake-queue" ] || fail "$settings/$cached: default dead-agent wait emitted a wake"
+          [ -e "$state/.paused-rechecked-$key" ] || fail "$settings/$cached: dead-agent wait lost its recheck cache"
+          ack_stopped_cycle "$state" || fail "could not acknowledge the default dead-agent test stop"
+          printf 'idle declared wait, changed display\n' > "$capture_file"
+          PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+            FM_CONFIG_OVERRIDE="$dir/config" FM_FAKE_TMUX_CURRENT_COMMAND="$command" \
+            FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting' \
+            watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=999
+          pid=$!
+          wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$settings/$cached: default changing dead-agent wait surfaced"; }
+          reap "$pid"
+          [ "$(cat "$state/.stale-$key" 2>/dev/null)" = "$(hash_text "$(cat "$capture_file")")" ] \
+            || fail "$settings/$cached: default changing-pane handling lost its stale suppressor"
+          [ ! -s "$out" ] && [ ! -s "$state/.wake-queue" ] || fail "$settings/$cached: default changing pane emitted a wake"
+        else
+          wait_for_exit "$pid" 100 || { reap "$pid"; fail "$settings/$command/$cached: default live or unknown wait did not surface"; }
+          grep -Fx "stale: $window" "$out" >/dev/null || fail "$settings/$command/$cached: default first-sight wording changed"
+          # First sight writes a cache for either policy; the next classification
+          # must still apply the default liveness gate rather than trust that cache.
+          if [ "$cached" = fresh ]; then rm -f "$state/.paused-rechecked-$key"; fi
+          class=$(PATH="$fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/config" FM_STATE_OVERRIDE="$state" \
+            FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+            FM_FAKE_TMUX_CURRENT_COMMAND="$command" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+            FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting' \
+            bash -c '. "$1"; pause_state_class "$2" default' _ "$WATCH" "$window")
+          [ "$class" = none ] || fail "$settings/$command/$cached: default liveness gate returned $class"
+          [ ! -e "$state/.paused-rechecked-$key" ] || fail "$settings/$command/$cached: default liveness gate retained its recheck cache"
+        fi
+        [ ! -e "$state/.stale-since-$key" ] || fail "$settings/$command/$cached: default declared wait started a wedge timer"
+      done
+    done
+  done
+  pass "without pause-cadence, new and existing homes retain both liveness gates and main's first-sight output"
+}
+
 # --- non-terminal stale, crew NOT provably working: surfaced immediately ------
 # The key requirement: a crew with no running pipeline that has gone quiet (and is
 # not busy) has stopped - it may be done via interactive menus, waiting, or wedged.
@@ -67,6 +138,8 @@ test_nonterminal_stale_not_working_surfaced() {
 # below is a dead agent, so this is not limited to a live waiter. The cadence is
 # anchored on the status-file age, so a churny idle pane cannot reset it.
 test_nonterminal_stale_paused_absorbed_then_resurfaced() {
+  local FM_CONFIG_OVERRIDE="$TMP_ROOT/opt-in-config"
+  export FM_CONFIG_OVERRIDE
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid back statusf
   dir=$(make_case nonterminal-stale-paused); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
@@ -207,6 +280,8 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
 # must surface once, while the unchanged hash must not append the same wake on
 # every watcher re-arm.
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
+  local FM_CONFIG_OVERRIDE="$TMP_ROOT/opt-in-config"
+  export FM_CONFIG_OVERRIDE
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -347,6 +422,8 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
 # throttle belongs to the old declaration and must not suppress the new wait's
 # first inspection merely because its timestamp is still young.
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
+  local FM_CONFIG_OVERRIDE="$TMP_ROOT/opt-in-config"
+  export FM_CONFIG_OVERRIDE
   local spec name initial replacement expected dir state fakebin out capture_file
   local statusf window key sig back pid wakes
   for spec in \
@@ -540,6 +617,8 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
 # still get its bounded recheck from the changed-hash path, and only once it has
 # stood a whole cadence.
 test_declared_wait_on_a_never_settling_pane_keeps_the_bounded_recheck() {
+  local FM_CONFIG_OVERRIDE="$TMP_ROOT/opt-in-config"
+  export FM_CONFIG_OVERRIDE
   local spec name status_line wording dir state fakebin out statusf window key sig wakes
   for spec in \
     'paused-ticking-pane|paused: waiting on the validation run to finish|awaiting external' \
@@ -601,6 +680,8 @@ SH
 # per declaration (handle_paused_stale), so the changed-hash path must not hold
 # it to the status-age cadence the way it holds an open-ended declaration.
 test_elapsed_until_on_a_never_settling_pane_is_rechecked_before_the_cadence() {
+  local FM_CONFIG_OVERRIDE="$TMP_ROOT/opt-in-config"
+  export FM_CONFIG_OVERRIDE
   local dir state fakebin out statusf window key sig wakes
   dir=$(make_case paused-until-passed-ticking-pane); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; statusf="$state/parked.status"
@@ -1866,6 +1947,7 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
 fi
 
 fm_test_run \
+  test_pause_cadence_default_keeps_liveness_gate \
   test_required_captain_hold_tests_fail_without_tasks_axi \
   test_nonterminal_stale_not_working_surfaced \
   test_nonterminal_stale_paused_absorbed_then_resurfaced \
