@@ -318,8 +318,18 @@ fm_pane_is_busy() {  # <target> [harness]
 # [busy-harness] scopes every busy read to one harness signature; the submit
 # core passes polytoken for a pane whose composer identity is polytoken (its
 # `Running for` row is outside the harness-less union) and nothing otherwise.
-fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 j state busy_state
+# Extended retry (swallowed-Enter self-heal): the base budget is a few
+# sub-second attempts, which a pane that is momentarily not taking input
+# (a hook cycle, a redraw, a popup absorbing keys) can outlast, leaving the
+# typed text unsent. When the budget is spent, the composer is still proven
+# pending, and the pane is NOT busy, the Enter has demonstrably not been
+# accepted, so keep sending Enter only (never retyping) with a doubling
+# backoff capped at 3s for [extended-retries] more attempts, re-reading the
+# composer after each. A busy pane skips this and keeps the queued-Enter
+# policy, because a harness that queues keeps its text visible and another
+# Enter could queue it twice. Direct callers default to 0 extra attempts.
+fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness] [extended-retries]
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} extended=${6:-0} i=0 j state busy_state wait_s
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -359,6 +369,21 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
   # Busy conversion is owned by fm_composer_queued_enter_verdict.
   busy_state=idle
   fm_pane_is_busy "$target" "$busy_harness" && busy_state=busy
+  case "$extended" in ''|*[!0-9]*) extended=0 ;; esac
+  wait_s=$sleep_s
+  while [ "$busy_state" = idle ] && [ "$extended" -gt 0 ]; do
+    extended=$((extended - 1))
+    wait_s=$(awk -v w="$wait_s" 'BEGIN { w *= 2; if (w > 3) w = 3; print w }' 2>/dev/null) || wait_s=$sleep_s
+    tmux send-keys -t "$target" Enter 2>/dev/null || true
+    sleep "$wait_s"
+    state=$(fm_tmux_composer_state "$target")
+    if fm_composer_blocking_dialog_noted >/dev/null; then
+      printf 'unknown'
+      return 0
+    fi
+    [ "$state" = pending ] || { printf '%s' "$state"; return 0; }
+    fm_pane_is_busy "$target" "$busy_harness" && busy_state=busy
+  done
   fm_composer_queued_enter_verdict "$state" "$busy_state"
 }
 
@@ -387,5 +412,6 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
     return 0
   fi
   sleep "$settle"
-  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$busy_harness"
+  fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$busy_harness" \
+    "${FM_SEND_EXTENDED_RETRIES:-6}"
 }

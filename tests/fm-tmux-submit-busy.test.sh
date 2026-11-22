@@ -55,7 +55,10 @@ case "${1:-}" in
     done
     if [ "$is_enter" = 1 ]; then
       [ -z "${FM_FAKE_SENT:-}" ] || printf 'Enter\n' >> "$FM_FAKE_SENT"
-      if [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
+      if [ -n "${FM_FAKE_SWALLOW_FIRST:-}" ] && [ -n "${FM_FAKE_SENT:-}" ] \
+         && [ "$(grep -c '^Enter$' "$FM_FAKE_SENT")" -le "$FM_FAKE_SWALLOW_FIRST" ]; then
+        :  # the first N Enters are swallowed; a later one lands
+      elif [ -n "${FM_FAKE_SWALLOW:-}" ] && [ -f "$FM_FAKE_SWALLOW" ]; then
         [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$FM_FAKE_SWALLOW"
         [ "${FM_FAKE_APPEND_BUSY:-0}" != 1 ] || printf '✻ Working…\n' >> "$COMPOSER"
       else
@@ -109,6 +112,65 @@ test_idle_pane_pending_returns_pending() {
     fm_tmux_submit_enter_core "win" 3 0.05 > "$vfile" 2>/dev/null
   [ "$(cat "$vfile")" = pending ] || fail "idle-pane pending should return pending, got '$(cat "$vfile")'"
   pass "fm_tmux_submit_enter_core: idle pane + pending composer stays pending (genuine swallow preserved)"
+}
+
+# A pane that is momentarily not taking input can swallow more Enters than the
+# base budget covers. The typed text must not be left unsent: once the base
+# budget is spent on an idle pane the extended phase keeps pressing Enter only.
+run_swallow_case() {  # <name> <swallow-first> <busy> <extended> -> verdict in $dir/verdict, Enters in $dir/sent.log
+  local dir="$TMP_ROOT/$1" fakebin composer
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
+  : > "$dir/sent.log"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$dir/sent.log" \
+    FM_FAKE_SWALLOW_FIRST="$2" FM_FAKE_PANE_BUSY="$3" \
+    fm_tmux_submit_enter_core "win" 3 0.01 '' '' "$4" > "$dir/verdict" 2>/dev/null
+  RUN_DIR=$dir
+}
+
+test_extended_retry_lands_late_enter() {
+  run_swallow_case extended-late 5 0 6
+  [ "$(cat "$RUN_DIR/verdict")" = empty ] \
+    || fail "an Enter landing inside the extended window must confirm, got '$(cat "$RUN_DIR/verdict")'"
+  [ "$(grep -c '^Enter$' "$RUN_DIR/sent.log")" -eq 6 ] \
+    || fail "Enter should stop after the one that lands (6th), sent $(grep -c '^Enter$' "$RUN_DIR/sent.log")"
+  ! grep -q '^typed' "$RUN_DIR/sent.log" || fail "the extended phase must never retype"
+  pass "fm_tmux_submit_enter_core: Enter swallowed past the base budget is retried until it lands"
+}
+
+test_extended_retry_budget_is_bounded() {
+  run_swallow_case extended-bounded 99 0 4
+  [ "$(cat "$RUN_DIR/verdict")" = pending ] \
+    || fail "an Enter that never lands must stay pending, got '$(cat "$RUN_DIR/verdict")'"
+  [ "$(grep -c '^Enter$' "$RUN_DIR/sent.log")" -eq 7 ] \
+    || fail "3 base + 4 extended Enters expected, sent $(grep -c '^Enter$' "$RUN_DIR/sent.log")"
+  pass "fm_tmux_submit_enter_core: the extended retry budget is bounded and still reports pending"
+}
+
+test_extended_retry_skips_busy_pane() {
+  run_swallow_case extended-busy 99 1 6
+  [ "$(cat "$RUN_DIR/verdict")" = empty ] \
+    || fail "a busy pane keeps the queued-Enter verdict, got '$(cat "$RUN_DIR/verdict")'"
+  [ "$(grep -c '^Enter$' "$RUN_DIR/sent.log")" -eq 3 ] \
+    || fail "a busy pane must not get extra Enters (a queueing harness would queue them twice)"
+  pass "fm_tmux_submit_enter_core: a busy pane skips the extended retry"
+}
+
+test_submit_core_extends_by_default() {
+  local dir fakebin composer
+  dir="$TMP_ROOT/core-default"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  printf '╭────────────╮\n│ > fix      │\n╰────────────╯\n' > "$composer"
+  : > "$dir/sent.log"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$dir/sent.log" \
+    FM_FAKE_SWALLOW_FIRST=5 FM_FAKE_PANE_BUSY=0 \
+    fm_tmux_submit_core "win" "fix" 3 0.01 0.01 > "$dir/verdict" 2>/dev/null
+  [ "$(cat "$dir/verdict")" = empty ] \
+    || fail "fm_tmux_submit_core must self-heal a swallowed Enter by default, got '$(cat "$dir/verdict")'"
+  [ "$(grep -c '^typed' "$dir/sent.log")" -eq 1 ] || fail "the text must be typed exactly once"
+  pass "fm_tmux_submit_core: a swallowed Enter past the base budget self-heals by default"
 }
 
 test_wrapped_continuation_retries_swallowed_enter() {
@@ -351,6 +413,10 @@ test_claude_busy_signature_uses_real_capture_shapes() {
 
 test_busy_pane_pending_returns_empty
 test_idle_pane_pending_returns_pending
+test_extended_retry_lands_late_enter
+test_extended_retry_budget_is_bounded
+test_extended_retry_skips_busy_pane
+test_submit_core_extends_by_default
 
 test_exit_picker_refuses_confirming_enter() {
   local dir fakebin composer sent vfile enters
