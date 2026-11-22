@@ -690,14 +690,11 @@ fm_pending_reply_child_id_valid() {  # <id>
   return 0
 }
 
-# The marker the helper appends, as "child=<id> child-state=<verdict>". An id
-# that is not a plain task id reads as no child ("-") with an unknown verdict;
-# the verdict word is fm-crew-state.sh's own, and fm_pending_reply_overall_label
-# alone decides what it means.
+# The marker the helper appends for a valid child id, as
+# "child=<id> child-state=<verdict>". The verdict word is fm-crew-state.sh's
+# own, and fm_pending_reply_overall_label alone decides what it means.
 fm_pending_reply_child_marker() {  # <child-id> <state>
-  local id=$1 state=$2
-  fm_pending_reply_child_id_valid "$id" || { id=-; state=unknown; }
-  printf 'child=%s child-state=%s' "$id" "$state"
+  printf 'child=%s child-state=%s' "$1" "$2"
 }
 
 # Prints "<child-id> <state>" from the marker that closes a helper-written

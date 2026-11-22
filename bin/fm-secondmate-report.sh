@@ -19,8 +19,9 @@
 # names the child task the request concerns: the helper
 # reads that child's current state through bin/fm-crew-state.sh in this home and
 # appends it to the line as "child=<id> child-state=<verdict>", which the parent
-# records beside the request outcome (bin/fm-pending-reply-lib.sh). Without
-# --task, or when the child cannot be read, the verdict is unknown.
+# records beside the request outcome (bin/fm-pending-reply-lib.sh). A child
+# that cannot be read has the verdict unknown. Without --task naming a plain
+# task id, the line carries no marker and the parent records unknown.
 # Without the flag, the helper emits its original line with no child marker
 # and accepts only the original arguments. The parent opts in separately to
 # recording the result (docs/configuration.md).
@@ -122,14 +123,12 @@ fi
 
 # The child's state is read last, immediately before the line is written.
 CHILD_MARKER=
-if [ "$CHILD_RESULTS" = 1 ]; then
+if fm_pending_reply_child_id_valid "$CHILD"; then
   CHILD_STATE=unknown
-  if fm_pending_reply_child_id_valid "$CHILD"; then
-    CHILD_RAW=$(FM_HOME="$HOME_DIR" "$SCRIPT_DIR/fm-crew-state.sh" "$CHILD" 2>/dev/null | head -1) || true
-    case "$CHILD_RAW" in
-      'state: '*) CHILD_STATE=${CHILD_RAW#state: }; CHILD_STATE=${CHILD_STATE%% *} ;;
-    esac
-  fi
+  CHILD_RAW=$(FM_HOME="$HOME_DIR" "$SCRIPT_DIR/fm-crew-state.sh" "$CHILD" 2>/dev/null | head -1) || true
+  case "$CHILD_RAW" in
+    'state: '*) CHILD_STATE=${CHILD_RAW#state: }; CHILD_STATE=${CHILD_STATE%% *} ;;
+  esac
   CHILD_MARKER=" $(fm_pending_reply_child_marker "$CHILD" "$CHILD_STATE")"
 fi
 

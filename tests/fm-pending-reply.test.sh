@@ -2237,6 +2237,9 @@ test_missing_child_result_reads_unknown() {
   out=$(received_result "$fb" "$mate" "$home" kid "" "")
   [ "$out" = "- unknown unknown" ] \
     || fail "a reply without a child must resolve and record unknown, not finished: $out"
+  out=$(tail -1 "$home/state/kid.status" | sed -E 's/ \[at=[0-9]+\]//; s/corr=[0-9a-f]{16}/corr=X/')
+  [ "$out" = "done [corr=X]: narrow fix done (via-helper)" ] \
+    || fail "an opted-in helper line without --task must carry no marker: $out"
   out=$(received_result "$fb" "$mate" "$home" kid no-such-child "")
   [ "$out" = "no-such-child unknown unknown" ] \
     || fail "a child with no record must record unknown and never finished: $out"
@@ -2364,7 +2367,7 @@ test_child_results_are_off_by_default() {
     rec=$(fm_pending_reply_path "$state" "$corr")
     assert_no_grep 'reply_child_' "$rec" "default resolution recorded an opted-in sender ($setting)"
     close=$(tail -1 "$state/kid.status" | sed -E 's/ \[at=[0-9]+\]//')
-    expected="resolved [key=pending-reply-$corr]: $(fm_pending_reply_resolved_note kid "$corr" helper)"
+    expected="resolved [key=pending-reply-$corr]: pending-reply-resolved: task=kid pending-reply-id=$corr via=helper"
     [ "$close" = "$expected" ] || fail "default escalation close changed ($setting): $close"
   done
   pass "unconfigured and existing-setting homes retain the original reply and record outputs"
