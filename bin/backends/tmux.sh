@@ -65,6 +65,18 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
   fm_tmux_submit_core "$@"
 }
 
+# Paste with bracketed-paste framing when the application requested it, then
+# send Enter in the same tmux command so no other client can interleave input.
+fm_backend_tmux_paste_submit() {  # <target> <text>
+  local buffer="fm-paste-$$-$RANDOM"
+  fm_backend_tmux_target_exists "$1" || return 1
+  printf '%s' "$2" | tmux load-buffer -b "$buffer" - || return 1
+  if ! tmux paste-buffer -d -p -b "$buffer" -t "$1" \; send-keys -t "$1" Enter; then
+    tmux delete-buffer -b "$buffer" 2>/dev/null || true
+    return 1
+  fi
+}
+
 # fm_backend_tmux_own_session: print the name of the tmux session this process
 # was started in. An untargeted display-message picks the most recently used
 # member of a session group, and so does a pane target, so an external client

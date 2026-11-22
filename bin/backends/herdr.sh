@@ -3243,6 +3243,21 @@ fm_backend_herdr_send_literal() {  # <target> <text>
   return "$rc"
 }
 
+# Herdr's agent prompt sends a bracketed paste and Enter in one ordered
+# sequence. An undetected agent receives nothing and lets the caller use the
+# ordinary typed path; other failures leave delivery unproven.
+fm_backend_herdr_paste_submit() {  # <target> <text>
+  local output rc=0
+  fm_backend_herdr_target_ready "$1" || return 1
+  output=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent prompt "$FM_BACKEND_HERDR_PANE" "$2" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  case "$output" in
+    *agent_not_found*|*"unrecognized subcommand"*) return 2 ;;
+  esac
+  [ -z "$output" ] || printf '%s\n' "$output" >&2
+  return 1
+}
+
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
 # Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery) onto
 # herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
