@@ -372,10 +372,9 @@ fm_tasks_axi() {
 fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   local data=$1 id=$2 out status addressing_status secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
   shift 2
-  # A non-positive bound is not a bound (fm-timeout-lib.sh), and a padded zero
-  # such as 00 is still zero, so the digits test alone would let the very read
-  # this bound exists to prevent back in. Compare arithmetically, tolerating a
-  # value too large for the shell to compare at all.
+  # Enforce fm-timeout-lib.sh's bound contract arithmetically: the digits test
+  # alone accepts padded zero such as 00. Tolerate a value too large for the
+  # shell to compare at all.
   case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
   [ "$secs" -gt 0 ] 2>/dev/null || secs=10
   fm_backlog_tasks_axi_addressing "$data"
