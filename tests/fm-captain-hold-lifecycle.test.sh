@@ -814,6 +814,7 @@ EOF
 test_answer_records_and_closes() {
   local home id json show shape
   home=$(make_home answer-close)
+  touch "$home/config/hold-answer-words"
   id=sample-guard-review
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Guard the answer path" --kind scout --repo sample --start >/dev/null \
@@ -893,12 +894,71 @@ test_answer_records_and_closes() {
   pass "answer records the captain's words, closes idempotently, and releases routed work"
 }
 
-# Issue #8152: an option choice is stored with the words the captain saw, never
-# as a bare letter, and every answered call exposes one single-line
-# `Selected answer:` field. Free-text answers close exactly as before.
+test_answer_words_are_opt_in() {
+  local home settings path out show answer label
+  for settings in unconfigured existing-settings; do
+    home=$(make_home "answer-default-$settings")
+    if [ "$settings" = existing-settings ]; then
+      touch "$home/config/hold-pr-settle" "$home/config/park-on-review" "$home/config/auto-land"
+    fi
+    for path in direct bare labelled blank free-text release; do
+      run_captain "$home" hold "sample-$path" --title "Choose the start state" \
+        --reason "A: Off until checks pass. B: On now." --repo sample >/dev/null \
+        || fail "could not register $settings $path call"
+      answer=A label=''
+      case "$path" in
+        direct|release)
+          printf 'A\n' > "$home/decision.txt"
+          if [ "$path" = release ]; then
+            out=$(run_captain "$home" answer "sample-$path" --decision-file "$home/decision.txt" --release) \
+              || fail "$settings release refused a bare option"
+          else
+            out=$(run_captain "$home" answer "sample-$path" --decision-file "$home/decision.txt") \
+              || fail "$settings answer refused a bare option"
+          fi
+          ;;
+        *)
+          case "$path" in
+            labelled) label='Off until checks pass.' ;;
+            blank) label=' ' ;;
+            free-text) answer='Keep it off for now' ;;
+          esac
+          out=$(printf 'sample-%s\t%s\t%s\n' "$path" "$answer" "$label" \
+            | run_captain "$home" answers --source "default fixture") \
+            || fail "$settings answers refused $path input"
+          assert_contains "$out" "closed: sample-$path" "$settings $path did not close"
+          ;;
+      esac
+      show=$(tasks_in "$home" show "sample-$path" --full)
+      if [ "$path" = release ]; then
+        assert_contains "$show" "state: queued" "default release completed the work"
+        assert_contains "$show" "Resolution mode: released" "default release lost its mode"
+      else
+        assert_contains "$show" "state: done" "$settings $path left the call open"
+        assert_contains "$show" "Resolution mode: answered" "$settings $path lost its mode"
+      fi
+      case "$show" in
+        *"Selected answer:"*) fail "$settings $path added an opt-in resolution field" ;;
+      esac
+      case "$path" in
+        bare|labelled|blank|free-text)
+          assert_contains "$show" "Answer: $answer" "$settings $path lost the raw answer"
+          if [ -n "$label" ]; then
+            assert_contains "$show" "Answer as shown to the captain: $label" \
+              "$settings $path changed the existing label record"
+          fi
+          ;;
+      esac
+    done
+  done
+  pass "answer intake and resolution records stay unchanged without the dedicated opt-in"
+}
+
+# The opt-in must preserve the displayed words without inferring missing labels.
 test_option_answers_keep_their_displayed_words() {
   local home show out rc shape n=0
   home=$(make_home option-words)
+  touch "$home/config/hold-answer-words"
   for shape in A b 7 '(c)' 'D.' 'e)' 'A ' ' b'; do
     n=$((n + 1))
     run_captain "$home" hold "sample-option-$n" --title "Choose the start state" \
@@ -1827,6 +1887,7 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
 test_bound_channel_answers_close_at_answer_time() {
   local home id sid artifact result out show rc
   home=$(make_home channel-answer-closure)
+  touch "$home/config/hold-answer-words"
   id=sample-eval-proposal
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Propose sample eval changes" --kind scout --repo sample --start >/dev/null \
@@ -2122,6 +2183,7 @@ test_normal_answers_retire_pending_reconcile_requests() {
 test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
   local home show list rc out
   home=$(make_home reconcile-outcomes)
+  touch "$home/config/hold-answer-words"
   tasks_in "$home" add sample-moot-call "Captain call: ship 0.1.37?" --repo sample >/dev/null
   tasks_in "$home" add sample-active-call "Captain call: which admission order?" --repo sample >/dev/null
   tasks_in "$home" add sample-mode-call "Captain call: verify replay mode?" --repo sample >/dev/null
@@ -2647,13 +2709,16 @@ SH
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
-    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "take the second option" >/dev/null 2>&1 \
+    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-followup "B" >/dev/null 2>&1 \
     || fail "an answer keyed by a task id was refused by the chat channel"
   show=$(tasks_in "$home" show sample-chat-followup --full)
   assert_contains "$show" "state: done" "a chat answer left the task-id call open"
   assert_contains "$show" "Resolution mode: answered" "the chat-answered call did not record its close path"
-  assert_contains "$show" "Answer: take the second option" "the chat-answered call lost the captain answer"
+  assert_contains "$show" "Answer: B" "the chat-answered call lost the captain answer"
   assert_contains "$show" "answer sent to $id" "the chat-answered call lost its channel provenance"
+  case "$show" in
+    *"Selected answer:"*) fail "default chat intake added an opt-in resolution field" ;;
+  esac
 
   : > "$home/send.log"
   set +e
@@ -2683,6 +2748,27 @@ SH
   fi
   run_captain "$home" verify "$id" >/dev/null \
     || fail "chat-answered calls did not satisfy the completion gate"
+  touch "$home/config/hold-answer-words"
+  run_captain "$home" hold sample-chat-opt-in --title "Choose the start state" \
+    --reason "A: Off until checks pass. B: On now." --repo sample >/dev/null \
+    || fail "could not register the opt-in chat call"
+  if env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-opt-in A \
+    > "$home/opt-in-chat.out" 2> "$home/opt-in-chat.err"; then
+    fail "opt-in chat intake closed a call with a bare option"
+  fi
+  assert_grep "could not be closed" "$home/opt-in-chat.err" "chat lost the failed-close diagnostic"
+  show=$(tasks_in "$home" show sample-chat-opt-in --full)
+  assert_contains "$show" "held: yes" "opt-in bare chat answer released the call"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-opt-in "A: Off until checks pass." >/dev/null 2>&1 \
+    || fail "opt-in chat intake refused the option words"
+  show=$(tasks_in "$home" show sample-chat-opt-in --full)
+  assert_contains "$show" "Selected answer: A: Off until checks pass." "chat lost the selected answer"
   pass "the chat channel feeds the same keyed-answer intake a captured review does"
 }
 
@@ -5220,6 +5306,7 @@ EOF
   pass "an answered captain call archived to a user-configured location still satisfies the completion gate"
 }
 
+test_answer_words_are_opt_in
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer
