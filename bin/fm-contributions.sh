@@ -391,6 +391,7 @@ poll() {
     | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
+  BUDGET_EXHAUSTED=${BUDGET_EXHAUSTED:-0}
   while IFS=$'\t' read -r -a row; do
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
     url=${row[0]}
