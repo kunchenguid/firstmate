@@ -373,6 +373,19 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted"
 }
 
+# Only harnesses verified to queue a pasted doorbell and its Enter while busy
+# may use the ordered submission path.
+FM_TASK_INBOX_PASTE_HARNESSES='claude'
+
+fm_task_inbox_paste_harness() {  # <backend>
+  fm_backend_list_contains "$FM_BACKEND_PASTE_SUBMIT" "$1" || return 1
+  [ -n "${FM_COMPOSER_HARNESS:-}" ] || return 1
+  case " $FM_TASK_INBOX_PASTE_HARNESSES " in
+    *" $FM_COMPOSER_HARNESS "*) return 0 ;;
+  esac
+  return 1
+}
+
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
@@ -389,10 +402,10 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # positively identify (that classifier is advisory here by design).
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
-# rather than skipped; skipping it would block every later ring. On both paths
-# a lost first Enter gets one confirmed retry.
+# rather than skipped; skipping it would block every later ring. Every
+# held-line path retries one lost Enter after a composer check.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict paste_rc
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -405,23 +418,42 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
         && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         || return 1
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
-      sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
-      return 0
+      fm_task_inbox_submit_held "$backend" "$target" "$line" "$label"
+      return
       ;;
   esac
-  # Accepted residual race: terminal input and Enter are separate delivery
-  # steps, so an agent exiting after the liveness check could leave a bare
-  # shell only a suffix; the `: ` prefix protects complete lines only. Do not
-  # add process-bound atomic delivery here unless an incident reopens this.
+  if fm_task_inbox_paste_harness "$backend"; then
+    paste_rc=0
+    fm_backend_paste_submit "$backend" "$target" "$line" "$label" >/dev/null 2>&1 || paste_rc=$?
+    case "$paste_rc" in
+      0)
+        sleep 0.3
+        fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
+        fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+        return 0
+        ;;
+      2) ;;
+      *) return 2 ;;
+    esac
+  fi
+  # Other harnesses and backends retain the typed path. Its separate input
+  # and Enter operations may leave an unsubmitted doorbell; the retry ladder
+  # and the shell no-op prefix remain the recovery boundary for that path.
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
   # The verdict is read only to report a failed keystroke; every other value
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
   [ "$verdict" != send-failed ] || return 2
+  return 0
+}
+
+# Submit a doorbell already held in the composer, retrying one lost Enter.
+fm_task_inbox_submit_held() {  # <backend> <target> <line> [expected-label]
+  fm_backend_send_key "$1" "$2" Enter "${4:-}" >/dev/null 2>&1 || return 2
+  sleep 0.3
+  fm_task_inbox_composer_holds "$1" "$2" "$3" "${4:-}" || return 0
+  fm_backend_send_key "$1" "$2" Enter "${4:-}" >/dev/null 2>&1 || return 2
   return 0
 }
 

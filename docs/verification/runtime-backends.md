@@ -1197,6 +1197,32 @@ ok - opencode (1.18.33): the doorbell reached a real worker, which acted and ack
 OpenCode needed `FM_SEND_INBOX_LIVE_TIMEOUT=560` because its configured model was still mid-turn at the default 240 seconds.
 Pi 0.87.1 was installed but not verified: its configured model returned an account error (`The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account`) before it read the inbox.
 
+### Ordered Claude doorbells on tmux and Herdr
+
+On 2026-11-22, the live guard exercised Claude Code 2.1.330 on tmux 3.6a and Herdr 0.9.3 on Linux x86_64.
+It rang a fresh doorbell, submitted a doorbell already held in the composer, and rang while Claude ran a timed shell command on each backend.
+Each record was acted on and acknowledged through the inbox's `handled/` move.
+The command was run with tmux 3.6a on `PATH` and an isolated temporary test root:
+
+```sh
+FM_TASK_INBOX_PASTE_LIVE_E2E=1 timeout 600 bash tests/fm-task-inbox-paste-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Claude 2.1.330 (Claude Code) on tmux: ordered doorbell submitted and acknowledged
+ok - Claude 2.1.330 (Claude Code) on tmux: held doorbell submitted without retyping
+ok - Claude 2.1.330 (Claude Code) on tmux: busy-turn doorbell submitted and acknowledged
+ok - Claude 2.1.330 (Claude Code) on herdr: ordered doorbell submitted and acknowledged
+ok - Claude 2.1.330 (Claude Code) on herdr: held doorbell submitted without retyping
+ok - Claude 2.1.330 (Claude Code) on herdr: busy-turn doorbell submitted and acknowledged
+ok - Claude 2.1.330 (Claude Code) on Herdr 0.9.3: both backend regressions passed
+```
+
+The guard uses the private tmux socket and named Herdr session helpers and refuses a pass unless both backends complete all three cases.
+Refresh this evidence after a Claude or backend upgrade before extending the ordered doorbell capability to another harness.
+
 ## Waiting-worker command ceilings
 
 The `# Waiting` section of the ship and scout briefs (`bin/fm-brief.sh`) has a worker hold every external wait inside one blocking shell command, bounded by what its harness lets one command run.

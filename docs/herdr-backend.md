@@ -672,6 +672,7 @@ Explicit named-session routing and unrelated launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane.
 Ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
+For a Claude doorbell, the adapter uses Herdr's `agent prompt` to send bracketed paste and Enter in one request; [the live guard](verification/runtime-backends.md#ordered-claude-doorbells-on-tmux-and-herdr) verifies the real composer and held-line retry.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 

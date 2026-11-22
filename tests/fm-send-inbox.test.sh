@@ -42,7 +42,7 @@ SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-inbox)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-# Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
+# Stub tmux: logs literal or pasted text to FM_SEND_LOG and lets the submit and
 # composer paths reach clean verdicts. FM_FAKE_TMUX_COMPOSER=pending renders a
 # composer visibly holding text; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
 make_stubs() { # <dir> -> echoes fakebin dir
@@ -52,6 +52,14 @@ make_stubs() { # <dir> -> echoes fakebin dir
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  load-buffer)
+    cat > "$FM_SEND_LOG.buffer"
+    exit $? ;;
+  paste-buffer)
+    [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
+    [ -f "$FM_SEND_LOG.buffer" ] || exit 1
+    printf '%s\n' "$(cat "$FM_SEND_LOG.buffer")" >> "$FM_SEND_LOG"
+    exit 0 ;;
   send-keys)
     [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
     shift

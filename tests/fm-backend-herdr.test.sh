@@ -4213,6 +4213,39 @@ test_send_key_normalizes_and_targets_pane() {
   pass "fm_backend_herdr_send_key: normalizes the key and targets the right pane"
 }
 
+# `agent prompt` is Herdr's ordered paste-and-submit. Success is 0; a pane with
+# no registered agent (the agent_not_found error code) or a client without the
+# subcommand (clap's "unrecognized subcommand") is 2 so the caller can type
+# instead; any other failure is 1 because delivery is unproven.
+test_paste_submit_maps_agent_prompt_outcomes() {
+  local dir log resp fb rc expect outcome
+  for outcome in ok missing old-client other; do
+    dir="$TMP_ROOT/paste-submit-$outcome"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    fb=$(make_herdr_fakebin "$dir")
+    case "$outcome" in
+      ok) expect=0 ;;
+      missing)
+        expect=2; echo 1 > "$resp/1.exit"
+        printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/1.err" ;;
+      old-client)
+        expect=2; echo 2 > "$resp/1.exit"
+        printf "error: unrecognized subcommand 'prompt'\n" > "$resp/1.err" ;;
+      other)
+        expect=1; echo 1 > "$resp/1.exit"
+        printf 'error: connection reset\n' > "$resp/1.err" ;;
+    esac
+    rc=0
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_paste_submit default:w1:p2 "hello there"' "$ROOT" \
+      2>/dev/null || rc=$?
+    expect_code "$expect" "$rc" "paste_submit outcome $outcome"
+    assert_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''prompt'$'\x1f''w1:p2'$'\x1f''hello there' \
+      "paste_submit did not send the text through agent prompt for $outcome"
+  done
+  pass "fm_backend_herdr_paste_submit: maps agent prompt success, fallback, and failure"
+}
+
 test_kill_is_best_effort() {
   local dir log resp fb
   dir="$TMP_ROOT/kill"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6683,6 +6716,7 @@ test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
+test_paste_submit_maps_agent_prompt_outcomes
 test_kill_is_best_effort
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy

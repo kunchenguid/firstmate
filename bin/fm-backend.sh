@@ -1276,17 +1276,10 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
-# fm_backend_send_text_submit: submit and verify through the selected adapter.
-# Pane backends type once and retry only submission; T3 uses a native send.
-# Echoes the backend's verdict; callers require exact empty for confirmed delivery.
-# A pane that already shows the recognised dialog is refused before any
-# adapter types, so that submit neither types the text nor sends Enter.
-fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local backend=$1 rc=0 target label dialog
-  shift
-  target=$1
-  label=${6:-}
-  fm_backend_source "$backend" || return 1
+# Refuse a recognised dialog before any input. Leave the sink open on success
+# for the submitter's Enter loop; the submitter releases it.
+fm_backend_submit_dialog_precheck() {  # <backend> <target> [expected-label]
+  local backend=$1 target=$2 label=${3:-} dialog
   # Every Enter loop below reads the dialog sink, so it must exist before
   # any adapter types: a sink that fails here leaves the composer untouched.
   fm_composer_dialog_sink_prepare || {
@@ -1306,6 +1299,33 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     echo "error: blocked on a prompt: $dialog" >&2
     return 1
   fi
+}
+
+# Backends with a verified ordered paste-and-submit primitive.
+FM_BACKEND_PASTE_SUBMIT="tmux herdr"
+
+fm_backend_paste_submit() {  # <backend> <target> <text> [expected-label]
+  local backend=$1 rc=0
+  shift
+  fm_backend_list_contains "$FM_BACKEND_PASTE_SUBMIT" "$backend" || return 2
+  fm_backend_source "$backend" || return 1
+  fm_backend_submit_dialog_precheck "$backend" "$1" "${3:-}" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_paste_submit "$1" "$2" || rc=$? ;;
+    herdr) fm_backend_herdr_paste_submit "$1" "$2" || rc=$? ;;
+  esac
+  fm_composer_dialog_sink_release
+  return "$rc"
+}
+
+# fm_backend_send_text_submit: submit and verify through the selected adapter.
+# Pane backends type once and retry only submission; T3 uses a native send.
+# Echoes the backend's verdict; callers require exact empty for confirmed delivery.
+fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
+  local backend=$1 rc=0
+  shift
+  fm_backend_source "$backend" || return 1
+  fm_backend_submit_dialog_precheck "$backend" "$1" "${6:-}" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" || rc=$? ;;
     herdr) fm_backend_herdr_send_text_submit "$@" || rc=$? ;;
