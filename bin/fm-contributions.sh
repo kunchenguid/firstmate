@@ -633,9 +633,9 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
     jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
-      jq -n --argjson ack_receipts "$ACK_RECEIPTS" --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]} | del(.retired)
-        | if $ack_receipts then del(.receipts) else . end | .seen -= ["closed"]' > "$TMP/row.json"
+      jq -n --slurpfile final "$TMP/final.json" '
+        $final[0] + {error:null,pending:[],notified:[]} | del(.retired, .receipts)
+        | .seen -= ["closed"]' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
