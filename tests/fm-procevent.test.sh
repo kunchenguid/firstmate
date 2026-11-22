@@ -813,6 +813,59 @@ out=$(PATH="$LAVISH_BIN:$PATH" FM_HOME="$HLT" "$ROOT/bin/fm-procevent-lavish.sh"
 assert_contains "$out" "retired: $lavish_id" "explicit adapter retirement stays supported after automatic retirement"
 pass "one Send & End yields exactly one captured result, automatic retirement, and no recurring poll"
 
+# --- silent disconnects relisten without a second runner ---------------------
+HRL="$TMP_ROOT/hrl"; new_home "$HRL"
+RL_BIN=$(fm_fakebin "$TMP_ROOT/lavish-relisten-stub")
+RL_POLL_COUNT="$TMP_ROOT/lavish-relisten-count"
+RL_GATE="$TMP_ROOT/lavish-relisten-gate"
+export RL_POLL_COUNT RL_GATE
+cat > "$RL_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$RL_POLL_COUNT" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$RL_POLL_COUNT"
+if [ "$n" = 2 ]; then
+  for _ in $(seq 1 600); do
+    [ -e "$RL_GATE" ] && break
+    sleep 0.1
+  done
+  [ -e "$RL_GATE" ] || exit 75
+fi
+if [ "$n" -lt 3 ]; then
+  printf 'session:\n  status: browser_disconnected\n'
+else
+  printf 'session:\n  status: feedback\nfeedback[1]{text}:\n  answer\n'
+fi
+SH
+chmod +x "$RL_BIN/lavish-axi"
+RL_ART="$TMP_ROOT/relisten-board.html"
+printf '<h1>board</h1>\n' > "$RL_ART"
+lavish_session "$RL_ART"
+rl_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$RL_ART")
+fm_test_track_procevent_home "$HRL"
+PATH="$RL_BIN:$PATH" FM_HOME="$HRL" "$ROOT/bin/fm-procevent-lavish.sh" arm "$RL_ART" >/dev/null
+PATH="$RL_BIN:$PATH" pe "$HRL" reconcile >/dev/null
+for _ in $(seq 1 100); do
+  [ "$(cat "$RL_POLL_COUNT" 2>/dev/null || echo 0)" -ge 2 ] && break
+  sleep 0.1
+done
+[ "$(cat "$RL_POLL_COUNT" 2>/dev/null || echo 0)" = 2 ] \
+  || fail "the Lavish listener did not relisten after a silent disconnect"
+rl_arm=$(PATH="$RL_BIN:$PATH" FM_HOME="$HRL" "$ROOT/bin/fm-procevent-lavish.sh" arm "$RL_ART")
+assert_contains "$rl_arm" "still-listening: $rl_id" "a second arm preserves the live listener"
+touch "$RL_GATE"
+for _ in $(seq 1 100); do
+  [ "$(count_results "$HRL" "$rl_id")" -ge 3 ] && [ -n "$(wake_payloads "$HRL")" ] && break
+  sleep 0.1
+done
+[ "$(cat "$RL_POLL_COUNT" 2>/dev/null || echo 0)" = 3 ] \
+  || fail "relisten or a second arm made $(cat "$RL_POLL_COUNT" 2>/dev/null || echo 0) polls"
+[ "$(count_results "$HRL" "$rl_id")" = 3 ] \
+  || fail "expected two silent rounds and one feedback round"
+[ "$(wake_payloads "$HRL" | sort -u | grep -c .)" = 1 ] \
+  || fail "silent disconnect rounds were announced"
+pass "Lavish relistens after silent disconnects and a second arm keeps the same runner"
+
 # --- end-user-aligned regression: an empty board close is not news ------------
 # The captain's report: closing a review surface he had said nothing on still
 # put a wake in his chat whose entire content was that nothing happened. The
