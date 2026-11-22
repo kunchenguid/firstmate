@@ -22,7 +22,7 @@
 # records beside the request outcome (bin/fm-pending-reply-lib.sh). A child
 # that cannot be read has the verdict unknown. Without --task naming a plain
 # task id, the line carries no marker and the parent records unknown.
-# Without the flag, the helper emits its original line with no child marker
+# Without config/reply-child-state, the helper emits its original line with no child marker
 # and accepts only the original arguments. The parent opts in separately to
 # recording the result (docs/configuration.md).
 #
