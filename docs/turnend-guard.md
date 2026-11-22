@@ -364,8 +364,12 @@ Pinning that signal to the session-lock identity recorded at claim time is what 
 An orphan fails both signals: it no longer descends from the replacement's lock pid, and its recorded lock-holder identity is the dead session's.
 An entry from a build before these fields existed records neither and falls back to descent alone.
 
+The auto-arm also records the Stop payload's `session_id` on line 1 as `claude_session`, which later writes of that generation keep, and a firing from another Claude session does not find that claim open.
+Claude delivers a hook's exit-2 rewake to the session that launched the hook, so a claim taken before Claude continued the conversation under a new session id, as a backgrounded session's `--fork-session` resume does, can only wake a conversation that no longer runs, even while its owner still descends from the lock-holding front end.
+A claim or a payload with no session id is judged as before, and so is every check the guard itself makes, because it names no session.
+
 Anything else lets the next Stop-owned firing take the next generation and arm.
-That covers a finished outcome, a dead or identity-mismatched owner, an owner orphaned by its session's exit, a stuck owner, an identityless entry, or no entry.
+That covers a finished outcome, a dead or identity-mismatched owner, an owner orphaned by its session's exit, a stuck owner, an identityless entry, an earlier session's claim, or no entry.
 Taking a newer generation is the reclaim, and a steady-state predecessor is never signalled or revoked.
 
 No mutex is held across arming or output.
