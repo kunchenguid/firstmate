@@ -53,7 +53,58 @@ make_stub() {  # <case-dir>
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+literal_payload() {
+  case "$payload" in
+    ". '"*"'")
+      staged=${payload#". '"}
+      staged=${staged%"'"}
+      [ ! -f "$staged" ] || payload=$(cat "$staged")
+      ;;
+  esac
+  printf '%s\n' "$payload" >> "$D/literal"
+  case "$payload" in
+    /exit|/quit)
+      if [ -e "$D/remote-relaunch-start" ] && [ ! -e "$D/remote-relaunch-end" ]; then
+        : > "$D/local-relaunch-during-remote"
+      fi
+      printf 'zsh' > "$D/command.$target"
+      ;;
+    *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command.$target" ;;
+    ': Firstmate instruction waiting: list '*)
+      printf 'doorbell\n' >> "$D/rings"
+      if [ -x "$D/on-doorbell" ]; then
+        "$D/on-doorbell" "$payload"
+      fi
+      if [ -f "$D/answer-inbox" ]; then
+        # Model the mate: read the newest instruction it was handed and
+        # report back on the parent channel, carrying the correlation token
+        # the request itself embedded.
+        inbox=$(cat "$D/answer-inbox")
+        corr=$(cat "$inbox"/*.msg 2>/dev/null \
+          | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+        if [ -n "$corr" ]; then
+          printf 'done [%s]: open records written down\n' "$corr" \
+            >> "$(cat "$D/answer-status")"
+        fi
+      fi
+      ;;
+  esac
+}
 case "${1:-}" in
+  load-buffer)
+    cat > "$D/paste-buffer"
+    exit $? ;;
+  paste-buffer)
+    target=
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = -t ] && [ -z "$target" ]; then target=$a; fi
+      prev=$a
+    done
+    payload=$(cat "$D/paste-buffer")
+    literal_payload
+    printf 'Enter\n' >> "$D/keys"
+    exit 0 ;;
   send-keys)
     shift
     literal=0
@@ -67,41 +118,7 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
-      case "$payload" in
-        ". '"*"'")
-          staged=${payload#". '"}
-          staged=${staged%"'"}
-          [ ! -f "$staged" ] || payload=$(cat "$staged")
-          ;;
-      esac
-      printf '%s\n' "$payload" >> "$D/literal"
-      case "$payload" in
-        /exit|/quit)
-          if [ -e "$D/remote-relaunch-start" ] && [ ! -e "$D/remote-relaunch-end" ]; then
-            : > "$D/local-relaunch-during-remote"
-          fi
-          printf 'zsh' > "$D/command.$target"
-          ;;
-        *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command.$target" ;;
-        ': Firstmate instruction waiting: list '*)
-          printf 'doorbell\n' >> "$D/rings"
-          if [ -x "$D/on-doorbell" ]; then
-            "$D/on-doorbell" "$payload"
-          fi
-          if [ -f "$D/answer-inbox" ]; then
-            # Model the mate: read the newest instruction it was handed and
-            # report back on the parent channel, carrying the correlation token
-            # the request itself embedded.
-            inbox=$(cat "$D/answer-inbox")
-            corr=$(cat "$inbox"/*.msg 2>/dev/null \
-              | grep -oE 'corr=[0-9a-f]{16}' | head -1)
-            if [ -n "$corr" ]; then
-              printf 'done [%s]: open records written down\n' "$corr" \
-                >> "$(cat "$D/answer-status")"
-            fi
-          fi
-          ;;
-      esac
+      literal_payload
     else
       printf '%s\n' "$payload" >> "$D/keys"
     fi

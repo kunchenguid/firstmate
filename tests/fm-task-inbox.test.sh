@@ -312,13 +312,38 @@ test_ring_skips_dead_agent() {
 # A fake tmux whose pane is a Claude-style composer that keeps its content in
 # FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
 # between rules, and Enter submits it (logged as SUBMIT) unless
-# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow.
+# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow. A loaded
+# buffer pasted with paste-buffer appends to the composer, and the chained
+# `; send-keys Enter` of the same tmux command submits it; FM_FAKE_PASTE_FAIL=1
+# fails the paste. Each input operation is recorded in FM_FAKE_OPS.
 make_composer_stub() {  # <dir>
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+ops=${FM_FAKE_OPS:-/dev/null}
+press_enter() {
+  printf 'enter\n' >> "$ops"
+  drops=$(cat "$FM_FAKE_DROP_ENTERS" 2>/dev/null || echo 0)
+  if [ "$drops" -gt 0 ]; then
+    echo $((drops - 1)) > "$FM_FAKE_DROP_ENTERS"
+  elif [ -s "$FM_FAKE_COMPOSER" ]; then
+    printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
+    : > "$FM_FAKE_COMPOSER"
+  fi
+}
 case "${1:-}" in
+  load-buffer)
+    cat > "$FM_FAKE_COMPOSER.buffer"
+    exit $? ;;
+  paste-buffer)
+    [ "${FM_FAKE_PASTE_FAIL:-0}" != 1 ] || exit 1
+    printf 'paste\n' >> "$ops"
+    cat "$FM_FAKE_COMPOSER.buffer" >> "$FM_FAKE_COMPOSER"
+    case " $* " in
+      *" ; send-keys "*" Enter "*) press_enter ;;
+    esac
+    exit 0 ;;
   send-keys)
     shift
     literal=0
@@ -330,15 +355,10 @@ case "${1:-}" in
       esac
     done
     if [ "$literal" = 1 ]; then
+      printf 'literal\n' >> "$ops"
       printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
     elif [ "${1:-}" = Enter ]; then
-      drops=$(cat "$FM_FAKE_DROP_ENTERS" 2>/dev/null || echo 0)
-      if [ "$drops" -gt 0 ]; then
-        echo $((drops - 1)) > "$FM_FAKE_DROP_ENTERS"
-      elif [ -s "$FM_FAKE_COMPOSER" ]; then
-        printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
-        : > "$FM_FAKE_COMPOSER"
-      fi
+      press_enter
     fi
     exit 0 ;;
   display-message)
@@ -408,6 +428,183 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
+}
+
+# Claude on tmux takes the ordered paste path: the doorbell arrives as one
+# pasted buffer and its Enter rides the same tmux command, so no typed input
+# ever precedes a separate Enter. Ring return codes follow the documented
+# contract: 0 rung, 1 skipped for other pending text, 2 send failed.
+test_claude_ring_pastes_and_submits_in_one_step() {
+  local dir state rec doorbell log ops composer drops rc
+  dir="$TMP_ROOT/ring-paste"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; ops="$dir/ops"; composer="$dir/composer"; drops="$dir/drops"
+  ring() {  # <harness> [extra env assignments...]
+    local harness=$1
+    shift
+    # shellcheck disable=SC2016 # the single-quoted script expands in the child shell
+    env PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_OPS="$ops" \
+      FM_FAKE_COMPOSER="$composer" FM_FAKE_DROP_ENTERS="$drops" \
+      FM_COMPOSER_HARNESS="$harness" "$@" \
+      bash -c '. "$1"; fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1' \
+      _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
+  }
+
+  : > "$log"; : > "$ops"; : > "$composer"; rm -f "$drops"
+  rc=0; ring claude || rc=$?
+  [ "$rc" = 0 ] || fail "a Claude paste ring should report rung, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the pasted doorbell should be submitted exactly once:"$'\n'"$(cat "$log")"
+  [ "$(cat "$ops")" = $'paste\nenter' ] \
+    || fail "a Claude ring should paste and submit in one step without typing:"$'\n'"$(cat "$ops")"
+
+  : > "$log"; : > "$ops"; : > "$composer"; echo 1 > "$drops"
+  rc=0; ring claude || rc=$?
+  [ "$rc" = 0 ] || fail "a paste whose Enter is lost should still report rung, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the retry Enter should submit the pasted doorbell once:"$'\n'"$(cat "$log")"
+  [ "$(cat "$ops")" = $'paste\nenter\nenter' ] \
+    || fail "a held pasted doorbell should get exactly one retry Enter, not a retype:"$'\n'"$(cat "$ops")"
+
+  : > "$log"; : > "$ops"; : > "$composer"; rm -f "$drops"
+  rc=0; ring claude FM_FAKE_PASTE_FAIL=1 || rc=$?
+  [ "$rc" = 2 ] || fail "a failed paste should return send-failed status 2, got rc $rc"
+  [ ! -s "$ops" ] || fail "a failed paste fell back to typing:"$'\n'"$(cat "$ops")"
+  [ ! -s "$composer" ] || fail "a failed paste left text in the composer: $(cat "$composer")"
+
+  : > "$log"; : > "$ops"; : > "$composer"; rm -f "$drops"
+  rc=0; ring codex || rc=$?
+  [ "$rc" = 0 ] || fail "a non-paste harness ring should report rung, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "a non-paste harness should still receive the doorbell:"$'\n'"$(cat "$log")"
+  grep -qx literal "$ops" || fail "a non-paste harness should keep the typed path:"$'\n'"$(cat "$ops")"
+  ! grep -qx paste "$ops" || fail "a non-paste harness was pasted into:"$'\n'"$(cat "$ops")"
+
+  : > "$log"; : > "$ops"; printf '%s' "$doorbell" > "$composer"; echo 1 > "$drops"
+  rc=0; ring claude || rc=$?
+  [ "$rc" = 0 ] || fail "a Claude composer holding our doorbell should be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "a held doorbell should be submitted once, not re-pasted:"$'\n'"$(cat "$log")"
+  [ "$(cat "$ops")" = $'enter\nenter' ] \
+    || fail "a held doorbell should get Enter plus one retry Enter only:"$'\n'"$(cat "$ops")"
+
+  : > "$log"; : > "$ops"; printf 'a half-typed draft' > "$composer"; rm -f "$drops"
+  rc=0; ring claude || rc=$?
+  [ "$rc" = 1 ] || fail "other pending text should skip a Claude ring, got rc $rc"
+  [ ! -s "$ops" ] || fail "other pending text received input:"$'\n'"$(cat "$ops")"
+  pass "inbox: Claude rings paste and submit in one step, retry a lost Enter, and report paste failures"
+}
+
+# A Claude-on-Herdr pane modeled by command, not call order: `agent get`
+# reports FM_FAKE_HERDR_STATUS, `pane read` renders FM_FAKE_COMPOSER like the
+# tmux composer stub, `pane send-keys ... enter` submits it, `pane send-text`
+# types into it, and `agent prompt` pastes and submits in one step unless
+# FM_FAKE_HERDR_PROMPT=missing answers with Herdr's agent_not_found error.
+# Unmodeled reads fail, so their verdicts stay unknown.
+make_herdr_composer_stub() {  # <dir>
+  mkdir -p "$1/fakebin"
+  cat > "$1/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+ops=${FM_FAKE_OPS:-/dev/null}
+submit() {
+  printf 'enter\n' >> "$ops"
+  if [ -s "$FM_FAKE_COMPOSER" ]; then
+    printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
+    : > "$FM_FAKE_COMPOSER"
+  fi
+}
+case "${1:-} ${2:-}" in
+  "status --json")
+    printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  "terminal title")
+    printf '{"result":{"reason":"no_foreground_client"}}\n' ;;
+  "agent get")
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"%s"}}}\n' "${FM_FAKE_HERDR_STATUS:-idle}" ;;
+  "agent prompt")
+    if [ "${FM_FAKE_HERDR_PROMPT:-ok}" = missing ]; then
+      printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$3"
+      exit 1
+    fi
+    printf 'prompt\n' >> "$ops"
+    printf '%s' "$4" >> "$FM_FAKE_COMPOSER"
+    submit ;;
+  "pane read")
+    rule=$(printf '─%.0s' $(seq 64))
+    printf '● done\n%s\n' "$rule"
+    if [ -s "$FM_FAKE_COMPOSER" ]; then
+      fold -w 60 "$FM_FAKE_COMPOSER" | awk 'NR == 1 { print "❯ " $0; next } { print "  " $0 }'
+    else
+      printf '❯ \n'
+    fi
+    printf '%s\n  ? for shortcuts\n' "$rule" ;;
+  "pane send-keys")
+    [ "${4:-}" != enter ] || submit ;;
+  "pane send-text")
+    printf 'literal\n' >> "$ops"
+    printf '%s' "$4" >> "$FM_FAKE_COMPOSER" ;;
+  *) exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/herdr"
+}
+
+# Herdr's `agent prompt` is the ordered paste path for Claude. A pane whose
+# agent Herdr cannot find falls back to the typed path; a held doorbell is
+# submitted while a verified paste harness is busy, but a busy pane of any
+# other harness keeps the documented skip.
+test_herdr_ring_pastes_and_falls_back() {
+  local dir state rec doorbell log ops composer rc
+  command -v jq >/dev/null 2>&1 || { pass "inbox: skip Herdr ring cases without jq"; return 0; }
+  dir="$TMP_ROOT/ring-herdr"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_herdr_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; ops="$dir/ops"; composer="$dir/composer"
+  ring() {  # <harness> [extra env assignments...]
+    local harness=$1
+    shift
+    # shellcheck disable=SC2016 # the single-quoted script expands in the child shell
+    env PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_OPS="$ops" \
+      FM_FAKE_COMPOSER="$composer" FM_COMPOSER_HARNESS="$harness" \
+      FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0 FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 "$@" \
+      bash -c '. "$1"; fm_task_inbox_ring herdr fmtest:w1:p2 "$2"' \
+      _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
+  }
+
+  : > "$log"; : > "$ops"; : > "$composer"
+  rc=0; ring claude || rc=$?
+  [ "$rc" = 0 ] || fail "a Claude Herdr ring should report rung, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "agent prompt should submit the doorbell exactly once:"$'\n'"$(cat "$log")"
+  [ "$(cat "$ops")" = $'prompt\nenter' ] \
+    || fail "a Claude Herdr ring should use agent prompt without typing:"$'\n'"$(cat "$ops")"
+
+  : > "$log"; : > "$ops"; : > "$composer"
+  rc=0; ring claude FM_FAKE_HERDR_PROMPT=missing || rc=$?
+  [ "$rc" = 0 ] || fail "an agent_not_found paste should fall back and report rung, got rc $rc"
+  grep -qx literal "$ops" || fail "an agent_not_found paste did not fall back to typing:"$'\n'"$(cat "$ops")"
+  ! grep -qx prompt "$ops" || fail "an agent_not_found paste still delivered a prompt:"$'\n'"$(cat "$ops")"
+
+  : > "$log"; : > "$ops"; printf '%s' "$doorbell" > "$composer"
+  rc=0; ring claude FM_FAKE_HERDR_STATUS=working || rc=$?
+  [ "$rc" = 0 ] || fail "a busy Claude pane holding our doorbell should be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "a busy Claude pane should queue the held doorbell once:"$'\n'"$(cat "$log")"
+
+  : > "$log"; : > "$ops"; printf '%s' "$doorbell" > "$composer"
+  rc=0; ring codex FM_FAKE_HERDR_STATUS=working || rc=$?
+  [ "$rc" = 1 ] || fail "a busy non-paste pane holding our doorbell should skip, got rc $rc"
+  [ ! -s "$ops" ] || fail "a busy non-paste pane received input:"$'\n'"$(cat "$ops")"
+  [ "$(cat "$composer")" = "$doorbell" ] || fail "a busy non-paste pane's composer was changed"
+  pass "inbox: Herdr rings paste through agent prompt, fall back when no agent is found, and gate busy submits by harness"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -1377,6 +1574,8 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_claude_ring_pastes_and_submits_in_one_step
+test_herdr_ring_pastes_and_falls_back
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_prefilters_history
 test_idempotent_write_prefilter_preserves_exact_bodies

@@ -52,7 +52,7 @@
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect another draft in a proven pending
-# composer; an unsubmitted or partly erased copy of this doorbell is retried. After
+# composer; an unsubmitted copy of this doorbell is retried. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: due actions deferred
 # by the caller's delivery guard consume a separate durable consecutive-poll budget,
@@ -108,7 +108,6 @@ FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
 FM_TASK_INBOX_BUSY_MAX_DEFAULT=2
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
-FM_TASK_INBOX_DOORBELL_HEAD=': Firstmate instruction waiting:'
 
 fm_task_inbox_grace_secs() {
   local g=${FM_TASK_INBOX_GRACE_SECS:-$FM_TASK_INBOX_GRACE_DEFAULT}
@@ -370,8 +369,8 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     ''|*[![:print:]]*) return 1 ;;
   esac
   quoted=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
-  printf "%s list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, read and act on each in numeric order, then mv each into its handled/." \
-    "$FM_TASK_INBOX_DOORBELL_HEAD" "$quoted"
+  printf ": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, read and act on each in numeric order, then mv each into its handled/." \
+    "$quoted"
 }
 
 # Only harnesses verified to queue a pasted doorbell and its Enter while busy
@@ -458,17 +457,13 @@ fm_task_inbox_submit_held() {  # <backend> <target> <line> [expected-label]
   return 0
 }
 
-# A complete doorbell or a prefix reaching at least its constant head is ours.
-# A partly erased wrapped line still tells the worker to inspect its inbox.
+# Whether the composer's content, ignoring line wrapping, is exactly <line>.
 fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
-  local cap held want head
+  local cap held
   fm_backend_source "$1" || return 1
   cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
   held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
-  held=$(printf '%s' "$held" | tr -d '[:space:]')
-  want=$(printf '%s' "$3" | tr -d '[:space:]')
-  head=$(printf '%s' "$FM_TASK_INBOX_DOORBELL_HEAD" | tr -d '[:space:]')
-  [ "${#held}" -ge "${#head}" ] && [ "${want:0:${#held}}" = "$held" ]
+  [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>
