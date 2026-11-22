@@ -1287,6 +1287,13 @@ else
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+# A record naming this session's own pane would close the session itself
+# (bin/fm-backend.sh fm_backend_target_is_self). --force does not override this.
+if [ -n "$T" ] && fm_backend_target_is_self "$BACKEND" "$T"; then
+  echo "REFUSED: task $ID's recorded endpoint $T is this firstmate session's own pane, so teardown would close the session itself. Nothing was changed." >&2
+  echo "The task's worker is gone: relaunch it (bin/fm-control.sh $ID relaunch), which records a fresh endpoint, then retry teardown; the relaunch names the tab to rename first if this session's tab still carries fm-$ID." >&2
+  exit 1
+fi
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.

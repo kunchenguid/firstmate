@@ -1549,6 +1549,11 @@ fi
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+# Checked before any pane read: the readable pane would otherwise report this
+# session's own state as the task's (bin/fm-backend.sh fm_backend_target_is_self).
+if fm_backend_target_is_self "$TASK_BACKEND" "$BACKEND_TARGET"; then
+  emit unknown none "backend target gone: $BACKEND_TARGET is this firstmate session's own pane, so the task's worker is gone; relaunch it, which creates a fresh endpoint"
+fi
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can
   # error or stall under load, and tmux can fail to be executed at all (a

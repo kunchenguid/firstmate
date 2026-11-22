@@ -3627,6 +3627,8 @@ event_wait_or_sleep() {
     # they are excluded from the fast escalation exactly as the stale loop skips
     # them.
     [ "$(window_kind "$w")" = secondmate ] && continue
+    # This session's own pane is never a recorded worker's transition source.
+    fm_backend_target_is_self "$b" "$w" && continue
     # T3 Code's bounded wait runs only when no other push backend is recorded,
     # so adding a T3 task to a herdr home never takes herdr's fast path away.
     if [ "$b" = t3code ]; then
@@ -4592,6 +4594,8 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
+    # Skip self-pane records before capture can read the supervisor's screen.
+    ! fm_backend_target_is_self "$(window_backend "$w")" "$w" || continue
     watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this

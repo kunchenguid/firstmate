@@ -74,6 +74,29 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
 }
 
+# Even --force must refuse a self-pane record before any mutation.
+test_herdr_record_naming_the_callers_own_pane_refuses_before_mutation() {
+  local dir id=herdr-self
+  dir=$(make_case herdr-self)
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf 'herdr' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p2" "endpoint_task_id=$id" "worktree=$dir/worktree" "project=$dir/project" \
+    "kind=scout" "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
+  HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2 \
+    assert_refused_without_mutation "$dir" "$id" "record naming the caller's own Herdr pane"
+  assert_contains "$(cat "$dir/stderr")" "this firstmate session's own pane" \
+    "the refusal should say the endpoint is the session's own pane"
+  pass "fm-teardown: a Herdr record naming the caller's own pane refuses under --force before any runtime call"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation() {
   local dir id=endpoint-a
 
@@ -1604,6 +1627,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
 }
 
 test_invalid_endpoint_records_refuse_before_mutation
+test_herdr_record_naming_the_callers_own_pane_refuses_before_mutation
 test_worktree_identity_refusal_names_the_repair_path
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

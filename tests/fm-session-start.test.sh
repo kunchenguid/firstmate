@@ -1441,6 +1441,39 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive, dead for exit 1, dead for any other probe status"
 }
 
+# Pane existence alone must not make a self-pane record read alive.
+test_endpoint_naming_the_sessions_own_herdr_pane_reads_dead() {
+  local rec root home fakebin out
+  rec=$(new_world liveness-herdr-self)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  # Both panes exist, as the restored worker pane does once the session runs in it.
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = pane ] && [ "${2:-}" = get ]; then
+  case "${3:-}" in p-live|p-self) exit 0 ;; esac
+fi
+exit 1
+SH
+  chmod +x "$fakebin/herdr"
+
+  printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-live.meta"
+  printf 'window=sess:p-self\nkind=ship\nbackend=herdr\n' > "$home/state/task-self.meta"
+
+  out=$(HERDR_ENV=1 HERDR_SESSION=sess HERDR_PANE_ID=p-self \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "another task's live endpoint not reported alive"
+  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-self is this firstmate session's own pane" \
+    "a record naming the session's own pane was not reported dead with its reason"
+  assert_not_contains "$out" "endpoint: alive (backend=herdr window=sess:p-self)" \
+    "the session's own pane was reported as the task's live endpoint"
+
+  pass "herdr endpoint liveness reports a record naming the session's own pane dead, with the reason"
+}
+
 test_endpoint_read_death_is_isolated_and_reported() {
   local rec root home fakebin out status=0
   [ -r /proc/self/stat ] || { echo "skip: /proc not readable (the read-death shape needs process ancestry)"; return 0; }
@@ -3118,6 +3151,7 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_endpoint_naming_the_sessions_own_herdr_pane_reads_dead
 test_endpoint_read_death_is_isolated_and_reported
 test_endpoint_read_hang_is_bounded_and_reported
 test_endpoint_bound_rejects_padded_zero

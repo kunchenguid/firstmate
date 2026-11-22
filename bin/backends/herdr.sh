@@ -2648,6 +2648,12 @@ fm_backend_herdr_create_task() {  # <container> <label> <cwd> <seeded_default_ta
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
       dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+      # The caller's restored tab must be renamed, never replaced as a husk.
+      if [ -n "$dup_pane" ] && declare -F fm_backend_target_is_self >/dev/null 2>&1 \
+        && fm_backend_target_is_self herdr "$session:$dup_pane"; then
+        echo "error: herdr tab '$label' ($dup) in workspace $wsid (session $session) is this firstmate session's own tab, restored from the task's old endpoint; rename it (herdr --session $session tab rename $dup <new-label>) and retry" >&2
+        return 1
+      fi
       if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
         echo "error: herdr tab '$label' already exists in workspace $wsid (session $session)" >&2
         return 1

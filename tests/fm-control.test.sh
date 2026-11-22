@@ -960,6 +960,53 @@ test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
   pass "fm-control exit: an unprovable tmux endpoint refuses instead of claiming the agent stopped"
 }
 
+# Log every runtime call and advertise a live agent to expose guard fallthrough.
+make_herdr_self_stub() {  # <case-dir>
+  local dir=$1
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_DIR:?}/herdr-calls"
+case "$1 ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.9.5","protocol":22},"server":{"running":true}}\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$3" ;;
+  "agent get") printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/herdr"
+  : > "$dir/fake/herdr-calls"
+}
+
+test_herdr_record_naming_the_callers_own_pane_gets_no_lifecycle_input() {
+  local dir out rc
+  dir=$(new_case herdr-self)
+  make_herdr_self_stub "$dir"
+  add_task "$dir" t1 claude ship herdr "lab:w1:p2"
+  {
+    echo "herdr_session=lab"
+    echo "herdr_workspace_id=w1"
+    echo "herdr_tab_id=w1:t2"
+    echo "herdr_pane_id=w1:p2"
+  } >> "$dir/home/state/t1.meta"
+
+  out=$(HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2 run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "interrupt into the caller's own pane should refuse"$'\n'"$out"
+  assert_contains "$out" "nothing to interrupt" "the interrupt refusal should say the task has no agent"
+  out=$(HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should report the record's endpoint gone"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone t1" "exit should report endpoint-gone rather than stopping the session"
+  assert_no_regex 'send-text|send-keys|pane run|pane close|tab close' "$dir/fake/herdr-calls" \
+    "no key, text, or close may reach the caller's own pane"
+  assert_no_regex 'pane read|agent get' "$dir/fake/herdr-calls" \
+    "the caller's own pane must not be read as the task's"
+
+  # The same record seen from a different pane is an ordinary live agent.
+  out=$(HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p9 run_control "$dir" t1 interrupt); rc=$?
+  assert_grep 'agent get' "$dir/fake/herdr-calls" \
+    "from another pane the record's endpoint should still be classified"
+  pass "fm-control: a Herdr record naming the caller's own pane gets no interrupt, exit, read, or close"
+}
+
 test_interrupt_refuses_when_no_agent_runs() {
   local dir out rc
   dir=$(new_case nointerrupt)
@@ -1355,6 +1402,7 @@ test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
+test_herdr_record_naming_the_callers_own_pane_gets_no_lifecycle_input
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
