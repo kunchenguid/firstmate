@@ -1619,6 +1619,30 @@ test_branch_prefix_command_is_shell_safe() {
 
 test_worker_role_scope
 
+# Ship and scout briefs must constrain cleanup to a process the worker can
+# identify precisely, across every delivery mode.
+test_worker_process_cleanup_is_pid_scoped() {
+  local home kind id brief
+  home="$TMP_ROOT/pid-cleanup-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-pid-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout >/dev/null 2>&1 \
+        || fail "fm-brief.sh --scout exited non-zero"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$kind" >/dev/null 2>&1 \
+        || fail "fm-brief.sh --mode $kind exited non-zero"
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep 'Never use pkill, killall, pattern-based or process-group kills, or commands that quit or signal GUI apps; stop only processes you started by their recorded PID or the confirmed owner PID of a port you bound.' \
+      "$brief" "$kind brief did not limit process cleanup to a recorded PID"
+  done
+
+  pass "fm-brief.sh: every ship and scout brief limits process cleanup to a recorded PID"
+}
+
 # Rule 2 governs file edits rather than pool administration, so every crewmate
 # scaffold must prohibit the administrative act itself. The rule is emitted from
 # one shared string so the ship and scout copies cannot drift apart.
@@ -1732,4 +1756,5 @@ test_ship_branch_prefix_empty_override_yields_bare_task_id
 test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
+test_worker_process_cleanup_is_pid_scoped
 test_crewmate_scaffolds_forbid_pool_administration
