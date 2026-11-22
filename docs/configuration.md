@@ -849,6 +849,7 @@ The full behavior contract and command details are owned by [`bin/fm-park.sh`](.
 
 The optional local, gitignored `config/retain-open-pr` presence flag opts this home into refusing ship-task cleanup while its recorded GitHub, Forgejo, or GitLab PR is open or unreadable.
 Create the empty file to enable the refusal on the next teardown invocation.
+To stop a ready worker before merge with the flag present, use `bin/fm-control.sh <id> exit`, retaining its record and isolated copy.
 With the file absent, teardown keeps its existing checks unchanged, including in homes with `config/park-on-review` or `config/auto-land`.
 This flag controls only the open-PR refusal, not the existing GitLab landed-work check or worker parking.
 [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) owns the safety checks and the `--force` escape after explicit discard approval.
