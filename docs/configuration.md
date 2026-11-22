@@ -1178,7 +1178,7 @@ The flag is home-local and is not inherited by secondmate homes.
 With the flag present, only a provably working crew overrides the declaration.
 An ordinary idle crew gets one plain stale wake on its first stable sight, including when its agent has exited.
 Later sights use `FM_PAUSE_RESURFACE_SECS`, keyed to the declaration rather than pane changes.
-A future `until` time, a secondmate, and a busy pane retain their existing first-sight handling.
+A future `until` time, a secondmate, a lane parked on review, and a busy pane retain their existing first-sight handling.
 A pane that never settles gets its recheck once the declaration has stood a whole cadence.
 An elapsed `until` time on that pane gets one recheck after two consecutive changing polls instead of waiting for the cadence.
 The existing pause-ceiling decision still takes precedence when enabled.

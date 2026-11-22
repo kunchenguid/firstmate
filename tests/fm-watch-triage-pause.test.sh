@@ -1273,6 +1273,60 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
 }
 
 
+# config/pause-cadence gives only an ordinary un-parked crew the plain first
+# sight. A secondmate's endpoint is never read and a lane parked on review is
+# woken by bin/fm-park.sh's tick alone, so both keep the absorbed handling they
+# have without the flag (docs/configuration.md, "Pause cadence").
+test_pause_cadence_keeps_secondmate_and_review_park_absorbed() {
+  local FM_CONFIG_OVERRIDE="$TMP_ROOT/opt-in-config"
+  export FM_CONFIG_OVERRIDE
+  local spec name kind status_line parked agent_env dir state fakebin out capture_file statusf window key pane_hash sig pid
+  for spec in \
+    'secondmate|secondmate|paused: awaiting the upstream release|no' \
+    'review-park|ship|paused [at=NOW]: parked on review: PR 12 clean at 0123456789ab; agent stopped, relaunches on review activity|yes'
+  do
+    name=${spec%%|*}; spec=${spec#*|}
+    kind=${spec%%|*}; spec=${spec#*|}
+    status_line=${spec%%|*}; parked=${spec#*|}
+    status_line=${status_line/NOW/$(date +%s)}
+    dir=$(make_case "opt-in-absorbed-$name"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/lane.status"
+    window="test:fm-lane"
+    printf 'idle on a declared wait\n' > "$capture_file"
+    printf '%s\n' "$status_line" > "$statusf"
+    # The parked lane's agent was stopped on purpose, so its pane is a bare shell.
+    agent_env=()
+    if [ "$parked" = no ]; then
+      printf 'window=%s\nkind=%s\n' "$window" "$kind" > "$state/lane.meta"
+    else
+      printf 'window=%s\nkind=%s\nharness=grok\nbackend=tmux\n' "$window" "$kind" > "$state/lane.meta"
+      agent_env=(FM_FAKE_TMUX_CURRENT_COMMAND=zsh)
+    fi
+    [ "$parked" = no ] || printf 'pr=12\nhead=0123456789ab\nparked_at=%s\nslot_leased=yes\n' "$(date +%s)" > "$state/lane.review-park"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-lane_status"
+    key=$(watch_window_key "$window")
+    pane_hash=$(hash_text "idle on a declared wait")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    env ${agent_env[@]+"${agent_env[@]}"} \
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_CREW_STATE='state: paused · source: status-log · declared wait' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"; fail "[$name] opted-in watcher woke for a wait it must absorb: $(cat "$out")"
+    fi
+    [ ! -s "$out" ] || fail "[$name] opted-in watcher printed a wake reason: $(cat "$out")"
+    [ ! -s "$state/.wake-queue" ] || fail "[$name] opted-in watcher queued a wake: $(cat "$state/.wake-queue")"
+    [ -e "$state/.paused-$key" ] || fail "[$name] the absorbed wait was not flagged paused"
+    [ ! -e "$state/.stale-since-$key" ] || fail "[$name] the absorbed wait started the wedge timer"
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the intentional stop"
+  done
+  pass "with pause-cadence, a secondmate and a lane parked on review stay absorbed on first sight"
+}
+
 test_secondmate_paused_resurfaces_in_normal_mode() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back
   dir=$(make_case secondmate-paused-resurface); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2498,6 +2552,7 @@ fm_test_run \
   test_own_work_wait_keeps_first_alert_then_long_cadence \
   test_absorbed_replacement_wait_does_not_inherit_the_old_throttle \
   test_pause_cadence_replacement_wait_gets_its_own_first_sight \
+  test_pause_cadence_keeps_secondmate_and_review_park_absorbed \
   test_live_declared_wait_churn_honors_the_resurface_throttle \
   test_declared_wait_on_a_never_settling_pane_keeps_the_bounded_recheck \
   test_elapsed_until_on_a_never_settling_pane_is_rechecked_before_the_cadence \

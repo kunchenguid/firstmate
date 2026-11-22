@@ -4729,7 +4729,7 @@ EOF
                 triage_log "absorbed non-terminal stale (provably working): $w"
                 ;;
               paused)
-                if [ ! -e "$CONFIG/pause-cadence" ]; then
+                if [ ! -e "$CONFIG/pause-cadence" ] || [ -f "$STATE/$task.review-park" ]; then
                   handle_paused_stale "$w" "$task" "$h"
                 else
                   last=$(status_declared_wait_line "$STATE/$task.status")
@@ -4821,7 +4821,7 @@ EOF
             # fires it once per declaration. It still waits for a second churned
             # poll, because a pane that changed once and settles takes its plain
             # first sight at the stable-hash surface two polls later.
-            if [ ! -e "$CONFIG/pause-cadence" ] || [ "$kind" = secondmate ]; then
+            if [ ! -e "$CONFIG/pause-cadence" ] || [ "$kind" = secondmate ] || [ -f "$STATE/$task.review-park" ]; then
               handle_paused_stale "$w" "$task" "$h"
             else
               last=$(status_declared_wait_line "$STATE/$task.status")
