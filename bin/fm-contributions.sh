@@ -129,10 +129,13 @@
 # with the PR's event and edit history and is bounded only by the record cap.
 # poll appends ordinary durable check wakes through fm-wake-lib and emits only
 # newly durable signals for the authenticated check to surface.
-# ack removes only the named pending token. A signal that carries a reviewer's
-# findings (an inline review comment, a re-raised unanswered thread, or a review
-# with text; substantive_signal in fm-contributions.jq) is acknowledged only with
-# a receipt, because an approved or non-blocking state does not mean the owning
+# ack removes only the named pending token. By default it accepts exactly that
+# token, with no receipt. The presence of config/contribution-ack-receipts in the
+# effective config directory enables receipt enforcement; contents are ignored.
+# Only with that flag, a signal that carries a reviewer's findings (an inline
+# review comment, a re-raised unanswered thread, or a review with text;
+# substantive_signal in fm-contributions.jq) is acknowledged only with a
+# receipt, because an approved or non-blocking state does not mean the owning
 # worker has nothing to act on. handoff needs a record in the owning task's
 # steering inbox (sent or already handled) that names the signal's source URL;
 # send the findings with fm-send first. disposition records why no worker action
@@ -213,6 +216,8 @@ MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
 REPLY_AGE=${FM_CONTRIBUTIONS_REPLY_AGE:-}
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
+ACK_RECEIPTS=false
+[ ! -f "$CONFIG/contribution-ack-receipts" ] || ACK_RECEIPTS=true
 TRACK_THREADS=false
 if [ -n "$REPLY_AGE" ]; then
   case "$REPLY_AGE" in *[!0-9]*) fail 'invalid reply age' ;; esac
@@ -244,7 +249,7 @@ trap 'exit 1' HUP INT TERM
 jq_lib() { # jq options/program via final argument
   local program=${!#}
   set -- "${@:1:$#-1}"
-  jq -L "$SCRIPT_DIR" "$@" "include \"fm-contributions\"; $program"
+  jq -L "$SCRIPT_DIR" --argjson ack_receipts "$ACK_RECEIPTS" "$@" "include \"fm-contributions\"; $program"
 }
 
 read_saved() {
@@ -274,7 +279,7 @@ read_saved() {
     printf '%s\0' "${part[@]}" | jq -Rs 'split("\u0000")[:-1]' > "$TMP/tasks.json"
     args=()
     for i in "${!part[@]}"; do args+=(--rawfile "rec$i" "${files[start + i]}"); done
-    jq -L "$SCRIPT_DIR" -n --slurpfile tasks "$TMP/tasks.json" "${args[@]}" 'include "fm-contributions";
+    jq -L "$SCRIPT_DIR" -n --argjson ack_receipts "$ACK_RECEIPTS" --slurpfile tasks "$TMP/tasks.json" "${args[@]}" 'include "fm-contributions";
       [range(0; $tasks[0] | length) as $i
         | [try ($ARGS.named["rec\($i)"] | fromjson) catch empty] as $parsed
         | if ($parsed | length) == 1
@@ -493,7 +498,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
       --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --slurpfile threads "$TMP/threads.json" \
-      --argjson track "$TRACK_THREADS" --argjson bots "$(review_bots)" '
+      --argjson track "$TRACK_THREADS" --argjson ack_receipts "$ACK_RECEIPTS" --argjson bots "$(review_bots)" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
       | ($comments[0] | add // []) as $issue_comments
@@ -519,9 +524,8 @@ observe() { # canonical GitHub URL -> normalized JSON
               | (.created_at // .submitted_at // "") as $at | (.in_reply_to_id // .id) as $root | . as $e
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
-                 # Leading whitespace is dropped before the cut so the saved
-                 # preview has text whenever the full body does (substantive_signal).
-                 author:.user.login,body:(.body // "" | sub("^\\s+"; "") | .[:500])}
+                 # Receipt enforcement needs the preview to retain findings after leading whitespace.
+                 author:.user.login,body:(.body // "" | if $ack_receipts then sub("^\\s+"; "") else . end | .[:500])}
                  + (if (.user.login | IN($bots[])) then {review_bot:true} else {} end)
                  + (if $track then {at:$at,
                    # A resolved inline thread counts as answered.
@@ -629,8 +633,9 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
     jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
-      jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,pending:[],notified:[]} | del(.retired, .receipts) | .seen -= ["closed"]' > "$TMP/row.json"
+      jq -n --argjson ack_receipts "$ACK_RECEIPTS" --slurpfile final "$TMP/final.json" '
+        $final[0] + {error:null,pending:[],notified:[]} | del(.retired)
+        | if $ack_receipts then del(.receipts) else . end | .seen -= ["closed"]' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
@@ -905,7 +910,10 @@ case "${1:-}" in
       || fail 'contribution is not owned by this durable task'
     jq -e --arg task "$task" --arg url "$url" '.[] | select(.task == $task) | .records[] | select(.url == $url)' "$TMP/saved.json" > "$TMP/row.json" \
       || fail 'observe the contribution before recording evidence'
-    if [ "$action" = ack ]; then
+    if [ "$action" = ack ] && [ "$ACK_RECEIPTS" = false ]; then
+      [ "$#" -eq 1 ] || fail 'ack needs one exact event token'
+      jq --arg token "$1" '.pending |= map(select(.token != $token))' "$TMP/row.json" > "$TMP/update.json"
+    elif [ "$action" = ack ]; then
       [ "$#" -ge 1 ] || fail 'ack needs one exact event token'
       ack_token=$1; shift
       jq_lib -nc --arg token "$ack_token" --slurpfile row "$TMP/row.json" \

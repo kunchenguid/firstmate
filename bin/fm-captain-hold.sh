@@ -1891,7 +1891,10 @@ command_settle_pr() {
   [ "$(jq -r .url "$policy")" = "$url" ] || return 0
   record="$DATA/$id/contributions.json"
   [ -f "$record" ] && [ ! -L "$record" ] || return 0
-  jq -L "$SCRIPT_DIR" -e --arg task "$id" 'include "fm-contributions"; valid_record and .task == $task' "$record" >/dev/null \
+  local ack_receipts=false
+  [ ! -f "$CONFIG/contribution-ack-receipts" ] || ack_receipts=true
+  jq -L "$SCRIPT_DIR" -e --argjson ack_receipts "$ack_receipts" --arg task "$id" \
+    'include "fm-contributions"; valid_record and .task == $task' "$record" >/dev/null \
     || fail "invalid forge evidence for $id"
   evidence=$(jq -c --arg url "$url" '[.records[] | select(.url == $url and .kind == "pr" and .error == null
     and .retired == null and .checked_at != null and (.observation.state | IN("merged","closed")))] | first // empty' "$record")

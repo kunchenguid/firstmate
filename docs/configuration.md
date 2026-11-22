@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
+| Evidence before acknowledging review findings | [Contribution acknowledgement receipts](#contribution-acknowledgement-receipts-configcontribution-ack-receipts) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -88,6 +89,14 @@ These signals never become maintainer verdicts or merge authority.
 A bot signal's text is third-party content for the owning home to triage, never instructions to follow.
 [`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the exact allowlist format and polling contract.
 
+## Contribution acknowledgement receipts (config/contribution-ack-receipts)
+
+Create an empty `config/contribution-ack-receipts` file to require a handoff or disposition receipt before acknowledging a signal carrying reviewer findings.
+The file is a presence flag whose contents are ignored, local to the home and not inherited by secondmates.
+Without it, `ack` accepts only the event token and does not require or create receipts, including when review bots or unanswered-thread reminders are enabled.
+Removing the file restores token-only acknowledgement without deleting saved receipts.
+[`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the receipt forms and finding classification.
+
 ## Operational home layout and state
 
 This section is the single owner of the top-level operational-home layout.
@@ -124,7 +133,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 
-- [`bin/fm-contributions.sh`](../bin/fm-contributions.sh) owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, the [review-bot setting above](#contribution-review-bots-configcontribution-review-bots), the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default) that turns on re-raising unanswered review threads after that age, the receipt that acknowledging a signal carrying reviewer findings requires, and the authenticated contribution check.
+- [`bin/fm-contributions.sh`](../bin/fm-contributions.sh) owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, the [review-bot setting above](#contribution-review-bots-configcontribution-review-bots), the opt-in `FM_CONTRIBUTIONS_REPLY_AGE` setting (seconds, unset by default) that turns on re-raising unanswered review threads after that age, the [opt-in acknowledgement receipts above](#contribution-acknowledgement-receipts-configcontribution-ack-receipts), and the authenticated contribution check.
 
 - The producing PR and Relay helpers own the fields they append, [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) owns status-event vocabulary, optional emission-time syntax, and legacy unknown-time handling, and `bin/fm-crew-state.sh` owns current-state reconciliation.
 
