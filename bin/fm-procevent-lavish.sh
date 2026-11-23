@@ -58,10 +58,12 @@
 # relisten   Exit 0 so the process-event runner keeps its claim and polls again
 #            after a silent or empty round. The runner owns the claim check.
 #            Same-process re-polling stays paced because a real `lavish-axi
-#            poll` remains pending while no browser is attached: Lavish 0.1.80
-#            with no browser held a 12s --timeout-ms poll for its full timeout
-#            and returned `status: waiting`, not an immediate empty or
-#            disconnect result.
+#            poll` reports a disconnect once and then blocks: on Lavish 0.1.80,
+#            closing an attached browser page made the pending poll return
+#            `status: browser_disconnected` after the disconnect grace period,
+#            and two further polls without reattaching each held a 6s
+#            --timeout-ms for its full timeout (about 7.2s with CLI startup)
+#            and returned `status: waiting`, not another immediate disconnect.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
