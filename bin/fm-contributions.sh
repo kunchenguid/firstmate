@@ -661,7 +661,7 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why unreported=$'\n' poll_cap lock_wait
+  local task url old kind error observed why unreported=$'\n' poll_cap lock_wait observation_start effective_budget
   local -a row
   poll_cap=$(( $(date +%s) + BUDGET_CAP ))
   lock_wait=$((BUDGET_CAP - BUDGET))
@@ -718,9 +718,12 @@ poll() {
   jq -Rnr --argjson bucket "$((EPOCH / 300))" '
     [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
     | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
-  DEADLINE=$(( $(date +%s) + BUDGET ))
+  observation_start=$(date +%s)
+  DEADLINE=$((observation_start + BUDGET))
   [ "$DEADLINE" -le "$poll_cap" ] || DEADLINE=$poll_cap
-  OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
+  effective_budget=$((DEADLINE - observation_start))
+  [ "$effective_budget" -ge 1 ] || return 0
+  OBSERVATION_RESERVE=$((effective_budget < 15 ? effective_budget : 15))
   while IFS=$'\t' read -r -a row; do
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
     url=${row[0]}

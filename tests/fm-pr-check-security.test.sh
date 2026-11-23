@@ -2012,6 +2012,35 @@ test_static_poll_contract() {
   pass "static poll is silent except for one merged line and remains watcher-bounded"
 }
 
+test_poll_bounds_reads_without_perl() {
+  local dir timer backend out rc started bash_bin sleep_bin
+  timer=$(command -v timeout || command -v gtimeout) || fail 'GNU timeout is needed for the no-Perl regression'
+  bash_bin=$(command -v bash)
+  sleep_bin=$(command -v sleep)
+  for backend in timeout gtimeout; do
+    dir=$(make_case "no-perl-$backend")
+    rm "$dir/home/config/pr-degraded-watch"
+    mkdir "$dir/restricted"
+    ln -s "$timer" "$dir/restricted/$backend"
+    ln -s "$sleep_bin" "$dir/restricted/sleep"
+    printf '#!%s\ntrap "" TERM\nsleep 10\n' "$bash_bin" > "$dir/restricted/gh"
+    chmod +x "$dir/restricted/gh"
+    started=$SECONDS
+    rc=0
+    out=$(PATH="$dir/restricted" FM_HOME="$dir/home" FM_CHECK_TIMEOUT=6 \
+      "$bash_bin" "$POLL" --validated github https://github.com/o/r/pull/1 github.com o/r 1) || rc=$?
+    [ "$rc" -eq 0 ] && [ "$out" = unreachable ] \
+      || fail "$backend without Perl failed to classify the cut read: rc=$rc out=$out"
+    [ "$((SECONDS - started))" -lt 5 ] || fail "$backend let the read reach the outer check bound"
+    printf '#!%s\nprintf "MERGED\\n"\n' "$bash_bin" > "$dir/restricted/gh"
+    out=$(PATH="$dir/restricted" FM_HOME="$dir/home" FM_CHECK_TIMEOUT=6 \
+      "$bash_bin" "$POLL" --validated github https://github.com/o/r/pull/1 github.com o/r 1) \
+      || fail "$backend failed a responsive read"
+    [ "$out" = merged ] || fail "$backend lost the normal merged result: $out"
+  done
+  pass 'without Perl, timeout and gtimeout cut stuck reads before the watcher bound and preserve merges'
+}
+
 test_unreachable_poll_wakes_only_on_a_persistent_streak() {
   local dir state out rc
   dir=$(make_case unreachable-streak)
@@ -6006,6 +6035,7 @@ test_watcher_sweep_records_a_reported_pr
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_poll_bounds_reads_without_perl
 test_unreachable_poll_wakes_only_on_a_persistent_streak
 test_gitlab_poll_shared_deadline
 test_fifo_forge_deadlines

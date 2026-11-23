@@ -8,6 +8,8 @@
 # read_deadline below), and stays silent on other errors, so a failed lookup
 # can never be read as a merge. Optional enrichment timeouts preserve a known
 # pipeline failure or confirmed train drop instead of reporting unreachable.
+# Without Perl or GNU timeout/gtimeout, required reads rely on the watcher's
+# outer check bound and optional enrichment is skipped.
 # A check or pipeline degradation names the head or pipeline that degraded,
 # the failed jobs with the forge's failure reasons, and the pipeline or check
 # URL, so the wake says which test broke without a job-log dig; the watcher
@@ -90,13 +92,17 @@ bounded_read() {  # <seconds> <command...>
   # and glab ignore SIGALRM. A TERM, INT, or HUP that stops the poll mid-read,
   # such as the watcher's own check timeout, is passed to that group the same
   # way and the read is reaped before perl exits, so a hung read never outlives
-  # the watcher. This body sources nothing, so the bound is the same perl
-  # fork-and-kill the watcher falls back to for its own checks; without perl a
-  # read runs unbounded and only the watcher's check timeout cuts it.
-  local limit=$1
+  # the watcher.
+  local limit=$1 timer rc
   shift
   [ "$limit" -ge 1 ] || return 124
-  command -v perl >/dev/null 2>&1 || { "$@"; return; }
+  if ! command -v perl >/dev/null 2>&1; then
+    timer=$(command -v timeout || command -v gtimeout) || { "$@"; return; }
+    rc=0
+    "$timer" --kill-after=0.1 "$limit" "$@" || rc=$?
+    [ "$rc" -ne 137 ] || rc=124
+    return "$rc"
+  fi
   # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
   perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } sub stop { kill "TERM", -$pid; select undef, undef, undef, 0.1; kill "KILL", -$pid; waitpid $pid, 0; exit $_[0] } local $SIG{ALRM} = sub { stop(124) }; local $SIG{TERM} = sub { stop(143) }; local $SIG{INT} = sub { stop(130) }; local $SIG{HUP} = sub { stop(129) }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' "$limit" "$@"
 }
@@ -259,9 +265,7 @@ case "$provider" in
         # Detail reads get at most five seconds within the remaining shared
         # deadline, so optional enrichment cannot suppress a known failure or
         # confirmed train drop by holding the poll until the watcher kills it.
-        # Without perl no read can be bounded, so a detail read fails and
-        # gitlab_failure_detail makes none.
-        command -v perl >/dev/null 2>&1 || return 1
+        { command -v perl || command -v timeout || command -v gtimeout; } >/dev/null 2>&1 || return 1
         local remaining=$((read_deadline - SECONDS))
         [ "$remaining" -le 5 ] || remaining=5
         GITLAB_HOST=$host bounded_read "$remaining" glab api "$1"
@@ -277,10 +281,9 @@ case "$provider" in
         # started once this poll has run ten seconds - keeps a large or slow
         # pipeline graph inside the watcher's check timeout, so the known
         # failure is still emitted with whatever detail the budget allowed
-        # rather than killed before it prints. Without perl to bound a read,
-        # the failure is emitted with no detail rather than risk one.
+        # rather than killed before it prints.
         detail=
-        command -v perl >/dev/null 2>&1 || return 0
+        { command -v perl || command -v timeout || command -v gtimeout; } >/dev/null 2>&1 || return 0
         seen=
         frontier="$1:0"
         depth=0
