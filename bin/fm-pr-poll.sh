@@ -156,10 +156,10 @@ case "$provider" in
     # checks were green, so a failing one here is a change worth waking for.
     # The degraded line names every failing check with its conclusion and the
     # first one's URL, so the wake says which test broke without a job-log
-    # dig. Every error, a non-open state, a pending or green rollup, and an
-    # unreadable head all stay silent; only the exact line shape below leaves
-    # this branch, and the head is validated here so the watcher's dedupe
-    # marker never sees another byte.
+    # dig. Apart from read_failed's deadline result, errors, a non-open state,
+    # a pending or green rollup, and an unreadable head all stay silent. The
+    # head is validated here so the watcher's dedupe marker never sees another
+    # byte.
     # shellcheck disable=SC2016  # The filter's $f and $r are jq variables, expanded by jq, not the shell.
     result=$(GH_HOST=$host forge_read gh pr view "$url" --json state,headRefOid,statusCheckRollup --jq '
       if .state == "MERGED" then
@@ -512,11 +512,11 @@ case "$provider" in
     # gerrit-axi resolves its server from the current directory's origin remote
     # first, and the watcher runs in no repository, so the host must be passed
     # explicitly from the validated record. Without it the tool has no host to
-    # reach and fails before reading anything, and this poll is silent on every
-    # failure, so the watch would wait forever on a change it never looked at.
+    # reach and fails before reading anything. Such a lookup failure stays
+    # silent, so the watch would wait forever on a change it never looked at.
     #
-    # The status is read explicitly and is the only thing that can wake this
-    # poll. Gerrit's submittability is a different question: a merged change
+    # The status is read explicitly and is the only evidence of a merge.
+    # Gerrit's submittability is a different question: a merged change
     # still reports its submit state as OK with nothing blocking it, so reading
     # submittability, a blocked_on list, or vote values would report a merge for
     # an open change that is merely ready to submit.

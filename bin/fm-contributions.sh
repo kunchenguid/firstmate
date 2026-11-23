@@ -68,9 +68,9 @@
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. The observation lock wait counts
-# against that same bound: poll waits at most the bound minus the budget for the
-# lock, and the forge reads must finish within the bound measured from the
-# poll's start. A poll that cannot take the lock skips the sweep silently and
+# against that same bound: the lock wait is the bound minus the budget, with a
+# one-second minimum, and forge reads must finish within the bound measured
+# from the poll's start. A poll that cannot take the lock skips the sweep silently and
 # reports once when FM_CHECK_PERSISTENT_SWEEPS consecutive polls found it held
 # (bin/fm-pr-lib.sh). Every read, including one retry,
 # is capped at five seconds. A first attempt killed at that bound or deadline is
@@ -82,7 +82,8 @@
 # dependent waves: core, six independent reads (seven when FM_CONTRIBUTIONS_REPLY_AGE
 # is set), then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
-# the effective budget and 15 seconds for those waves. URLs needing forge
+# 15 seconds and the effective budget remaining after lock acquisition and
+# local setup for those waves. URLs needing forge
 # reads are sorted by URL and rotated by the current five-minute epoch bucket
 # modulo their count, without stored scheduling state or freshness-based
 # reordering. Terminal URLs settle separately before the forge budget starts
