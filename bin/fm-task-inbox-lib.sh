@@ -477,12 +477,13 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   [ "$rc" = 1 ] || return "$rc"
   case "$backend" in tmux|paseo) ;; *) return 1 ;; esac
   fm_backend_source "$backend" || return 1
+  line=$(fm_task_inbox_doorbell_line "$rec") || return 1
+  fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" && return 1
   if ! held=$(fm_task_inbox_composer_draft "$backend" "$target" "$label"); then
     # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
     FM_TASK_INBOX_RING_NOTE="the composer holds other pending text that cannot be restored exactly, so it was left in place"
     return 1
   fi
-  line=$(fm_task_inbox_doorbell_line "$rec") || return 1
   if ! fm_task_inbox_composer_clear "$backend" "$target" "$held" "$label"; then
     # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
     if [ "$(fm_task_inbox_composer_text "$backend" "$target" "$label")" = "$held" ]; then
@@ -535,7 +536,7 @@ fm_task_inbox_composer_draft() {  # <backend> <target> [expected-label]
   held=${out%$'\n'*}
   rows=${out##*$'\n'}
   case "$rows" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$held" ] || return 1
+  case "$held" in ''|-*) return 1 ;; esac
   raw=$(_fm_composer_screen_row "$rows" "$cap" | fm_composer_strip_ansi)
   case "$raw" in *"$held"*) printf '%s' "$held" ;; *) return 1 ;; esac
 }
