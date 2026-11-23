@@ -574,7 +574,7 @@
 #                  this -e and still does not name its auto-discovered primary extensions)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
-#     __BRIEFDOORBELL__ quoted printable doorbell naming the launch-brief record this
+#     __BRIEFDOORBELL__ quoted single-line doorbell naming the launch-brief record this
 #                  script published into the receiving home's operational inbox
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -2932,7 +2932,7 @@ launch_template() {
     # Claude Code strips invisible characters, U+2063 included, from the
     # launch-prompt argument, so the brief rides the operational-input owner's
     # record-backed doorbell: the full envelope is published into the receiving
-    # home's state/operational-inbox before launch and only a printable doorbell
+    # home's state/operational-inbox before launch and only a single-line doorbell
     # naming it is passed. A record that cannot be published stops the spawn.
     printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;

@@ -16,7 +16,7 @@
 // It also mirrors the owner's record-backed doorbell parse and record classification
 // (`fm_operational_doorbell_path`, `fm_operational_record_kind`), which the `doorbell-kind`
 // command composes: a harness that strips U+2063 from submitted prompts receives a plain
-// ASCII doorbell naming a record that holds the envelope. The file read stays with the
+// single-line doorbell naming a record that holds the envelope. The file read stays with the
 // caller, so this module remains pure.
 
 const OPERATIONAL_MARK = "\u2063";
@@ -115,7 +115,7 @@ export function firstmateOperationalDoorbellPath(message: string): string | unde
     return undefined;
   }
   const path = message.slice(DOORBELL_PREFIX.length, message.length - DOORBELL_SUFFIX.length);
-  if (!path.startsWith("/") || path.includes("'") || !/^[\x20-\x7e]*$/.test(path)) return undefined;
+  if (!path.startsWith("/") || path.includes("'") || /[\x00-\x1f\x7f]/.test(path)) return undefined;
   const cut = path.lastIndexOf("/");
   const directory = path.slice(0, cut);
   if (directory.slice(directory.lastIndexOf("/") + 1) !== RECORD_DIRNAME) return undefined;

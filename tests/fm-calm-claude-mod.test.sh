@@ -539,7 +539,14 @@ test_doorbell_parity_with_shell_owner() {
   printf '\342\201\243FIRSTMATE_OP: v1 bogus: body' >"$inbox/9-bogus.msg"
   printf '\342\201\243FIRSTMATE_OP: legacy untyped' >"$inbox/9-legacy.msg"
   printf '[fm-from-firstmate]\342\201\243routed' >"$inbox/9-routed.msg"
-  mkdir -p "$dir/elsewhere"
+  mkdir -p "$dir/elsewhere" "$dir/Рабочий стол/state" "$dir/tab"$'\t'"home/state/operational-inbox"
+  index=$((index + 1))
+  printf 'body' | FM_STATE_OVERRIDE="$dir/Рабочий стол/state" "$OPERATIONAL_INPUT" record watcher \
+    | tr -d '\n' >"$dir/case-$index.txt" || fail "the owner could not publish a record in a non-ASCII home"
+  printf 'x' | "$OPERATIONAL_INPUT" encode watcher >"$dir/tab"$'\t'"home/state/operational-inbox/9-x.msg"
+  index=$((index + 1))
+  printf ": Firstmate operational input waiting: read '%s' and handle its contents as Firstmate operational input." \
+    "$dir/tab"$'\t'"home/state/operational-inbox/9-x.msg" >"$dir/case-$index.txt"
   printf '\342\201\243FIRSTMATE_OP: v1 watcher: x' >"$dir/elsewhere/9-x.msg"
   for out in \
     "$inbox/9-ascii.msg" "$inbox/9-bogus.msg" "$inbox/9-legacy.msg" "$inbox/9-routed.msg" \

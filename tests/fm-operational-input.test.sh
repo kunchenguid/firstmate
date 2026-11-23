@@ -252,6 +252,8 @@ test_non_ascii_home_carrier() {
   mkdir -p "$bad"
   printf 'x' | FM_STATE_OVERRIDE="$bad" "$OWNER" record watcher >/dev/null 2>&1 \
     && fail "a home path with a control character was accepted"
+  mkdir -p "$bad/operational-inbox"
+  printf 'x' | "$OWNER" encode watcher >"$bad/operational-inbox/1-a.msg"
   stray="${FM_OPERATIONAL_DOORBELL_PREFIX}$bad/operational-inbox/1-a.msg${FM_OPERATIONAL_DOORBELL_SUFFIX}"
   [ -z "$(printf '%s' "$stray" | "$OWNER" doorbell-kind)" ] \
     || fail "a doorbell naming a control-character path was recognized"

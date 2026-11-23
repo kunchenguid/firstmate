@@ -17,9 +17,9 @@
 # Record-backed carrier. Some harnesses remove invisible characters, U+2063
 # included, from every submitted prompt (Claude Code 2.1.280 does so for typed,
 # pasted, and launch-prompt input), so a typed envelope reaches them as plain
-# ASCII that no consumer can tell apart from human text. For a harness named in
+# text that no consumer can tell apart from human text. For a harness named in
 # FM_OPERATIONAL_RECORD_HARNESSES a producer instead writes the complete current
-# envelope to a durable record and types only a constant ASCII doorbell naming
+# envelope to a durable record and types only a constant doorbell naming
 # it. The doorbell text alone proves nothing: it counts as Firstmate input only
 # when the record it names exists and holds a current generic envelope. Records
 # are not consumed on delivery, so a verbatim copy of a live doorbell line,
