@@ -837,7 +837,7 @@ A firstmate session started or resumed in a restored task pane inherits the pane
 Firstmate never treats its own pane as that task's endpoint.
 The session-start digest reports the task's endpoint dead, and the recovery-grade agent state reads it missing.
 The watcher neither reads that pane nor subscribes to its status.
-Peek, steer, interrupt, exit, and teardown refuse or report the endpoint gone without sending anything to it.
+Peek, steer, interrupt, exit, and teardown, including a forced secondmate teardown's descendant records, refuse or report the endpoint gone without sending anything to it.
 `bin/fm-control.sh <id> relaunch` creates a fresh endpoint for the task in its recorded worktree.
 While the session's own tab still carries the task's `fm-<id>` label in that workspace, the relaunch refuses and names the `herdr tab rename` that frees the label.
 The check compares the recorded `<session>:<pane-id>` with the Herdr pane identity a firstmate process inherited when it started.

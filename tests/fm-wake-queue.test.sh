@@ -866,6 +866,53 @@ SH
   pass "an active turn defers the secondmate stall escalation without cancelling it"
 }
 
+# A mate record naming the watcher's own Herdr pane must not borrow the
+# supervisor's busy screen as the mate's active turn (#6167).
+test_secondmate_record_naming_the_watchers_own_pane_does_not_defer_stall() {
+  local dir state sub fakebin row_epoch
+  dir=$(make_case secondmate-own-pane)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=lab:w1:p2\nkind=secondmate\nharness=claude\nbackend=herdr\nherdr_session=lab\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  row_epoch=$(( $(date +%s) - 10 ))
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$row_epoch" \
+    > "$sub/state/.wake-queue"
+  fakebin="$dir/fakebin"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.9.5","protocol":22},"server":{"running":true}}\n' ;;
+  "pane read") printf 'working\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t2","workspace_id":"w1"}}}\n' "${3:-}" ;;
+  "tab get") printf '{"result":{"tab":{"tab_id":"w1:t2","label":"fm-mate","workspace_id":"w1"}}}\n' ;;
+  "agent get") printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "other-pane" defer mate "$row_epoch-7"
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-other-pane.out" >/dev/null \
+    || fail "the control mate inside an active turn was escalated: $(cat "$dir/watch-other-pane.out")"
+
+  HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2 \
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    secondmate_stall_watch_leg "$dir" "own-pane" alert
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch-own-pane.out" >/dev/null \
+    || fail "the watcher's own busy pane hid the mate's frozen queue: $(cat "$dir/watch-own-pane.out")"
+  pass "a secondmate record naming the watcher's own Herdr pane does not defer its stall escalation"
+}
+
 # A mate's turns end in its own home, so this home never holds a turn-ended mark
 # for it and its meta mtime records only the last launch. The active-turn gate
 # once aged the mate's turn from that launch, so every mate launched more than
@@ -3829,6 +3876,7 @@ test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once
 test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
 test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
+test_secondmate_record_naming_the_watchers_own_pane_does_not_defer_stall
 test_secondmate_long_lived_mate_mid_turn_is_not_a_stall
 test_secondmate_proven_idle_ring_lets_the_child_drain
 test_term_stops_a_watcher_blocked_in_the_drain_ring_idle_capture

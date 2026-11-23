@@ -3481,8 +3481,14 @@ watcher_waited() {  # <command...>
   return "$rc"
 }
 
-# watcher_capture: fm_backend_capture through watcher_waited.
+# watcher_capture: fm_backend_capture through watcher_waited. A self-pane
+# target fails like a capture failure, so no caller reads the supervisor's
+# screen as a worker's (bin/fm-backend.sh fm_backend_target_is_self).
 watcher_capture() {  # <backend> <target> <lines> [expected-label]
+  if fm_backend_target_is_self "$1" "$2"; then
+    WATCHER_CAPTURE=
+    return 1
+  fi
   watcher_waited fm_backend_capture "$@"
 }
 
@@ -4594,8 +4600,6 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    # Skip self-pane records before capture can read the supervisor's screen.
-    ! fm_backend_target_is_self "$(window_backend "$w")" "$w" || continue
     watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this

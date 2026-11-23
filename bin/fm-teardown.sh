@@ -3348,6 +3348,10 @@ validate_firstmate_home_children_removal() {
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    if fm_backend_target_is_self "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET"; then
+      echo "REFUSED: child $child_id's recorded endpoint $FM_BACKEND_VALIDATED_TARGET is this firstmate session's own pane, so forced cleanup would close the session itself. Nothing was changed." >&2
+      return 1
+    fi
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
