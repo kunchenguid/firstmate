@@ -839,7 +839,7 @@ The session-start digest reports the task's endpoint dead, and the recovery-grad
 The watcher neither reads that pane nor subscribes to its status.
 Peek, steer, interrupt, exit, and teardown, including a forced secondmate teardown's descendant records, refuse or report the endpoint gone without sending anything to it.
 `bin/fm-control.sh <id> relaunch` creates a fresh endpoint for the task in its recorded worktree.
-A secondmate is recovered with `bin/fm-spawn.sh <id> --secondmate` instead, because relaunch refuses a secondmate whose endpoint is gone; every refusal names the command that fits the record's kind.
+A secondmate is recovered with `bin/fm-spawn.sh <id> --secondmate` instead, because relaunch refuses a secondmate whose endpoint is gone; each recovery hint names the command that fits the record's kind.
 While the session's own tab still carries the task's `fm-<id>` label in that workspace, either recovery refuses and names the `herdr tab rename` that frees the label.
 The check compares the recorded `<session>:<pane-id>` with the Herdr pane identity a firstmate process inherited when it started.
 It therefore covers the session's own tool calls, hooks, and supervision cycles, but not a process running in a different terminal, such as the away-mode daemon.
