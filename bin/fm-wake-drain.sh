@@ -482,7 +482,7 @@ EOF
 # are charged to the same budget, so the section never grows past it.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local used=0 omitted=0 hidden_tasks=0 bytes n=0 t=0 i j round more counts=''
+  local used=0 omitted=0 hidden_tasks=0 hidden_decisions=0 bytes n=0 t=0 i j round more counts=''
   local -a lines=() line_bytes=() line_shown=() task_name=() task_first=() task_count=()
 
   if [ -n "$snapshot" ]; then
@@ -532,6 +532,7 @@ EOF
       bytes=$(( ${#FM_LINE_CAP_LINE} + 1 ))
       if [ $((used + bytes)) -gt "$global_bytes" ]; then
         hidden_tasks=$((hidden_tasks + 1))
+        hidden_decisions=$((hidden_decisions + task_count[j]))
         continue
       fi
       counts="$counts$FM_LINE_CAP_LINE
@@ -561,7 +562,7 @@ EOF
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
   printf '%s' "$counts" || return 1
   if [ "$hidden_tasks" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more task(s) with open decisions omitted (byte cap)\n' "$hidden_tasks" || return 1
+    printf 'OPEN DECISIONS: %d more tasks with %d decisions (byte cap)\n' "$hidden_tasks" "$hidden_decisions" || return 1
   fi
   for ((i = 0; i < n; i++)); do
     [ "${line_shown[i]}" -eq 1 ] || continue
