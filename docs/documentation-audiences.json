@@ -490,6 +490,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/agy-acp.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/claude.md",
       "audience": "agent-runtime"
     },

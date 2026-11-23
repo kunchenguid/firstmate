@@ -29,6 +29,11 @@ Herdr's `pane process-info` for the same pane reports the foreground process as 
 `bin/fm-harness.sh` therefore matches the anchored process name `agy` alone, and the spawn clears `CLAUDECODE`, `PI_CODING_AGENT`, `GROK_AGENT`, and `FM_PI_HARNESS` at the launch boundary.
 `tests/fm-agy-harness.test.sh` pins the anchored match, the rejection of unrelated names containing the fragment, and that an inherited `CLAUDECODE` never outranks a real `agy` ancestor once the spawn clears it.
 
+Verified on 2026-11-23 for T3 Code's bundled Antigravity ACP server (`antigravity` 1.5.14 on macOS darwin-arm64, launched as `<store>/antigravity acp --gemini-dir <dir> --app-data-dir antigravity-acp` with `ANTIGRAVITY_AGENT=1`, `ANTIGRAVITY_LS_VERSION=cli-1.5.14`, and an inherited `CLAUDECODE=1` in the tool environment): `ps -o comm=` reports the full executable path ending in `/antigravity` while `ps -o args=` starts with `<path>/antigravity acp ...`.
+`bin/fm-agy-process-lib.sh` owns both anchored shapes - exact `agy`, or exact `antigravity` whose first argument is `acp` - so Electron `Antigravity.app` processes (`Antigravity`, `Antigravity Helper`) and non-ACP `antigravity` commands never match.
+`bin/fm-harness.sh` walks up to 16 parent hops (matching `bin/fm-session-lock-lib.sh`) so deep `SessionStart` hook stacks reach the owning harness process instead of falling back to an inherited `CLAUDECODE=1`.
+`tests/fm-agy-harness.test.sh` and `tests/fm-session-lock-ancestry.test.sh` pin macOS and Linux `comm`/`args` shapes (including paths with spaces), deep ancestry, and negative non-ACP/Electron shapes, while `tests/fm-agy-primary.test.sh` drives a real `antigravity acp` process through `bin/fm-harness.sh` and `bin/fm-sessionstart-agy.sh`.
+
 ## Launch: positional prompt-interactive with auto-submit
 
 ```
@@ -159,8 +164,10 @@ Primary and persistent secondmate execution is verified through native `.agents/
 Session-open digest injection is implemented by `bin/fm-sessionstart-agy.sh` on the `SessionStart` event.
 PreToolUse seatbelts enforce execution safety through `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
 In primary and secondmate homes, watcher commands are classified by the shared arm-command policy, `cd` commands are denied in favor of absolute paths or `cwd`, and subagent invocations (`invoke_subagent`, `define_subagent`) are denied while inspection tools (`manage_subagents`, `manage_task`) remain permitted.
-Supervision continuity uses synchronous Stop-hook parking via `bin/fm-turnend-guard-agy.sh`, running `bin/fm-watch-arm.sh` (or the supervision host) which waits under the 28800s hook timeout until woken by an incoming event (bounded only when the optional `FM_AGY_PARK_TIMEOUT` is set) and falls back to bounded repair nagging via `bin/fm-turnend-guard.sh --agy`.
-Session lock verification recognizes `agy` process ancestry via `bin/fm-session-lock-lib.sh`.
+Supervision continuity for standalone `agy` uses synchronous Stop-hook parking via `bin/fm-turnend-guard-agy.sh`, running `bin/fm-watch-arm.sh` (or the supervision host) which waits under the 28800s hook timeout until woken by an incoming event (bounded only when the optional `FM_AGY_PARK_TIMEOUT` is set) and falls back to bounded repair nagging via `bin/fm-turnend-guard.sh --agy`.
+Verified live under T3 Code's `antigravity acp` on 2026-11-23: ACP awaits `.agents/hooks.json` `Stop` before completing the prompt turn, so parking synchronously on `Stop` held incoming user messages until the server restarted.
+`bin/fm-turnend-guard-agy.sh` now detects `antigravity acp` from the lock holder and delegates immediately to `bin/fm-turnend-guard.sh --agy --agy-acp` without parking, while `bin/fm-wake-lib.sh` reports `persistent` and `bin/fm-session-start.sh` / `bin/fm-supervision-instructions.sh` select `docs/supervision-protocols/agy-acp.md` (`tests/fm-agy-primary.test.sh` pins non-parking ACP Stop behavior and protocol routing).
+Session lock verification recognizes `agy` and `antigravity acp` process ancestry via `bin/fm-session-lock-lib.sh` and `bin/fm-agy-process-lib.sh`.
 
 ## What is still unproven
 

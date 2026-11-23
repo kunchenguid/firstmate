@@ -101,6 +101,7 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
 AGY_MODE=0
+AGY_ACP_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -113,7 +114,8 @@ for arg in "$@"; do
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
     --agy) AGY_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor|--agy]" >&2; exit 2 ;;
+    --agy-acp) AGY_ACP_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--agy|--agy-acp]" >&2; exit 2 ;;
   esac
 done
 
@@ -266,6 +268,7 @@ fi
 
 block_stop() {
   local afk x_mode reason rule msg max_blocks cur_blocks
+  local agy_acp_args=()
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -282,7 +285,8 @@ block_stop() {
     cur_blocks=$((cur_blocks + 1))
     mkdir -p "$STATE" 2>/dev/null || true
     printf '%s\n' "$cur_blocks" > "$STATE/.turnend-blocks"
-    reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --harness agy --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+    [ "$AGY_ACP_MODE" -eq 1 ] && agy_acp_args=(--agy-acp)
+    reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --harness agy "${agy_acp_args[@]+"${agy_acp_args[@]}"}" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
       || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   else
     reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \

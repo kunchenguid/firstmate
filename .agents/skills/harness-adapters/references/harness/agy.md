@@ -38,9 +38,9 @@ The unauthenticated failure mode was not observed, so treat any auth prompt or r
 
 ## Detection
 
-Detected by ancestry alone: `../../../../../bin/fm-harness.sh` matches the anchored process name `agy`, never `*agy*`.
-No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - but a structural agy ancestor now outranks that retained marker, which `../../../../../bin/fm-harness.sh` decides without depending on the spawn's own launch-boundary marker clearing.
-agy is included in the session-lock name vocabulary in `../../../../../bin/fm-session-lock-lib.sh`, allowing an agy session to hold a home session lock.
+Detected by ancestry alone: `../../../../../bin/fm-agy-process-lib.sh` owns both anchored shapes, matching either the exact process name `agy` or an `antigravity` executable invoked with `acp` as its first argument (T3 Code's bundled Antigravity ACP server), never `*agy*` or Electron `Antigravity.app` processes.
+Both `../../../../../bin/fm-harness.sh` and `../../../../../bin/fm-session-lock-lib.sh` delegate to that shared matcher, and `agy` remains in the session-lock name vocabulary so either shape can hold a home session lock.
+No environment marker is promoted: `AGENT=1` observed on a live TUI is an inherited launcher value, not an agy identity, and agy does not clear an inherited `CLAUDECODE` - a structural `agy` or `antigravity acp` ancestor outranks that retained marker without depending on launch-boundary marker clearing.
 
 ## Worker busy state and turn end
 
@@ -56,5 +56,7 @@ A PreToolUse handler that prints nothing allows the call, while a printed object
 SessionStart executes `bin/fm-sessionstart-agy.sh` to inject the session-start digest into model context.
 PreToolUse invokes `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
 Stop executes `bin/fm-turnend-guard-agy.sh`, which parks on a home-scoped watcher cycle through `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host) under the registered 28800s hook timeout and delivers actionable wake output; only an optional `FM_AGY_PARK_TIMEOUT` bound re-arms via `{"decision":"continue","reason":"..."}` with `[supervision-park]`, and `FM_AGY_TURNEND_LOOP_CEILING` (default 180) bounds hook-driven turns.
+Under T3 Code's `antigravity acp` server, ACP awaits the Stop hook before ending the prompt turn, so synchronous Stop-hook parking blocks incoming user messages until timeout.
+`bin/fm-turnend-guard-agy.sh` therefore detects `antigravity acp` and delegates immediately to `bin/fm-turnend-guard.sh --agy --agy-acp` (a non-parking 3-block bounded repair nag), while `bin/fm-wake-lib.sh` and `bin/fm-supervision-instructions.sh` select `persistent` supervision and `../../../../../docs/supervision-protocols/agy-acp.md` (arming via background `run_command`).
 A bounded 3-block repair nag is enforced via `bin/fm-turnend-guard.sh --agy` before failing open with `{}`.
-See `../../../../../docs/supervision-protocols/agy.md` for the complete supervision protocol.
+See `../../../../../docs/supervision-protocols/agy.md` and `../../../../../docs/supervision-protocols/agy-acp.md` for the complete supervision protocols.
