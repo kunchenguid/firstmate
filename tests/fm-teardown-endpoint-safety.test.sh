@@ -1768,9 +1768,91 @@ test_gnhf_secondmate_and_child_history_refuse_before_mutation() {
   pass "forced secondmate retirement preserves home and external child GNHF histories before any destructive step"
 }
 
+test_gnhf_child_slot_ownership_controls_removal_preflight() {
+  local dir home shape rc
+  for shape in reassigned unclaimed ambiguous collision; do
+    dir=$(make_gnhf_case "gnhf-child-slot-$shape")
+    home="$dir/secondmate-home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+    printf 'history-scout\n' > "$home/.fm-secondmate-home"
+    fm_write_meta "$dir/home/state/history-scout.meta" \
+      "window=isolated:fm-history-scout" "endpoint_task_id=history-scout" \
+      "kind=secondmate" "mode=local-only" "home=$home" \
+      "worktree=$home" "project=$dir/project"
+    fm_write_meta "$home/state/child.meta" \
+      "window=isolated:fm-child" "endpoint_task_id=child" "kind=scout" \
+      "worktree=$dir/worktree" "project=$dir/project" "mode=local-only"
+    printf 'synthetic child status\n' > "$home/state/child.status"
+    cp "$home/state/child.status" "$dir/status.before"
+    : > "$dir/home/config/status-archive"
+    mkdir -p "$dir/worktree/.gnhf/runs/synthetic"
+    printf 'public synthetic history\n' > "$dir/worktree/.gnhf/runs/synthetic/marker"
+    cp "$dir/worktree/.gnhf/runs/synthetic/marker" "$dir/history.before"
+    claim_pool_slot "$dir" child "$home"
+    case "$shape" in
+      reassigned|collision)
+        fm_write_meta "$dir/home/state/current-owner.meta" \
+          "window=isolated:fm-current-owner" "endpoint_task_id=current-owner" \
+          "kind=scout" "worktree=$dir/worktree" "project=$dir/project"
+        cp "$dir/home/state/current-owner.meta" "$dir/current-owner.before"
+        if [ "$shape" = reassigned ]; then
+          claim_pool_slot "$dir" current-owner
+        else
+          rm -rf "$dir/worktree/.gnhf"
+        fi ;;
+      unclaimed) rm "$dir/pool/1/.fm-slot-owner" ;;
+      ambiguous) printf 'home=%s\n' "$home" > "$dir/pool/1/.fm-slot-owner" ;;
+    esac
+    cp "$dir/home/state/history-scout.meta" "$dir/meta.before"
+    cp "$home/state/child.meta" "$dir/child.before"
+    [ "$shape" = unclaimed ] || cp "$dir/pool/1/.fm-slot-owner" "$dir/owner.before"
+    rc=0
+    run_gnhf_case "$dir" --force > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    if [ "$shape" = reassigned ]; then
+      [ "$rc" -eq 0 ] || fail "reassigned child retirement failed: $(cat "$dir/stderr")"
+      assert_absent "$home" "reassigned child's stale home survived retirement"
+      assert_absent "$dir/home/state/history-scout.meta" "reassigned child's parent record survived"
+      cmp -s "$dir/status.before" "$dir/home/data/history-scout/children/child/status.log" \
+        || fail "reassigned child's status was not retired to its archive"
+      assert_no_grep 'fm-current-owner' "$dir/runtime.log" "current owner's backend was touched"
+      assert_no_grep 'treehouse' "$dir/runtime.log" "reassigned slot was returned"
+    else
+      [ "$rc" -eq 1 ] || fail "$shape child slot must refuse, got $rc"
+      case "$shape" in
+        unclaimed) assert_grep 'GNHF history' "$dir/stderr" "unclaimed history did not refuse" ;;
+        ambiguous) assert_grep 'slot-owner claim' "$dir/stderr" "ambiguous ownership did not refuse" ;;
+        collision) assert_grep 'also task current-owner' "$dir/stderr" "slot exclusivity did not refuse" ;;
+      esac
+      cmp -s "$dir/meta.before" "$dir/home/state/history-scout.meta" || fail "$shape parent record changed"
+      cmp -s "$dir/child.before" "$home/state/child.meta" || fail "$shape child record changed"
+      cmp -s "$dir/status.before" "$home/state/child.status" || fail "$shape child status changed"
+      [ ! -s "$dir/runtime.log" ] || fail "$shape backend changed before refusal"
+    fi
+    if [ "$shape" != collision ]; then
+      cmp -s "$dir/history.before" "$dir/worktree/.gnhf/runs/synthetic/marker" || fail "$shape history changed"
+    fi
+    if [ "$shape" = unclaimed ]; then
+      assert_absent "$dir/pool/1/.fm-slot-owner" "unclaimed slot acquired a claim"
+    else
+      cmp -s "$dir/owner.before" "$dir/pool/1/.fm-slot-owner" || fail "$shape slot claim changed"
+    fi
+    if [ -f "$dir/current-owner.before" ]; then
+      cmp -s "$dir/current-owner.before" "$dir/home/state/current-owner.meta" || fail "$shape current owner record changed"
+    fi
+    cmp -s "$dir/pool.before" "$dir/pool/treehouse-state.json" || fail "$shape slot lease changed"
+    cmp -s "$dir/source.before" "$dir/worktree/README.md" || fail "$shape source bytes changed"
+    assert_present "$dir/worktree/sentinel" "$shape slot scratch removed"
+  done
+  pass "child removal skips only proven reassigned slots and preserves ownership and exclusivity refusals"
+}
+
 test_gnhf_history_refuses_before_mutation
 test_gnhf_absent_scout_still_returns_clean
 test_gnhf_secondmate_and_child_history_refuse_before_mutation
+test_gnhf_child_slot_ownership_controls_removal_preflight
+if [ "${1:-}" = --gnhf-only ]; then
+  exit 0
+fi
 test_invalid_endpoint_records_refuse_before_mutation
 test_worktree_identity_refusal_names_the_repair_path
 test_control_lock_contention_refuses_before_mutation
