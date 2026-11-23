@@ -88,7 +88,13 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
-# A scratch copy (kind=scout) and a --force run discard untracked content.
+# GNHF history is never disposable scratch, including under --force.
+# Any .gnhf entry (even empty, ignored, symlinked or nonregular) within a cleanup
+# target refuses before destructive steps; an unreadable scan refuses too.
+# This includes nested scratch repositories, child worktrees and secondmate homes.
+# Preserve that history outside the cleanup target before retrying.
+#
+# A scratch copy (kind=scout) and a --force run discard other untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
 # Before that return, teardown runs `git clean -ffdq` in the copy, and a forced
@@ -2042,6 +2048,7 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  validate_no_gnhf_history "$dir" || return 1
   local out lock attempt=0 max_retries lock_desc
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
@@ -2133,11 +2140,28 @@ report_worktree_dirt() {
   ' >&2
 }
 
+# Presence alone protects history: never read it or follow a .gnhf symlink.
+# Scan nested repositories too, since the scratch scrub removes them wholesale.
+validate_no_gnhf_history() {  # <cleanup-target>
+  local target=$1 histories
+  [ -n "$target" ] || return 0
+  [ -e "$target" ] || [ -L "$target" ] || return 0
+  if ! histories=$(find -H "$target" -name .git -prune -o -name .gnhf -print -prune); then
+    echo "REFUSED: cannot inspect $target for protected GNHF history; preserving the cleanup target and task records." >&2
+    return 1
+  fi
+  if [ -n "$histories" ]; then
+    echo "REFUSED: protected GNHF history (.gnhf) exists under $target; preserve it outside the cleanup target before retrying. --force does not bypass this check." >&2
+    return 1
+  fi
+}
+
 # Scratch and --force copies are scrubbed before Treehouse return. See the
 # script header for why `git clean -fd` is not enough and why a dirty return
 # is not reported as clean.
 teardown_scrub_scratch_copy() {
   local wt=$1
+  validate_no_gnhf_history "$wt" || return 1
   # A non-git path has no nested repository this clean can remove.
   git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   git -C "$wt" clean -ffdq || {
@@ -2881,6 +2905,7 @@ validate_child_worktree_for_removal() {
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
   abs_target=$(validate_removal_target "$target" "child worktree") || return 1
+  validate_no_gnhf_history "$abs_target" || return 1
   if abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
     if path_is_ancestor_of "$abs_home" "$abs_target"; then
       echo "REFUSED: unsafe child worktree removal target $target is inside the active firstmate home" >&2
@@ -2916,6 +2941,7 @@ validate_firstmate_home_for_removal() {
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
+  validate_no_gnhf_history "$abs_home_path" || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
     return 1
@@ -3703,6 +3729,11 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+
+# Refuse before pipeline abort, process termination, endpoint close or pool return.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  validate_no_gnhf_history "$WT" || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

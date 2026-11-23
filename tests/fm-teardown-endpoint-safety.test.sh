@@ -1603,6 +1603,174 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+# Standalone repositories model a pool without allocating any real pool slots.
+make_gnhf_case() {  # <name>
+  local dir id=history-scout
+  dir=$(make_case "$1")
+  mkdir -p "$dir/pool/1"
+  mv "$dir/worktree" "$dir/pool/1/repo"
+  ln -s pool/1/repo "$dir/worktree"
+  fm_git_init_commit "$dir/worktree"
+  rm -rf "$dir/project"
+  ln -s "$dir/worktree" "$dir/project"
+  printf '{"worktrees":[{"name":"1","path":"%s","lease_holder":"%s"}]}\n' \
+    "$dir/pool/1/repo" "$id" > "$dir/pool/treehouse-state.json"
+  claim_pool_slot "$dir" "$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" "spawn_gen=synthetic-history" \
+    "kind=scout" "mode=no-mistakes" "decisions_reviewed=1" \
+    "worktree=$dir/worktree" "project=$dir/project"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Synthetic report.\n' > "$dir/home/data/$id/report.md"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  cp "$dir/worktree/README.md" "$dir/source.before"
+  cp "$dir/home/state/$id.meta" "$dir/meta.before"
+  cp "$dir/pool/treehouse-state.json" "$dir/pool.before"
+  cp "$dir/pool/1/.fm-slot-owner" "$dir/owner.before"
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'treehouse %s\n' "$*" >> "$FM_RUNTIME_LOG"
+if [ "${1:-}" = return ]; then
+  for wt in "$@"; do :; done
+  git -C "$wt" clean -fdq
+fi
+SH
+  # No real pipeline or process inventory is consulted by these fixtures.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/no-mistakes"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/lsof"
+  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/no-mistakes" "$dir/fakebin/lsof"
+  printf '%s\n' "$dir"
+}
+
+run_gnhf_case() {  # <case> [teardown flags]
+  local dir=$1; shift
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEARDOWN_GUARD_DONE=1 \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    bash "$TEARDOWN" history-scout "$@"
+}
+
+test_gnhf_history_refuses_before_mutation() {
+  local dir shape history rc before
+  for shape in run ignored nested empty symlink dangling file fifo scan-error forced; do
+    dir=$(make_gnhf_case "gnhf-$shape")
+    history="$dir/worktree/.gnhf"
+    case "$shape" in
+      nested) history="$dir/worktree/scratch-clone/.gnhf"; git init -q "$dir/worktree/scratch-clone" ;;
+      ignored) printf '.gnhf/\n' >> "$dir/worktree/.git/info/exclude" ;;
+    esac
+    case "$shape" in
+      empty) mkdir -p "$history" ;;
+      symlink|dangling)
+        mkdir -p "$dir/external-history"
+        printf 'public synthetic history\n' > "$dir/external-history/marker"
+        if [ "$shape" = symlink ]; then
+          ln -s "$dir/external-history" "$history"
+        else
+          ln -s "$dir/missing-history" "$history"
+        fi ;;
+      file) printf 'public synthetic history\n' > "$history" ;;
+      fifo) mkfifo "$history" ;;
+      *)
+        mkdir -p "$history/runs/synthetic"
+        printf 'public synthetic history\n' > "$history/runs/synthetic/marker"
+        cp "$history/runs/synthetic/marker" "$dir/history.before" ;;
+    esac
+    if [ "$shape" = scan-error ]; then
+      cat > "$dir/fakebin/find" <<'SH'
+#!/usr/bin/env bash
+printf 'synthetic directory scan failure\n' >&2
+exit 1
+SH
+      chmod +x "$dir/fakebin/find"
+    fi
+    before=$(git -C "$dir/worktree" rev-parse HEAD)
+    rc=0
+    if [ "$shape" = forced ]; then
+      run_gnhf_case "$dir" --force > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    else
+      run_gnhf_case "$dir" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    fi
+    [ "$rc" -eq 1 ] || fail "GNHF $shape: teardown must refuse, got $rc"
+    assert_grep 'REFUSED:' "$dir/stderr" "GNHF $shape: missing refusal"
+    assert_grep 'GNHF history' "$dir/stderr" "GNHF $shape: refusal must name protected history"
+    [ -e "$history" ] || [ -L "$history" ] || fail "GNHF $shape: history removed"
+    [ ! -f "$dir/history.before" ] || cmp -s "$dir/history.before" "$history/runs/synthetic/marker" \
+      || fail "GNHF $shape: history bytes changed"
+    cmp -s "$dir/meta.before" "$dir/home/state/history-scout.meta" || fail "GNHF $shape: task record changed"
+    cmp -s "$dir/pool.before" "$dir/pool/treehouse-state.json" || fail "GNHF $shape: lease changed"
+    cmp -s "$dir/owner.before" "$dir/pool/1/.fm-slot-owner" || fail "GNHF $shape: slot claim changed"
+    [ "$before" = "$(git -C "$dir/worktree" rev-parse HEAD)" ] || fail "GNHF $shape: source HEAD changed"
+    cmp -s "$dir/source.before" "$dir/worktree/README.md" || fail "GNHF $shape: source bytes changed"
+    assert_present "$dir/worktree/sentinel" "GNHF $shape: source scratch removed"
+    assert_present "$dir/home/data/history-scout/report.md" "GNHF $shape: report removed"
+    [ ! -s "$dir/runtime.log" ] || fail "GNHF $shape: backend changed before refusal"
+  done
+  pass "GNHF history and ambiguous or unreadable histories refuse before source, lease, task or backend changes"
+}
+
+test_gnhf_absent_scout_still_returns_clean() {
+  local dir rc=0
+  dir=$(make_gnhf_case gnhf-absent)
+  git init -q "$dir/worktree/scratch-clone"
+  printf 'disposable\n' > "$dir/worktree/scratch-clone/scratch"
+  run_gnhf_case "$dir" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || fail "history-free scout cleanup failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/worktree/sentinel" "history-free scout scratch survived"
+  assert_absent "$dir/worktree/scratch-clone" "history-free nested scratch survived"
+  assert_absent "$dir/home/state/history-scout.meta" "history-free task record survived"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "history-free slot claim survived"
+  assert_grep 'treehouse return' "$dir/runtime.log" "history-free pool return missing"
+  assert_grep 'tmux <kill-window>' "$dir/runtime.log" "history-free backend close missing"
+  pass "history-free disposable scout still closes and returns clean"
+}
+
+test_gnhf_secondmate_and_child_history_refuse_before_mutation() {
+  local dir home shape rc
+  for shape in home child; do
+    dir=$(make_gnhf_case "gnhf-secondmate-$shape")
+    home="$dir/secondmate-home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+    printf 'history-scout\n' > "$home/.fm-secondmate-home"
+    fm_write_meta "$dir/home/state/history-scout.meta" \
+      "window=isolated:fm-history-scout" "endpoint_task_id=history-scout" \
+      "spawn_gen=synthetic-history" "kind=secondmate" "mode=local-only" \
+      "home=$home" "worktree=$home" "project=$dir/project"
+    if [ "$shape" = home ]; then
+      mkdir -p "$home/.gnhf/runs/synthetic"
+      printf 'public synthetic history\n' > "$home/.gnhf/runs/synthetic/marker"
+    else
+      mkdir -p "$dir/worktree/.gnhf/runs/synthetic"
+      printf 'public synthetic history\n' > "$dir/worktree/.gnhf/runs/synthetic/marker"
+      claim_pool_slot "$dir" child "$home"
+      fm_write_meta "$home/state/child.meta" \
+        "window=isolated:fm-child" "endpoint_task_id=child" "kind=scout" \
+        "worktree=$dir/worktree" "project=$dir/project" "mode=local-only"
+      cp "$home/state/child.meta" "$dir/child.before"
+      cp "$dir/pool/1/.fm-slot-owner" "$dir/owner.before"
+    fi
+    cp "$dir/home/state/history-scout.meta" "$dir/meta.before"
+    rc=0
+    run_gnhf_case "$dir" --force > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    [ "$rc" -eq 1 ] || fail "GNHF secondmate $shape: expected refusal, got $rc"
+    assert_grep 'REFUSED:' "$dir/stderr" "GNHF secondmate $shape: missing refusal"
+    assert_grep 'GNHF history' "$dir/stderr" "GNHF secondmate $shape: missing history refusal"
+    cmp -s "$dir/meta.before" "$dir/home/state/history-scout.meta" || fail "GNHF secondmate $shape: parent changed"
+    cmp -s "$dir/pool.before" "$dir/pool/treehouse-state.json" || fail "GNHF secondmate $shape: lease changed"
+    cmp -s "$dir/owner.before" "$dir/pool/1/.fm-slot-owner" || fail "GNHF secondmate $shape: claim changed"
+    if [ "$shape" = home ]; then
+      assert_present "$home/.gnhf/runs/synthetic/marker" "secondmate history removed"
+    else
+      assert_present "$dir/worktree/.gnhf/runs/synthetic/marker" "child history removed"
+      cmp -s "$dir/child.before" "$home/state/child.meta" || fail "GNHF child record changed"
+    fi
+    [ ! -s "$dir/runtime.log" ] || fail "GNHF secondmate $shape: backend changed before refusal"
+  done
+  pass "forced secondmate retirement preserves home and external child GNHF histories before any destructive step"
+}
+
+test_gnhf_history_refuses_before_mutation
+test_gnhf_absent_scout_still_returns_clean
+test_gnhf_secondmate_and_child_history_refuse_before_mutation
 test_invalid_endpoint_records_refuse_before_mutation
 test_worktree_identity_refusal_names_the_repair_path
 test_control_lock_contention_refuses_before_mutation
