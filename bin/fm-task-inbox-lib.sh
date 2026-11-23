@@ -391,7 +391,8 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-# fm_task_inbox_ring wraps this so foreign pending text never blocks a ring.
+# fm_task_inbox_ring wraps this so, on tmux and paseo, a one-row foreign draft
+# does not block a ring.
 fm_task_inbox_ring_core() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -453,7 +454,7 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
   return 1
 }
 
-# Ring the doorbell without ever being blocked by someone else's composer text.
+# Ring the doorbell without being blocked by someone else's one-row draft.
 # fm_task_inbox_ring_core defers (rc 1) when the composer PROVENLY holds other
 # pending text, which let a single stray character swallow every steer. Here
 # that text is captured, the composer cleared, the doorbell rung, and the text

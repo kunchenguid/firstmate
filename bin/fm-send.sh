@@ -55,8 +55,8 @@
 # On pane backends, the composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text on tmux or paseo, the ring captures
 # it, clears the composer, rings, and types the text back (fm_task_inbox_ring);
-# on any other backend, or when the draft cannot be read back exactly (a single
-# visible row) or the clear fails, the ring is skipped with a notice
+# on any other backend, or when the draft is not a single visible row that can
+# be typed back exactly, or the clear fails, the ring is skipped with a notice
 # and the watcher re-rings an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.
 #
