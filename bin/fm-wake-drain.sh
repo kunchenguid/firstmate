@@ -458,6 +458,36 @@ EOF
   [ "$shown" -gt 0 ] || return 0
 }
 
+# _open_decisions_pack_counts <limit>: pack the caller's ord[] tasks, in order,
+# as "task:N" pairs several per line within the per-item width, stopping at the
+# first pair that would pass <limit> bytes. Reads print_open_decisions_section's
+# locals; sets OD_COUNTS, OD_COUNTS_BYTES, and OD_PACKED (tasks packed).
+_open_decisions_pack_counts() {
+  local limit=$1 k pair add fresh cur='' prefix='OPEN DECISIONS counts:'
+  OD_COUNTS='' OD_COUNTS_BYTES=0 OD_PACKED=0
+  for ((k = 0; k < t; k++)); do
+    pair=" ${task_name[ord[k]]}:${task_count[ord[k]]}"
+    fresh=1
+    if [ -n "$cur" ] && [ $(( ${#cur} + ${#pair} )) -le $((item_bytes - 1)) ]; then
+      fresh=0
+      add=${#pair}
+    else
+      # A new line pays for its prefix and its newline.
+      add=$(( ${#prefix} + ${#pair} + 1 ))
+    fi
+    [ $((OD_COUNTS_BYTES + add)) -le "$limit" ] || break
+    if [ "$fresh" -eq 0 ]; then
+      cur="$cur$pair"
+    else
+      [ -z "$cur" ] || OD_COUNTS="$OD_COUNTS$cur"$'\n'
+      cur="$prefix$pair"
+    fi
+    OD_COUNTS_BYTES=$((OD_COUNTS_BYTES + add))
+    OD_PACKED=$((OD_PACKED + 1))
+  done
+  [ -z "$cur" ] || OD_COUNTS="$OD_COUNTS$cur"$'\n'
+}
+
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
@@ -474,16 +504,19 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 #
-# When every entry fits the global budget they print in fold order. When they
-# do not, walking that order would let the first tasks by name spend the whole
-# budget and leave later tasks invisible, so the budget is shared instead: one
-# count line per task comes first, then entries are taken round-robin across
-# tasks, newest first, and the chosen entries print in fold order. Count lines
-# are charged to the same budget, so the section never grows past it.
+# When every entry fits the global budget they print in fold order, unchanged.
+# When they do not, walking that order would let the first tasks by name spend
+# the whole budget and leave later tasks invisible, so the budget is shared:
+# a total line, then compact "task:N" counts largest first (ties by newest open
+# entry), then entries round-robin across the counted tasks, newest first,
+# printed in fold order. If even the counts do not fit, the largest that fit
+# print and one "K more tasks with M decisions" line keeps the total exact.
+# Everything but the fixed header and hint lines is charged to the budget.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local used=0 omitted=0 hidden_tasks=0 hidden_decisions=0 bytes n=0 t=0 i j round more counts=''
-  local -a lines=() line_bytes=() line_shown=() task_name=() task_first=() task_count=()
+  local used=0 shown=0 bytes n=0 t=0 i j round more counts='' total_line='' overflow_line=''
+  local order newest epoch k=0 hidden_decisions=0 limit
+  local -a lines=() line_bytes=() line_shown=() task_name=() task_first=() task_count=() ord=()
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
@@ -525,51 +558,70 @@ $open
 EOF
 
   [ "$n" -gt 0 ] || return 0
+  shown=$n
   if [ "$used" -gt "$global_bytes" ]; then
-    used=0
-    for ((j = 0; j < t; j++)); do
-      fm_cap_line_var "OPEN DECISIONS: ${task_count[j]} open for ${task_name[j]}" $((item_bytes - 1))
-      bytes=$(( ${#FM_LINE_CAP_LINE} + 1 ))
-      if [ $((used + bytes)) -gt "$global_bytes" ]; then
-        hidden_tasks=$((hidden_tasks + 1))
-        hidden_decisions=$((hidden_decisions + task_count[j]))
-        continue
-      fi
-      counts="$counts$FM_LINE_CAP_LINE
-"
-      used=$((used + bytes))
-    done
+    # Largest count first; a tie goes to the task whose newest open entry is
+    # newer (the timed fold view's emission time, unknown counting as oldest);
+    # a remaining tie keeps scan order.
+    order=$(for ((j = 0; j < t; j++)); do
+      newest=0
+      while IFS=$'\t' read -r _ _ epoch _; do
+        case "$epoch" in ''|*[!0-9]*) ;; *) [ "$epoch" -le "$newest" ] || newest=$epoch ;; esac
+      done <<EOF
+$(status_open_decisions_incremental "$STATE/${task_name[j]}.status" '' timed 2>/dev/null)
+EOF
+      printf '%s\t%s\t%s\n' "${task_count[j]}" "$newest" "$j"
+    done | sort -t "$(printf '\t')" -k1,1nr -k2,2nr -k3,3n | cut -f3)
+    for j in $order; do ord[k]=$j; k=$((k + 1)); done
+
+    total_line="OPEN DECISIONS: $n open across $t tasks"
+    used=$(( ${#total_line} + 1 ))
+    _open_decisions_pack_counts $((global_bytes - used))
+    if [ "$OD_PACKED" -lt "$t" ]; then
+      # Reserve the overflow line at its widest (every task, every decision).
+      overflow_line="OPEN DECISIONS: $t more tasks with $n decisions (byte cap)"
+      limit=$((global_bytes - used - ${#overflow_line} - 1))
+      [ "$limit" -ge 0 ] || limit=0
+      _open_decisions_pack_counts "$limit"
+      for ((k = OD_PACKED; k < t; k++)); do
+        hidden_decisions=$((hidden_decisions + task_count[ord[k]]))
+      done
+      overflow_line="OPEN DECISIONS: $((t - OD_PACKED)) more tasks with $hidden_decisions decisions (byte cap)"
+      used=$((used + ${#overflow_line} + 1))
+    fi
+    counts=$OD_COUNTS
+    used=$((used + OD_COUNTS_BYTES))
+
     for ((i = 0; i < n; i++)); do line_shown[i]=0; done
+    shown=0
     round=0
     more=1
     while [ "$more" -eq 1 ]; do
       more=0
-      for ((j = 0; j < t; j++)); do
+      for ((k = 0; k < OD_PACKED; k++)); do
+        j=${ord[k]}
         [ "$round" -lt "${task_count[j]}" ] || continue
         more=1
         i=$((task_first[j] + task_count[j] - 1 - round))
-        if [ $((used + line_bytes[i])) -gt "$global_bytes" ]; then
-          omitted=$((omitted + 1))
-          continue
-        fi
+        [ $((used + line_bytes[i])) -le "$global_bytes" ] || continue
         line_shown[i]=1
         used=$((used + line_bytes[i]))
+        shown=$((shown + 1))
       done
       round=$((round + 1))
     done
   fi
 
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
+  [ -z "$total_line" ] || printf '%s\n' "$total_line" || return 1
   printf '%s' "$counts" || return 1
-  if [ "$hidden_tasks" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more tasks with %d decisions (byte cap)\n' "$hidden_tasks" "$hidden_decisions" || return 1
-  fi
+  [ -z "$overflow_line" ] || printf '%s\n' "$overflow_line" || return 1
   for ((i = 0; i < n; i++)); do
     [ "${line_shown[i]}" -eq 1 ] || continue
     printf '%s\n' "${lines[i]}" || return 1
   done
-  if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
+  if [ "$shown" -lt "$n" ]; then
+    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$((n - shown))" || return 1
   fi
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
