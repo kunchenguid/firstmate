@@ -2033,6 +2033,108 @@ test_superseded_wait_check_skips_away_mode() {
   pass "with the away-mode flag present an armed busy paused worker at a human gate behaves exactly as with the flag absent: no superseded wake and no crew-state read"
 }
 
+# --- a declared wait whose agent is gone ------------------------------------
+# A paused recheck reads the agent once as it fires: a dead or missing agent is
+# named instead of asking to confirm a wait nothing is left to resume, and a live
+# agent keeps the unchanged wording. Under the opt-in config/worker-auto-relaunch
+# the same recheck hands a gated ship to bin/fm-control.sh relaunch instead.
+dead_wait_fixture() {  # <name> -> dir
+  local dir state key
+  dir=$(make_case "$1"); state="$dir/state"
+  printf 'idle, waiting on the vendor\n' > "$dir/pane.txt"
+  printf 'window=test:fm-until\nkind=ship\nharness=grok\nbackend=tmux\n' > "$state/until.meta"
+  printf 'paused: waiting on the vendor reply\n' > "$state/until.status"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/until.status"
+  printf '%s' "$(seen_sig "$state/until.status")" > "$state/.seen-until_status"
+  key=$(watch_window_key test:fm-until)
+  printf '%s' "$(hash_text 'idle, waiting on the vendor')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  mkdir -p "$dir/config"
+  printf '%s\n' "$dir"
+}
+
+test_paused_recheck_names_a_dead_agent() {
+  local verdict dir cmd windows
+  for verdict in dead missing alive; do
+    dir=$(dead_wait_fixture "dead-wait-$verdict")
+    case "$verdict" in
+      dead) cmd=zsh windows=fm-until ;;
+      missing) cmd=zsh windows=fm-someone-else ;;
+      alive) cmd=grok windows=fm-until ;;
+    esac
+    if [ "$verdict" = alive ]; then
+      # A live agent's first sight surfaces bare; the recheck is the next wake.
+      FM_FAKE_TMUX_CURRENT_COMMAND=$cmd until_watch "$dir" 240
+      wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "a live agent's first sight did not wake"; }
+      ack_stopped_cycle "$dir/state" || fail "could not acknowledge the live agent's first sight"
+      set_mtime "$(( $(date +%s) - 600 ))" "$dir/state/.paused-resurfaced-$(watch_window_key test:fm-until)"
+      : > "$dir/watch.out"
+    fi
+    FM_FAKE_TMUX_CURRENT_COMMAND=$cmd FM_FAKE_TMUX_WINDOWS=$windows until_watch "$dir" 240
+    wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "the $verdict-agent paused recheck did not wake"; }
+    grep -F 'stale: test:fm-until (paused ' "$dir/watch.out" >/dev/null \
+      || fail "the $verdict-agent recheck was not the paused recheck: $(cat "$dir/watch.out")"
+    if [ "$verdict" = alive ]; then
+      grep -F 'confirm the wait still holds' "$dir/watch.out" >/dev/null \
+        || fail "a live agent's recheck lost its wording: $(cat "$dir/watch.out")"
+      grep -F 'agent dead' "$dir/watch.out" >/dev/null && fail "a live agent was named dead: $(cat "$dir/watch.out")"
+    else
+      grep -F 'awaiting external - agent dead - ' "$dir/watch.out" >/dev/null \
+        || fail "the $verdict agent was not named dead: $(cat "$dir/watch.out")"
+      grep -F 'confirm the wait still holds' "$dir/watch.out" >/dev/null \
+        && fail "a $verdict agent was still asked to confirm the wait: $(cat "$dir/watch.out")"
+    fi
+    [ ! -e "$dir/control.log" ] || fail "an unconfigured home relaunched the $verdict agent"
+  done
+  pass "a declared-wait recheck names a dead or missing agent, and keeps its wording for a live one"
+}
+
+test_worker_auto_relaunch_is_opt_in_and_gated() {
+  local leg dir state root expect ledger
+  for leg in off clean dirty bound failing; do
+    dir=$(dead_wait_fixture "auto-relaunch-$leg"); state="$dir/state"
+    root=$(make_fake_control_root "$dir")
+    attach_clean_worktree "$dir" "$state/until.meta"
+    [ "$leg" = off ] || : > "$dir/config/worker-auto-relaunch"
+    case "$leg" in
+      dirty) printf 'unsaved\n' > "$dir/wt/scratch.txt" ;;
+      bound) printf '%s\tattempt\n' "$(date +%s)" "$(date +%s)" "$(date +%s)" > "$state/.secondmate-relaunch-until" ;;
+    esac
+    ledger=$(cat "$state/.secondmate-relaunch-until" 2>/dev/null || true)
+    if [ "$leg" = failing ]; then
+      FM_TEST_CONTROL_RC=1 FM_ROOT_OVERRIDE="$root" FM_FAKE_TMUX_CURRENT_COMMAND=zsh until_watch "$dir" 240
+    else
+      FM_ROOT_OVERRIDE="$root" FM_FAKE_TMUX_CURRENT_COMMAND=zsh until_watch "$dir" 240
+    fi
+    wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "the $leg leg did not wake"; }
+    case "$leg" in
+      clean)
+        grep -Fx 'check: worker until auto-relaunched after agent dead (test:fm-until)' "$dir/watch.out" >/dev/null \
+          || fail "a gated dead worker was not relaunched: $(cat "$dir/watch.out")"
+        grep -F 'until relaunch --note The watcher relaunched this task automatically' "$dir/control.log" >/dev/null \
+          || fail "the relaunch did not go through fm-control with a note: $(cat "$dir/control.log" 2>/dev/null)"
+        [ "$(cut -f2 "$state/.secondmate-relaunch-until" | tr '\n' ' ')" = 'attempt relaunched ' ] \
+          || fail "the relaunch was not ledgered: $(cat "$state/.secondmate-relaunch-until")"
+        ;;
+      failing)
+        grep -F 'check: worker until auto-relaunch failed after agent dead: error: test relaunch refused' "$dir/watch.out" >/dev/null \
+          || fail "a failed relaunch was not reported: $(cat "$dir/watch.out")"
+        [ "$(cut -f2 "$state/.secondmate-relaunch-until" | tr '\n' ' ')" = 'attempt failed ' ] \
+          || fail "the failed relaunch was not ledgered: $(cat "$state/.secondmate-relaunch-until")"
+        ;;
+      *)
+        grep -F 'awaiting external - agent dead - ' "$dir/watch.out" >/dev/null \
+          || fail "the $leg leg did not report the dead agent: $(cat "$dir/watch.out")"
+        [ ! -e "$dir/control.log" ] || fail "the $leg leg relaunched: $(cat "$dir/control.log")"
+        [ "$(cat "$state/.secondmate-relaunch-until" 2>/dev/null || true)" = "$ledger" ] \
+          || fail "the $leg leg changed the relaunch ledger"
+        ;;
+    esac
+    [ "$leg" != dirty ] || [ -e "$dir/wt/scratch.txt" ] || fail "the dirty leg lost the uncommitted file"
+  done
+  pass "worker auto-relaunch runs only when opted in, with a clean copy and ledger room, and reports each attempt once"
+}
+
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
   exit 0
@@ -2088,4 +2190,6 @@ fm_test_run \
   test_silent_recheck_flag_on_wakes_when_the_agent_exited \
   test_silent_recheck_flag_on_wakes_when_declared_time_is_due \
   test_paused_bg_job_without_until_stays_silent_after_the_job_ends \
-  test_paused_bg_job_until_timeout_rechecks_after_the_job_ends
+  test_paused_bg_job_until_timeout_rechecks_after_the_job_ends \
+  test_paused_recheck_names_a_dead_agent \
+  test_worker_auto_relaunch_is_opt_in_and_gated

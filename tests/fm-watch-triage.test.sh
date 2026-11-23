@@ -2650,6 +2650,38 @@ test_wedge_guard_never_defers_a_gone_endpoint() {
   pass "a gone endpoint is reported before any guard is asked, so a guard never defers it"
 }
 
+# The opt-in worker auto-relaunch also runs where the wedge threshold finds a
+# dead agent, and its terminal-line gate keeps a finished lane on the report.
+test_worker_auto_relaunch_at_the_wedge_threshold() {
+  local log dir state fakebin out capture root window="test:fm-wedge"
+  local working='state: working · source: run-step · ci running'
+  for log in 'working: still compiling' 'done: shipped the fix'; do
+    # The idle timer is already running, as it is once a validating lane's
+    # leftover terminal line was overridden as provably working.
+    dir=$(wedge_threshold_fixture "wedge-auto-relaunch-${log%%:*}" "$log" 0 5)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    root=$(make_fake_control_root "$dir")
+    attach_clean_worktree "$dir" "$state/wedge.meta"
+    : > "$dir/config/worker-auto-relaunch"
+    gone_endpoint_env dead; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+    FM_ROOT_OVERRIDE="$root" wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "a dead agent under '$log' was never handled at the threshold: $(cat "$out")"
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+    case "$log" in
+      working:*)
+        grep -Fx "check: worker wedge auto-relaunched after agent dead ($window)" "$out" >/dev/null \
+          || fail "a non-terminal dead worker was not relaunched: $(cat "$out")"
+        grep -F 'wedge relaunch --note ' "$dir/control.log" >/dev/null || fail "fm-control was not asked to relaunch"
+        ;;
+      *)
+        grep -F 'agent dead' "$out" >/dev/null || fail "a finished lane's dead agent was not reported: $(cat "$out")"
+        [ ! -e "$dir/control.log" ] || fail "a lane whose last line is terminal was relaunched"
+        ;;
+    esac
+  done
+  pass "worker auto-relaunch runs at the wedge threshold, and never for a lane whose last line is terminal"
+}
+
 # Reporting once must not mean reporting once forever: a replacement launched into
 # the same window has to get the full alarm back, and its own later death has to be
 # reported again rather than silenced by the record of the first one.
@@ -5516,6 +5548,7 @@ fm_test_run \
   test_wedge_escalation_marks_demand_deep_inspection_after_threshold \
   test_wedge_escalation_resets_when_pane_becomes_active \
   test_gone_endpoint_reports_once_instead_of_escalating_forever \
+  test_worker_auto_relaunch_at_the_wedge_threshold \
   test_live_and_unproven_endpoints_still_wedge_escalate \
   test_wedge_guards_absent_config_keeps_the_unchanged_ladder \
   test_wedge_guard_critical_defers_one_window_at_a_time_up_to_the_cap \
