@@ -4057,6 +4057,21 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
+# pipeline_monitor_observe_all: keep one read-only no-mistakes monitor terminal per
+# hc-backed task at its active run (bin/fm-hc-pipeline-monitor.sh owns the contract).
+# Non-hc tasks are skipped by their meta, and a failure only logs: it never wakes firstmate.
+pipeline_monitor_observe_all() {
+  local meta task
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    grep -qx 'backend=hc' "$meta" 2>/dev/null || continue
+    task=${meta##*/}
+    task=${task%.meta}
+    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-hc-pipeline-monitor.sh" observe "$task" >/dev/null 2>&1 \
+      || triage_log "pipeline monitor for $task not updated this poll"
+  done
+}
+
 while :; do
   PR_DEGRADED_WATCH_ENABLED=0
   [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
@@ -4923,6 +4938,8 @@ EOF
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
   fi
+
+  pipeline_monitor_observe_all
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr, rex),
   # else the blind poll sleep. See event_wait_or_sleep.
