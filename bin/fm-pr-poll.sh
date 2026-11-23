@@ -3,10 +3,13 @@
 # change poll sidecar.
 # It emits exactly one merged line for a merged change, exactly one degraded
 # line for a ready change that degraded after its ready report (a failing
-# check on GitHub, a failing head pipeline on GitLab), and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. A degraded line names the head or pipeline that degraded, the
-# failed jobs with the forge's failure reasons, and the pipeline or check
+# check on GitHub, a failing head pipeline or merge-train drop on GitLab),
+# exactly one unreachable line when a required forge read times out (see
+# read_deadline below), and stays silent on other errors, so a failed lookup
+# can never be read as a merge. Optional enrichment timeouts preserve a known
+# pipeline failure or confirmed train drop instead of reporting unreachable.
+# A check or pipeline degradation names the head or pipeline that degraded,
+# the failed jobs with the forge's failure reasons, and the pipeline or check
 # URL, so the wake says which test broke without a job-log dig; the watcher
 # dedupes one wake per transition on that head/pipeline (bin/fm-watch.sh).
 # The provider-tagged identity is data in the sidecar and is never
@@ -67,6 +70,49 @@ case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
 
+# Every forge read shares one deadline five seconds inside the watcher's
+# per-check bound (FM_CHECK_TIMEOUT, default 30, read from this poll's own
+# environment because the watcher runs it as a direct child), because a stalled
+# connection holds gh for about a minute before its own client gives up. A read
+# cut at that deadline prints "unreachable" instead of letting the watcher cut
+# the whole poll, so bin/fm-watch.sh retries it quietly on the next sweep and
+# wakes only when it stays unreachable (the streak threshold and reset contract
+# live in bin/fm-pr-lib.sh). The arming baseline read (--baseline) treats a cut
+# read as unknown, like any other failed read.
+read_deadline=${FM_CHECK_TIMEOUT:-30}
+case "$read_deadline" in ''|0*|*[!0-9]*) read_deadline=30 ;; esac
+read_deadline=$((read_deadline - 5))
+[ "$read_deadline" -ge 1 ] || read_deadline=1
+
+bounded_read() {  # <seconds> <command...>
+  # The read runs in its own process group, which gets TERM then KILL at the
+  # limit and exits 124. A bare alarm is not enough, because Go CLIs such as gh
+  # and glab ignore SIGALRM. A TERM, INT, or HUP that stops the poll mid-read,
+  # such as the watcher's own check timeout, is passed to that group the same
+  # way and the read is reaped before perl exits, so a hung read never outlives
+  # the watcher. This body sources nothing, so the bound is the same perl
+  # fork-and-kill the watcher falls back to for its own checks; without perl a
+  # read runs unbounded and only the watcher's check timeout cuts it.
+  local limit=$1
+  shift
+  [ "$limit" -ge 1 ] || return 124
+  command -v perl >/dev/null 2>&1 || { "$@"; return; }
+  # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+  perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } sub stop { kill "TERM", -$pid; select undef, undef, undef, 0.1; kill "KILL", -$pid; waitpid $pid, 0; exit $_[0] } local $SIG{ALRM} = sub { stop(124) }; local $SIG{TERM} = sub { stop(143) }; local $SIG{INT} = sub { stop(130) }; local $SIG{HUP} = sub { stop(129) }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' "$limit" "$@"
+}
+
+forge_read() {  # <command...>; bounded by what is left of the poll's deadline
+  bounded_read "$((read_deadline - SECONDS))" "$@"
+}
+
+read_failed() {  # <status>; exits the poll after a failed forge read
+  if [ "$1" -eq 124 ] && [ "$unknown" -eq 0 ]; then
+    printf '%s\n' unreachable
+    exit 0
+  fi
+  exit $unknown
+}
+
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
 # a doctored sidecar cannot silently address a different project or a differently
@@ -92,7 +138,7 @@ case "$provider" in
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
     if [ "$degraded_enabled" != 1 ]; then
-      result=$(GH_HOST=$host gh pr view "$url" --json state --jq '.state' 2>/dev/null) || exit $unknown
+      result=$(GH_HOST=$host forge_read gh pr view "$url" --json state --jq '.state' 2>/dev/null) || read_failed $?
       [ "$result" = MERGED ] && printf '%s\n' merged
       exit 0
     fi
@@ -109,7 +155,7 @@ case "$provider" in
     # this branch, and the head is validated here so the watcher's dedupe
     # marker never sees another byte.
     # shellcheck disable=SC2016  # The filter's $f and $r are jq variables, expanded by jq, not the shell.
-    result=$(GH_HOST=$host gh pr view "$url" --json state,headRefOid,statusCheckRollup --jq '
+    result=$(GH_HOST=$host forge_read gh pr view "$url" --json state,headRefOid,statusCheckRollup --jq '
       if .state == "MERGED" then
         "merged"
       elif .state == "OPEN"
@@ -133,7 +179,7 @@ case "$provider" in
           + (if $u == "" then "" else " url=" + ($u | gsub("[\\n\\r\\t]"; " ")) end)
       else
         ""
-      end' 2>/dev/null) || exit $unknown
+      end' 2>/dev/null) || read_failed $?
     case $result in
       merged)
         printf '%s\n' merged
@@ -182,7 +228,7 @@ case "$provider" in
     [ "$segments" -ge 2 ] || exit 0
     [ "$url" = "https://$host/$path/-/merge_requests/$number" ] || exit 0
     if [ "$degraded_enabled" != 1 ]; then
-      raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
+      raw=$(GITLAB_HOST=$host forge_read glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || read_failed $?
       state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
       [ "$state" = merged ] && printf '%s\n' merged
       exit 0
@@ -210,19 +256,15 @@ case "$provider" in
     # which keeps the merged wake for a watch armed before jq was required.
     enc=${path//\//%2F}
     gitlab_detail_read() {  # <api path>
-        # Each detail read gets its own hard limit of five seconds, so a hung
-        # read is cut rather than holding the poll until the watcher's check
-        # timeout kills it before it prints. This body sources nothing, so the
-        # limit is the same perl fork-and-kill bound the watcher falls back to
-        # for its own checks: the read runs in its own process group, which
-        # gets TERM then KILL at the deadline. A bare alarm is not enough,
-        # because glab's Go runtime ignores SIGALRM. A TERM, INT, or HUP that
-        # stops the poll mid-read, such as the watcher's own check timeout,
-        # is passed to that group the same way and the read is reaped before
-        # perl exits, so a hung glab never outlives the watcher. Without perl
-        # no read can be bounded, so gitlab_failure_detail makes none.
-        # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-        GITLAB_HOST=$host perl -e 'my $t = shift; my $pid = fork; exit 1 unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 } sub stop { kill "TERM", -$pid; select undef, undef, undef, 0.1; kill "KILL", -$pid; waitpid $pid, 0; exit $_[0] } local $SIG{ALRM} = sub { stop(124) }; local $SIG{TERM} = sub { stop(143) }; local $SIG{INT} = sub { stop(130) }; local $SIG{HUP} = sub { stop(129) }; alarm $t; waitpid $pid, 0; exit(($? & 127) ? 128 + ($? & 127) : $? >> 8)' 5 glab api "$1"
+        # Detail reads get at most five seconds within the remaining shared
+        # deadline, so optional enrichment cannot suppress a known failure or
+        # confirmed train drop by holding the poll until the watcher kills it.
+        # Without perl no read can be bounded, so a detail read fails and
+        # gitlab_failure_detail makes none.
+        command -v perl >/dev/null 2>&1 || return 1
+        local remaining=$((read_deadline - SECONDS))
+        [ "$remaining" -le 5 ] || remaining=5
+        GITLAB_HOST=$host bounded_read "$remaining" glab api "$1"
     }
     gitlab_failure_detail() {  # <pipeline>; sets detail
         # The degraded line names the failed jobs with their forge failure
@@ -288,12 +330,12 @@ case "$provider" in
         done
     }
     if ! command -v jq >/dev/null 2>&1; then
-      raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit $unknown
+      raw=$(GITLAB_HOST=$host forge_read glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || read_failed $?
       state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit $unknown
       [ "$state" = merged ] && printf '%s\n' merged
       exit 0
     fi
-    raw=$(GITLAB_HOST=$host glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || exit $unknown
+    raw=$(GITLAB_HOST=$host forge_read glab mr view "$number" -R "https://$host/$path" -F json 2>/dev/null) || read_failed $?
     [ -n "$raw" ] || exit $unknown
     result=$(printf '%s' "$raw" | jq -r '
       if type == "object"
@@ -333,7 +375,7 @@ case "$provider" in
         # stdout is the car record and stderr the CLI's diagnostics: a notice on
         # a good read must not spoil the record, nor noise on a 404 hide it.
         errfile=$(mktemp "${TMPDIR:-/tmp}/fm-pr-poll.XXXXXX") || exit $unknown
-        car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>"$errfile")
+        car=$(GITLAB_HOST=$host forge_read glab api "projects/$enc/merge_trains/merge_requests/$number" 2>"$errfile")
         car_rc=$?
         car_err=$(cat "$errfile" 2>/dev/null)
         rm -f "$errfile"
@@ -343,12 +385,19 @@ case "$provider" in
           elif [ "$unknown" -eq 3 ]; then
             printf '%s\n' train=unknown
           fi
+        elif [ "$car_rc" -eq 124 ]; then
+          [ "$unknown" -ne 3 ] || { printf '%s\n' train=unknown; exit 0; }
+          read_failed "$car_rc"
         elif [ "$car_rc" -ne 0 ]; then
           case $car_err in
             *'(HTTP 404)'*) ;;
             *) [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; exit 0 ;;
           esac
-          trains=$(gitlab_detail_read "projects/$enc/merge_trains" 2>/dev/null) || { [ "$unknown" -eq 3 ] && printf '%s\n' train=unknown; exit 0; }
+          trains=$(gitlab_detail_read "projects/$enc/merge_trains" 2>/dev/null) || {
+            trains_rc=$?
+            [ "$unknown" -ne 3 ] || { printf '%s\n' train=unknown; exit 0; }
+            read_failed "$trains_rc"
+          }
           present=$(printf '%s' "$trains" | jq -er --argjson iid "$number" '
             if type == "array" then
               [ .[].cars[]? | select(.merge_request.iid == $iid) ] | length == 0
@@ -407,7 +456,7 @@ case "$provider" in
         [ "${#line}" -le 2000 ] || exit 0
         printf '%s\n' "$line"
         if [ "$unknown" -eq 3 ]; then
-          baseline_car=$(GITLAB_HOST=$host glab api "projects/$enc/merge_trains/merge_requests/$number" 2>/dev/null) || baseline_car=
+          baseline_car=$(GITLAB_HOST=$host forge_read glab api "projects/$enc/merge_trains/merge_requests/$number" 2>/dev/null) || baseline_car=
           if [ -n "$baseline_car" ] && printf '%s' "$baseline_car" | jq -e 'type == "object" and (.id | type) == "number"' >/dev/null 2>&1; then
             printf '%s\n' ontrain
           else
@@ -476,7 +525,7 @@ case "$provider" in
     # gerrit.canonicalWebUrl and omits it when that setting is unset, so an
     # equality test would leave a correctly armed watch silent forever on such
     # a server, and this poll has no channel to report that it never matched.
-    json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) || exit $unknown
+    json=$(forge_read gerrit-axi show "$number" --host "$host" --json 2>/dev/null) || read_failed $?
     [ -n "$json" ] || exit $unknown
     status=$(printf '%s' "$json" | jq -r --argjson change "$number" '
       if type == "object" and .ok == true and (.changes | type) == "array" then
@@ -541,10 +590,11 @@ case "$provider" in
     # tea's single-PR view ignores field selection, so the one pull request
     # is read by number from the REST record through "tea api", which keeps
     # the credential inside tea. "tea api" exits 0 on an HTTP error with the
-    # error body as output, so only a boolean merged field of true wakes this
-    # poll and every other reading stays silent.
-    merged=$(tea api --login "$login" --repo "$owner/$repo" \
-      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null | jq -r '
+    # error body as output, so only a boolean merged field of true reports a
+    # merge; other records stay silent, and read deadlines use read_failed.
+    record=$(forge_read tea api --login "$login" --repo "$owner/$repo" \
+      "/repos/{owner}/{repo}/pulls/$number" 2>/dev/null) || read_failed $?
+    merged=$(printf '%s' "$record" | jq -r '
         if type == "object" and (.merged | type) == "boolean"
         then .merged | tostring
         else error("invalid pull request record")

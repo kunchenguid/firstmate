@@ -67,7 +67,12 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read, including one retry,
+# a direct child) with a three-second margin. The observation lock wait counts
+# against that same bound: poll waits at most the bound minus the budget for the
+# lock, and the forge reads must finish within the bound measured from the
+# poll's start. A poll that cannot take the lock skips the sweep silently and
+# reports once when FM_CHECK_PERSISTENT_SWEEPS consecutive polls found it held
+# (bin/fm-pr-lib.sh). Every read, including one retry,
 # is capped at five seconds. A first attempt killed at that bound or deadline is
 # budget refusal; a killed retry retains the genuine failure that caused it.
 # HTTP 5xx, 429, secondary-rate-limit 403, connection, DNS and TLS failures are
@@ -291,7 +296,7 @@ project() {
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
 }
 
-acquire() {
+acquire() { # [max-wait-seconds]; with a bound, returns 1 when the lock stays held
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'state directory unavailable'
   [ -d "$DATA" ] && [ ! -L "$DATA" ] || fail 'data directory unavailable'
   # Keep the wake library's source-time state initialization off read-only paths.
@@ -299,8 +304,26 @@ acquire() {
   FM_WAKE_QUEUE_LOCK="$STATE/.wake-queue.lock"
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fm_lock_acquire_wait "$STATE/.contributions.lock" || fail 'observation lock unavailable'
+  if [ "$#" -eq 1 ]; then
+    fm_lock_acquire_wait_max "$STATE/.contributions.lock" "$1" || return 1
+  else
+    fm_lock_acquire_wait "$STATE/.contributions.lock" || fail 'observation lock unavailable'
+  fi
   LOCK_HELD=1
+}
+
+# Counts consecutive polls that found the observation lock held and prints the
+# one report at the persistence threshold; a poll that takes the lock clears it.
+lock_busy_note() {
+  local counter="$STATE/.contributions-lock-busy" count=""
+  [ ! -L "$counter" ] || fail 'lock-busy counter is a symlink'
+  [ ! -f "$counter" ] || IFS= read -r count < "$counter" || count=
+  case "$count" in ''|0*|*[!0-9]*) count=0 ;; esac
+  [ "${#count}" -le 9 ] || count=0
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$counter.tmp.$$" && mv -f -- "$counter.tmp.$$" "$counter"
+  [ "$count" -ne "$FM_CHECK_PERSISTENT_SWEEPS" ] \
+    || printf 'contributions: observation lock held by another process for %s consecutive polls\n' "$count"
 }
 
 write_record() { # task record-json-file
@@ -638,9 +661,16 @@ clear_unsupported_errors() {
 }
 
 poll() {
-  local task url old kind error observed why unreported=$'\n'
+  local task url old kind error observed why unreported=$'\n' poll_cap lock_wait
   local -a row
-  acquire
+  poll_cap=$(( $(date +%s) + BUDGET_CAP ))
+  lock_wait=$((BUDGET_CAP - BUDGET))
+  [ "$lock_wait" -ge 1 ] || lock_wait=1
+  if ! acquire "$lock_wait"; then
+    lock_busy_note
+    return 0
+  fi
+  rm -f -- "$STATE/.contributions-lock-busy"
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
@@ -689,6 +719,7 @@ poll() {
     [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
     | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
+  [ "$DEADLINE" -le "$poll_cap" ] || DEADLINE=$poll_cap
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   while IFS=$'\t' read -r -a row; do
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
