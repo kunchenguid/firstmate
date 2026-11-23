@@ -55,9 +55,9 @@
 # On pane backends, the composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text, the ring captures it, clears the
 # composer, rings, and types the text back (fm_task_inbox_ring); only when the
-# draft cannot be read, the backend cannot type literal text back, or the clear
-# fails is the ring skipped with a notice and the watcher re-rings an ordinary
-# record later; no composer verdict is
+# draft cannot be read back exactly (a single visible row), the backend cannot
+# type literal text back, or the clear fails is the ring skipped with a notice
+# and the watcher re-rings an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.
 #
 # TYPED - the LOCAL text submitted directly instead of through the inbox. On a

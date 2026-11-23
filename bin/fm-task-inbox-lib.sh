@@ -427,11 +427,11 @@ fm_task_inbox_ring_core() {  # <backend> <target> <record-path> [expected-label]
 }
 
 # Clear the composer's draft: Ctrl-U presses sized from the draft length (one
-# wrapped row per press on some harnesses), then Backspace presses for a short
+# wrapped row per press on some harnesses), then, on a backend whose Backspace
+# key name is known (tmux and paseo take BSpace), Backspace presses for a short
 # leftover a harness's Ctrl-U did not take. 0 only when the composer reads empty.
 fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-label]
-  local backend=$1 target=$2 held=$3 label=${4:-} presses i=0 bs=backspace
-  [ "$backend" != tmux ] || bs=BSpace
+  local backend=$1 target=$2 held=$3 label=${4:-} presses i=0
   presses=$(( ${#held} / 40 + 2 ))
   [ "$presses" -le 12 ] || presses=12
   while [ "$i" -lt "$presses" ]; do
@@ -439,10 +439,11 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
     i=$((i + 1))
     [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" != empty ] || return 0
   done
+  case "$backend" in tmux|paseo) ;; *) return 1 ;; esac
   if [ "${#held}" -le 80 ]; then
     i=0
     while [ "$i" -lt "${#held}" ]; do
-      fm_backend_send_key "$backend" "$target" "$bs" "$label" >/dev/null 2>&1 || break
+      fm_backend_send_key "$backend" "$target" BSpace "$label" >/dev/null 2>&1 || break
       i=$((i + 1))
     done
     [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" != empty ] || return 0
@@ -456,20 +457,25 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
 # that text is captured, the composer cleared, the doorbell rung, and the text
 # typed back unsubmitted, so a half-typed draft survives the ring and the
 # worker still hears the bell. Local and remote endpoints share this path (the
-# remote leg rings through its host's backend). When the draft cannot be read,
-# the backend has no literal-send primitive, or the clear fails, the ring still
-# defers as before and sets FM_TASK_INBOX_RING_NOTE. After a ring that left
-# our own doorbell unsubmitted, that doorbell is cleared before the draft is
-# restored so the two never run together; a failed restore is reported in
-# the note, which never carries the draft text.
+# remote leg rings through its host's backend). Only a draft that is certain
+# to round-trip exactly is cleared (fm_task_inbox_composer_draft); when the
+# draft cannot be read that way, the backend has no literal-send primitive, or
+# the clear fails, the ring still defers as before and sets
+# FM_TASK_INBOX_RING_NOTE. After the ring, whatever of our own doorbell is left
+# in the composer, whole or partly typed, is cleared before the draft is
+# restored so the two never run together; a failed restore is reported in the
+# note, which never carries the draft text.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} rc=0 held line
+  local backend=$1 target=$2 rec=$3 label=${4:-} rc=0 held line left bell
   fm_task_inbox_ring_core "$@" || rc=$?
   [ "$rc" = 1 ] || return "$rc"
   fm_backend_source "$backend" || return 1
   fm_backend_has_send_literal "$backend" || return 1
-  held=$(fm_task_inbox_composer_text "$backend" "$target" "$label") || return 1
-  [ -n "$held" ] || return 1
+  if ! held=$(fm_task_inbox_composer_draft "$backend" "$target" "$label"); then
+    # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
+    FM_TASK_INBOX_RING_NOTE="the composer holds other pending text that cannot be restored exactly, so it was left in place"
+    return 1
+  fi
   line=$(fm_task_inbox_doorbell_line "$rec") || return 1
   if ! fm_task_inbox_composer_clear "$backend" "$target" "$held" "$label"; then
     # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
@@ -480,7 +486,9 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fm_task_inbox_ring_core "$@" || rc=$?
   if [ "$rc" != 3 ]; then
     sleep "${FM_TASK_INBOX_RESTORE_SETTLE:-0.3}"
-    if fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label"; then
+    left=$(fm_task_inbox_composer_text "$backend" "$target" "$label" | tr -d '[:space:]') || left=
+    bell=$(printf '%s' "$line" | tr -d '[:space:]')
+    if [ -n "$left" ] && [ "${bell#"$left"}" != "$bell" ]; then
       fm_task_inbox_composer_clear "$backend" "$target" "$line" "$label" || true
     fi
   fi
@@ -495,13 +503,31 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
 }
 
 # The composer's content as the shared extractor normalizes it (single-spaced,
-# never multi-line), so it can be typed back verbatim.
+# never multi-line).
 fm_task_inbox_composer_text() {  # <backend> <target> [expected-label]
   local cap held
   fm_backend_source "$1" || return 1
   cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${3:-}" 2>/dev/null) || return 1
   held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
   printf '%s' "$held"
+}
+
+# The composer's draft only when typing it back reproduces it exactly: it was
+# read from one visible row (not wrapped, not multi-line, nothing scrolled off
+# onto other rows), and that row shows it verbatim, so the extractor's space
+# normalization changed nothing. Any other read fails, so the ring defers.
+fm_task_inbox_composer_draft() {  # <backend> <target> [expected-label]
+  local cap out held rows raw
+  fm_backend_source "$1" || return 1
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${3:-}" 2>/dev/null) || return 1
+  out=$(fm_composer_extract_selected_content styled=0 "$cap" \
+    && printf '\n%s' "$FM_COMPOSER_EXTRACT_ROWS") || return 1
+  held=${out%$'\n'*}
+  rows=${out##*$'\n'}
+  case "$rows" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$held" ] || return 1
+  raw=$(_fm_composer_screen_row "$rows" "$cap" | fm_composer_strip_ansi)
+  case "$raw" in *"$held"*) printf '%s' "$held" ;; *) return 1 ;; esac
 }
 
 # Whether the composer's content, ignoring line wrapping, is exactly <line>.

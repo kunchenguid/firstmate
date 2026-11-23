@@ -2132,9 +2132,12 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
 
+# Sets FM_COMPOSER_EXTRACT_ROWS to the space-separated screen rows that
+# contributed content, so a caller in the same shell can tell a one-row read.
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0 cwd_start
+  FM_COMPOSER_EXTRACT_ROWS=
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -2213,6 +2216,7 @@ EOF
       continue
     fi
     joined="${joined}${joined:+ }$content"
+    FM_COMPOSER_EXTRACT_ROWS="${FM_COMPOSER_EXTRACT_ROWS}${FM_COMPOSER_EXTRACT_ROWS:+ }$row"
     row=$((row + 1))
   done
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'

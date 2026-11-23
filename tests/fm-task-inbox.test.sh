@@ -312,7 +312,9 @@ test_ring_skips_dead_agent() {
 # A fake tmux whose pane is a Claude-style composer that keeps its content in
 # FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
 # between rules, and Enter submits it (logged as SUBMIT) unless
-# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow.
+# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow. While the file
+# FM_FAKE_PARTIAL_LITERAL exists, the next literal send types only its first
+# ten characters, removes the file, and fails.
 make_composer_stub() {  # <dir>
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/tmux" <<'SH'
@@ -329,7 +331,11 @@ case "${1:-}" in
         *) break ;;
       esac
     done
-    if [ "$literal" = 1 ]; then
+    if [ "$literal" = 1 ] && [ -n "${FM_FAKE_PARTIAL_LITERAL:-}" ] && [ -e "$FM_FAKE_PARTIAL_LITERAL" ]; then
+      rm -f "$FM_FAKE_PARTIAL_LITERAL"
+      printf '%s' "${1:0:10}" >> "$FM_FAKE_COMPOSER"
+      exit 1
+    elif [ "$literal" = 1 ]; then
       printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
     elif [ "${1:-}" = C-u ] && [ "${FM_FAKE_NO_CTRL_U:-0}" != 1 ]; then
       : > "$FM_FAKE_COMPOSER"
@@ -397,17 +403,20 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the stuck doorbell once, not retype it:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the stuck doorbell unsubmitted"
 
-  for other in 'a half-typed draft' "$doorbell and a draft"; do
-    : > "$log"; printf '%s' "$other" > "$composer"
-    rc=0; ring || rc=$?
-    [ "$rc" = 0 ] || fail "other pending text must not block the ring, got rc $rc for: $other"
-    [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
-      || fail "only the doorbell may be submitted for: $other"$'\n'"$(cat "$log")"
-    # A draft wider than a row is read back row by row, so only its
-    # non-space characters are guaranteed to round-trip.
-    [ "$(tr -d '[:space:]' < "$composer")" = "$(printf '%s' "$other" | tr -d '[:space:]')" ] \
-      || fail "other pending text was not restored: $(cat "$composer")"
-  done
+  : > "$log"; printf '%s' 'a half-typed draft' > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "other pending text must not block the ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "only the doorbell may be submitted:"$'\n'"$(cat "$log")"
+  [ "$(cat "$composer")" = 'a half-typed draft' ] \
+    || fail "other pending text was not restored exactly: $(cat "$composer")"
+
+  # A draft that wraps past one row cannot be read back exactly: defer untouched.
+  : > "$log"; printf '%s' "$doorbell and a draft" > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 1 ] || fail "a wrapped draft should defer the ring, got rc $rc"
+  [ ! -s "$log" ] || fail "nothing may be submitted over a wrapped draft"
+  [ "$(cat "$composer")" = "$doorbell and a draft" ] || fail "a wrapped draft must be left untouched"
 
   : > "$log"; : > "$composer"; echo 1 > "$drops"
   rc=0; ring || rc=$?
@@ -422,7 +431,7 @@ test_ring_submits_its_own_stuck_doorbell() {
 # the doorbell and left 16 steers unread. The ring now captures the text,
 # clears it, rings, and types the text back; every backend step is a stub.
 test_ring_clears_rings_and_restores_stray_text() {
-  local dir state rec doorbell log composer drops rc
+  local dir state rec doorbell log composer drops rc out other
   dir="$TMP_ROOT/ring-restore"
   state="$dir/state"
   mkdir -p "$state"
@@ -434,6 +443,13 @@ test_ring_clears_rings_and_restores_stray_text() {
     PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
       FM_FAKE_DROP_ENTERS="$drops" FM_TASK_INBOX_RESTORE_SETTLE=0 \
       inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+  ring_note() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$drops" FM_TASK_INBOX_RESTORE_SETTLE=0 FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$1"; rc=0; fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1 || rc=$?
+        printf "rc=%s note=%s\n" "$rc" "${FM_TASK_INBOX_RING_NOTE:-}"' \
+      _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
   }
   : > "$log"; printf 'x' > "$composer"; echo 0 > "$drops"
   rc=0; ring || rc=$?
@@ -453,6 +469,25 @@ test_ring_clears_rings_and_restores_stray_text() {
   rc=0; FM_FAKE_NO_CTRL_U=1 ring || rc=$?
   [ "$rc" = 1 ] || fail "an uncleared long draft should still defer the ring, got rc $rc"
   [ ! -s "$log" ] || fail "nothing may be submitted when the composer cannot be cleared"
+
+  # Drafts the one-row read cannot reproduce exactly defer, left untouched.
+  for other in $'first line\nsecond line' 'two  spaces'; do
+    : > "$log"; printf '%s' "$other" > "$composer"
+    out=$(ring_note) || true
+    [ ! -s "$log" ] || fail "nothing may be submitted over an inexact draft: $other"
+    [ "$(cat "$composer")" = "$other" ] || fail "an inexact draft must be left untouched: $(cat "$composer")"
+    assert_contains "$out" "rc=1" "an inexact draft should defer the ring"
+    assert_contains "$out" "cannot be restored exactly" "the note should say the draft was left in place"
+  done
+
+  # A ring that types part of the doorbell and then fails leaves that part
+  # cleared and the draft restored exactly.
+  : > "$log"; printf 'draft' > "$composer"; : > "$dir/partial"
+  out=$(FM_FAKE_PARTIAL_LITERAL="$dir/partial" ring_note) || true
+  assert_contains "$out" "rc=2" "a failed partial ring should report the send failure"
+  assert_contains "$out" "cleared for the ring and restored" "the note should report the exact restore"
+  [ "$(cat "$composer")" = draft ] || fail "a partial doorbell must not be left with the draft: $(cat "$composer")"
+  [ ! -s "$log" ] || fail "nothing may be submitted after a partial ring"
 
   # A lost first Enter leaves our doorbell in the composer; it is cleared
   # before the draft returns so the draft never runs into it.
