@@ -406,7 +406,7 @@ An unreachable remote host is unknown rather than dead, preserves its route and 
 Idle secondmate endpoints are healthy; teardown is explicit and refuses while the secondmate home has in-flight work unless the captain has approved discard with `--force`.
 
 Secondmate homes converge conservatively to the primary's version and declared inherited local material at launch and during locked session start.
-The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session local-material push contract.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, mid-session local-material push, and divergence-visibility contracts.
 
 Secondmate agents can run on a different verified harness than crewmates.
 [`configuration.md`](configuration.md#choose-the-secondmate-harness) owns secondmate runtime pinning, per-mate overrides, precedence, compatibility, and malformed-file refusal.
@@ -554,7 +554,7 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 It restarts every live second mate whose home the pass left on the target commit through a persist-gated replacement, including a home that needed no advance, because a restart is also the only thing that re-resolves launch-time harness wiring; the re-read nudge is retained only as the fallback for live agents whose runtime cannot prove a restart.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The primary update is fast-forward only, while a clean secondmate divergence may reconcile with `reset --keep` only when a three-way temporary-index proof shows its complete local tree result is already present at the target, including after a squash merge.
-Dirty, uniquely diverged, offline, and off-default targets are reported and left untouched, and genuine secondmate divergence remains visible through a durable reconciliation record until a later successful convergence clears it.
+Dirty, uniquely diverged, offline, and off-default targets are reported and left untouched; the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns durable visibility for genuine divergence until convergence.
 Local homes share the guarded fast-forward helper, while remote updates delegate the same safety decision to the configured host through the generic transport.
 The procedure and outcome vocabulary are owned by the [`/updatefirstmate` skill](../.agents/skills/updatefirstmate/SKILL.md); the relevant script headers own the mechanics.
 
