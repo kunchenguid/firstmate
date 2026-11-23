@@ -215,8 +215,52 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+# Two tasks that sort first carry far more open decisions than the global
+# budget holds; a third task sorts last. Walking in name order used to spend the
+# whole budget on the first two and leave the last one with no line at all.
+test_byte_cap_shares_the_budget_across_tasks() {
+  local dir state out task k charged
+  dir=$(make_case fair-share)
+  state="$dir/state"
+  out="$dir/drain.out"
+  for task in task-a task-b; do
+    for k in $(seq 1 20); do
+      printf 'needs-decision [key=%s-%s]: ' "$task" "$k"
+      awk 'BEGIN { while (i++ < 18) printf "padding-text " }'
+      printf '\n'
+    done > "$state/$task.status"
+  done
+  printf 'needs-decision [key=z-old]: oldest call for the last task\n' > "$state/task-z.status"
+  printf 'blocked [key=z-new]: newest call for the last task\n' >> "$state/task-z.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-budget decision set"
+
+  for task in task-a task-b; do
+    grep -Fx "OPEN DECISIONS: 20 open for $task" "$out" >/dev/null \
+      || fail "the over-budget listing has no count line for $task"
+    grep -F "$task [key=$task-20] needs-decision:" "$out" >/dev/null \
+      || fail "the newest open decision for $task was not shown"
+    if grep -F "$task [key=$task-1] needs-decision:" "$out" >/dev/null; then
+      fail "the oldest decision for $task was shown ahead of its newer ones"
+    fi
+  done
+  grep -Fx 'OPEN DECISIONS: 2 open for task-z' "$out" >/dev/null \
+    || fail "the last task by name has no count line"
+  grep -F 'task-z [key=z-new] blocked: newest call for the last task' "$out" >/dev/null \
+    || fail "the last task by name had no entry shown"
+  grep -E '^OPEN DECISIONS: [0-9]+ more omitted \(byte cap\)$' "$out" >/dev/null \
+    || fail "the over-budget listing lost its omission count"
+  grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
+    || fail "the over-budget listing lost the answerer-closes hint"
+  charged=$(grep -E '^(task-|OPEN DECISIONS: [0-9]+ open for )' "$out" | wc -c | tr -d ' ')
+  [ "$charged" -le 4000 ] || fail "count lines and entries ran $charged bytes past the 4000-byte budget"
+
+  pass "an over-budget OPEN DECISIONS listing counts every task and shares entries round-robin, newest first"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
+test_byte_cap_shares_the_budget_across_tasks
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library

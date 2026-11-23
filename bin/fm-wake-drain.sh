@@ -473,9 +473,17 @@ EOF
 # fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
+#
+# When every entry fits the global budget they print in fold order. When they
+# do not, walking that order would let the first tasks by name spend the whole
+# budget and leave later tasks invisible, so the budget is shared instead: one
+# count line per task comes first, then entries are taken round-robin across
+# tasks, newest first, and the chosen entries print in fold order. Count lines
+# are charged to the same budget, so the section never grows past it.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local used=0 omitted=0 hidden_tasks=0 bytes n=0 t=0 i j round more counts=''
+  local -a lines=() line_bytes=() line_shown=() task_name=() task_first=() task_count=()
 
   if [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
@@ -484,6 +492,7 @@ print_open_decisions_section() {
   fi
   [ -n "$open" ] || return 0
 
+  # Both scans print each task's open set as one contiguous run, oldest first.
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
     # State the folded key on EVERY entry, "default" included. This section's
@@ -499,23 +508,65 @@ print_open_decisions_section() {
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
     fm_cap_line_var "$line" $((item_bytes - 1))
-    line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
-    if [ $((used + bytes)) -gt "$global_bytes" ]; then
-      omitted=$((omitted + 1))
-      continue
+    lines[n]=$FM_LINE_CAP_LINE
+    line_bytes[n]=$(( ${#FM_LINE_CAP_LINE} + 1 ))
+    line_shown[n]=1
+    used=$((used + line_bytes[n]))
+    if [ "$t" -eq 0 ] || [ "${task_name[t - 1]}" != "$task" ]; then
+      task_name[t]=$task
+      task_first[t]=$n
+      task_count[t]=0
+      t=$((t + 1))
     fi
-    output="$output$line
-"
-    used=$((used + bytes))
-    shown=$((shown + 1))
+    task_count[t - 1]=$((task_count[t - 1] + 1))
+    n=$((n + 1))
   done <<EOF
 $open
 EOF
 
-  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  [ "$n" -gt 0 ] || return 0
+  if [ "$used" -gt "$global_bytes" ]; then
+    used=0
+    for ((j = 0; j < t; j++)); do
+      fm_cap_line_var "OPEN DECISIONS: ${task_count[j]} open for ${task_name[j]}" $((item_bytes - 1))
+      bytes=$(( ${#FM_LINE_CAP_LINE} + 1 ))
+      if [ $((used + bytes)) -gt "$global_bytes" ]; then
+        hidden_tasks=$((hidden_tasks + 1))
+        continue
+      fi
+      counts="$counts$FM_LINE_CAP_LINE
+"
+      used=$((used + bytes))
+    done
+    for ((i = 0; i < n; i++)); do line_shown[i]=0; done
+    round=0
+    more=1
+    while [ "$more" -eq 1 ]; do
+      more=0
+      for ((j = 0; j < t; j++)); do
+        [ "$round" -lt "${task_count[j]}" ] || continue
+        more=1
+        i=$((task_first[j] + task_count[j] - 1 - round))
+        if [ $((used + line_bytes[i])) -gt "$global_bytes" ]; then
+          omitted=$((omitted + 1))
+          continue
+        fi
+        line_shown[i]=1
+        used=$((used + line_bytes[i]))
+      done
+      round=$((round + 1))
+    done
+  fi
+
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
-  printf '%s' "$output" || return 1
+  printf '%s' "$counts" || return 1
+  if [ "$hidden_tasks" -gt 0 ]; then
+    printf 'OPEN DECISIONS: %d more task(s) with open decisions omitted (byte cap)\n' "$hidden_tasks" || return 1
+  fi
+  for ((i = 0; i < n; i++)); do
+    [ "${line_shown[i]}" -eq 1 ] || continue
+    printf '%s\n' "${lines[i]}" || return 1
+  done
   if [ "$omitted" -gt 0 ]; then
     printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
