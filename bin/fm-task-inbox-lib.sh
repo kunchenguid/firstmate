@@ -467,10 +467,12 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
 # read that way or the clear fails, the ring still defers as before and sets
 # FM_TASK_INBOX_RING_NOTE, which says when a failed clear changed the draft.
 # The one-row read cannot see leading or trailing spaces, so the note says the
-# draft was typed back, not that it was restored. After the ring, whatever of our own doorbell is left
-# in the composer, whole or partly typed, is cleared before the draft is
-# restored so the two never run together; a failed restore is reported in the
-# note, which never carries the draft text.
+# draft was typed back, not that it was restored. A composer already holding
+# this record's own doorbell defers untouched, since that is not a foreign
+# draft. After the ring, whatever of our own doorbell is left in the composer,
+# whole or partly typed, is cleared before the draft is restored so the two
+# never run together; a failed restore is reported in the note, which never
+# carries the draft text.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} rc=0 held line left bell
   fm_task_inbox_ring_core "$@" || rc=$?
@@ -526,7 +528,9 @@ fm_task_inbox_composer_text() {  # <backend> <target> [expected-label]
 # The composer's draft only when typing it back reproduces it exactly: it was
 # read from one visible row (not wrapped, not multi-line, nothing scrolled off
 # onto other rows), and that row shows it verbatim, so the extractor's space
-# normalization changed nothing. Any other read fails, so the ring defers.
+# normalization changed nothing. A draft starting with '-' also fails, since a
+# backend's literal send could read it as an option. Any other read fails, so
+# the ring defers.
 fm_task_inbox_composer_draft() {  # <backend> <target> [expected-label]
   local cap out held rows raw
   fm_backend_source "$1" || return 1
