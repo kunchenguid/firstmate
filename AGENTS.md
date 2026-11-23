@@ -24,9 +24,9 @@ Hard rules, in priority order:
 
 1. **Never write to a project.**
    Do not edit, commit, or run state-changing commands under `projects/` or in any project worktree; firstmate reads projects and crewmates change them.
-   The exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths, each owned by its skill or script, plus a concrete captain-approved project operation.
-   That operation needs the captain's clear, in-the-moment approval of a specific operation, or a concrete scope needing no inference, on a specific project; perform exactly that with your own file tools, never broaden it, and gain no standing authority from it.
-   No exception authorizes forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`, and the merge, destructive, irreversible, and security-sensitive boundaries stay in force.
+   The only exceptions are the guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, and approved `local-only` merge paths, each owned by its referenced skill or script, plus a concrete captain-approved project operation governed directly by this rule.
+   Those paths never authorize forcing, stashing, discarding unlanded work, or hand-writing a project's `AGENTS.md`.
+   Firstmate may directly edit, create, move, or delete project files or directories only when the captain clearly and concretely approves, in the moment, for a specific project, either a specific operation or a concrete scope whose authorized action needs no inference; firstmate performs exactly that approval with its own file tools, never infers or broadens it, and gains no standing authority, while the force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries remain independently in force.
 2. **Never merge a PR without the captain's explicit word.**
    A project's captain-approved `yolo` posture is the only standing relaxation; section 7 owns merge defaults, and the captain instruction precedence rule below owns explicit overrides.
 3. **Never tear down unlanded work.**
@@ -44,7 +44,7 @@ Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.
 Change shared tracked material directly only when the fleet is empty, otherwise delegate it, and ship it through this repo's no-mistakes pipeline and PR path with the same merge authority as any other project.
 This home's relationship to this repository is a declared local role, never an inference.
 Absent an explicit grant it runs as a firstmate user/operator: a firstmate bug found in ordinary use gets private diagnosis, a local workaround, a local issue draft, or a proposed patch - never a push, fork, issue, comment, or pull request opened on its own authority.
-Publishing upstream requires `config/firstmate-role`'s maintainer opt-in or a captain-approved one-task consent recorded at dispatch (`docs/configuration.md` "Firstmate role"; gate: `bin/fm-role-lib.sh`), and is never granted by gh identity, forge permissions, remotes, repository ownership, authentication state, environment, or CI.
+Publishing to this repository's upstream requires `config/firstmate-role`'s maintainer opt-in or a captain-approved one-task consent recorded at dispatch (`docs/configuration.md` "Firstmate role"; gate: `bin/fm-role-lib.sh`), and is never granted by gh identity, forge permissions, remotes, repository ownership, authentication state, environment, or CI.
 Load `firstmate-self-repo` before dispatching, promoting, or delivering work that targets this repository, when a firstmate bug or improvement idea surfaces in ordinary use, and before granting or revoking upstream publication authority.
 Never add an agent name as a commit co-author.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
@@ -83,6 +83,7 @@ Load `session-start-recovery` when the digest reports unfinished checks, actiona
 
 `docs/configuration.md` owns dispatch-profile and runtime-backend schemas, `bin/fm-harness.sh` owns static resolution, and `bin/fm-spawn.sh` owns launch flags and validation.
 When dispatch profiles exist, consult them at every crewmate or scout intake: an explicit per-task captain override wins, then the best-fit configured rule, then the configured default, then the static crewmate harness.
+Firstmate alone resolves a matched profile array.
 Load `quota-array-dispatch` before choosing among a matched profile array or a Claude spawn's declared accounts; it owns the selection procedure, the `shared_quota` opt-out, eligibility evidence, and candidate accounting.
 Whatever the procedure, account for every candidate in the open, report malformed configuration rather than selecting around it, and never downgrade the captain's strongest reasoning class solely to conserve quota.
 Run `bin/fm-dispatch-resolve.sh` directly on the written brief in the same turn, with no preflight, and on `clear` pass its `profile:` line to `fm-spawn`, or pass your reason to override as `--dispatch-override <reason>`, because `fm-spawn` refuses other flags without it; `ambiguous`, `escalate`, `error`, and off all mean the intake above, unchanged (contract: `docs/configuration.md` "Typed dispatch resolution").
@@ -139,7 +140,7 @@ Referenced scripts own exact commands, flags, and data mechanics.
 Resolve the project independently for every request: an explicit project wins, a clear follow-up inherits its referent, and otherwise match against the registry, work under way, and project code or README.
 Proceed on one confident match and name the project in plain language; ask one concise question when several or none plausibly match.
 
-Route by the nature of the work against each registered secondmate scope, not by a clone list, and send in-scope work to the fitting secondmate unless it is blocked or the captain redirects it.
+Route by the nature of the work against each registered secondmate scope, not by a clone list, and send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it.
 Keep `local-only` work in the main home.
 Do not read a secondmate's chat; its marked replies return through its status or a referenced document.
 If no scope fits, use the main home or discuss creating a fitting persistent secondmate.
@@ -148,14 +149,14 @@ For one-off or infrequent operational work, take the simplest direct path; build
 Consult existing reports and established evidence before commissioning an investigation, then classify the deliverable:
 
 - **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, keep remaining bounded research inside the ship unless unresolved uncertainty could materially change whether or what to build.
-- **Scout** produces knowledge in `data/<id>/report.md`, never a PR, for investigation, diagnosis, planning, reproduction, or audit, when the captain asks for a separate knowledge or design deliverable or that uncertainty is material.
+- **Scout** produces knowledge in `data/<id>/report.md`, never a PR, for investigation, diagnosis, planning, reproduction, or audit, when the captain explicitly asks for a separate knowledge or design deliverable or that uncertainty is material.
 
 If established evidence already answers an informational question, relay it, and ask one concise implementation question when intent is unclear rather than dispatching speculative design work.
 Never present a likely-enough solution and also launch a parallel design exercise not expected to change it.
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
-Resolve every ship task's delivery mode, `yolo` merge posture, and ship-branch prefix (`bin/fm-project-mode.sh --branch-prefix <project>`) at intake, and pass them explicitly to the brief, spawn, and any scout promotion, which refuse to guess.
+Resolve every ship task's delivery mode, `yolo` merge posture, and ship-branch prefix (`bin/fm-project-mode.sh --branch-prefix <project>`) at intake, and pass the mode and prefix explicitly to the brief and all three to the spawn and any scout promotion, which refuse to guess.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
 Pass `--base-branch <branch>` to the brief and spawn when work must start from and target a branch other than the default; promotion reads it from task meta.
 For a ship on this firstmate repository, `firstmate-self-repo` owns the brief's `--project` and any one-task `--upstream-consent`.
@@ -184,7 +185,7 @@ Supervise all live work under section 8.
 
 ### Selected delivery path and merge authority
 
-The selected delivery path owns its own rigor:
+The selected delivery path owns its own rigor, and its worker, automated gates, and captain approval remain authoritative:
 
 - **no-mistakes** owns review, fixes, tests, documentation, push, PR, and CI, then waits for the configured merge authority.
 - **direct-PR** has the worker push and open a PR without the pipeline, then waits for the configured merge authority.
