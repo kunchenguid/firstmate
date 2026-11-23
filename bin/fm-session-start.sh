@@ -878,17 +878,8 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     fi
   fi
 fi
-SUP_AGY_ACP_ARGS=()
-if [ "$PRIMARY_HARNESS" = agy ] && [ -f "$SCRIPT_DIR/fm-agy-process-lib.sh" ]; then
-  # shellcheck source=bin/fm-agy-process-lib.sh
-  . "$SCRIPT_DIR/fm-agy-process-lib.sh"
-  if fm_agy_acp_in_ancestry; then
-    SUP_AGY_ACP_ARGS=(--agy-acp)
-  fi
-fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
-  "${SUP_AGY_ACP_ARGS[@]+"${SUP_AGY_ACP_ARGS[@]}"}" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
   --afk-mode "$AFK_MODE" \

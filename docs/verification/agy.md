@@ -165,8 +165,9 @@ Session-open digest injection is implemented by `bin/fm-sessionstart-agy.sh` on 
 PreToolUse seatbelts enforce execution safety through `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
 In primary and secondmate homes, watcher commands are classified by the shared arm-command policy, `cd` commands are denied in favor of absolute paths or `cwd`, and subagent invocations (`invoke_subagent`, `define_subagent`) are denied while inspection tools (`manage_subagents`, `manage_task`) remain permitted.
 Supervision continuity for standalone `agy` uses synchronous Stop-hook parking via `bin/fm-turnend-guard-agy.sh`, running `bin/fm-watch-arm.sh` (or the supervision host) which waits under the 28800s hook timeout until woken by an incoming event (bounded only when the optional `FM_AGY_PARK_TIMEOUT` is set) and falls back to bounded repair nagging via `bin/fm-turnend-guard.sh --agy`.
-Verified live under T3 Code's `antigravity acp` on 2026-11-23: ACP awaits `.agents/hooks.json` `Stop` before completing the prompt turn, so parking synchronously on `Stop` held incoming user messages until the server restarted.
-`bin/fm-turnend-guard-agy.sh` now detects `antigravity acp` from the lock holder and delegates immediately to `bin/fm-turnend-guard.sh --agy --agy-acp` without parking, while `bin/fm-wake-lib.sh` reports `persistent` and `bin/fm-session-start.sh` / `bin/fm-supervision-instructions.sh` select `docs/supervision-protocols/agy-acp.md` (`tests/fm-agy-primary.test.sh` pins non-parking ACP Stop behavior and protocol routing).
+Verified live on 2026-11-23 under T3 Code (`antigravity` 1.5.14): ACP awaits `.agents/hooks.json` `Stop` before completing the prompt turn, so synchronous Stop-hook parking in `bin/fm-turnend-guard-agy.sh` blocked incoming user messages until the server restarted.
+Verified live on the same date and host: a background `run_command` task that crosses `WaitMsBeforeAsync` survives a `{}` Stop return, and when it exits it delivers a completion notification that resumes the model.
+`bin/fm-turnend-guard-agy.sh` now detects `antigravity acp` in its own process ancestry (`fm_agy_acp_in_ancestry` in `bin/fm-agy-process-lib.sh`) and delegates immediately to `bin/fm-turnend-guard.sh --agy` without parking, while `bin/fm-wake-lib.sh` reports `persistent` and `bin/fm-supervision-instructions.sh` selects `docs/supervision-protocols/agy-acp.md` and the background-arm supervision host lines from the same ancestry check (`tests/fm-agy-primary.test.sh` and `tests/fm-supervision-instructions.test.sh` pin non-parking ACP Stop behavior and protocol routing).
 Session lock verification recognizes `agy` and `antigravity acp` process ancestry via `bin/fm-session-lock-lib.sh` and `bin/fm-agy-process-lib.sh`.
 
 ## What is still unproven
@@ -174,6 +175,8 @@ Session lock verification recognizes `agy` and `antigravity acp` process ancestr
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
+A live end-to-end `bin/fm-watch-arm.sh` background cycle under `antigravity acp` has not been verified yet.
+That includes whether T3 Code queues or immediately delivers user messages while a long-lived watcher background task is running, and whether non-T3 ACP hosts share T3 Code's idle background-task wakeup.
 
 ## Refreshing this record
 

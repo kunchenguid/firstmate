@@ -23,7 +23,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
-HARNESS_EXPLICIT=0
 AGY_ACP=0
 READ_ONLY=0
 AFK=0
@@ -34,7 +33,7 @@ QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--agy-acp] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -55,12 +54,7 @@ while [ "$#" -gt 0 ]; do
     --harness)
       [ "$#" -gt 1 ] || { echo "error: --harness requires a value" >&2; exit 2; }
       HARNESS=$2
-      HARNESS_EXPLICIT=1
       shift 2
-      ;;
-    --agy-acp)
-      AGY_ACP=1
-      shift
       ;;
     --read-only)
       [ "$#" -gt 1 ] || { echo "error: --read-only requires 0 or 1" >&2; exit 2; }
@@ -127,15 +121,11 @@ if [ "$HARNESS" = codex ]; then
     SNIPPET="$DOC_DIR/codex-checkpoint.md"
   fi
 fi
-if [ "$HARNESS" = agy ]; then
-  if [ "$AGY_ACP" -eq 0 ] && [ "$HARNESS_EXPLICIT" -eq 0 ] && [ -f "$SCRIPT_DIR/fm-agy-process-lib.sh" ]; then
-    # shellcheck source=bin/fm-agy-process-lib.sh
-    . "$SCRIPT_DIR/fm-agy-process-lib.sh"
-    if fm_agy_acp_in_ancestry; then
-      AGY_ACP=1
-    fi
-  fi
-  if [ "$AGY_ACP" -eq 1 ]; then
+if [ "$HARNESS" = agy ] && [ -f "$SCRIPT_DIR/fm-agy-process-lib.sh" ]; then
+  # shellcheck source=bin/fm-agy-process-lib.sh
+  . "$SCRIPT_DIR/fm-agy-process-lib.sh"
+  if fm_agy_acp_in_ancestry; then
+    AGY_ACP=1
     SNIPPET="$DOC_DIR/agy-acp.md"
     [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/agy.md"
   fi
@@ -188,8 +178,9 @@ if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
 fi
 
 render_snippet() {  # [snippet]
-  local line tags snippet=${1:-$SNIPPET} codex_tag=codex-checkpoint
+  local line tags snippet=${1:-$SNIPPET} codex_tag=codex-checkpoint agy_tag=agy-cli
   [ "$CODEX_PARK" -eq 0 ] || codex_tag=codex-park
+  [ "$AGY_ACP" -eq 0 ] || agy_tag=agy-acp
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       '{'*'} '*)
@@ -198,6 +189,7 @@ render_snippet() {  # [snippet]
         case ",$tags," in
           *",$HARNESS,"*) ;;
           *",$codex_tag,"*) [ "$HARNESS" = codex ] || continue ;;
+          *",$agy_tag,"*) [ "$HARNESS" = agy ] || continue ;;
           *) continue ;;
         esac
         line=${line#*\} }

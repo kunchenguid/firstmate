@@ -22,4 +22,6 @@ When the background `run_command` arm finishes with an actionable wake (`signal:
 4. Do not invent a wake from an attach-status line alone.
    Re-arm attaches to an existing healthy cycle when one is already present and follows its verified successor chain (see [`watcher-continuity.md`](../watcher-continuity.md)).
 
-The primary project `Stop` hook runs `bin/fm-turnend-guard-agy.sh`, which detects `antigravity acp` and delegates immediately to the non-parking bounded backstop (`bin/fm-turnend-guard.sh --agy --agy-acp`, 3-block repair nag before failing open with `{}`) instead of parking for the hook timeout.
+On an ACP host that does not wake an idle session when a background task completes, queued wakes stay durable in `state/.wake-queue` and are drained with `bin/fm-wake-drain.sh` at the start of the next turn.
+
+The primary project `Stop` hook runs `bin/fm-turnend-guard-agy.sh`, which detects `antigravity acp` and delegates immediately to the non-parking bounded backstop (`bin/fm-turnend-guard.sh --agy`, 3-block repair nag before failing open with `{}`) instead of parking for the hook timeout.

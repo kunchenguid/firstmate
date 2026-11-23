@@ -25,7 +25,7 @@
 #   - Antigravity ACP sessions (T3 Code's bundled `antigravity acp` server)
 #     await Stop hooks before completing the prompt turn, so parking synchronously
 #     blocks incoming user messages. Those sessions delegate immediately to
-#     bin/fm-turnend-guard.sh --agy --agy-acp without parking.
+#     bin/fm-turnend-guard.sh --agy without parking.
 #
 # Guard rails before parking:
 #   - Stand down in crewmate/scout linked worktrees (fm_primary_scope_matches).
@@ -118,9 +118,8 @@ fi
 # awaits Stop hooks before ending the ACP prompt turn, so parking synchronously
 # on Stop blocks incoming user messages until timeout. Delegate immediately to
 # the non-parking bounded turn-end guard instead.
-LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-if fm_proc_info "$LOCK_PID" && fm_agy_acp_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
-  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --agy --agy-acp
+if fm_agy_acp_in_ancestry; then
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --agy
   exit 0
 fi
 
