@@ -426,17 +426,15 @@ fm_task_inbox_ring_core() {  # <backend> <target> <record-path> [expected-label]
   return 0
 }
 
-# Clear the composer's draft: on a backend whose key names are known (tmux and
-# paseo take C-e and BSpace), C-e first so Ctrl-U, which deletes back from the
+# Clear the composer's draft on tmux or paseo, the backends whose C-e and BSpace
+# key names are verified: C-e first so Ctrl-U, which deletes back from the
 # cursor, takes the whole line; then Ctrl-U presses sized from the draft length
-# (one wrapped row per press on some harnesses), then on those same backends
-# Backspace presses for a short leftover a harness's Ctrl-U did not take. 0 only
-# when the composer reads empty.
+# (one wrapped row per press on some harnesses), then Backspace presses for a
+# short leftover a harness's Ctrl-U did not take. 0 only when the composer
+# reads empty.
 fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-label]
   local backend=$1 target=$2 held=$3 label=${4:-} presses i=0
-  case "$backend" in
-    tmux|paseo) fm_backend_send_key "$backend" "$target" C-e "$label" >/dev/null 2>&1 || return 1 ;;
-  esac
+  fm_backend_send_key "$backend" "$target" C-e "$label" >/dev/null 2>&1 || return 1
   presses=$(( ${#held} / 40 + 2 ))
   [ "$presses" -le 12 ] || presses=12
   while [ "$i" -lt "$presses" ]; do
@@ -444,7 +442,6 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
     i=$((i + 1))
     [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" != empty ] || return 0
   done
-  case "$backend" in tmux|paseo) ;; *) return 1 ;; esac
   if [ "${#held}" -le 80 ]; then
     i=0
     while [ "$i" -lt "${#held}" ]; do
@@ -462,10 +459,11 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
 # that text is captured, the composer cleared, the doorbell rung, and the text
 # typed back unsubmitted, so a half-typed draft survives the ring and the
 # worker still hears the bell. Local and remote endpoints share this path (the
-# remote leg rings through its host's backend). Only a draft that is certain
-# to round-trip exactly is cleared (fm_task_inbox_composer_draft); when the
-# draft cannot be read that way, the backend has no literal-send primitive, or
-# the clear fails, the ring still defers as before and sets
+# remote leg rings through its host's backend). The rescue runs only on tmux
+# and paseo, whose clear keys are verified; every other backend defers exactly
+# as before, with no key sent. Only a draft that is certain to round-trip
+# exactly is cleared (fm_task_inbox_composer_draft); when the draft cannot be
+# read that way or the clear fails, the ring still defers as before and sets
 # FM_TASK_INBOX_RING_NOTE, which says when a failed clear changed the draft.
 # The one-row read cannot see leading or trailing spaces, so the note says the
 # draft was typed back, not that it was restored. After the ring, whatever of our own doorbell is left
@@ -476,8 +474,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} rc=0 held line left bell
   fm_task_inbox_ring_core "$@" || rc=$?
   [ "$rc" = 1 ] || return "$rc"
+  case "$backend" in tmux|paseo) ;; *) return 1 ;; esac
   fm_backend_source "$backend" || return 1
-  fm_backend_has_send_literal "$backend" || return 1
   if ! held=$(fm_task_inbox_composer_draft "$backend" "$target" "$label"); then
     # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
     FM_TASK_INBOX_RING_NOTE="the composer holds other pending text that cannot be restored exactly, so it was left in place"

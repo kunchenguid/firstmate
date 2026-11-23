@@ -531,6 +531,35 @@ test_ring_clears_rings_and_restores_stray_text() {
   pass "inbox: the ring clears stray composer text, rings, and restores the text on a stub pane"
 }
 
+# The draft rescue is verified only on tmux and paseo; every other backend
+# defers exactly as before, sending no key at all over a pending draft.
+test_ring_defers_untouched_off_tmux_and_paseo() {
+  local dir state rec log backend out
+  dir="$TMP_ROOT/ring-other-backends"
+  state="$dir/state"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/keys.log"
+  for backend in herdr zellij cmux tern rex orca; do
+    : > "$log"
+    out=$(FM_STATE_OVERRIDE="$state" FM_KEYS_LOG="$log" bash -c '
+      . "$1"
+      fm_backend_agent_state() { echo alive; }
+      fm_backend_busy_state() { echo idle; }
+      fm_backend_composer_state() { echo pending; }
+      fm_backend_capture() { printf "● done\n────\n❯ a draft\n────\n"; }
+      fm_backend_send_key() { printf "key %s\n" "$3" >> "$FM_KEYS_LOG"; }
+      fm_backend_send_literal() { printf "literal %s\n" "$3" >> "$FM_KEYS_LOG"; }
+      fm_backend_send_text_submit() { printf "submit %s\n" "$3" >> "$FM_KEYS_LOG"; }
+      rc=0; fm_task_inbox_ring "$2" endpoint "$3" label || rc=$?
+      printf "rc=%s\n" "$rc"
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$backend" "$rec")
+    assert_contains "$out" "rc=1" "$backend should defer the ring over a pending draft"
+    [ ! -s "$log" ] || fail "$backend must send no key over a pending draft:"$'\n'"$(cat "$log")"
+  done
+  pass "inbox: off tmux and paseo the ring defers over a pending draft without sending a key"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -1499,6 +1528,7 @@ test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
 test_ring_clears_rings_and_restores_stray_text
+test_ring_defers_untouched_off_tmux_and_paseo
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_prefilters_history
 test_idempotent_write_prefilter_preserves_exact_bodies

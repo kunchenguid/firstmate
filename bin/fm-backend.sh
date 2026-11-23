@@ -1276,14 +1276,6 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
-# fm_backend_has_send_literal: whether the adapter can type literal text back.
-fm_backend_has_send_literal() {  # <backend>
-  case "$1" in
-    tmux|herdr|zellij|orca|cmux|paseo|rex|tern) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 # fm_backend_send_literal: type <text> as literal, UNSUBMITTED input through the
 # selected adapter, so the caller can restore a composer draft it cleared. An
 # adapter with no literal-send primitive declines (nonzero), never types lines.
