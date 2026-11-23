@@ -145,8 +145,8 @@ printf '%s' "$DIGEST" | grep -q '^lock acquired: harness pid [0-9][0-9]*$' \
   || fail "SessionStart hook digest lacks the stale-lock reclaim"
 ! printf '%s' "$DIGEST" | grep -q '^●  STARTUP TRUNCATED - ' \
   || fail "SessionStart hook digest was truncated"
-printf '%s' "$DIGEST" | grep -q '^The digest above is complete for this session start\.' \
-  || fail "SessionStart hook digest lacks its completion marker"
+printf '%s' "$DIGEST" | grep -q '^WITHHELD lines above name a read-only command for each omission\.$' \
+  || fail "SessionStart hook digest lacks its withheld-line marker"
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then

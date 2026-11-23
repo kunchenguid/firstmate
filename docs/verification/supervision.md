@@ -74,6 +74,15 @@ Codex's interactive TUI fired no project `SessionStart` hook at all in the same 
 Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
 The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
+The three session-start parts (core, preferences, and learnings) were verified on 2026-10-11 with Claude Code 2.1.296, codex-cli 0.153.4, and Pi 1.0.0 through `FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh`.
+The recorder printed a per-open core token, a late token after about 6,700 bytes of core output, and per-open preferences and learnings tokens.
+On Claude, the three tracked `SessionStart` entries each fired, and the model quoted all four tokens back on the cold open, after `/clear`, and after `/compact`.
+On `codex exec`, the three tracked entries each fired, and the model quoted all four tokens back on the cold open; the interactive TUI limit above still applies.
+Clear and compact cannot be tested on `codex exec` because it has no tracked clear or compact surface.
+On Pi, the single `--part all` message carried all four tokens, which the model quoted back on the cold open, after `/new`, and after `/compact`.
+So a core message near the 7,000-byte Codex budget reached model context whole on all three, past the 2,000-character preview a capped hook output is cut to.
+Claude Code 2.1.296 selects "No, exit" by default in its folder-trust prompt, so the guard moves to the trusting option before it confirms.
+
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
 Both preconditions are load-bearing: the stock 20,000-token keep window exceeds a small lab session, and `AgentSession.compact()` aborts an in-flight turn before measuring compactable history, which otherwise discards that turn and reports `Nothing to compact (session too small)`.

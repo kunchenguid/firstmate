@@ -4,7 +4,8 @@
 # wake through `codex queue --thread`. This works in embedded CLI mode without
 # an app-server daemon. No terminal injection or separate event selector.
 #
-# Usage: fm-codex-stop-park.sh --session-start|--guard|--capable
+# Usage: fm-codex-stop-park.sh --session-start [fm-sessionstart-run.sh args...]
+#        fm-codex-stop-park.sh --guard|--capable
 #        fm-codex-stop-park.sh                 (asynchronous Stop hook)
 # Hook modes read the native JSON payload on stdin. --capable is read-only.
 # The park is opt-in: only a home with config/codex-stop-park
@@ -59,6 +60,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
 MODE=${1:-stop}
+[ $# -eq 0 ] || shift
 SESSION_FILE="$STATE/.codex-park-session"
 CLAIM="$STATE/.codex-park.lock"
 RECORD="$STATE/.codex-park.json"
@@ -188,7 +190,7 @@ if [ "$MODE" = --session-start ]; then
       '.type == "session_meta" and .payload.id == $session and .payload.originator == "codex-tui"' >/dev/null 2>&1; then
     export FM_CODEX_PARK_SESSION="$SESSION"
   fi
-  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-sessionstart-run.sh"
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-sessionstart-run.sh" ${1+"$@"}
   rc=$?
   if [ -n "${FM_CODEX_PARK_SESSION:-}" ] && fm_session_lock_owned_by_self "$STATE"; then
     printf '%s\n%s\n' "$SESSION" "$(cat "$STATE/.lock")" > "$SESSION_FILE.tmp.$$" \
