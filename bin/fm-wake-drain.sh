@@ -7,6 +7,12 @@
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
 #
+# --since-last-ack: when passed on a presentation drain (not an --ack-through
+# call), annotation lines are filtered to only those whose [at=EPOCH] timestamp
+# is strictly newer than the epoch recorded by the last successful
+# acknowledgement. If no prior ack is on record, all annotations print as usual.
+# The durable ack epoch lives in $STATE/.wake-drain-last-ack-epoch.
+#
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # Every scratch file this script mints (.main-eligible-rows.tmp.*,
@@ -225,19 +231,28 @@ presented_max_row() { # <rows-file>
   fi
 }
 
-case "${1:-}" in
-  '') ;;
-  --ack-through)
-    ACK_THROUGH=${2:-}
-    case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
-    [ "${3:-}" = --recovery-generation ] \
-      || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
-    ACK_GENERATION=${4:-}
-    case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
-    [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
-    ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
-esac
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --since-last-ack)
+      SINCE_LAST_ACK=true
+      shift
+      ;;
+    --ack-through)
+      ACK_THROUGH=${2:-}
+      case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
+      [ "${3:-}" = --recovery-generation ] \
+        || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
+      ACK_GENERATION=${4:-}
+      case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
+      shift 4
+      ;;
+    *) echo "usage: fm-wake-drain.sh [--since-last-ack] [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  esac
+done
+if [ -n "$ACK_THROUGH" ] && [ "$SINCE_LAST_ACK" = true ]; then
+  echo "wake drain: --since-last-ack cannot be combined with --ack-through" >&2
+  exit 2
+fi
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 
@@ -280,6 +295,9 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" "$mode" "$fingerprint" || return 1
   done <<< "$fingerprints"
 }
+
+SINCE_LAST_ACK=false
+LAST_ACK_EPOCH_FILE="$STATE/.wake-drain-last-ack-epoch"
 
 BRANCH_OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 BRANCH_OUTCOME_INDEX_MAX_BYTES=512
@@ -791,6 +809,39 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
+# Wrapper around fm_wake_print_annotations that applies --since-last-ack
+# filtering when active. When SINCE_LAST_ACK is true, annotation lines whose
+# [at=EPOCH] timestamp is at or before the last acknowledged epoch are
+# suppressed. Lines without a parseable [at=...] pass through unfiltered.
+_fm_drain_print_annotations() {
+  local rows=$1 snapshot=${2:-} since_epoch
+  if [ "$SINCE_LAST_ACK" != true ]; then
+    fm_wake_print_annotations "$rows" "$snapshot"
+    return
+  fi
+  since_epoch=
+  if [ -f "$LAST_ACK_EPOCH_FILE" ] && [ -r "$LAST_ACK_EPOCH_FILE" ] && [ ! -L "$LAST_ACK_EPOCH_FILE" ]; then
+    since_epoch=$(cat "$LAST_ACK_EPOCH_FILE" 2>/dev/null) || since_epoch=
+    case "$since_epoch" in ''|*[!0-9]*) since_epoch= ;; esac
+  fi
+  if [ -z "$since_epoch" ]; then
+    fm_wake_print_annotations "$rows" "$snapshot"
+    return
+  fi
+  fm_wake_print_annotations "$rows" "$snapshot" | awk -v cutoff="$since_epoch" '
+    {
+      epoch = ""
+      if (match($0, /\[at=[0-9]+\]/)) {
+        s = substr($0, RSTART + 4, RLENGTH - 5)
+        if (s + 0 > cutoff + 0) { print; next }
+        next
+      }
+      print
+    }
+  '
+  return "${PIPESTATUS[0]}"
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
@@ -812,7 +863,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
     rc=1
   }
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
-    fm_wake_print_annotations "$rows" "$snapshot" || rc=1
+    _fm_drain_print_annotations "$rows" "$snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then
       annotation_manifest=$(fm_wake_annotation_manifest "$rows") || rc=1
       fully_presented=$(printf '%s\n' "$annotation_manifest" | awk -F '\t' '$2 == "direct" { sub(/\.status$/, "", $1); print $1 }') || rc=1
@@ -955,6 +1006,15 @@ if [ -n "$ACK_THROUGH" ]; then
       RECOVERY_ACK_MOVED=true
     fi
   fi
+  # Record the max epoch of acknowledged rows for --since-last-ack filtering.
+  awk -F '\t' -v new="$DRAIN_TMP" '
+    BEGIN { while ((getline line < new) > 0) { split(line, f, "\t"); kept[f[2]]=1 } }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && !($2 in kept) && $1 ~ /^[0-9]+$/ && $1 > max { max=$1 }
+    END { if (max != "") print max }
+  ' "$FM_WAKE_QUEUE" > "$LAST_ACK_EPOCH_FILE.tmp" 2>/dev/null \
+    && { [ ! -s "$LAST_ACK_EPOCH_FILE.tmp" ] || mv -f "$LAST_ACK_EPOCH_FILE.tmp" "$LAST_ACK_EPOCH_FILE"; } \
+    || true
+  rm -f "$LAST_ACK_EPOCH_FILE.tmp" 2>/dev/null || true
   if ! _fm_atomic_replace "$DRAIN_TMP" "$FM_WAKE_QUEUE"; then
     echo "wake drain: acknowledged wakes could not be consumed safely" >&2
     exit 1
