@@ -346,7 +346,13 @@ case "${1:-}" in
       printf '%s' "${1:0:10}" >> "$FM_FAKE_COMPOSER"
       exit 1
     elif [ "$literal" = 1 ]; then
-      printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
+      # Like real tmux: a trailing ';' is a command separator, '\;' a literal ';'.
+      text=$1
+      case "$text" in
+        *'\;') text="${text%??};" ;;
+        *';') text="${text%;}" ;;
+      esac
+      printf '%s' "$text" >> "$FM_FAKE_COMPOSER"
     elif [ "${1:-}" = C-u ] && [ "${FM_FAKE_NO_CTRL_U:-0}" != 1 ]; then
       : > "$FM_FAKE_COMPOSER"
     elif [ "${1:-}" = BSpace ]; then
@@ -506,6 +512,14 @@ test_ring_clears_rings_and_restores_stray_text() {
   assert_contains "$out" "rc=0" "a draft ending in a space should not block the ring"
   assert_contains "$out" "typed back; leading or trailing spaces may not be preserved" \
     "the note should say spaces at the draft's ends may be lost"
+
+  # A draft ending in ';' is typed back with its ';', which tmux would
+  # otherwise read as a command separator and drop.
+  : > "$log"; printf 'foo;' > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a draft ending in ';' should not block the ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] || fail "only the doorbell should be submitted over 'foo;'"
+  [ "$(cat "$composer")" = 'foo;' ] || fail "a trailing ';' was not typed back: $(cat "$composer")"
 
   # A cursor moved back into the draft: C-e first lets Ctrl-U take it all.
   : > "$log"; printf 'fix the bug' > "$composer"; echo 8 > "$dir/cursor"
