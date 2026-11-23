@@ -842,6 +842,17 @@ The optional local, gitignored `config/park-on-review` presence flag opts this h
 Either flag also lets `bin/fm-teardown.sh` accept a merged GitLab merge request, including a squash or merge-train merge, as landed work when the merge request's head contains the lane's work; with neither flag, teardown does not read GitLab merge requests.
 Both flags are home-local and not inherited by secondmate homes.
 The full behavior contract and command details are owned by [`bin/fm-park.sh`](../bin/fm-park.sh); the watcher calls its `tick` command on each check sweep.
+With `config/auto-land`, a merged record that the [finished-work review](#finished-work-cleanup-configauto-clean-finished) finds still present gets the same automatic cleanup instead of a notification.
+
+## Finished-work cleanup (config/auto-clean-finished)
+
+Every watcher heartbeat reviews this home's task records for finished work that is still present: a record whose PR is merged, or one whose newest report is `done:` or `failed:` and whose agent is gone or which has had no newer status for a day.
+This review is always on and reads only local files plus one endpoint liveness read; it raises one `check: finished work:` notification per record and fact, naming the record and its cleanup command.
+The optional local, gitignored `config/auto-clean-finished` presence flag opts this home into cleaning up such a record without a PR automatically, when its agent is gone or idle and no steering message is waiting, instead of notifying.
+That cleanup is the same detached cleanup `bin/fm-park.sh land` runs for merged lanes, so every teardown refusal stands, nothing is forced, and the outcome, including a refusal, is reported once and never retried.
+A merged record follows `config/auto-land` instead.
+The flag is home-local, takes effect on the next heartbeat, and is not inherited by secondmate homes.
+[`bin/fm-finished-record-lib.sh`](../bin/fm-finished-record-lib.sh) owns the exact conditions, thresholds, and exclusions.
 
 ## PR registration scan (config/pr-register-scan)
 

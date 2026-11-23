@@ -4585,6 +4585,208 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+# --- heartbeat: finished work gets a cleanup owner from disk -----------------
+
+# Write <id>'s status log as <line>, aged <age> seconds, and mark it already seen
+# and already surfaced, so only the finished-record review can act on it.
+finished_status() {  # <state> <id> <line> <age>
+  local state=$1 id=$2 line=$3 age=$4 f
+  f="$state/$id.status"
+  printf '%s\n' "$line" >> "$f"
+  set_mtime "$(( $(date +%s) - age ))" "$f"
+  printf '%s' "$(seen_sig "$f")" > "$state/.seen-${id}_status"
+  status_presentation_marker_commit "$state/.hb-surfaced-$id" "$f" "$(size_of "$f")" \
+    "$(_fm_open_decisions_file_ident "$f")" || fail "could not mark $id surfaced"
+}
+
+# One watcher run whose heartbeat is due at once. <dir>/config is the home's
+# config, and every remaining argument is an extra environment assignment.
+finished_heartbeat_bg() {  # <dir> [env assignments...]
+  local dir=$1
+  shift
+  printf '3\n' > "$dir/state/.heartbeat-streak"
+  touch "$dir/state/.last-check" "$dir/state/.last-heartbeat"
+  set_mtime "$(( $(date +%s) - 30 ))" "$dir/state/.last-heartbeat"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    FM_CONFIG_OVERRIDE="$dir/config" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 FM_FINISHED_GRACE_SECS=20 FM_FINISHED_AGE_SECS=600 \
+    env "$@" "$WATCH" > "$dir/watch.out" &
+}
+
+finished_rows() {  # <state> -> one line per queued finished-work row key
+  awk -F '\t' '$3 == "check" && $4 ~ /^finished-/ { print $4 }' "$1/.wake-queue" 2>/dev/null | sort
+}
+
+# Record <id>'s merge the way every merge path does (bin/fm-merge-outcome-lib.sh).
+finished_merged_record() {  # <state> <id> <pr-url> <marker-age>
+  local state=$1 id=$2 url=$3 age=$4
+  command -v fm_pr_url_parse >/dev/null 2>&1 || . "$ROOT/bin/fm-pr-lib.sh"
+  fm_write_meta "$state/$id.meta" "kind=ship" "pr=$url"
+  fm_pr_url_parse "$url" || fail "fixture PR URL did not parse: $url"
+  fm_pr_poll_merge_mark_notified "$state" "$id" "$FM_PR_PROVIDER" "$FM_PR_HOST" \
+    "$FM_PR_PATH" "$FM_PR_NUMBER" || fail "could not record $id's merge"
+  set_mtime "$(( $(date +%s) - age ))" "$state/$id.pr-poll-merge-notified"
+}
+
+test_heartbeat_reports_each_finished_record_once() {
+  local dir state pid i
+  dir=$(make_case heartbeat-finished); state="$dir/state"; mkdir -p "$dir/config"
+  # Merged by bin/fm-pr-merge.sh or seen by the poll, and still present.
+  finished_merged_record "$state" merged1 https://github.com/acme/widget/pull/7 60
+  finished_status "$state" merged1 'done [at=1]: PR https://github.com/acme/widget/pull/7 checks green' 60
+  # A scout whose report went unattended past the age bound.
+  fm_write_meta "$state/scout1.meta" "kind=scout"
+  finished_status "$state" scout1 'done [at=1]: report at data/scout1/report.md' 900
+  # Not finished work for this review: just merged (inside the grace), a fresh
+  # terminal line, a PR its armed merge poll still owns, a persistent mate, a
+  # captain hold, and a record still working.
+  finished_merged_record "$state" justmerged https://github.com/acme/widget/pull/8 1
+  fm_write_meta "$state/fresh1.meta" "kind=scout"
+  finished_status "$state" fresh1 'done [at=1]: report ready' 1
+  fm_write_meta "$state/armed1.meta" "kind=ship" "pr=https://github.com/acme/widget/pull/9"
+  printf '#!/bin/sh\nexit 0\n' > "$state/armed1.check.sh"
+  finished_status "$state" armed1 'done [at=1]: PR https://github.com/acme/widget/pull/9 checks green' 900
+  fm_write_meta "$state/mate1.meta" "kind=secondmate"
+  finished_status "$state" mate1 'done [at=1]: handed back' 900
+  fm_write_meta "$state/held1.meta" "kind=ship"
+  finished_status "$state" held1 'done [at=1]: ready for the captain' 900
+  finished_status "$state" held1 'captain-held [at=2]: awaiting approval' 900
+  fm_write_meta "$state/busy1.meta" "kind=ship"
+  finished_status "$state" busy1 'working [at=1]: still at it' 900
+
+  finished_heartbeat_bg "$dir"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a heartbeat with finished records did not wake: $(cat "$dir/watch.out")"
+  [ "$(finished_rows "$state" | paste -sd, -)" = "finished-merged1,finished-scout1" ] \
+    || fail "finished-work rows were not exactly the merged and unattended records: $(finished_rows "$state" | paste -sd, -)"
+  grep -F 'check: finished work: merged1 - PR https://github.com/acme/widget/pull/7 is merged and its record is still present; clean up with bin/fm-teardown.sh merged1, which refuses unlanded work' \
+    "$dir/watch.out" >/dev/null || fail "the merged record's wake did not name it and its cleanup: $(cat "$dir/watch.out")"
+  grep -F 'finished work: scout1 - its last report is done: and has had no newer status for 0h; clean up with bin/fm-teardown.sh scout1' \
+    "$dir/watch.out" >/dev/null || fail "the unattended scout's wake did not name it and its cleanup: $(cat "$dir/watch.out")"
+  [ "$(cat "$state/.heartbeat-streak")" = 0 ] || fail "a finished-work wake did not reset idle heartbeat backoff"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the finished-work wake"
+
+  # The same facts never notify twice: the next heartbeat is absorbed.
+  finished_heartbeat_bg "$dir"
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 4 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null || fail "an unchanged finished record woke again: $(cat "$dir/watch.out")"
+  reap "$pid"
+  [ ! -s "$dir/watch.out" ] || fail "an unchanged finished record printed a wake: $(cat "$dir/watch.out")"
+  [ -z "$(finished_rows "$state")" ] || fail "an unchanged finished record queued again: $(finished_rows "$state")"
+
+  # A new terminal report on the same record is a new fact. The reaped watcher
+  # above left a downtime marker; this round starts as a clean re-arm.
+  rm -f "$state/.watcher-down"
+  finished_status "$state" scout1 'failed [at=2]: follow-up could not reproduce' 900
+  finished_heartbeat_bg "$dir"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a new terminal report on a reported record did not wake"
+  [ "$(finished_rows "$state")" = finished-scout1 ] || fail "the new fact queued the wrong rows: $(finished_rows "$state")"
+  grep -F 'finished work: scout1 - its last report is failed:' "$dir/watch.out" >/dev/null \
+    || fail "the new fact's wake did not name the failed report: $(cat "$dir/watch.out")"
+  pass "a heartbeat reports each merged or unattended finished record once, names its cleanup, and skips work it does not own"
+}
+
+test_heartbeat_reports_a_finished_record_whose_agent_is_gone() {
+  local dir state pid
+  dir=$(make_case heartbeat-finished-gone); state="$dir/state"; mkdir -p "$dir/config"
+  # The tmux inventory no longer lists the recorded window.
+  fm_write_meta "$state/gone1.meta" "kind=scout" "window=test:fm-gone1"
+  finished_status "$state" gone1 'failed [at=1]: could not reproduce' 60
+  # The same terminal line, but its endpoint is still listed with its agent.
+  fm_write_meta "$state/alive1.meta" "kind=scout" "window=test:fm-alive1"
+  finished_status "$state" alive1 'done [at=1]: report ready' 60
+  finished_heartbeat_bg "$dir" FM_FAKE_TMUX_WINDOWS=fm-alive1 FM_FAKE_TMUX_CURRENT_COMMAND=claude
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a finished record with a gone agent did not wake: $(cat "$dir/watch.out")"
+  [ "$(finished_rows "$state")" = finished-gone1 ] || fail "gone-agent rows: $(finished_rows "$state")"
+  grep -F 'finished work: gone1 - its last report is failed: and its agent is gone (missing); clean up with bin/fm-teardown.sh gone1' \
+    "$dir/watch.out" >/dev/null || fail "the gone agent's wake did not name it: $(cat "$dir/watch.out")"
+  pass "a heartbeat reports a finished record whose agent is gone once the grace has passed"
+}
+
+# Behind its opt-ins the review starts the merged poll's detached cleanup
+# instead of notifying; the outcome, a refusal included, is the tick's report,
+# and a refusal is never retried or forced.
+test_heartbeat_cleans_finished_records_only_when_opted_in() {
+  local dir state pid i
+  dir=$(make_case heartbeat-finished-auto); state="$dir/state"; mkdir -p "$dir/config"
+  cat > "$dir/fakebin/fm-teardown.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/teardown.log"
+if [ "\$1" = refused1 ]; then echo "REFUSED: worktree has work not on any remote and not landed." >&2; exit 1; fi
+echo "Torn down \$1"
+SH
+  chmod +x "$dir/fakebin/fm-teardown.sh"
+  : > "$dir/config/auto-land"
+  : > "$dir/config/auto-clean-finished"
+  finished_merged_record "$state" merged2 https://github.com/acme/widget/pull/17 60
+  finished_status "$state" merged2 'done [at=1]: PR https://github.com/acme/widget/pull/17 checks green' 60
+  fm_write_meta "$state/gone2.meta" "kind=scout" "window=test:fm-gone2"
+  finished_status "$state" gone2 'done [at=1]: report at data/gone2/report.md' 60
+  fm_write_meta "$state/refused1.meta" "kind=ship" "window=test:fm-refused1"
+  finished_status "$state" refused1 'failed [at=1]: gave up' 60
+  # A waiting steering message keeps a record out of automatic cleanup.
+  fm_write_meta "$state/steered1.meta" "kind=scout" "window=test:fm-steered1"
+  finished_status "$state" steered1 'done [at=1]: report ready' 60
+  mkdir -p "$state/steered1.inbox"; printf 'one more thing\n' > "$state/steered1.inbox/1.msg"
+
+  finished_heartbeat_bg "$dir" FM_PARK_TEARDOWN_BIN="$dir/fakebin/fm-teardown.sh"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the steered record did not notify: $(cat "$dir/watch.out")"
+  [ "$(finished_rows "$state")" = finished-steered1 ] \
+    || fail "opted-in records notified instead of cleaning up: $(finished_rows "$state")"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ "$(find "$state" -maxdepth 1 -name '.review-park-report-*' | wc -l | tr -d ' ')" -ge 3 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(sort "$dir/teardown.log" | paste -sd, -)" = "gone2,merged2,refused1" ] \
+    || fail "automatic cleanup did not run one plain teardown per eligible record: $(cat "$dir/teardown.log" 2>/dev/null)"
+  cat "$state"/.review-park-report-* > "$dir/reports"
+  grep -Fx 'cleaned up merged2: PR https://github.com/acme/widget/pull/17 merged; lane torn down and its working copy returned' "$dir/reports" >/dev/null \
+    || fail "the merged cleanup report was wrong: $(cat "$dir/reports")"
+  grep -Fx 'cleaned up gone2: finished record; lane torn down and its working copy returned' "$dir/reports" >/dev/null \
+    || fail "the finished cleanup report was wrong: $(cat "$dir/reports")"
+  grep -Fx 'cleanup-refused refused1: finished record; automatic cleanup refused: REFUSED: worktree has work not on any remote and not landed.' "$dir/reports" >/dev/null \
+    || fail "the refusal was not reported as a finding: $(cat "$dir/reports")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the steered record's wake"
+
+  # The same fact becomes eligible after its steering message is handled.
+  rm -rf "$state/steered1.inbox"
+  finished_heartbeat_bg "$dir" FM_PARK_TEARDOWN_BIN="$dir/fakebin/fm-teardown.sh"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "an already reported record was not cleaned up after becoming eligible"
+  i=0
+  while [ "$(find "$state" -maxdepth 1 -name '.review-park-report-*' | wc -l | tr -d ' ')" -lt 4 ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ "$(grep -c . "$dir/teardown.log")" = 4 ] || fail "the newly eligible record was not cleaned up exactly once"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the cleanup heartbeat"
+
+  # The refusal stands: a later heartbeat neither retries nor forces it.
+  finished_heartbeat_bg "$dir" FM_PARK_TEARDOWN_BIN="$dir/fakebin/fm-teardown.sh"
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 4 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  [ "$(grep -c . "$dir/teardown.log")" = 4 ] || fail "a refused cleanup was retried or newly eligible work was missed: $(cat "$dir/teardown.log")"
+  ! grep -q -- --force "$dir/teardown.log" || fail "automatic cleanup forced a teardown"
+  pass "behind config/auto-land and config/auto-clean-finished the heartbeat starts the detached cleanup once, and a refusal is reported, never retried or forced"
+}
+
 test_afk_heartbeat_preserves_idle_accounting() {
   local dir state fakebin out pid
   dir=$(make_case afk-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5556,6 +5758,9 @@ fm_test_run \
   test_heartbeat_backstop_surfaces_unsurfaced_status \
   test_heartbeat_backstop_surfaces_a_masked_status \
   test_afk_heartbeat_preserves_idle_accounting \
+  test_heartbeat_reports_each_finished_record_once \
+  test_heartbeat_reports_a_finished_record_whose_agent_is_gone \
+  test_heartbeat_cleans_finished_records_only_when_opted_in \
   test_beacon_stays_fresh_while_absorbing \
   test_afk_signal_records_heartbeat_endpoint \
   test_afk_present_reverts_watcher_to_one_shot \

@@ -82,7 +82,12 @@
 # bin/fm-teardown.sh <task-id> (never --force), so every teardown gate still
 # applies, and prints one outcome line naming the lane and its PR. With
 # --if-eligible it does nothing unless the lane is eligible for merge-time
-# cleanup (land_eligible below: parked, or config/auto-land present). With
+# cleanup (land_eligible below: parked, or config/auto-land present) or is a
+# record without pr= in a home with config/auto-clean-finished. A record
+# without pr= is cleaned up only while its newest crew status line is still
+# done: or failed:; bin/fm-finished-record-lib.sh decides it is finished and
+# starts that land from the watcher heartbeat, and its outcome line names the
+# lane as a finished record instead of a merged PR. With
 # --detach it starts the land as a detached action (below), prints "automatic
 # cleanup started", and returns at once; with --queue it only saves the request.
 # The request (state/<id>.review-park-land) records the merged PR as pr=, and
@@ -686,13 +691,24 @@ cmd_resume() {
 
 # --- land ------------------------------------------------------------------
 
-# Parked lanes always clean up; other lanes require explicit home opt-in.
+# Parked lanes always clean up; other lanes require explicit home opt-in:
+# config/auto-land for any lane, or config/auto-clean-finished for a finished
+# record without pr= (bin/fm-finished-record-lib.sh decides it is finished).
 land_eligible() {  # <id>
-  [ -e "$(record_path "$1")" ] || [ -e "$CONFIG/auto-land" ]
+  [ -e "$(record_path "$1")" ] || [ -e "$CONFIG/auto-land" ] && return 0
+  [ -e "$CONFIG/auto-clean-finished" ] && [ -z "$(fm_meta_get "$STATE/$1.meta" pr)" ]
+}
+
+# 0 while <id>'s newest crew status line still reports done: or failed:.
+land_record_finished() {  # <id>
+  local verb
+  status_line_verb "$(last_crew_status_line "$STATE/$1.status")" verb
+  case "$verb" in done|failed) return 0 ;; esac
+  return 1
 }
 
 cmd_land() {
-  local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why tmp
+  local id=${1-} eligible=0 detach=0 queue=0 pr out rc=0 why tmp what
   task_id_ok "$id" || die "usage: fm-park.sh land <task-id> [--if-eligible] [--detach] [--queue]" 2
   shift
   while [ "$#" -gt 0 ]; do
@@ -719,30 +735,40 @@ cmd_land() {
     return 0
   fi
   pr=$(fm_meta_get "$STATE/$id.meta" pr)
+  what="PR $pr merged"
+  [ -n "$pr" ] || what="finished record"
   # A park or relaunch under way finishes first; each is bounded by the same
   # backstop, so this wait is too.
   if ! fm_lock_acquire_wait_max "$(lane_lock "$id")" "$ACTION_SECS"; then
-    printf 'cleanup-refused %s: PR %s merged; another park action still holds the lane\n' "$id" "$pr"
+    printf 'cleanup-refused %s: %s; another park action still holds the lane\n' "$id" "$what"
     return 1
   fi
   LOCKS_HELD="$LOCKS_HELD $(lane_lock "$id")"
   [ -f "$STATE/$id.meta" ] || return 0
   pr=$(fm_meta_get "$STATE/$id.meta" pr)
+  what="PR $pr merged"
+  [ -n "$pr" ] || what="finished record"
   if [ -e "$STATE/$id.review-park-land" ] \
     && [ "$(fm_meta_get "$STATE/$id.review-park-land" pr)" != "$pr" ]; then
     rm -f -- "$STATE/$id.review-park-land"
     return 0
   fi
+  # A record without a PR is cleaned up only as finished work, so one that
+  # reported anything newer since the request is left alone.
+  if [ -z "$pr" ] && ! land_record_finished "$id"; then
+    rm -f -- "$STATE/$id.review-park-land"
+    return 0
+  fi
   out=$(FM_HOME=$FM_HOME fm_run_timed "$ACTION_SECS" "$TEARDOWN_BIN" "$id" 2>&1) || rc=$?
   case "$rc" in
-    0) printf 'cleaned up %s: PR %s merged; lane torn down and its working copy returned\n' "$id" "$pr" ;;
+    0) printf 'cleaned up %s: %s; lane torn down and its working copy returned\n' "$id" "$what" ;;
     4)
-      printf 'cleaned up %s: PR %s merged; lane torn down, but its returned pool slot was lost\n' "$id" "$pr"
+      printf 'cleaned up %s: %s; lane torn down, but its returned pool slot was lost\n' "$id" "$what"
       printf '%s\n' "$out" | grep -E '^(warning: treehouse return left pool slot |  )' || true
       ;;
     *)
       why=$(printf '%s\n' "$out" | grep -m1 -E 'REFUSED|^error|refus' || printf '%s\n' "$out" | tail -1)
-      printf 'cleanup-refused %s: PR %s merged; automatic cleanup refused: %s\n' "$id" "$pr" "$why"
+      printf 'cleanup-refused %s: %s; automatic cleanup refused: %s\n' "$id" "$what" "$why"
       return 1
       ;;
   esac
