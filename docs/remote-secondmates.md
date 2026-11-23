@@ -705,7 +705,7 @@ It refuses while any of these holds:
 Herdr retirement closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in its code root's remote session, never the shared session or a sibling's workspace or panes.
 Rex retirement follows the [recorded-block and empty-session cleanup contract](rex-backend.md#cleanup-and-the-absence-proof), never stopping the shared server.
 SSH exit 255 preserves both the route and local records because completion is unknown.
-`--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
+`--force` remains the explicit discard path and requires the same captain authority as local secondmate discard, subject to [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s protected-history contract.
 
 No generic remote delete or write surface exists:
 

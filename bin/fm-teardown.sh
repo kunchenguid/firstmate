@@ -89,10 +89,14 @@
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # GNHF history is never disposable scratch, including under --force.
-# Any .gnhf entry (even empty, ignored, symlinked or nonregular) within a cleanup
-# target refuses before destructive steps; an unreadable scan refuses too.
-# This includes nested scratch repositories, child worktrees and secondmate homes.
+# A cleanup scan finding any .gnhf entry (even empty, ignored, symlinked or
+# nonregular) refuses before destructive steps; an unreadable scan refuses too.
+# Scans include nested scratch repositories, child worktrees and secondmate homes,
+# but prune .git entries and do not follow descendant symlinks.
+# The slot-ownership contract below excludes proven reassigned slots from scanning.
 # Preserve that history outside the cleanup target before retrying.
+# tests/fm-teardown-endpoint-safety.test.sh --gnhf-only pins this boundary with
+# synthetic CLI fixtures, not real backend lifecycle coverage.
 #
 # A scratch copy (kind=scout) and a --force run discard other untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
