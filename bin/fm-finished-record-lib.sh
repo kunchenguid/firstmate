@@ -118,7 +118,7 @@ finished_records_record() {  # <surfaced-file> <kept-lines> <added-lines>
 
 finished_records_review() {
   local surfaced grace age now meta id prior keep='' added=''
-  local status last crew verb pr sig cond detail mtime elapsed agent reason
+  local status last crew verb pr sig cond detail mtime elapsed agent reason auto_eligible
   # shellcheck disable=SC2034 # Read by bin/fm-watch.sh after this returns.
   FM_FINISHED_RECORDS_REASON=''
   surfaced="$STATE/.finished-records-surfaced"
@@ -144,7 +144,6 @@ finished_records_review() {
       && fm_pr_poll_merge_already_notified "$STATE" "$id" \
         "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; then
       sig="merged $FM_PR_URL"
-      [ "$sig" != "$prior" ] || continue
       mtime=$(_fm_status_file_mtime "$STATE/$id.pr-poll-merge-notified") || continue
       case "$mtime" in ''|*[!0-9]*) continue ;; esac
       [ $(( now - mtime )) -ge "$grace" ] || continue
@@ -156,7 +155,6 @@ finished_records_review() {
       status_line_verb "$crew" verb
       case "$verb" in done|failed) ;; *) continue ;; esac
       sig="finished $(printf '%s' "$crew" | fm_wake_clean_field)"
-      [ "$sig" != "$prior" ] || continue
       mtime=$(_fm_status_file_mtime "$status") || continue
       case "$mtime" in ''|*[!0-9]*) continue ;; esac
       elapsed=$(( now - mtime ))
@@ -173,7 +171,12 @@ finished_records_review() {
         detail="its last report is $verb: and its agent is gone ($agent)"
       fi
     fi
-    if finished_record_auto_eligible "$id" "$cond" "$pr" "$agent"; then
+    auto_eligible=0
+    finished_record_auto_eligible "$id" "$cond" "$pr" "$agent" && auto_eligible=1
+    if [ "$sig" = "$prior" ] && [ "$auto_eligible" != 1 ]; then
+      continue
+    fi
+    if [ "$auto_eligible" = 1 ]; then
       if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
         "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --detach >/dev/null 2>&1; then
         triage_log "could not start automatic cleanup of finished record $id ($cond); retrying next heartbeat"

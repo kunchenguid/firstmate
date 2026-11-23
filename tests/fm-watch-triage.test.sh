@@ -4761,6 +4761,16 @@ SH
     || fail "the refusal was not reported as a finding: $(cat "$dir/reports")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the steered record's wake"
 
+  # The same fact becomes eligible after its steering message is handled.
+  rm -rf "$state/steered1.inbox"
+  finished_heartbeat_bg "$dir" FM_PARK_TEARDOWN_BIN="$dir/fakebin/fm-teardown.sh"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "an already reported record was not cleaned up after becoming eligible"
+  i=0
+  while [ "$(find "$state" -maxdepth 1 -name '.review-park-report-*' | wc -l | tr -d ' ')" -lt 4 ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ "$(grep -c . "$dir/teardown.log")" = 4 ] || fail "the newly eligible record was not cleaned up exactly once"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the cleanup heartbeat"
+
   # The refusal stands: a later heartbeat neither retries nor forces it.
   finished_heartbeat_bg "$dir" FM_PARK_TEARDOWN_BIN="$dir/fakebin/fm-teardown.sh"
   pid=$!
