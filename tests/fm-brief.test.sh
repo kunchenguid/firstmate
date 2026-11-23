@@ -1620,27 +1620,44 @@ test_branch_prefix_command_is_shell_safe() {
 test_worker_role_scope
 
 # Ship and scout briefs must constrain cleanup to a process the worker can
-# identify precisely, across every delivery mode.
+# identify precisely, across every delivery mode, as numbered rule 9. With
+# --herdr-lab the same rule must also allow the socket-scoped tmux teardown
+# and helper teardown the Herdr section requires, so the brief never both
+# requires and forbids its own cleanup.
+# shellcheck disable=SC2016 # Backticks and $VARs are literal generated brief text.
 test_worker_process_cleanup_is_pid_scoped() {
   local home kind id brief
   home="$TMP_ROOT/pid-cleanup-home"
   mkdir -p "$home/data"
 
-  for kind in no-mistakes direct-PR local-only scout; do
+  for kind in no-mistakes direct-PR local-only scout herdr-ship herdr-scout; do
     id="brief-pid-$kind"
-    if [ "$kind" = scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout >/dev/null 2>&1 \
-        || fail "fm-brief.sh --scout exited non-zero"
-    else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$kind" >/dev/null 2>&1 \
-        || fail "fm-brief.sh --mode $kind exited non-zero"
-    fi
+    case "$kind" in
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout >/dev/null 2>&1 ;;
+      herdr-ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode no-mistakes --herdr-lab >/dev/null 2>&1 ;;
+      herdr-scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --scout --herdr-lab >/dev/null 2>&1 ;;
+      *) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" alpha --mode "$kind" >/dev/null 2>&1 ;;
+    esac || fail "fm-brief.sh $kind brief exited non-zero"
     brief="$home/data/$id/brief.md"
-    assert_grep 'Never use pkill, killall, pattern-based or process-group kills, or commands that quit or signal GUI apps; stop only processes you started by their recorded PID or the confirmed owner PID of a port you bound.' \
+    assert_grep '9. Never use `pkill`, `killall`, pattern-based or process-group kills, or commands that quit or signal GUI apps.' \
+      "$brief" "$kind brief did not ban blind process kills as rule 9"
+    assert_grep '   Stop a process only by its recorded PID or the confirmed owner PID of a port you bound.' \
       "$brief" "$kind brief did not limit process cleanup to a recorded PID"
+    assert_grep '   Scoped teardown of resources you created or that this brief prescribes is allowed' \
+      "$brief" "$kind brief forbade scoped teardown of resources the worker owns"
+    assert_grep '   `tmux -S <your own socket> kill-server`, or `docker compose down` for a stack you started.' \
+      "$brief" "$kind brief did not name socket-scoped tmux teardown as allowed"
+    case "$kind" in
+      herdr-*)
+        assert_grep 'kill-server`) and only while that socket exists' "$brief" \
+          "$kind brief lost the Herdr section's socket-scoped tmux teardown"
+        assert_grep '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' "$brief" \
+          "$kind brief lost the Herdr helper teardown"
+        ;;
+    esac
   done
 
-  pass "fm-brief.sh: every ship and scout brief limits process cleanup to a recorded PID"
+  pass "fm-brief.sh: every ship and scout brief limits process cleanup to PIDs and owned teardown"
 }
 
 # Rule 2 governs file edits rather than pool administration, so every crewmate

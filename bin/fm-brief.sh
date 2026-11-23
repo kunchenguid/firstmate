@@ -650,9 +650,6 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
 
-# One cleanup rule is shared by ship and scout briefs.
-PROCESS_STOP_RULE='Never use pkill, killall, pattern-based or process-group kills, or commands that quit or signal GUI apps; stop only processes you started by their recorded PID or the confirmed owner PID of a port you bound.'
-
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
 # The secondmate charter deliberately omits this rule because a secondmate
@@ -691,6 +688,15 @@ IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
 EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
 
+# One shared string keeps the ship and scout process-cleanup rule identical.
+IFS= read -r -d '' SHARED_PROCESS_STOP_RULE <<'EOF' || true
+9. Never use `pkill`, `killall`, pattern-based or process-group kills, or commands that quit or signal GUI apps.
+   Stop a process only by its recorded PID or the confirmed owner PID of a port you bound.
+   Scoped teardown of resources you created or that this brief prescribes is allowed, such as a teardown command this brief names,
+   `tmux -S <your own socket> kill-server`, or `docker compose down` for a stack you started.
+EOF
+SHARED_PROCESS_STOP_RULE=${SHARED_PROCESS_STOP_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -718,7 +724,6 @@ The worktree is your laboratory - install, run, edit, and make scratch commits f
 The report is the only thing that survives, so anything worth keeping must be in it.
 
 # Rules
-$PROCESS_STOP_RULE
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; outside it, write only the report and status file below, except for the task's empty-inventory attestation through \`fm-captain-hold.sh complete --none\`, exactly as specified under Definition of done.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
@@ -740,6 +745,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_PROCESS_STOP_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -798,7 +804,6 @@ If the top-level path is the primary checkout or not the worktree you were launc
 1. First action: create your branch: \`git checkout -b $BRANCH_Q --\`$SETUP2
 
 # Rules
-$PROCESS_STOP_RULE
 $RULE1
 2. Keep project edits inside this worktree; keep proof and scratch output outside it, under \`$DATA/$ID/\` or a temporary directory.
    Outside the worktree, write only that task material and the status and steering-inbox records authorized below.
@@ -826,6 +831,7 @@ $ASK_USER_BLOCK
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_PROCESS_STOP_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
