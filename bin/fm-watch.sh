@@ -4209,17 +4209,15 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
-    # Structural: run EVERY *.check.sh in this sweep, durable-append each reason,
-    # then wake once at the end. A chatty early check must not exit the cycle and
-    # starve later checks (e.g. vimline-consumer-rebuild as last alpha name).
-    # wake() still exits the process; only the final combined call uses it here.
+    # wake() exits the process, so collect results until every due check and
+    # end-of-sweep action has run. An actionable early check must not starve
+    # later alphabetical checks.
     check_wake_reasons=
     queue_check_wake() {
       # $1 = reason line(s); append for one end-of-sweep wake
       if [ -n "${1:-}" ]; then
         if [ -n "$check_wake_reasons" ]; then
-          check_wake_reasons="$check_wake_reasons"$'
-'"$1"
+          check_wake_reasons="$check_wake_reasons"$'\n'"$1"
         else
           check_wake_reasons=$1
         fi
@@ -4356,6 +4354,7 @@ EOF
             continue
           fi
           queue_check_wake "$reason"
+          continue
         elif [ "$is_pr_poll" -eq 1 ] \
           && { [ "$out" = ontrain ] || [ "${out%% *}" = degraded ]; } \
           && [ "$PR_DEGRADED_WATCH_ENABLED" != 1 ]; then
@@ -4423,6 +4422,7 @@ EOF
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
           queue_check_wake "$reason"
+          continue
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
