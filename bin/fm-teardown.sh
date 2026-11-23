@@ -89,8 +89,10 @@
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # GNHF history is never disposable scratch, including under --force.
-# A cleanup scan finding any .gnhf entry (even empty, ignored, symlinked or
-# nonregular) refuses before destructive steps; an unreadable scan refuses too.
+# An initial cleanup scan finding any .gnhf entry (even empty, ignored, symlinked
+# or nonregular) refuses before destructive steps; an unreadable scan refuses too.
+# Scans repeat before scratch scrubbing, pool return and direct removal to protect
+# history created during shutdown; a late refusal can leave an endpoint closed.
 # Scans include nested scratch repositories, child worktrees and secondmate homes,
 # but prune .git entries and do not follow descendant symlinks.
 # The slot-ownership contract below excludes proven reassigned slots from scanning.
@@ -321,10 +323,13 @@
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     grace period to any survivor whose process identity still matches.
+#     Secondmate home removal and forced child-worktree cleanup use this same
+#     reaper before their final history scan and disposal: closing an endpoint
+#     alone cannot stop disowned writers. These paths require lsof and refuse
+#     if it is missing, the scan fails, or verified processes remain.
+#     Only owned targets are reaped; proven reassigned slots stay untouched.
+#     Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
