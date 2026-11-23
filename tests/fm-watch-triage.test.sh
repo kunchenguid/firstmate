@@ -4782,7 +4782,7 @@ SH
     i=$((i + 1))
   done
   reap "$pid"
-  [ "$(grep -c . "$dir/teardown.log")" = 3 ] || fail "a refused cleanup was retried: $(cat "$dir/teardown.log")"
+  [ "$(grep -c . "$dir/teardown.log")" = 4 ] || fail "a refused cleanup was retried or newly eligible work was missed: $(cat "$dir/teardown.log")"
   ! grep -q -- --force "$dir/teardown.log" || fail "automatic cleanup forced a teardown"
   pass "behind config/auto-land and config/auto-clean-finished the heartbeat starts the detached cleanup once, and a refusal is reported, never retried or forced"
 }

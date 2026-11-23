@@ -171,6 +171,7 @@ finished_records_review() {
         detail="its last report is $verb: and its agent is gone ($agent)"
       fi
     fi
+    case "$prior" in "$sig"$'\t'cleanup) continue ;; esac
     auto_eligible=0
     finished_record_auto_eligible "$id" "$cond" "$pr" "$agent" && auto_eligible=1
     if [ "$sig" = "$prior" ] && [ "$auto_eligible" != 1 ]; then
@@ -183,6 +184,7 @@ finished_records_review() {
         continue
       fi
       triage_log "started automatic cleanup of finished record $id ($cond)"
+      sig="$sig"$'\t'cleanup
     else
       reason="check: finished work: $id - $detail; clean up with bin/fm-teardown.sh $id, which refuses unlanded work"
       fm_wake_append check "finished-$id" "$reason" || return 2
