@@ -1850,8 +1850,106 @@ test_gnhf_child_slot_ownership_controls_removal_preflight() {
   pass "child removal skips only proven reassigned slots and preserves ownership and exclusivity refusals"
 }
 
+test_gnhf_shutdown_history_survives_direct_removal() {
+  local dir shape late target rc real_node
+  real_node=$(command -v node)
+  for shape in orca-reap orca-close t3-home; do
+    for late in yes no; do
+      dir=$(make_gnhf_case "gnhf-shutdown-$shape-$late")
+      if [ "$shape" = t3-home ]; then
+        target="$dir/secondmate-home"
+        mkdir -p "$target/state" "$target/data" "$target/config" "$target/projects"
+        printf 'history-scout\n' > "$target/.fm-secondmate-home"
+        cp "$dir/source.before" "$target/source"
+        fm_write_meta "$dir/home/state/history-scout.meta" \
+          "window=fm-history-scout" "backend=t3code" "t3_thread_id=synthetic-thread" "endpoint_task_id=history-scout" \
+          "kind=secondmate" "mode=local-only" "home=$target" \
+          "worktree=$target" "project=$dir/project"
+        cat > "$dir/fakebin/node" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  */fm-t3-mcp.mjs)
+    printf 't3 %s\n' "$2" >> "$FM_RUNTIME_LOG"
+    case "$2" in
+      status) printf '{"ok":true}\n' ;;
+      state) printf '{"ok":true,"exists":true,"archived":false}\n' ;;
+      archive) printf '{"ok":true,"closed":true}\n' ;;
+      *) exit 1 ;;
+    esac
+    exit 0 ;;
+esac
+exec "$FM_GNHF_REAL_NODE" "$@"
+SH
+        chmod +x "$dir/fakebin/node"
+      else
+        target="$dir/pool/1/repo"
+        fm_write_meta "$dir/home/state/history-scout.meta" \
+          "window=fm-history-scout" "backend=orca" "terminal=synthetic-terminal" "endpoint_task_id=history-scout" \
+          "orca_worktree_id=synthetic-worktree::$target" "kind=scout" "mode=local-only" \
+          "worktree=$target" "project=$dir/project"
+        cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf 'orca %s\n' "$*" >> "$FM_RUNTIME_LOG"
+case "$1 $2" in
+  'worktree show') printf '{"ok":true,"result":{"path":"%s"}}\n' "$FM_GNHF_LATE_TARGET" ;;
+  'terminal close')
+    if [ "$FM_GNHF_LATE" = yes ] && [ "$FM_GNHF_SHUTDOWN" = orca-close ]; then
+      mkdir -p "$FM_GNHF_LATE_TARGET/.gnhf/runs/synthetic"
+      printf 'public synthetic shutdown history\n' > "$FM_GNHF_LATE_TARGET/.gnhf/runs/synthetic/marker"
+    fi ;;
+  'worktree rm') rm -rf -- "$FM_GNHF_LATE_TARGET" ;;
+  *) exit 1 ;;
+esac
+SH
+        chmod +x "$dir/fakebin/orca"
+      fi
+      cat > "$dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+printf 'synthetic shutdown scan\n' >> "$FM_RUNTIME_LOG"
+if [ "$FM_GNHF_LATE" = yes ] && [ "$FM_GNHF_SHUTDOWN" != orca-close ]; then
+  mkdir -p "$FM_GNHF_LATE_TARGET/.gnhf/runs/synthetic"
+  printf 'public synthetic shutdown history\n' > "$FM_GNHF_LATE_TARGET/.gnhf/runs/synthetic/marker"
+fi
+exit 0
+SH
+      cp "$dir/home/state/history-scout.meta" "$dir/meta.before"
+      rc=0
+      FM_GNHF_REAL_NODE="$real_node" FM_GNHF_LATE_TARGET="$target" \
+      FM_GNHF_LATE="$late" FM_GNHF_SHUTDOWN="$shape" \
+        run_gnhf_case "$dir" --force > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+      assert_grep 'synthetic shutdown scan' "$dir/runtime.log" "$shape: shutdown barrier not reached: $(cat "$dir/stderr")"
+      if [ "$shape" = t3-home ]; then
+        assert_grep 't3 archive' "$dir/runtime.log" "$shape: thread was not archived"
+      else
+        assert_grep 'orca terminal close' "$dir/runtime.log" "$shape: endpoint close not reached"
+      fi
+      if [ "$late" = yes ]; then
+        [ "$rc" -eq 1 ] || fail "$shape: late history must refuse removal, got $rc"
+        assert_grep 'REFUSED: protected GNHF history' "$dir/stderr" "$shape: missing late-history refusal"
+        assert_equals 'public synthetic shutdown history' \
+          "$(cat "$target/.gnhf/runs/synthetic/marker")" "$shape: shutdown history changed"
+        cmp -s "$dir/meta.before" "$dir/home/state/history-scout.meta" || fail "$shape: task record changed"
+        cmp -s "$dir/pool.before" "$dir/pool/treehouse-state.json" || fail "$shape: lease changed"
+        cmp -s "$dir/owner.before" "$dir/pool/1/.fm-slot-owner" || fail "$shape: claim changed"
+        if [ "$shape" = t3-home ]; then
+          cmp -s "$dir/source.before" "$target/source" || fail "$shape: home source changed"
+        else
+          cmp -s "$dir/source.before" "$target/README.md" || fail "$shape: worktree source changed"
+          assert_no_grep 'orca worktree rm' "$dir/runtime.log" "$shape: worktree removal was invoked"
+        fi
+      else
+        [ "$rc" -eq 0 ] || fail "$shape: history-free direct removal failed: $(cat "$dir/stderr")"
+        assert_absent "$target" "$shape: history-free target survived removal"
+        assert_absent "$dir/home/state/history-scout.meta" "$shape: history-free task record survived"
+      fi
+    done
+  done
+  pass "synthetic CLI cleanup preserves shutdown-created history at Orca and nonpooled T3 removal boundaries"
+}
+
 test_gnhf_history_refuses_before_mutation
 test_gnhf_absent_scout_still_returns_clean
+test_gnhf_shutdown_history_survives_direct_removal
 test_gnhf_secondmate_and_child_history_refuse_before_mutation
 test_gnhf_child_slot_ownership_controls_removal_preflight
 if [ "${1:-}" = --gnhf-only ]; then

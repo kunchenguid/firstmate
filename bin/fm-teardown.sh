@@ -2931,6 +2931,7 @@ validate_child_worktree_for_removal() {
 safe_rm_rf() {
   local target=$1 label=$2
   validate_removal_target "$target" "$label" >/dev/null || return 1
+  validate_no_gnhf_history "$target" || return 1
   rm -rf -- "$target"
 }
 
@@ -4130,6 +4131,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
+  validate_no_gnhf_history "$WT" || exit 1
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
