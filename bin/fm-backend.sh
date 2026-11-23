@@ -1277,21 +1277,16 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 }
 
 # fm_backend_send_literal: type <text> as literal, UNSUBMITTED input through the
-# selected adapter, so the caller can restore a composer draft it cleared. An
-# adapter with no literal-send primitive declines (nonzero), never types lines.
+# selected adapter, so the caller can restore a composer draft it cleared. Only
+# tmux and paseo, the backends the draft rescue runs on, type; every other
+# backend declines (nonzero), never types lines.
 fm_backend_send_literal() {  # <backend> <target> <text> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_literal "$@" ;;
-    herdr) fm_backend_herdr_send_literal "$@" ;;
-    zellij) fm_backend_zellij_send_literal "$@" ;;
-    orca) fm_backend_orca_send_literal "$@" ;;
-    cmux) fm_backend_cmux_send_literal "$@" ;;
     paseo) fm_backend_paseo_send_literal "$@" ;;
-    rex) fm_backend_rex_send_literal "$@" ;;
-    tern) fm_backend_tern_send_literal "$@" ;;
     *) return 1 ;;
   esac
 }
