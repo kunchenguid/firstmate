@@ -29,7 +29,7 @@
 #             Records are never re-rung or acknowledged; every write prunes
 #             records at about FM_OPERATIONAL_RECORD_RETENTION_DAYS (7) elapsed days.
 #   Doorbell: FM_OPERATIONAL_DOORBELL_PREFIX <absolute physical record path>
-#             FM_OPERATIONAL_DOORBELL_SUFFIX, one printable-ASCII line whose
+#             FM_OPERATIONAL_DOORBELL_SUFFIX, one line without control characters whose
 #             leading ": " is the shell no-op, as for the steering doorbell.
 # Verification has two strengths: fm_operational_doorbell_record_kind checks only
 # the named record, which presentation-only consumers mirror (the Claude Code
@@ -247,7 +247,7 @@ fm_operational_record_prune() {  # <record-dir>
 
 # Write one generic-kind record under <state-dir> and return its doorbell line.
 # Exits 2 for invalid input and 1 when the record cannot be published or its
-# physical path cannot be carried by a printable-ASCII doorbell.
+# physical path cannot be carried by a one-line doorbell.
 fm_operational_record_write() {  # <state-dir> <kind> <body> <doorbell-var>
   local state=${1-} kind=${2-} body=${3-} result_var=${4-} encoded dir abs nonce name tmp
   local LC_ALL=C
@@ -257,7 +257,7 @@ fm_operational_record_write() {  # <state-dir> <kind> <body> <doorbell-var>
   mkdir -p "$dir" 2>/dev/null || return 1
   abs=$(cd -P "$dir" 2>/dev/null && pwd -P) || return 1
   case "$abs" in
-    *"'"*|*[![:print:]]*) return 1 ;;
+    *"'"*|*[[:cntrl:]]*) return 1 ;;
   esac
   nonce=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
   case "$nonce" in ''|*[!0-9a-f]*) return 1 ;; esac
@@ -288,7 +288,7 @@ fm_operational_doorbell_path() {  # <message> <result-var>
     *) return 1 ;;
   esac
   case "$candidate" in
-    *"'"*|*[![:print:]]*) return 1 ;;
+    *"'"*|*[[:cntrl:]]*) return 1 ;;
   esac
   dir=${candidate%/*}
   name=${candidate##*/}

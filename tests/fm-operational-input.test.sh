@@ -233,6 +233,31 @@ test_record_backed_doorbell_carrier() {
   pass "record-backed carrier: Claude-only selection, an ASCII doorbell naming an exact envelope record, home-bound open, and no recognition without the record"
 }
 
+test_non_ascii_home_carrier() {
+  local tmp state doorbell record kind body bad stray
+  tmp=$(fm_test_tmproot fm-operational-input-nonascii)
+  state="$tmp/Рабочий стол/state"
+  mkdir -p "$state"
+  doorbell=$(printf 'digest body' | FM_STATE_OVERRIDE="$state" "$OWNER" record watcher) \
+    || fail "record write refused a home path with non-ASCII characters"
+  kind=$(printf '%s' "$doorbell" | "$OWNER" doorbell-kind)
+  [ "$kind" = watcher ] || fail "doorbell-kind lost the kind for a non-ASCII home: $kind"
+  fm_operational_doorbell_path "$doorbell" record || fail "the owner cannot parse a non-ASCII doorbell"
+  body=$(FM_STATE_OVERRIDE="$state" "$OWNER" open "$record") || fail "open refused a non-ASCII home's own record"
+  [ "$body" = "digest body" ] || fail "open lost the body for a non-ASCII home: $body"
+  fm_operational_doorbell_kind "$doorbell" "$state" kind && [ "$kind" = watcher ] \
+    || fail "the home-bound check rejected a non-ASCII home's own doorbell"
+
+  bad="$tmp/control"$'\t'"char/state"
+  mkdir -p "$bad"
+  printf 'x' | FM_STATE_OVERRIDE="$bad" "$OWNER" record watcher >/dev/null 2>&1 \
+    && fail "a home path with a control character was accepted"
+  stray="${FM_OPERATIONAL_DOORBELL_PREFIX}$bad/operational-inbox/1-a.msg${FM_OPERATIONAL_DOORBELL_SUFFIX}"
+  [ -z "$(printf '%s' "$stray" | "$OWNER" doorbell-kind)" ] \
+    || fail "a doorbell naming a control-character path was recognized"
+  pass "non-ASCII home: a Cyrillic state path carries and parses its doorbell, while a control-character path is still refused"
+}
+
 test_record_prune_outgrows_one_argument_list() {
   local tmp state pad left
   tmp=$(fm_test_tmproot fm-operational-input-flood)
@@ -255,4 +280,5 @@ test_genuine_near_misses_remain_unclassified
 test_cross_language_adapter_uses_the_owner
 test_invalid_current_encodings_are_rejected
 test_record_backed_doorbell_carrier
+test_non_ascii_home_carrier
 test_record_prune_outgrows_one_argument_list
