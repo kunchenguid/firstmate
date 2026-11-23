@@ -164,6 +164,7 @@ A lane that reaches its tier bound needs investigation and a distribution or run
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) holds the executable values and names each job's tier beside its `timeout-minutes`.
 [`tests/fm-ci-workflow.test.sh`](../tests/fm-ci-workflow.test.sh) holds the policy against the parsed workflow: every job belongs to exactly one tier or is the canary exception, the workflow carries exactly three distinct tier values plus the canary's, the fast tier stays within 5-10 minutes, the normal jobs share one 30-minute budget, and the Herdr family-run step is the 20-minute tripwire below its job backstop with an `always()` teardown after it.
 The non-blocking Ubuntu 26.04 canary is the one exception to the tiers.
+It runs only on main pushes and on pull requests that carry the `full-ci` label, so its long run is spent only where the full suite also runs.
 It bounds each of its ten suites at 1500 seconds, and its 270-minute job timeout sits above the 250 minutes those ten bounds add up to.
 A hung suite therefore fails inside its step, where the check stays green and the job summary and a warning annotation report the failure.
 A job timeout would instead cancel the job, publish a check that is not green, and skip that report.

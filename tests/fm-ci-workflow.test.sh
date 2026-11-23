@@ -11,10 +11,11 @@
 #
 # They also hold the outside pull request gate the maintainer approved in
 # DOP-167 (keep public CI within GitHub's 40-job limit): a PR from an author
-# without write access runs the quick checks, the non-blocking Ubuntu canary,
-# and a failing Full suite verdict until full-ci is added; later pushes run the
-# whole suite, any other label neither starts nor cancels a run, and close main
-# pushes keep only the newest run.
+# without write access runs the quick checks and a failing Full suite verdict
+# until full-ci is added; later pushes run the whole suite, any other label
+# neither starts nor cancels a run, and close main pushes keep only the newest
+# run. The non-blocking Ubuntu canary runs only on main pushes and PRs carrying
+# full-ci, whatever the author's access.
 #
 # They also hold the fork opt-out: the repository variables FM_CI_SKIP_PUSH and
 # FM_CI_SKIP_MACOS let a fork skip the push run and the macOS job through a
@@ -417,11 +418,11 @@ test_only_the_full_ci_label_joins_the_pr_group() {
   pass "only the full-ci label joins and supersedes the PR's group; other labels cancel nothing"
 }
 
-UNGATED_JOBS='test-coverage tests-ubuntu-26-canary invariants full-suite'
+UNGATED_JOBS='test-coverage invariants full-suite'
 
-# The canary must exercise outside PRs before full-ci approval; the required
-# Full suite verdict still fails naming the label.
-test_outside_pr_without_label_runs_quick_checks_and_canary() {
+# Before full-ci, an outside PR runs only the quick checks, not even the
+# canary, and the required Full suite verdict fails naming the label.
+test_outside_pr_without_label_runs_quick_checks() {
   local action association actual out
   # The associations open fork PRs to firstmate carried on 2026-10-29.
   for association in CONTRIBUTOR FIRST_TIME_CONTRIBUTOR NONE; do
@@ -437,7 +438,7 @@ test_outside_pr_without_label_runs_quick_checks_and_canary() {
   fi
   printf '%s\n' "$out" | grep -q 'full-ci' \
     || fail "the Full suite failure must name the full-ci label, got:"$'\n'"$out"
-  pass "an unlabelled outside PR runs quick checks, the canary, and a failing Full suite naming full-ci"
+  pass "an unlabelled outside PR runs quick checks and a failing Full suite naming full-ci"
 }
 
 # DOP-167: the full-ci label and every later push run the whole suite, and the
@@ -461,17 +462,20 @@ test_full_ci_label_runs_the_whole_suite() {
   pass "the full-ci label and later pushes run every job, and the verdict follows the lanes"
 }
 
-# DOP-167: main, own branches and write-access authors run everything as today.
+# DOP-167: main, own branches and write-access authors run the full suite as
+# today; only main pushes and full-ci PRs add the canary.
 test_trusted_runs_are_unchanged() {
-  local all context actual out
+  local all want context actual out
   all=$(workflow_jobs | tr '\n' ' ') || fail "could not list ci.yml jobs"
   for context in event=push association=OWNER association=MEMBER association=COLLABORATOR head=kunchenguid/firstmate; do
+    want=$all
+    [ "$context" = event=push ] || want=$(workflow_jobs | grep -vx "$CANARY_JOB" | tr '\n' ' ')
     actual=$(jobs_running_under "$context" | tr '\n' ' ') || fail "could not resolve jobs for $context"
-    [ "$actual" = "$all" ] || fail "$context must run every job as before, ran: $actual"
+    [ "$actual" = "$want" ] || fail "$context must run $want, ran: $actual"
     out=$(run_full_suite_verdict "$context") \
       || fail "the Full suite verdict must pass for $context when its lanes passed:"$'\n'"$out"
   done
-  pass "main pushes, own branches and write-access authors still run every job and pass the verdict"
+  pass "main pushes run every job; own branches and write-access authors run all but the canary and pass the verdict"
 }
 
 # DOP-167: another label neither starts nor cancels a run: no job runs, not
@@ -520,8 +524,10 @@ test_unrelated_label_never_masks_an_earlier_failure() {
     while IFS=$'\t' read -r name conclusion; do
       case "$expect:$name" in
         all-failed:*) want=failure ;;
+        unlabelled-failed:'Ubuntu 26.04 canary') want=skipped ;;
+        unlabelled-failed:*) want=failure ;;
         waiting:'Full suite') want=failure ;;
-        waiting:'Test coverage guard'|waiting:'Repo invariants'|waiting:'Ubuntu 26.04 canary') want=success ;;
+        waiting:'Test coverage guard'|waiting:'Repo invariants') want=success ;;
         waiting:*) want=skipped ;;
       esac
       [ "$conclusion" = "$want" ] \
@@ -534,7 +540,7 @@ test_unrelated_label_never_masks_an_earlier_failure() {
     done <<<"$before"
   done <<'TABLE'
 labels=full-ci outcome=failure|action=labeled label=bug labels=full-ci,bug|all-failed
-association=OWNER outcome=failure|action=labeled label=bug labels=bug association=OWNER|all-failed
+association=OWNER outcome=failure|action=labeled label=bug labels=bug association=OWNER|unlabelled-failed
 outcome=success|action=labeled label=bug labels=bug|waiting
 TABLE
   pass "an unrelated label after a failed or waiting suite leaves every earlier check as it was"
@@ -653,7 +659,8 @@ test_fork_skip_variables_are_opt_in() {
       all-but-macos) want=$(printf '%s\n' "$all" | grep -vx macos-stock-bash) ;;
       *) fail "unknown expectation $expected" ;;
     esac
-    actual=$(jobs_running_under event="$event" association=OWNER skip_push="$skip_push" skip_macos="$skip_macos") \
+    # full-ci keeps the canary in every pull_request row, so only the variables vary.
+    actual=$(jobs_running_under event="$event" association=OWNER labels=full-ci skip_push="$skip_push" skip_macos="$skip_macos") \
       || fail "could not resolve the job conditions for $event FM_CI_SKIP_PUSH=$skip_push FM_CI_SKIP_MACOS=$skip_macos"
     [ "$actual" = "$want" ] \
       || fail "$event with FM_CI_SKIP_PUSH=$skip_push FM_CI_SKIP_MACOS=$skip_macos must run $expected jobs"$'\n'"ran: $(printf '%s' "$actual" | tr '\n' ' ')"$'\n'"wanted: $(printf '%s' "$want" | tr '\n' ' ')"
@@ -865,7 +872,7 @@ test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_keep_only_the_newest_run
 test_only_the_full_ci_label_joins_the_pr_group
-test_outside_pr_without_label_runs_quick_checks_and_canary
+test_outside_pr_without_label_runs_quick_checks
 test_full_ci_label_runs_the_whole_suite
 test_trusted_runs_are_unchanged
 test_unrelated_label_starts_no_job
