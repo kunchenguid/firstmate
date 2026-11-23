@@ -79,6 +79,7 @@ The recorder printed a per-open core token, a late token after about 6,700 bytes
 On Claude, the three tracked `SessionStart` entries each fired, and the model quoted all four tokens back on the cold open, after `/clear`, and after `/compact`.
 On `codex exec`, the three tracked entries each fired, and the model quoted all four tokens back on the cold open; the interactive TUI limit above still applies.
 Clear and compact cannot be tested on `codex exec` because it has no tracked clear or compact surface.
+Delivery after clear and compact is therefore proven on Claude and Pi only, and on Codex only the cold open is proven.
 On Pi, the single `--part all` message carried all four tokens, which the model quoted back on the cold open, after `/new`, and after `/compact`.
 So a core message near the 7,000-byte Codex budget reached model context whole on all three, past the 2,000-character preview a capped hook output is cut to.
 Claude Code 2.1.296 selects "No, exit" by default in its folder-trust prompt, so the guard moves to the trusting option before it confirms.

@@ -674,11 +674,16 @@ fill_backlog_from_manual() {
       return ""
     }
     /^##[[:space:]]+/ { state = state_for_heading($0); next }
-    /^- \[[ xX]\] / {
-      rest = $0
-      sub(/^- \[[ xX]\] /, "", rest)
-      id = rest
-      sub(/ - .*/, "", id)
+    /^[-*][[:space:]]+(\[[ xX]\][[:space:]]+[^[:space:]]+|\*\*[^*]+\*\*)[[:space:]]+-[[:space:]]/ {
+      id = $0
+      sub(/^[-*][[:space:]]+/, "", id)
+      if (id ~ /^\*\*/) {
+        sub(/^\*\*/, "", id)
+        sub(/\*\*.*/, "", id)
+      } else {
+        sub(/^\[[ xX]\][[:space:]]+/, "", id)
+        sub(/[[:space:]].*/, "", id)
+      }
       if (state == "done") { done++; next }
       if (state == "in_flight") {
         inflight++
@@ -686,8 +691,10 @@ fill_backlog_from_manual() {
         next
       }
       if (state == "queued") {
+        captain = ($0 ~ /hold-kind:[[:space:]]*captain/)
+        if (captain) print "CAP", id
         if ($0 ~ /blocked-by:/) { blocked++; next }
-        if ($0 ~ /hold-kind:[[:space:]]*captain/) { held++; print "CAP", id; next }
+        if (captain) { held++; next }
         if ($0 ~ /\(hold[):]/ || $0 ~ /hold-until:/) { held++; other++; next }
         print "READY", id
         next

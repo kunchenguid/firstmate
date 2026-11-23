@@ -2171,6 +2171,37 @@ EOF
   pass "manual backlog rendering prints counts and ids, and does not print bodies or hold reasons"
 }
 
+test_backlog_manual_backend_reads_every_title_line_form() {
+  local rec root home fakebin out
+  rec=$(new_world backlog-manual-title-forms)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## Queued
+- [ ] dash-ready - Dash checkbox row (repo: firstmate) (kind: ship)
+* [ ] star-ready - Star checkbox row (repo: firstmate) (kind: ship)
+- **bold-ready** - Bold id row (repo: firstmate) (kind: ship)
+- [ ] blocked-captain - Waits on another task blocked-by: dash-ready (hold: captain choice pending) (hold-kind: captain)
+EOF
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "backlog (manual backend): in_flight=0 held=0 blocked=1 ready=3" \
+    "manual backend miscounted star-bullet or bold-id title lines"
+  assert_contains "$out" "ready ids: dash-ready star-ready bold-ready" \
+    "manual backend dropped a star-bullet or bold-id ready row"
+  assert_contains "$out" "captain-held ids: blocked-captain" \
+    "manual backend dropped the captain hold on a blocked row"
+
+  pass "manual backend reads star bullets, bold ids, and captain holds on blocked rows"
+}
+
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback() {
   local rec root home fakebin out
   rec=$(new_world backlog-compact-unavailable)
@@ -3441,6 +3472,7 @@ test_session_start_seeds_the_outcome_display_tail_while_away
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_budget_withholds_the_summary
 test_backlog_compact_manual_backend_skips_indented_bodies
+test_backlog_manual_backend_reads_every_title_line_form
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
