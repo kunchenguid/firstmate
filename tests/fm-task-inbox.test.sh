@@ -314,7 +314,9 @@ test_ring_skips_dead_agent() {
 # between rules, and Enter submits it (logged as SUBMIT) unless
 # FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow. While the file
 # FM_FAKE_PARTIAL_LITERAL exists, the next literal send types only its first
-# ten characters, removes the file, and fails.
+# ten characters, removes the file, and fails. While the file FM_FAKE_CURSOR
+# exists it holds the cursor column: Ctrl-U deletes only before it, Backspace
+# at it does nothing, and C-e (unless FM_FAKE_NO_CTRL_E=1) moves it to the end.
 make_composer_stub() {  # <dir>
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/tmux" <<'SH'
@@ -331,7 +333,15 @@ case "${1:-}" in
         *) break ;;
       esac
     done
-    if [ "$literal" = 1 ] && [ -n "${FM_FAKE_PARTIAL_LITERAL:-}" ] && [ -e "$FM_FAKE_PARTIAL_LITERAL" ]; then
+    cursor=${FM_FAKE_CURSOR:-/dev/null/none}
+    if [ "$literal" = 0 ] && [ "${1:-}" = C-e ] && [ "${FM_FAKE_NO_CTRL_E:-0}" != 1 ]; then
+      rm -f "$cursor"
+    elif [ "$literal" = 0 ] && [ -f "$cursor" ] && [ "${1:-}" = C-u ]; then
+      cur=$(cat "$FM_FAKE_COMPOSER"); col=$(cat "$cursor")
+      printf '%s' "${cur:$col}" > "$FM_FAKE_COMPOSER"; echo 0 > "$cursor"
+    elif [ "$literal" = 0 ] && [ -f "$cursor" ] && [ "${1:-}" = BSpace ]; then
+      :
+    elif [ "$literal" = 1 ] && [ -n "${FM_FAKE_PARTIAL_LITERAL:-}" ] && [ -e "$FM_FAKE_PARTIAL_LITERAL" ]; then
       rm -f "$FM_FAKE_PARTIAL_LITERAL"
       printf '%s' "${1:0:10}" >> "$FM_FAKE_COMPOSER"
       exit 1
@@ -485,9 +495,32 @@ test_ring_clears_rings_and_restores_stray_text() {
   : > "$log"; printf 'draft' > "$composer"; : > "$dir/partial"
   out=$(FM_FAKE_PARTIAL_LITERAL="$dir/partial" ring_note) || true
   assert_contains "$out" "rc=2" "a failed partial ring should report the send failure"
-  assert_contains "$out" "cleared for the ring and restored" "the note should report the exact restore"
+  assert_contains "$out" "cleared for the ring and typed back" "the note should report the draft typed back"
   [ "$(cat "$composer")" = draft ] || fail "a partial doorbell must not be left with the draft: $(cat "$composer")"
   [ ! -s "$log" ] || fail "nothing may be submitted after a partial ring"
+
+  # The one-row read cannot see a trailing space, so the note never claims an
+  # exact restore.
+  : > "$log"; printf 'fix the ' > "$composer"
+  out=$(ring_note) || true
+  assert_contains "$out" "rc=0" "a draft ending in a space should not block the ring"
+  assert_contains "$out" "typed back; leading or trailing spaces may not be preserved" \
+    "the note should say spaces at the draft's ends may be lost"
+
+  # A cursor moved back into the draft: C-e first lets Ctrl-U take it all.
+  : > "$log"; printf 'fix the bug' > "$composer"; echo 8 > "$dir/cursor"
+  out=$(FM_FAKE_CURSOR="$dir/cursor" ring_note) || true
+  assert_contains "$out" "rc=0" "a draft with the cursor moved back should not block the ring"
+  [ "$(cat "$composer")" = 'fix the bug' ] || fail "a mid-cursor draft was not typed back whole: $(cat "$composer")"
+
+  # Without C-e, Ctrl-U takes only part of it; the note says the draft changed.
+  : > "$log"; printf 'fix the bug' > "$composer"; echo 8 > "$dir/cursor"
+  out=$(FM_FAKE_CURSOR="$dir/cursor" FM_FAKE_NO_CTRL_E=1 ring_note) || true
+  rm -f "$dir/cursor"
+  assert_contains "$out" "rc=1" "a clear that fails should defer the ring"
+  assert_contains "$out" "partly cleared and could not be restored" \
+    "the note should say a failed clear changed the draft"
+  [ ! -s "$log" ] || fail "nothing may be submitted when the composer cannot be cleared"
 
   # A lost first Enter leaves our doorbell in the composer; it is cleared
   # before the draft returns so the draft never runs into it.

@@ -426,12 +426,17 @@ fm_task_inbox_ring_core() {  # <backend> <target> <record-path> [expected-label]
   return 0
 }
 
-# Clear the composer's draft: Ctrl-U presses sized from the draft length (one
-# wrapped row per press on some harnesses), then, on a backend whose Backspace
-# key name is known (tmux and paseo take BSpace), Backspace presses for a short
-# leftover a harness's Ctrl-U did not take. 0 only when the composer reads empty.
+# Clear the composer's draft: on a backend whose key names are known (tmux and
+# paseo take C-e and BSpace), C-e first so Ctrl-U, which deletes back from the
+# cursor, takes the whole line; then Ctrl-U presses sized from the draft length
+# (one wrapped row per press on some harnesses), then on those same backends
+# Backspace presses for a short leftover a harness's Ctrl-U did not take. 0 only
+# when the composer reads empty.
 fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-label]
   local backend=$1 target=$2 held=$3 label=${4:-} presses i=0
+  case "$backend" in
+    tmux|paseo) fm_backend_send_key "$backend" "$target" C-e "$label" >/dev/null 2>&1 || return 1 ;;
+  esac
   presses=$(( ${#held} / 40 + 2 ))
   [ "$presses" -le 12 ] || presses=12
   while [ "$i" -lt "$presses" ]; do
@@ -461,7 +466,9 @@ fm_task_inbox_composer_clear() {  # <backend> <target> <held-text> [expected-lab
 # to round-trip exactly is cleared (fm_task_inbox_composer_draft); when the
 # draft cannot be read that way, the backend has no literal-send primitive, or
 # the clear fails, the ring still defers as before and sets
-# FM_TASK_INBOX_RING_NOTE. After the ring, whatever of our own doorbell is left
+# FM_TASK_INBOX_RING_NOTE, which says when a failed clear changed the draft.
+# The one-row read cannot see leading or trailing spaces, so the note says the
+# draft was typed back, not that it was restored. After the ring, whatever of our own doorbell is left
 # in the composer, whole or partly typed, is cleared before the draft is
 # restored so the two never run together; a failed restore is reported in the
 # note, which never carries the draft text.
@@ -479,7 +486,11 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   line=$(fm_task_inbox_doorbell_line "$rec") || return 1
   if ! fm_task_inbox_composer_clear "$backend" "$target" "$held" "$label"; then
     # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
-    FM_TASK_INBOX_RING_NOTE="the composer holds other pending text that could not be cleared"
+    if [ "$(fm_task_inbox_composer_text "$backend" "$target" "$label")" = "$held" ]; then
+      FM_TASK_INBOX_RING_NOTE="the composer holds other pending text that could not be cleared"
+    else
+      FM_TASK_INBOX_RING_NOTE="the composer's pending text was partly cleared and could not be restored"
+    fi
     return 1
   fi
   rc=0
@@ -494,7 +505,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fi
   if [ "$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null)" = empty ] \
     && fm_backend_send_literal "$backend" "$target" "$held" "$label" >/dev/null 2>&1; then
-    FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring and restored"
+    FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring and typed back; leading or trailing spaces may not be preserved"
   else
     # shellcheck disable=SC2034 # read by the sourcing caller (fm-send.sh)
     FM_TASK_INBOX_RING_NOTE="the composer's pending text was cleared for the ring but could not be restored"
