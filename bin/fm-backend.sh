@@ -126,6 +126,17 @@ fm_backend_target_is_self() {  # <backend> <target>
   esac
 }
 
+# fm_backend_self_pane_recovery: the command that gives a self-pane task a
+# fresh endpoint. A secondmate's gone endpoint is respawned, never relaunched
+# (bin/fm-spawn.sh refuses that relaunch).
+fm_backend_self_pane_recovery() {  # <meta-file> <id>
+  if [ "$(fm_meta_get "$1" kind)" = secondmate ]; then
+    printf 'bin/fm-spawn.sh %s --secondmate' "$2"
+  else
+    printf 'bin/fm-control.sh %s relaunch' "$2"
+  fi
+}
+
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
 # zsh diagnostics can source it too, so backend-name matching must stay portable.

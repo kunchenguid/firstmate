@@ -1291,7 +1291,7 @@ fi
 # (bin/fm-backend.sh fm_backend_target_is_self). --force does not override this.
 if [ -n "$T" ] && fm_backend_target_is_self "$BACKEND" "$T"; then
   echo "REFUSED: task $ID's recorded endpoint $T is this firstmate session's own pane, so teardown would close the session itself. Nothing was changed." >&2
-  echo "The task's worker is gone: relaunch it (bin/fm-control.sh $ID relaunch), which records a fresh endpoint, then retry teardown; the relaunch names the tab to rename first if this session's tab still carries fm-$ID." >&2
+  echo "The task's worker is gone: recover it ($(fm_backend_self_pane_recovery "$META" "$ID")), which records a fresh endpoint, then retry teardown; the recovery names the tab to rename first if this session's tab still carries fm-$ID." >&2
   exit 1
 fi
 # The recorded backend, including every sibling its adapter sources, has to

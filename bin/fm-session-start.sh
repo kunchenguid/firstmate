@@ -938,8 +938,8 @@ for meta in "$STATE"/*.meta; do
   target=$(fm_backend_target_of_meta "$meta")
   if [ -n "$window" ] && fm_backend_target_is_self "$(fm_backend_of_meta "$meta")" "${target:-$window}"; then
     # Report the collision before probing the supervisor as a worker.
-    printf 'endpoint: dead (backend=%s window=%s is this firstmate session'"'"'s own pane, so the task'"'"'s worker is gone; recover it with bin/fm-control.sh %s relaunch, which creates a fresh endpoint)\n' \
-      "$(fm_backend_of_meta "$meta")" "$window" "$id"
+    printf 'endpoint: dead (backend=%s window=%s is this firstmate session'"'"'s own pane, so the task'"'"'s worker is gone; recover it with %s, which creates a fresh endpoint)\n' \
+      "$(fm_backend_of_meta "$meta")" "$window" "$(fm_backend_self_pane_recovery "$meta" "$id")"
   elif [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     endpoint_rc=0

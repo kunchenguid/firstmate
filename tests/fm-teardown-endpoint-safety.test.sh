@@ -94,6 +94,8 @@ SH
     assert_refused_without_mutation "$dir" "$id" "record naming the caller's own Herdr pane"
   assert_contains "$(cat "$dir/stderr")" "this firstmate session's own pane" \
     "the refusal should say the endpoint is the session's own pane"
+  assert_contains "$(cat "$dir/stderr")" "bin/fm-control.sh $id relaunch" \
+    "the refusal should name the relaunch that recovers a non-secondmate task"
   pass "fm-teardown: a Herdr record naming the caller's own pane refuses under --force before any runtime call"
 }
 

@@ -491,7 +491,8 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 if fm_backend_target_is_self "$TARGET_BACKEND" "$T"; then
-  echo "error: $RAW_TARGET resolves to $T, which is this firstmate session's own pane, not a worker; nothing was sent - the task's worker is gone, so relaunch it with bin/fm-control.sh <task-id> relaunch, which creates a fresh endpoint" >&2
+  SELF_ID=$(fm_send_id_from_meta "$TARGET_META")
+  echo "error: $RAW_TARGET resolves to $T, which is this firstmate session's own pane, not a worker; nothing was sent - the task's worker is gone, so recover it with $(fm_backend_self_pane_recovery "$TARGET_META" "${SELF_ID:-<task-id>}"), which creates a fresh endpoint" >&2
   exit 1
 fi
 fm_send_detect_kiro_from_live_target

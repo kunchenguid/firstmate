@@ -1801,11 +1801,27 @@ SH
     "$ROOT/bin/fm-peek.sh" t1 2>&1); rc=$?
   expect_code 1 "$rc" "peek of a record naming the caller's own pane should refuse"$'\n'"$out"
   assert_contains "$out" "this firstmate session's own pane" "the peek refusal should name the reason"
+  assert_contains "$out" "bin/fm-control.sh t1 relaunch" "a ship task's refusal should name its relaunch"
   out=$(env -u HERDR_SOCKET_PATH HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2 \
     PATH="$dir/fakebin:$PATH" FM_FAKE_HERDR_LOG="$dir/herdr.log" FM_HOME="$dir/home" \
     "$ROOT/bin/fm-send.sh" t1 "status please" 2>&1); rc=$?
   expect_code 1 "$rc" "a steer to a record naming the caller's own pane should refuse"$'\n'"$out"
   assert_contains "$out" "nothing was sent" "the send refusal should say nothing was sent"
+  # fm-spawn.sh refuses to relaunch a secondmate whose endpoint is gone.
+  fm_write_meta "$dir/home/state/t1.meta" \
+    "window=lab:w1:p2" "endpoint_task_id=t1" "worktree=$dir/wt" "harness=claude" "kind=secondmate" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
+  out=$(env -u HERDR_SOCKET_PATH HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2 \
+    PATH="$dir/fakebin:$PATH" FM_FAKE_HERDR_LOG="$dir/herdr.log" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-peek.sh" t1 2>&1); rc=$?
+  expect_code 1 "$rc" "peek of a secondmate record naming the caller's own pane should refuse"$'\n'"$out"
+  assert_contains "$out" "bin/fm-spawn.sh t1 --secondmate" "a secondmate's refusal should name its respawn"
+  assert_not_contains "$out" "relaunch" "a secondmate's refusal must not point at the relaunch it refuses"
+  out=$(env -u HERDR_SOCKET_PATH HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2 \
+    PATH="$dir/fakebin:$PATH" FM_FAKE_HERDR_LOG="$dir/herdr.log" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-send.sh" t1 "status please" 2>&1); rc=$?
+  expect_code 1 "$rc" "a steer to a secondmate record naming the caller's own pane should refuse"$'\n'"$out"
+  assert_contains "$out" "bin/fm-spawn.sh t1 --secondmate" "a secondmate's send refusal should name its respawn"
   assert_no_regex 'pane read|send-text|send-keys|pane run' "$dir/herdr.log" \
     "the caller's own pane must not be read or typed into"
   [ -z "$(find "$dir/home/state" -path '*t1.inbox*' -name '*.msg' 2>/dev/null)" ] \
