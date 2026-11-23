@@ -6,6 +6,7 @@
 #   fm-hc-pipeline-monitor.sh observe <task-id>  # idempotent; the watcher calls it each poll
 #   fm-hc-pipeline-monitor.sh close <task-id>    # fm-teardown.sh calls it before the worker close
 #
+# observe is opt-in: it opens nothing unless config/hc-pipeline-monitor exists.
 # observe reads the task's active no-mistakes run in its worktree. For the first
 # active run it opens exactly one monitor terminal running
 # `no-mistakes attach --run <run-id>`. When a newer run id appears it replaces the
@@ -31,6 +32,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}
 FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+CONFIG=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
 FM_BACKEND_LIB_DIR=$SCRIPT_DIR
 export FM_ROOT FM_HOME FM_BACKEND_LIB_DIR
 
@@ -102,6 +104,8 @@ active_run_id() {
 
 cmd_observe() {
   local task=$1 meta session wt run_id home record recorded addr live out
+  # Opt-in: with config/hc-pipeline-monitor absent, observe opens nothing. close still runs.
+  [ -e "$CONFIG/hc-pipeline-monitor" ] || return 0
   meta="$STATE/$task.meta"
   [ -f "$meta" ] || return 0
   [ "$(meta_value "$meta" backend)" = hc ] || return 0

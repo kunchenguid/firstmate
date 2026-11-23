@@ -17,6 +17,7 @@ FB="$TMP_ROOT/fakebin"
 FAKE_HC_DIR="$TMP_ROOT/hc"
 FAKE_NM_STATUS="$TMP_ROOT/nm-status"
 mkdir -p "$STATE" "$WT" "$FB" "$FAKE_HC_DIR/terminals" "$HOMEDIR/config"
+: > "$HOMEDIR/config/hc-pipeline-monitor"
 
 # Fake herdr-core: terminals are files of label lines under $FAKE_HC_DIR/terminals.
 cat > "$FB/hc" <<'SH'
@@ -104,6 +105,17 @@ monitor_for() {  # <task> -> addresses carrying the monitor labels
 run_mon() { bash "$MON" "$@"; }
 hometag() { FM_ROOT=$HOMEDIR FM_HOME=$HOMEDIR bash -c ". \"$ROOT/bin/fm-backend-hometag-lib.sh\"; fm_backend_hometag"; }
 
+test_observe_opens_nothing_without_flag() {
+  rm -f "$HOMEDIR/config/hc-pipeline-monitor"
+  write_meta t3 hc
+  set_run run-3 running
+  before=$(count_terminals)
+  run_mon observe t3
+  assert_equals "$before" "$(count_terminals)" "without config/hc-pipeline-monitor observe opens no monitor"
+  : > "$HOMEDIR/config/hc-pipeline-monitor"
+  pass "observe is opt-in and opens nothing without the flag"
+}
+
 test_observe_opens_one_monitor_for_active_run() {
   write_meta t1 hc
   set_run run-1 running
@@ -166,6 +178,7 @@ test_close_is_noop_without_monitor() {
 }
 
 fm_test_run \
+  test_observe_opens_nothing_without_flag \
   test_observe_opens_one_monitor_for_active_run \
   test_observe_same_run_is_idempotent \
   test_newer_run_replaces_monitor \
