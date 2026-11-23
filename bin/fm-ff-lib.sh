@@ -35,6 +35,9 @@
 # happens after an upstream squash merge. Every other divergence stays put and
 # records an inspectable state/.secondmate-update-reconcile/<id>.pending marker
 # in the supervising home until a later successful convergence clears it.
+# The marker keeps its first_seen epoch across rewrites, so bin/fm-watch.sh and
+# bin/fm-bootstrap.sh can report how long a home has been stuck
+# (secondmate_update_reconcile_pending).
 # Locally leased homes start at a detached HEAD on the default branch, so their
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A standalone remote home may instead advance
@@ -286,7 +289,7 @@ secondmate_update_reconcile_marker_path() { # <state> <id>
 }
 
 secondmate_update_reconcile_record() { # <state> <id> <local-commit> <target-commit> <target>
-  local state=$1 id=$2 local_commit=$3 target_commit=$4 target=$5 marker parent tmp
+  local state=$1 id=$2 local_commit=$3 target_commit=$4 target=$5 marker parent tmp first_seen=
   case "$target" in *$'\n'*|*$'\r'*) return 1 ;; esac
   if [ -e "$state" ] || [ -L "$state" ]; then
     state=$(resolved_existing_dir "$state") || return 1
@@ -302,6 +305,10 @@ secondmate_update_reconcile_record() { # <state> <id> <local-commit> <target-com
     mkdir -p "$parent" || return 1
   fi
   [ ! -L "$marker" ] || return 1
+  if [ -f "$marker" ]; then
+    first_seen=$(secondmate_update_reconcile_first_seen "$marker") || first_seen=
+  fi
+  [ -n "$first_seen" ] || first_seen=$(date +%s)
   tmp=$(umask 077; mktemp "$parent/.secondmate-update-reconcile.XXXXXX" 2>/dev/null) || return 1
   {
     printf 'schema=fm-secondmate-update-reconcile.v1\n'
@@ -310,10 +317,48 @@ secondmate_update_reconcile_record() { # <state> <id> <local-commit> <target-com
     printf 'local_commit=%s\n' "$local_commit"
     printf 'target_commit=%s\n' "$target_commit"
     printf 'target=%s\n' "$target"
+    printf 'first_seen=%s\n' "$first_seen"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
   printf '%s\n' "$marker"
+}
+
+# Epoch at which the record's divergence was first seen. A record written before
+# first_seen existed falls back to its file mtime, the oldest time still known.
+secondmate_update_reconcile_first_seen() { # <marker>
+  local first
+  first=$(sed -n 's/^first_seen=//p' "$1" 2>/dev/null | head -1)
+  case "$first" in
+    ''|*[!0-9]*)
+      if [ "$(uname)" = Darwin ]; then
+        first=$(/usr/bin/stat -f %m "$1" 2>/dev/null)
+      else
+        first=$(stat -c %Y "$1" 2>/dev/null)
+      fi
+      ;;
+  esac
+  case "$first" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$first"
+}
+
+# Print one tab-separated row per pending record in <state>, oldest first:
+# id, first-seen epoch, age seconds, age as <days>d<hours>h, local commit,
+# target commit, record path.
+secondmate_update_reconcile_pending() { # <state> <now-epoch>
+  local state=$1 now=$2 marker id first age
+  for marker in "$state"/.secondmate-update-reconcile/*.pending; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    id=${marker##*/}
+    id=${id%.pending}
+    first=$(secondmate_update_reconcile_first_seen "$marker") || continue
+    [ "$first" -le "$now" ] || first=$now
+    age=$((now - first))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$first" "$age" \
+      "$((age / 86400))d$((age % 86400 / 3600))h" \
+      "$(sed -n 's/^local_commit=//p' "$marker" | head -1)" \
+      "$(sed -n 's/^target_commit=//p' "$marker" | head -1)" "$marker"
+  done | sort -t "$(printf '\t')" -k2,2n -k1,1
 }
 
 secondmate_update_reconcile_clear() { # <state> <id>

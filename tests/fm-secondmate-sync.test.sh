@@ -756,6 +756,33 @@ test_bootstrap_sweep_surfaces_skipped_home() {
   pass "T9 bootstrap surfaces a skipped dirty live secondmate home"
 }
 
+test_bootstrap_reports_oldest_divergence_age() {
+  local w c1 fakebin out line legacy
+  w=$(new_world boot-diverged-age)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-div "$c1"
+  printf 'fork work\n' > "$w/sm-div/AGENTS.md"
+  git -C "$w/sm-div" add -A
+  git -C "$w/sm-div" commit -qm local-work
+  bump_primary "$w" instr
+  # An older record from before first_seen existed: its file time is its start.
+  legacy="$w/home/state/.secondmate-update-reconcile/sm-old.pending"
+  mkdir -p "${legacy%/*}"
+  printf 'schema=fm-secondmate-update-reconcile.v1\nid=sm-old\nstatus=diverged\nlocal_commit=aaaa\ntarget_commit=bbbb\ntarget=main\n' > "$legacy"
+  fm_touch_epoch "$(( $(date +%s) - 3 * 86400 - 2 * 3600 - 60 ))" "$legacy"
+
+  fakebin=$(make_fake_toolchain "$w")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "SECONDMATE_SYNC: secondmate sm-div: skipped: diverged from" \
+    "the diverged live home was not reported"
+  line=$(printf '%s\n' "$out" | grep 'reconciliation pending for' || true)
+  [ "$line" = "SECONDMATE_SYNC: secondmate sm-old: reconciliation pending for 3d2h, oldest of 2 (record: $legacy)" ] \
+    || fail "digest did not name the oldest divergence and its age (got: $out)"
+  pass "T9b bootstrap names the oldest pending divergence and its age"
+}
+
 # --- T10: spawning a secondmate fast-forwards its worktree before launch ------
 test_spawn_fast_forwards_before_launch() {
   local w c1 c2 fakebin
@@ -1441,6 +1468,7 @@ test_bootstrap_nudge_retry_is_idempotent
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
+test_bootstrap_reports_oldest_divergence_age
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
 test_seed_marker_clean_when_gitignored
