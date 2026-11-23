@@ -589,6 +589,61 @@ test_sweep_refuses_relaunch_on_ledger_errors() {
   pass "sweep: an unreadable or unwritable relaunch ledger refuses to kill or spawn"
 }
 
+# A run with an outer deadline (the deferred session-start stage) must never
+# start a relaunch the deadline would kill midway: a half-started mate is what
+# a later relaunch then duplicates. The skip records no attempt, so the
+# watcher's own relaunch bound is not spent on it.
+test_sweep_skips_relaunch_that_would_outrun_the_deadline() {
+  local w fb tmuxfb log out ledger now
+  now=$(date +%s)
+
+  w=$(new_world sweep-deadline-tight)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  ledger="$w/home/state/.secondmate-relaunch-sm1"
+  printf '%s\tattempt\n%s\trelaunched\n' 1000 1063 > "$ledger"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_NETWORK_DEADLINE=$((now + 30)))
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: its last relaunch took 63s but only " \
+    "a relaunch longer than the remaining bound should be skipped with its reason"
+  assert_contains "$out" "endpoint left dead for the watcher's liveness tick" \
+    "the skip should say the watcher takes the relaunch over"
+  [ ! -s "$log" ] || fail "a relaunch that could not fit still killed or spawned: $(cat "$log")"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 2 ] || fail "a skipped relaunch gained ledger rows: $(cat "$ledger")"
+
+  w=$(new_world sweep-deadline-passed)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_NETWORK_DEADLINE=$((now - 1)))
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: skipped: this run's time bound has passed" \
+    "a relaunch after the deadline should be skipped even with no recorded duration"
+  [ ! -s "$log" ] || fail "a relaunch past the deadline still killed or spawned: $(cat "$log")"
+
+  # A killed attempt measures nothing, so the earlier settled 63s relaunch
+  # still decides; with room for it the relaunch goes ahead.
+  w=$(new_world sweep-deadline-room)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  ledger="$w/home/state/.secondmate-relaunch-sm1"
+  printf '%s\tattempt\n%s\trelaunched\n%s\tattempt\n' 1000 1063 2000 > "$ledger"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_NETWORK_DEADLINE=$((now + 600)))
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1" \
+    "a relaunch that fits the remaining bound should run silently"
+  assert_contains "$(cat "$log")" "new-window" "a relaunch that fits the remaining bound was not started"
+  [ "$(tail -1 "$ledger" | cut -f2)" = relaunched ] || fail "the fitting relaunch left no outcome row: $(cat "$ledger")"
+
+  # With no deadline and no settled duration, behavior is unchanged.
+  w=$(new_world sweep-deadline-none)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log" FM_BOOTSTRAP_NETWORK_DEADLINE=soon)
+  assert_contains "$(cat "$log")" "new-window" "a non-numeric deadline must not skip a relaunch"
+  pass "sweep: a relaunch the outer deadline would kill is skipped and left to the watcher"
+}
+
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
@@ -1012,6 +1067,7 @@ test_sweep_noop_with_no_secondmate_meta
 test_sweep_skips_mate_whose_liveness_lock_is_held
 test_relaunch_waits_for_other_mates_relaunch_lock
 test_sweep_refuses_relaunch_on_ledger_errors
+test_sweep_skips_relaunch_that_would_outrun_the_deadline
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
 test_remote_full_probe_rex_route

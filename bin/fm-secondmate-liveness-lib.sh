@@ -117,6 +117,16 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
     "$ledger" 2>/dev/null
 }
 
+# Seconds the last settled relaunch of <id> took: from its latest `attempt`
+# row to the outcome row that settled it. An attempt with no outcome (a launch
+# killed midway) measures nothing. Prints nothing when no relaunch has settled.
+fm_secondmate_liveness_last_duration() {  # <id>
+  awk -F '\t' '$1 !~ /^[0-9]+$/ { next }
+    $2 == "attempt" { a = $1; next }
+    ($2 == "relaunched" || $2 == "failed") && a != "" { d = $1 - a; a = "" }
+    END { if (d != "") print d }' "$STATE/.secondmate-relaunch-$1" 2>/dev/null
+}
+
 # fm_secondmate_liveness_probe <meta> <id> <full|poll>
 #
 # Read-only probe of one registered secondmate's recorded endpoint. Populates:
@@ -281,7 +291,7 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   return 0
 }
 
-# fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs]
+# fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs] [deadline-epoch]
 #
 # Acts on a `relaunchable` probe verdict for <id>: takes the per-home relaunch
 # lock, records the attempt, kills a confirmed-dead local endpoint if required
@@ -299,9 +309,15 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 # the ledger cannot be read, or the attempt row cannot be appended, nothing is
 # killed or spawned and no attempt is recorded: the verdict becomes
 # FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON set and this returns 1.
+# A <deadline-epoch> names an outer bound that will kill this process: once the
+# relaunch lock is held, a relaunch that cannot finish before it - no time left,
+# or the mate's last settled relaunch took at least what remains - is skipped
+# the same way, because a launch killed midway leaves a half-started mate that
+# the next relaunch duplicates. The mate stays dead for the watcher's liveness
+# tick, which runs outside that deadline.
 # Caller holds the liveness lock and owns reporting.
-fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
-  local meta=$1 id=$2 timeout=${3:-} relaunch_lock wait_seconds rc=0
+fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs] [deadline-epoch]
+  local meta=$1 id=$2 timeout=${3:-} deadline=${4:-} relaunch_lock wait_seconds rc=0 last left why
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
   if ! fm_secondmate_liveness_recent_attempts "$id" 0 >/dev/null; then
     FM_SM_LIVE_STATUS=skipped
@@ -317,6 +333,19 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     FM_SM_LIVE_REASON="another secondmate relaunch still owns the per-home relaunch lock after ${wait_seconds}s; endpoint left $FM_SM_LIVE_STATE"
     FM_SM_LIVE_RC=1
     return 1
+  fi
+  if [ -n "$deadline" ]; then
+    left=$(( deadline - $(date +%s) ))
+    last=$(fm_secondmate_liveness_last_duration "$id")
+    if [ "$left" -le 0 ] || { [ -n "$last" ] && [ "$last" -ge "$left" ]; }; then
+      fm_lock_release "$relaunch_lock" || true
+      why="its last relaunch took ${last}s but only ${left}s of this run's time bound remain"
+      [ "$left" -gt 0 ] || why="this run's time bound has passed"
+      FM_SM_LIVE_STATUS=skipped
+      FM_SM_LIVE_REASON="$why, so no relaunch was started; endpoint left $FM_SM_LIVE_STATE for the watcher's liveness tick"
+      FM_SM_LIVE_RC=1
+      return 1
+    fi
   fi
   if ! fm_secondmate_liveness_ledger_add "$id" attempt; then
     fm_lock_release "$relaunch_lock" || true
