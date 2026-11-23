@@ -385,11 +385,9 @@ teardown_require_backend_prerequisites() {  # <backend> <task-id>
   fi
 }
 
-# Retiring a T3 secondmate home needs lsof to prove its provider processes
-# have left it (t3code_secondmate_home_shutdown_barrier).
-t3code_secondmate_lsof_check() {  # <task-id> <home>
+teardown_target_lsof_check() {
   command -v lsof >/dev/null 2>&1 && return 0
-  echo "REFUSED: cannot prove T3 secondmate $1's provider processes have left ${2:-its home} (lsof is unavailable); preserving the home and its records for retry" >&2
+  echo "REFUSED: cannot prove $1's processes have left $2 (lsof is unavailable); preserving the target and its records for retry" >&2
   return 1
 }
 for _teardown_source in \
@@ -1305,7 +1303,7 @@ teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
 # even under --force.
 if [ "$BACKEND" = t3code ]; then
   fm_backend_runtime_check t3code || exit 1
-  [ "$TEARDOWN_META_KIND" != secondmate ] || t3code_secondmate_lsof_check "$ID" "$(fm_meta_get "$META" home)" || exit 1
+  [ "$TEARDOWN_META_KIND" != secondmate ] || teardown_target_lsof_check "T3 secondmate $ID" "$(fm_meta_get "$META" home)" || exit 1
 fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
@@ -2995,16 +2993,9 @@ EOF
   printf '%s\n' "$abs_home_path"
 }
 
-# t3code_secondmate_home_shutdown_barrier: T3 detaches a provider session as a
-# separate effect after its thread's archive reads back, so the secondmate's
-# Claude or Codex process, and anything it started, can still be running in
-# the home after the proven archive. Worker teardown's worktree reaper never
-# runs for a secondmate, so the same structural reaper runs here, over the
-# home, before it is returned or removed; without lsof nothing can prove the
-# home is quiet, and the home and its records are kept.
-t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
-  t3code_secondmate_lsof_check "$2" "$1" || return 1
-  reap_task_worktree_processes "secondmate home" "$1"
+teardown_target_shutdown_barrier() {
+  teardown_target_lsof_check "$1" "$2" || return 1
+  reap_task_worktree_processes "$1" "$2"
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
@@ -3023,8 +3014,7 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
-  if [ "$backend" = t3code ] \
-    && ! t3code_secondmate_home_shutdown_barrier "$abs_home_path" "$expected_id"; then
+  if ! teardown_target_shutdown_barrier "$label" "$abs_home_path"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
@@ -3381,7 +3371,7 @@ validate_firstmate_home_children_removal() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
+      [ "$child_backend" != t3code ] || teardown_target_lsof_check "T3 secondmate $child_id" "$child_home" || return 1
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
@@ -3649,6 +3639,7 @@ cleanup_firstmate_home_children() {
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+        teardown_target_shutdown_barrier "child worktree" "$child_wt" || return 1
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3669,6 +3660,8 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        teardown_target_shutdown_barrier "child worktree" "$child_wt" || return 1
+        validate_no_gnhf_history "$child_wt" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3689,10 +3682,10 @@ cleanup_firstmate_home_children() {
             if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
               return "$child_return_rc"
             fi
-            safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+            safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return $?
           fi
         else
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+          safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return $?
         fi
       fi
     fi
