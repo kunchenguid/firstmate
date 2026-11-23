@@ -651,12 +651,11 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
   assert_grep 'harness=agy' "$meta" "agy meta did not record its harness"
   assert_grep 'model=fixture-reasoner-high' "$meta" "agy meta did not record its model"
   assert_grep 'effort=low' "$meta" "agy meta did not record its effort"
-  assert_not_contains "$(cat "$meta")" "effort_source=" "an id without effort siblings must not claim model-owned effort"
   pass "fm-spawn: agy forwards effort for a model without catalog siblings"
 }
 
 test_agy_catalog_family_owns_effort() {
-  local name=$1 id rec out rc launch meta
+  local name=$1 id rec out rc launch
   shift
   id="agy-family-$name-$$"
   rec=$(make_agy_spawn_case "family-$name" "$id")
@@ -668,8 +667,6 @@ test_agy_catalog_family_owns_effort() {
   launch=$(cat "$CASE_DIR/launch.log")
   assert_contains "$launch" "--model 'gemini-3.8-flash-high'" "agy launch dropped the effort-suffixed model"
   assert_not_contains "$launch" "--effort" "agy passed --effort for a verified family ($name)"
-  meta="$HOME_DIR/state/$id.meta"
-  assert_grep 'effort_source=model-id' "$meta" "agy meta did not attribute effort to the model id ($name)"
   pass "fm-spawn: agy takes effort from the model id ($name)"
 }
 
@@ -715,7 +712,6 @@ test_agy_unreachable_listing_launches_unvalidated() {
   [ -s "$CASE_DIR/launch.log" ] || fail "an unreachable listing produced no launch command"
   assert_contains "$out" "listing is unreachable" "an unreachable listing launched without its notice"
   assert_contains "$(cat "$CASE_DIR/launch.log")" "--effort 'high'" "an unreachable listing suppressed the requested effort"
-  assert_not_contains "$(cat "$HOME_DIR/state/$id.meta")" "effort_source=" "an unreachable listing claimed model-owned effort"
   pass "fm-spawn: an unreachable agy listing establishes nothing and launches"
 }
 

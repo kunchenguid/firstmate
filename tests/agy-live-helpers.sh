@@ -3,7 +3,12 @@
 
 agy_live_stage_home() {  # <throwaway HOME>
   local agy_home=$1 login_keychain="$HOME/Library/Keychains/login.keychain-db"
-  mkdir -p "$agy_home/.gemini/antigravity-cli" || return 1
+  local settings="$HOME/.gemini/antigravity-cli/settings.json"
+  local settings_dir="$agy_home/.gemini/antigravity-cli"
+  mkdir -p "$settings_dir" || return 1
+  if [ -f "$settings" ]; then
+    jq -e '{colorScheme}' "$settings" > "$settings_dir/settings.json" 2>/dev/null || return 1
+  fi
   # macOS searches for the login Keychain under HOME. A link lets agy use
   # the native account session while its trust and settings stay in the lab.
   if [ "$(uname -s)" = Darwin ] && [ -f "$login_keychain" ]; then
