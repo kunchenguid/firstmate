@@ -1607,6 +1607,9 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
 make_gnhf_case() {  # <name>
   local dir id=history-scout
   dir=$(make_case "$1")
+  # Keep removable homes outside the code root even with an in-repo TMPDIR.
+  mkdir -p "$dir/code"
+  ln -s "$ROOT/bin" "$dir/code/bin"
   mkdir -p "$dir/pool/1"
   mv "$dir/worktree" "$dir/pool/1/repo"
   ln -s pool/1/repo "$dir/worktree"
@@ -1645,7 +1648,7 @@ SH
 
 run_gnhf_case() {  # <case> [teardown flags]
   local dir=$1; shift
-  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_TEARDOWN_GUARD_DONE=1 \
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/code" FM_TEARDOWN_GUARD_DONE=1 \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
     bash "$TEARDOWN" history-scout "$@"
 }
