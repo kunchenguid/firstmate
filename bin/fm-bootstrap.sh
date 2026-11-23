@@ -21,6 +21,8 @@
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
+#                 "SECONDMATE_SYNC: secondmate <id>: reconciliation pending for
+#                 <d>d<h>h, oldest of <n> (record: <path>)",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
@@ -45,7 +47,8 @@
 #          The secondmate sweep also propagates declared inherited local material
 #          into each validated live secondmate home.
 #          SECONDMATE_SYNC lines report actionable skipped placement-specific
-#          syncs or inheritance failures for live secondmate homes, plus
+#          syncs or inheritance failures for live secondmate homes, the
+#          oldest still-pending divergence record with its age, plus
 #          quarantine diagnostics for divergent shared captain-preference
 #          copies; no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
@@ -541,6 +544,12 @@ secondmate_sync() {
     esac
   done < "$tmp"
   rm -f "$tmp"
+  local pending oldest_id oldest_age oldest_marker
+  pending=$(secondmate_update_reconcile_pending "$STATE" "$(date +%s)")
+  if [ -n "$pending" ]; then
+    IFS=$'\t' read -r oldest_id _ _ oldest_age _ _ oldest_marker <<<"${pending%%$'\n'*}"
+    echo "SECONDMATE_SYNC: secondmate $oldest_id: reconciliation pending for $oldest_age, oldest of $(printf '%s\n' "$pending" | wc -l | tr -d ' ') (record: $oldest_marker)"
+  fi
   unset -f fm_ff_after_instruction_update
   # Inheritance propagation: push the primary-authoritative local inheritance
   # surface into every VALIDATED live secondmate home swept above.

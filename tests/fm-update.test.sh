@@ -320,7 +320,7 @@ test_dirty_secondmate_skipped() {
 
 # --- T5: diverged secondmate is skipped, its commit preserved --------------
 test_diverged_secondmate_skipped() {
-  local w out before marker second_out
+  local w out before marker second_out first_seen
   w=$(new_world t5)
   add_sm "$w" sm1
   # Local commit on the secondmate's detached HEAD makes it diverge from origin.
@@ -342,9 +342,19 @@ test_diverged_secondmate_skipped() {
   assert_grep 'schema=fm-secondmate-update-reconcile.v1' "$marker" "divergence record schema missing"
   assert_grep "local_commit=$before" "$marker" "divergence record lost the protected local commit"
 
+  first_seen=$(sed -n 's/^first_seen=//p' "$marker")
+  case "$first_seen" in ''|*[!0-9]*) fail "divergence record has no first_seen epoch: $(cat "$marker")" ;; esac
+
   second_out=$(run_update "$w")
   assert_contains "$second_out" "reconciliation required (record: $marker)" \
     "a later update did not surface the durable divergence"
+  assert_grep "first_seen=$first_seen" "$marker" "a later update reset the divergence's first_seen"
+
+  # A record written before first_seen existed keeps its file time as the start.
+  sed '/^first_seen=/d' "$marker" > "$marker.legacy" && mv "$marker.legacy" "$marker"
+  TZ=UTC0 touch -t 202001020304.05 "$marker"
+  run_update "$w" >/dev/null
+  assert_grep "first_seen=1577934245" "$marker" "a legacy record did not keep its file time as first_seen"
   pass "T5 diverged secondmate is preserved and durably actionable"
 }
 

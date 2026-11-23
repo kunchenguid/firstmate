@@ -127,6 +127,11 @@
 #                          opt-in config/open-decision-reminders record-age
 #                          backstop, independent of pane and branch state;
 #                          open_decision_reminder_tick owns its bounded repeats
+#   check: secondmate <id> still diverged after <d>d<h>h: local <commit> target <commit> (record: <path>)
+#                          a secondmate home that could not fast-forward has
+#                          stayed diverged past a day; repeats every three
+#                          days until a sync clears its record
+#                          (secondmate_diverged_reminder_tick)
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -3014,6 +3019,65 @@ EOF
   fi
 }
 
+# A secondmate home that cannot fast-forward keeps a divergence record in this
+# home (bin/fm-ff-lib.sh secondmate_update_reconcile_pending owns the record
+# and its first-seen time) until a later sync converges it. Once a record is
+# FM_SECONDMATE_DIVERGED_REMIND_SECS old (default one day), one check row per
+# home is queued, then again every FM_SECONDMATE_DIVERGED_REPEAT_SECS (default
+# three days) while it stays. The tick only reports; it never resets or
+# reconciles the home. Both settings must be canonical positive integers of at
+# most nine digits.
+secondmate_diverged_reminder_tick() {  # [now-epoch], for deterministic clock callers
+  local now=${1:-} threshold=${FM_SECONDMATE_DIVERGED_REMIND_SECS:-86400}
+  local repeat=${FM_SECONDMATE_DIVERGED_REPEAT_SECS:-259200} value
+  local ledger="$STATE/.secondmate-diverged-reminders" old='' rows='' pending queued tmp
+  local id first age age_text local_commit target_commit marker last old_id old_first old_last key reason
+  SECONDMATE_DIVERGED_REMINDER=
+  for value in "$threshold" "$repeat"; do
+    case "$value" in ''|0*|*[!0-9]*) echo 'watcher: invalid secondmate divergence reminder settings' >&2; return 1 ;; esac
+    [ "${#value}" -le 9 ] || return 1
+  done
+  if ! compgen -G "$STATE/.secondmate-update-reconcile/*.pending" >/dev/null; then
+    rm -f -- "$ledger"
+    return 0
+  fi
+  [ -n "$now" ] || fm_epoch_seconds_to now
+  pending=$(. "$SCRIPT_DIR/fm-ff-lib.sh" && secondmate_update_reconcile_pending "$STATE" "$now") || return 1
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    [ -f "$ledger" ] && [ ! -L "$ledger" ] || return 1
+    old=$(cat "$ledger") || return 1
+  fi
+  queued=$(fm_wake_queued_keys check)
+  while IFS=$'\t' read -r id first age age_text local_commit target_commit marker; do
+    [ -n "$id" ] || continue
+    last=0
+    while IFS=$'\t' read -r old_id old_first old_last; do
+      [ "$old_id" = "$id" ] && [ "$old_first" = "$first" ] || continue
+      case "$old_last" in ''|*[!0-9]*) ;; *) [ "${#old_last}" -gt 12 ] || last=$((10#$old_last)) ;; esac
+      break
+    done <<EOF
+$old
+EOF
+    if [ "$age" -ge "$threshold" ] && { [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$repeat" ]; }; then
+      key="secondmate-diverged-$id"
+      if ! printf '%s\n' "$queued" | grep -Fx "$key" >/dev/null 2>&1; then
+        reason="check: secondmate $id still diverged after $age_text: local ${local_commit:0:12} target ${target_commit:0:12} (record: $marker)"
+        fm_wake_append check "$key" "$reason" || return 1
+        [ -n "$SECONDMATE_DIVERGED_REMINDER" ] || SECONDMATE_DIVERGED_REMINDER=$reason
+      fi
+      last=$now
+    fi
+    rows="$rows$id"$'\t'"$first"$'\t'"$last"$'\n'
+  done <<EOF
+$pending
+EOF
+  tmp=$(mktemp "$STATE/.secondmate-diverged-reminders.XXXXXX") || return 1
+  if ! printf '%s' "$rows" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 # The identity a re-surface throttle is bound to: the task's whole status-log
 # signature. Any new status event - a replacement wait, a fresh delivery, a
 # blocker - changes it and so starts its own window instead of inheriting the
@@ -4153,6 +4217,12 @@ while :; do
     exit 1
   }
   [ -z "$OPEN_DECISION_REMINDER" ] || wake "$OPEN_DECISION_REMINDER"
+
+  secondmate_diverged_reminder_tick || {
+    echo 'watcher: secondmate divergence reminder check failed' >&2
+    exit 1
+  }
+  [ -z "$SECONDMATE_DIVERGED_REMINDER" ] || wake "$SECONDMATE_DIVERGED_REMINDER"
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
