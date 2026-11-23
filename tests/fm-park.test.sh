@@ -968,6 +968,39 @@ test_land_requires_opt_in_but_always_cleans_parked() {
   pass "merge-time cleanup requires opt-in for unparked lanes and always cleans parked lanes"
 }
 
+# A finished record without a PR (a scout, or a ship that never opened one) is
+# cleaned up only under its own opt-in, only while its newest crew line still
+# reports done: or failed:, and its outcome names it as finished work.
+test_land_cleans_a_finished_record_without_pr_only_under_its_opt_in() {
+  local w out rc
+  w=$(make_world land-finished "$GH_URL")
+  fm_write_meta "$w/state/lane.meta" "window=fm:fm-lane" "endpoint_task_id=lane" \
+    "worktree=$w/root/.treehouse/repo-1/3/repo" "project=$w/project" "kind=scout" "harness=claude"
+  rm -f "$w/state/lane.check.sh"
+  printf 'done [at=1]: report at data/lane/report.md\n' > "$w/state/lane.status"
+  out=$(run_park "$w" land lane --if-eligible 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/teardown.log" ] || fail "land-finished: acted without config/auto-clean-finished: $out"
+
+  : > "$w/config/auto-clean-finished"
+  printf 'working [at=2]: picked up a follow-up\n' >> "$w/state/lane.status"
+  printf 'pr=\n' > "$w/state/lane.review-park-land"
+  out=$(run_park "$w" land lane --if-eligible 2>&1)
+  [ -z "$out" ] && [ ! -e "$w/teardown.log" ] || fail "land-finished: cleaned up a record that is working again: $out"
+  [ ! -e "$w/state/lane.review-park-land" ] || fail "land-finished: kept the request of a record that is working again"
+
+  printf 'failed [at=3]: could not reproduce\n' >> "$w/state/lane.status"
+  : > "$w/teardown.refuse"
+  rc=0; out=$(run_park "$w" land lane --if-eligible 2>&1) || rc=$?
+  [ "$rc" = 1 ] || fail "land-finished-refused: exit $rc"
+  [ "$out" = "cleanup-refused lane: finished record; automatic cleanup refused: REFUSED: worktree has work not on any remote and not landed." ] \
+    || fail "land-finished-refused: $out"
+  rm -f "$w/teardown.refuse" "$w/teardown.log"
+  out=$(run_park "$w" land lane --if-eligible 2>&1)
+  [ "$out" = "cleaned up lane: finished record; lane torn down and its working copy returned" ] || fail "land-finished: $out"
+  [ "$(cat "$w/teardown.log")" = lane ] || fail "land-finished: teardown was not called exactly once without --force: $(cat "$w/teardown.log")"
+  pass "a finished record without a PR is cleaned up only under config/auto-clean-finished and only while it still reports done or failed"
+}
+
 test_land_queue_fails_when_cleanup_request_cannot_be_written() {
   local w out rc=0
   w=$(make_world land-queue-write-fail "$GH_URL")
@@ -1227,6 +1260,7 @@ fm_test_run \
   test_closed_pr_is_reported_once \
   test_tick_parks_clean_idle_lanes_only_when_opted_in \
   test_land_requires_opt_in_but_always_cleans_parked \
+  test_land_cleans_a_finished_record_without_pr_only_under_its_opt_in \
   test_land_queue_fails_when_cleanup_request_cannot_be_written \
   test_land_report_keeps_lost_pool_slot_details \
   test_detached_land_returns_at_once_and_the_tick_reports_it \

@@ -166,6 +166,11 @@
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
+#   check: finished work: <task> - <why>; clean up with bin/fm-teardown.sh <task>, ...
+#                          a heartbeat found a merged or finished record still
+#                          present, once per record and fact; joined with `; `
+#                          when more than one surfaces (fm-finished-record-lib.sh
+#                          owns the conditions and the opt-in automatic cleanup)
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -257,6 +262,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-record-hygiene-lib.sh
 . "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
+# shellcheck source=bin/fm-finished-record-lib.sh
+. "$SCRIPT_DIR/fm-finished-record-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
 # the per-cycle reconcile itself runs as a separate process.
 # shellcheck source=bin/fm-procevent-lib.sh
@@ -4894,6 +4901,12 @@ EOF
       hygiene_started=$(ps -o lstart= -p "$hygiene_worker" 2>/dev/null | sed 's/^[[:space:]]*//')
       printf '%s\t%s\n' "$hygiene_worker" "$hygiene_started" > "$hygiene_running"
     fi
+    # Finished work gets an owner in both postures: its notification rows are
+    # queued (or its opt-in cleanup started) before any triage below, so a
+    # heartbeat that exits for another reason still delivers them.
+    finished_rc=0
+    finished_records_review || finished_rc=$?
+    [ "$finished_rc" -ne 2 ] || exit 1
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
@@ -4912,6 +4925,10 @@ EOF
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat" actionable
+    elif [ "$finished_rc" -eq 0 ]; then
+      touch "$STATE/.last-heartbeat"
+      mark_all_captain_relevant_surfaced || true
+      wake "$FM_FINISHED_RECORDS_REASON"
     else
       if ! mark_all_captain_relevant_surfaced; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
