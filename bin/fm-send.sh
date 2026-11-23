@@ -96,10 +96,11 @@
 # entry of the user root's plugins/installed_plugins.json. Built-ins and unknown
 # commands keep the marker in front and arrive as chat. Only the typed bytes
 # move: the pending-reply record, corr reuse, and the slash settle read the
-# original text. Typed bytes over 800 keep the marker in front, because Claude
-# turns a typed burst longer than 800 characters into a pasted block it never
-# parses as a command; the limit counts bytes on purpose, so multibyte text
-# falls back early rather than late. Every other marked typed message,
+# original text. Typed bytes over 800 are refused before anything is typed,
+# and the new pending-reply record is discarded, because Claude turns a typed
+# burst longer than 800 characters into a pasted block it never parses as a
+# command; the limit counts bytes on purpose, so multibyte text is refused
+# early rather than pasted late. Every other marked typed message,
 # including "/" or "$" to a non-claude secondmate, keeps the marker in front
 # and reaches that harness as chat, not as a parser command.
 #
@@ -1301,7 +1302,12 @@ else
         slash_args=${RESOLVE_ANSWER_TEXT#"$slash_command"}
         fm_pending_reply_embed_corr "${slash_args#[[:space:]]}" "$PENDING_REPLY_CORR" slash_args
         slash_message="$slash_command $slash_args"
-        [ "$(printf '%s' "$slash_message" | wc -c)" -gt 800 ] || MESSAGE=$slash_message
+        if [ "$(printf '%s' "$slash_message" | wc -c)" -gt 800 ]; then
+          fm_send_known_undelivered_cleanup || true
+          echo "error: slash command $slash_command for $TARGET_TASK_ID is over the 800-byte limit for a typed Claude command once its marker and corr are added; Claude would paste it as chat instead of running it, so nothing was sent. Shorten the arguments." >&2
+          exit 1
+        fi
+        MESSAGE=$slash_message
       fi
       ;;
     esac

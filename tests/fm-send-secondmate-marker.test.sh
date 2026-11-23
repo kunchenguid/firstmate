@@ -289,7 +289,7 @@ expect_marker_first() {
 }
 
 test_claude_secondmate_slash_command_leads_typed_bytes() {
-  local dir fb log home rc got corr long user_root acct plugin
+  local dir fb log home rc got corr long before user_root acct plugin
   dir="$TMP_ROOT/sm-slash"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home sm-slash)
@@ -330,11 +330,15 @@ test_claude_secondmate_slash_command_leads_typed_bytes() {
   expect_code 0 "$rc" "an unknown command to a local claude secondmate should succeed"
   expect_marker_first "$log" "/nosuchcmd x" "an unknown command must keep the marker in front"
 
+  # Claude pastes a typed burst over 800 characters as chat and never parses
+  # it as a command, so an over-limit installed command is refused unsent.
   long=$(printf 'word %.0s' $(seq 1 160))
+  before=$(ls "$(fm_pending_reply_dir "$home/state")" | sort)
   run_send "$fb" "$home" "$log" "domain" "/sharpen $long"; rc=$?
-  expect_code 0 "$rc" "a long slash command to a local claude secondmate should succeed"
-  expect_marker_first "$log" "/sharpen $long" \
-    "typed bytes over Claude's 800-character paste threshold must keep the marker in front"
+  [ "$rc" -ne 0 ] || fail "a slash command over Claude's 800-character paste threshold must be refused"
+  [ ! -s "$log" ] || fail "a refused over-limit slash command must type nothing"$'\n'"$(cat "$log")"
+  [ "$(ls "$(fm_pending_reply_dir "$home/state")" | sort)" = "$before" ] \
+    || fail "a refused over-limit slash command must leave no new pending-reply record"
 
   if command -v jq >/dev/null 2>&1; then
     plugin="$TMP_ROOT/plugin-cache/pstack/1.0"
@@ -378,7 +382,7 @@ test_claude_secondmate_slash_command_leads_typed_bytes() {
   run_send "$fb" "$home" "$log" "acct" "/acctonly now"; rc=$?
   expect_code 0 "$rc" "a command in the meta account root should succeed"
   expect_command_first "$log" /acctonly "now" "the meta account= root must be searched"
-  pass "fm-send: a local claude secondmate installed skill or command is typed command-first, while built-ins, unknown commands, and long text keep the marker in front"
+  pass "fm-send: a local claude secondmate installed skill or command is typed command-first, while built-ins and unknown commands keep the marker in front, and over-limit commands are refused"
 }
 
 test_other_marked_messages_keep_marker_first() {
