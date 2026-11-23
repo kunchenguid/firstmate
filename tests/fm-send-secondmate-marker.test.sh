@@ -333,11 +333,11 @@ test_claude_secondmate_slash_command_leads_typed_bytes() {
   # Claude pastes a typed burst over 800 characters as chat and never parses
   # it as a command, so an over-limit installed command is refused unsent.
   long=$(printf 'word %.0s' $(seq 1 160))
-  before=$(ls "$(fm_pending_reply_dir "$home/state")" | sort)
+  before=$(find "$(fm_pending_reply_dir "$home/state")" -mindepth 1 -maxdepth 1 | sort)
   run_send "$fb" "$home" "$log" "domain" "/sharpen $long"; rc=$?
   [ "$rc" -ne 0 ] || fail "a slash command over Claude's 800-character paste threshold must be refused"
   [ ! -s "$log" ] || fail "a refused over-limit slash command must type nothing"$'\n'"$(cat "$log")"
-  [ "$(ls "$(fm_pending_reply_dir "$home/state")" | sort)" = "$before" ] \
+  [ "$(find "$(fm_pending_reply_dir "$home/state")" -mindepth 1 -maxdepth 1 | sort)" = "$before" ] \
     || fail "a refused over-limit slash command must leave no new pending-reply record"
 
   if command -v jq >/dev/null 2>&1; then
