@@ -10,8 +10,9 @@
 #      fragment, and a structural agy ancestor now outranks a retained or
 #      inherited CLAUDECODE - tests/fm-harness-precedence.test.sh owns the
 #      general boundary.
-#   3. The launch carries the brief via --prompt-interactive with --model,
-#      --effort, and --dangerously-skip-permissions; a requested model a
+#   3. The launch carries the brief via --prompt-interactive with --model
+#      and --dangerously-skip-permissions. Verified effort-family ids replace
+#      --effort; other ids keep the legacy flag behavior. A requested model a
 #      reachable `agy models` omits refuses loudly instead of wedging a pane,
 #      while a hung or unreachable listing is cut off and never blocks.
 #   4. A fresh worktree would park agy on its folder-trust dialog, so the spawn
@@ -551,6 +552,8 @@ if [ "${1:-}" = models ]; then
   printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
   printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
   printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
+  printf 'fixture-reasoner-high\tFixture Reasoner (High)\n'
+  printf 'fixture-reasoner-preview-low\tFixture Reasoner Preview (Low)\n'
   exit 0
 fi
 echo "fake agy must never execute" >&2
@@ -631,13 +634,13 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
   rec=$(make_agy_spawn_case launch "$id")
   read_agy_spawn_record "$rec"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
-    --model gemini-3.8-flash-low --effort low)
+    --model fixture-reasoner-high --effort low)
   rc=$?
   expect_code 0 "$rc" "agy spawn with a listed model should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
   assert_contains "$launch" "$FAKEBIN_DIR/agy" "agy launch did not pin the resolved absolute binary"
   assert_contains "$launch" "--prompt-interactive" "agy launch did not carry the brief via --prompt-interactive"
-  assert_contains "$launch" "--model 'gemini-3.8-flash-low'" "agy launch did not carry the requested model"
+  assert_contains "$launch" "--model 'fixture-reasoner-high'" "agy launch did not carry the requested model"
   assert_contains "$launch" "--effort 'low'" "agy launch did not carry the requested effort"
   assert_contains "$launch" "--dangerously-skip-permissions" "agy launch omitted unattended autonomy"
   assert_contains "$launch" "env -u CLAUDECODE" "agy launch did not clear the inherited launcher marker"
@@ -646,9 +649,28 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
   assert_not_contains "$launch" "__BRIEF__" "agy launch left its brief placeholder unsubstituted"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'harness=agy' "$meta" "agy meta did not record its harness"
-  assert_grep 'model=gemini-3.8-flash-low' "$meta" "agy meta did not record its model"
+  assert_grep 'model=fixture-reasoner-high' "$meta" "agy meta did not record its model"
   assert_grep 'effort=low' "$meta" "agy meta did not record its effort"
-  pass "fm-spawn: agy launch carries brief, model, effort, and autonomy with cleared markers"
+  assert_not_contains "$(cat "$meta")" "effort_source=" "an id without effort siblings must not claim model-owned effort"
+  pass "fm-spawn: agy forwards effort for a model without catalog siblings"
+}
+
+test_agy_catalog_family_owns_effort() {
+  local name=$1 id rec out rc launch meta
+  shift
+  id="agy-family-$name-$$"
+  rec=$(make_agy_spawn_case "family-$name" "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-high "$@") || rc=$?
+  expect_code 0 "$rc" "agy spawn with a listed effort family should succeed ($out)"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "--model 'gemini-3.8-flash-high'" "agy launch dropped the effort-suffixed model"
+  assert_not_contains "$launch" "--effort" "agy passed --effort for a verified family ($name)"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'effort_source=model-id' "$meta" "agy meta did not attribute effort to the model id ($name)"
+  pass "fm-spawn: agy takes effort from the model id ($name)"
 }
 
 test_agy_effort_xhigh_is_recorded_but_omitted() {
@@ -657,7 +679,7 @@ test_agy_effort_xhigh_is_recorded_but_omitted() {
   rec=$(make_agy_spawn_case xhigh "$id")
   read_agy_spawn_record "$rec"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
-    --model gemini-3.8-flash-low --effort xhigh)
+    --model fixture-reasoner-high --effort xhigh)
   rc=$?
   expect_code 0 "$rc" "agy spawn with an unsupported effort should still succeed"
   launch=$(cat "$CASE_DIR/launch.log")
@@ -688,10 +710,12 @@ test_agy_unreachable_listing_launches_unvalidated() {
   read_agy_spawn_record "$rec"
   rc=0
   out=$(FM_FAKE_AGY_MODELS_FAIL=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
-    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low --effort high) || rc=$?
   expect_code 0 "$rc" "an unreachable model listing must not block the spawn"
   [ -s "$CASE_DIR/launch.log" ] || fail "an unreachable listing produced no launch command"
   assert_contains "$out" "listing is unreachable" "an unreachable listing launched without its notice"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "--effort 'high'" "an unreachable listing suppressed the requested effort"
+  assert_not_contains "$(cat "$HOME_DIR/state/$id.meta")" "effort_source=" "an unreachable listing claimed model-owned effort"
   pass "fm-spawn: an unreachable agy listing establishes nothing and launches"
 }
 
@@ -931,6 +955,8 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy
 test_agy_effort_xhigh_is_recorded_but_omitted
 test_agy_unlisted_model_refuses_before_pane_creation
 test_agy_unreachable_listing_launches_unvalidated
+test_agy_catalog_family_owns_effort implicit
+test_agy_catalog_family_owns_effort conflicting --effort low
 test_agy_hung_listing_is_cut_off_and_launches
 test_agy_zero_model_timeout_is_clamped_to_the_default_bound
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths
