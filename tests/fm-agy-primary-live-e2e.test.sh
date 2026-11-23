@@ -11,6 +11,24 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/agy-live-helpers.sh
+. "$ROOT/tests/agy-live-helpers.sh"
+
+OUT=
+AGY_EXIT=
+
+fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  if [ -n "$AGY_EXIT" ]; then
+    printf 'agy output (exit %s, tail, redacted):\n' "$AGY_EXIT" >&2
+    if [ -n "$OUT" ]; then
+      printf '%s\n' "$OUT" | agy_live_failure_tail >&2
+    else
+      printf '%s\n' '(no agy output)' >&2
+    fi
+  fi
+  exit 1
+}
 
 fm_live_gate opt-in FM_AGY_PRIMARY_LIVE,FM_AGY_PRIMARY_LIVE_E2E agy jq
 
@@ -46,17 +64,16 @@ trap cleanup_all EXIT
 run_agy() {  # <home> <prompt> [env...]
   local home=$1 prompt=$2
   shift 2
-  (cd "$home" && env HOME="$AGY_USER_HOME" FM_HOME="$home" "$@" \
-    timeout 600 "$AGY_BIN" -p "$prompt" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} \
-    --effort low --dangerously-skip-permissions 2>&1 || true)
+  AGY_EXIT=0
+  OUT=$(
+    cd "$home" 2>&1 && env HOME="$AGY_USER_HOME" FM_HOME="$home" AGY_CLI_HIDE_ACCOUNT_INFO=true "$@" \
+      timeout 600 "$AGY_BIN" -p "$prompt" ${AGY_MODEL_ARGS[@]+"${AGY_MODEL_ARGS[@]}"} \
+      --effort low --dangerously-skip-permissions 2>&1
+  ) || AGY_EXIT=$?
 }
 
-mkdir -p "$HOME_DIR" "$AGY_USER_HOME/.gemini/antigravity-cli"
-for auth_file in antigravity-oauth-token installation_id jetski_state.pbtxt settings.json; do
-  if [ -f "$HOME/.gemini/antigravity-cli/$auth_file" ]; then
-    cp "$HOME/.gemini/antigravity-cli/$auth_file" "$AGY_USER_HOME/.gemini/antigravity-cli/$auth_file"
-  fi
-done
+mkdir -p "$HOME_DIR" || fail "could not create the throwaway firstmate home"
+agy_live_stage_home "$AGY_USER_HOME" || fail "could not stage the throwaway agy HOME"
 
 (cd "$ROOT" && tar --exclude=.git --exclude=state --exclude=projects --exclude=node_modules -cf - .) \
   | (cd "$HOME_DIR" && tar -xf -) \
@@ -77,9 +94,9 @@ printf '# Backlog\n\n- live probe\n' > "$HOME_DIR/data/backlog.md"
 HOME="$AGY_USER_HOME" "$HOME_DIR/bin/fm-agy-trust.sh" "$HOME_DIR" "live-primary" >/dev/null 2>&1 || true
 
 # --- SessionStart -------------------------------------------------------------
-OUT=$(run_agy "$HOME_DIR" "Reply with the exact live marker token from session start context and nothing else.")
+run_agy "$HOME_DIR" "Reply with the exact live marker token from session start context and nothing else."
 [ -f "$HOME_DIR/state/.lock" ] || fail "SessionStart hook did not create state/.lock in live agy run"
-assert_contains "$OUT" "$MARKER" "SessionStart injectSteps systemMessage did not reach live agy context"
+[[ "$OUT" == *"$MARKER"* ]] || fail "SessionStart injectSteps systemMessage did not reach live agy context"
 pass "agy primary live: SessionStart hook acquires lock and injects digest into live model context"
 
 # --- PreToolUse deny ----------------------------------------------------------
@@ -87,12 +104,12 @@ pass "agy primary live: SessionStart hook acquires lock and injects digest into 
 # whole command line never runs and its trailing touch leaves no marker.
 DENY_MARK="$HOME_DIR/state/live-deny-ran"
 rm -f "$HOME_DIR/state/.lock"
-OUT=$(run_agy "$HOME_DIR" "Run exactly this one shell command with your command tool: bin/fm-watch.sh; touch state/live-deny-ran
-If the command is blocked or denied, do not run any other command; reply with the word BLOCKED and the reason you were given.")
-[ ! -e "$DENY_MARK" ] || fail "PreToolUse did not deny a direct bin/fm-watch.sh command in live agy: $OUT"
-assert_contains "$OUT" "BLOCKED" "live agy never reported the watcher command as blocked"
-assert_contains "$OUT" "watcher-direct" \
-  "live agy reply lacked the [watcher-direct] reason bin/fm-arm-pretool-check.sh --agy returns, so the PreToolUse deny is unproven"
+run_agy "$HOME_DIR" "Run exactly this one shell command with your command tool: bin/fm-watch.sh; touch state/live-deny-ran
+If the command is blocked or denied, do not run any other command; reply with the word BLOCKED and the reason you were given."
+[ ! -e "$DENY_MARK" ] || fail "PreToolUse did not deny a direct bin/fm-watch.sh command in live agy"
+[[ "$OUT" == *BLOCKED* ]] || fail "live agy never reported the watcher command as blocked"
+[[ "$OUT" == *watcher-direct* ]] \
+  || fail "live agy reply lacked the [watcher-direct] reason bin/fm-arm-pretool-check.sh --agy returns, so the PreToolUse deny is unproven"
 pass "agy primary live: PreToolUse --agy deny blocks a direct watcher command"
 
 # --- Stop-hook park -----------------------------------------------------------
@@ -124,14 +141,14 @@ rm -f "$HOME_DIR/state/.lock" "$HOME_DIR/state/.agy-park-owner" \
   done
 ) &
 WAKE_PID=$!
-OUT=$(run_agy "$HOME_DIR" "If you have not yet seen a firstmate watcher wake message in this conversation, reply with the single word READY and end your turn without running any command. Once you receive a firstmate watcher wake message, reply with the single word DONE and end your turn without running any command." \
-  FM_POLL=1 FM_SIGNAL_GRACE=0 FM_AGY_PARK_TIMEOUT=30 FM_AGY_TURNEND_LOOP_CEILING=2)
+run_agy "$HOME_DIR" "If you have not yet seen a firstmate watcher wake message in this conversation, reply with the single word READY and end your turn without running any command. Once you receive a firstmate watcher wake message, reply with the single word DONE and end your turn without running any command." \
+  FM_POLL=1 FM_SIGNAL_GRACE=0 FM_AGY_PARK_TIMEOUT=30 FM_AGY_TURNEND_LOOP_CEILING=2
 wait "$WAKE_PID" 2>/dev/null || true
 [ -s "$HOME_DIR/state/.agy-park-owner" ] \
-  || fail "Stop hook never claimed a park in state/.agy-park-owner in live agy run: $OUT"
+  || fail "Stop hook never claimed a park in state/.agy-park-owner in live agy run"
 [ -e "$HOME_DIR/state/live-watcher-started" ] \
-  || fail "Stop hook never started a real watcher with state/.last-watcher-beat in live agy run: $OUT"
-assert_contains "$OUT" "DONE" "Stop hook watcher wake did not reach a follow-up turn in live agy run"
+  || fail "Stop hook never started a real watcher with state/.last-watcher-beat in live agy run"
+[[ "$OUT" == *DONE* ]] || fail "Stop hook watcher wake did not reach a follow-up turn in live agy run"
 rm -f "$HOME_DIR/state/live-task.meta" "$HOME_DIR/state/.wake-queue" "$HOME_DIR/state/live-task.status"
 stop_watchers
 pass "agy primary live: Stop hook parks on a real watcher and delivers its wake to a follow-up turn"
@@ -150,9 +167,9 @@ jq -e --arg p "$SM_HOME" '.trustedWorkspaces | index($p) != null' \
   "$AGY_USER_HOME/.gemini/antigravity-cli/settings.json" >/dev/null 2>&1 \
   || fail "secondmate home was not recorded in agy trustedWorkspaces"
 
-OUT=$(run_agy "$SM_HOME" "Reply with the exact live marker token from session start context and nothing else.")
+run_agy "$SM_HOME" "Reply with the exact live marker token from session start context and nothing else."
 [ -f "$SM_HOME/state/.lock" ] || fail "SessionStart hook did not create state/.lock in the live secondmate home"
-assert_contains "$OUT" "$SM_MARKER" "a pre-trusted secondmate home did not reach its own SessionStart digest in live agy"
+[[ "$OUT" == *"$SM_MARKER"* ]] || fail "a pre-trusted secondmate home did not reach its own SessionStart digest in live agy"
 pass "agy secondmate live: pre-seeded workspace trust launches straight into the secondmate home's digest"
 
 cleanup_all

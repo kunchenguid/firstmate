@@ -6,8 +6,9 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/agy-live-helpers.sh
+. "$ROOT/tests/agy-live-helpers.sh"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGY_BIN=$(command -v agy 2>/dev/null || true)
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
 LAB=
@@ -20,9 +21,23 @@ cleanup() {
   [ -z "$LAB" ] || rm -rf -- "$LAB"
 }
 
+capture() {
+  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" -S -100 "$@" 2>/dev/null || true
+}
+
 fail() {
+  local latest
   printf 'not ok - %s\n' "$1" >&2
-  cleanup
+  if [ -n "$REAL_TMUX" ] && [ -n "$LAB" ]; then
+    latest=$(capture -J)
+    latest=${latest:-${screen:-}}
+    printf '%s\n' 'Last agy pane capture (tail, redacted):' >&2
+    if [ -n "$latest" ]; then
+      printf '%s\n' "$latest" | agy_live_failure_tail >&2
+    else
+      printf '%s\n' '(no pane capture available)' >&2
+    fi
+  fi
   exit 1
 }
 
@@ -42,13 +57,8 @@ git -C "$LAB/workspace" config user.name "guard" || fail "could not configure th
 git -C "$LAB/workspace" commit -q --allow-empty -m init || fail "could not seed the isolated agy workspace"
 WORKSPACE=$(cd "$LAB/workspace" && pwd -P) || fail "could not resolve the isolated agy workspace"
 
-# The worker runs under a throwaway HOME holding a copy of ~/.gemini (the
-# method recorded in docs/verification/agy.md), so its trust answer and every
-# other agy write land in the lab store, never the operator's real one.
 AGY_HOME="$LAB/home"
-mkdir -p "$AGY_HOME" || fail "could not create the throwaway agy HOME"
-[ -d "$HOME/.gemini" ] || fail "no ~/.gemini to stage for the throwaway agy HOME"
-cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway agy credential copy"
+agy_live_stage_home "$AGY_HOME" || fail "could not stage the throwaway agy HOME"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
@@ -60,23 +70,19 @@ cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway
 "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n agy -c "$WORKSPACE" \
   || fail "could not open the isolated agy window"
 
-capture() {
-  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" -S -100 2>/dev/null || true
-}
-
 # The launch prompt asks for a computed answer (12345+67890=80235) so the
 # awaited token never appears in the echoed launch line itself, where a plain
 # reply token would false-positive on the shell echo (including across tmux
 # wrapped rows).
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
-  "HOME=\"$AGY_HOME\" $AGY_BIN --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
+  "HOME=\"$AGY_HOME\" AGY_CLI_HIDE_ACCOUNT_INFO=true \"$AGY_BIN\" --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
   || fail "could not type the agy launch line"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
   || fail "could not submit the agy launch line"
 
 # A fresh workspace stops on the folder-trust dialog. Answer the preselected
 # safe choice once it renders. The answer appends the workspace to
-# trustedWorkspaces in the throwaway HOME's copy of the agy settings store.
+# trustedWorkspaces in the throwaway HOME's agy settings store.
 screen=
 for _ in $(seq 1 150); do
   screen=$(capture)
