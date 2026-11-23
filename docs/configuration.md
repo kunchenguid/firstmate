@@ -184,7 +184,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ## No-mistakes pipeline monitor for hc tasks (config/hc-pipeline-monitor)
 
 The optional local, gitignored `config/hc-pipeline-monitor` presence flag opts this home into a read-only pipeline monitor tab for hc-backed tasks.
-With the flag present, the watcher's observe pass opens one Herdr tab named `<task> pipeline monitor` in the task's space when the task has an active no-mistakes run, running `no-mistakes attach --run <run-id>`.
+With the flag present, the watcher's observe pass opens one Herdr tab named `<hometag>-<task> pipeline monitor`, beside the worker's tab in the worker's space, when the task has an active no-mistakes run, running `no-mistakes attach --run <run-id>`.
 A newer run id replaces that tab, and task teardown closes it.
 With the file absent, observe opens nothing; teardown still closes any monitor tab this home owns.
 `bin/fm-hc-pipeline-monitor.sh` owns the behavior and its ownership labels.

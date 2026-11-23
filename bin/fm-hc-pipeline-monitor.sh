@@ -4,7 +4,7 @@
 #
 # Usage:
 #   fm-hc-pipeline-monitor.sh observe <task-id>  # idempotent; the watcher calls it each poll
-#   fm-hc-pipeline-monitor.sh close <task-id>    # fm-teardown.sh calls it before the worker close
+#   fm-hc-pipeline-monitor.sh close <task-id>    # fm-teardown.sh calls it after the worker close
 #
 # observe is opt-in: it opens nothing unless config/hc-pipeline-monitor exists.
 # observe reads the task's active no-mistakes run in its worktree. For the first
@@ -66,15 +66,19 @@ monitor_terminal_owned() {
 }
 
 # monitor_list <session> <task> <home>: addresses of this task's monitor terminals.
+# Returns non-zero when the listing cannot be read, so it never looks like "no monitors".
 monitor_list() {
-  fm_backend_hc_cli "$1" ls --json --label "firstmate.monitor=$(monitor_label "$2")" --label "firstmate.home=$3" 2>/dev/null \
-    | jq -r '.terminals[]?.address // empty' 2>/dev/null
+  local out
+  out=$(fm_backend_hc_cli "$1" ls --json --label "firstmate.monitor=$(monitor_label "$2")" --label "firstmate.home=$3" 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -r '.terminals[]?.address // empty' 2>/dev/null
 }
 
 # monitor_close_all <session> <task> <home>: close every owned monitor terminal.
-# Returns non-zero when a listed terminal is not provably owned or cannot be closed.
+# Returns non-zero when the listing is unreadable, or a listed terminal is not
+# provably owned or cannot be closed.
 monitor_close_all() {
-  local session=$1 task=$2 home=$3 address failed=0
+  local session=$1 task=$2 home=$3 address failed=0 listed
+  listed=$(monitor_list "$session" "$task" "$home") || { echo "error: could not list pipeline monitors for $task" >&2; return 1; }
   while IFS= read -r address; do
     [ -n "$address" ] || continue
     fm_backend_hc_address_valid "$address" || { failed=1; continue; }
@@ -84,11 +88,22 @@ monitor_close_all() {
       continue
     fi
     fm_backend_hc_cli "$session" kill --json "$address" >/dev/null 2>&1 || true
-    fm_backend_hc_cli "$session" rm --json "$address" >/dev/null 2>&1 || true
+    if ! fm_backend_hc_cli "$session" rm --json "$address" >/dev/null 2>&1; then
+      echo "error: could not close pipeline monitor $address" >&2
+      failed=1
+    fi
   done <<EOF
-$(monitor_list "$session" "$task" "$home")
+$listed
 EOF
   [ "$failed" -eq 0 ]
+}
+
+# worker_space <session> <terminal> <home>: the space of the worker's own terminal,
+# falling back to the spawn default when its label cannot be read.
+worker_space() {
+  local space
+  space=$(fm_backend_hc_cli "$1" get --json "$2" 2>/dev/null | jq -r '.labels["herdr.space"] // empty' 2>/dev/null) || space=
+  printf '%s' "${space:-${FM_HC_SPACE:-fm-$3}}"
 }
 
 # active_run_id <worktree>: prints the active run id, or nothing when no run is
@@ -130,7 +145,7 @@ cmd_observe() {
   monitor_close_all "$session" "$task" "$home" || { echo "error: could not clear the old pipeline monitor for $task; not opening a second one" >&2; return 1; }
   out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
     --cwd "$wt" \
-    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$(monitor_tab "$task")" \
+    --label "herdr.space=$(worker_space "$session" "$(meta_value "$meta" hc_terminal)" "$home")" --label "herdr.tab=$(monitor_tab "$task")" \
     --label "firstmate.monitor=$(monitor_label "$task")" --label "firstmate.home=$home" \
     -- no-mistakes attach --run "$run_id" 2>&1) \
     || { echo "error: could not open the pipeline monitor for $task: $out" >&2; return 1; }
