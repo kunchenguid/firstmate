@@ -125,7 +125,10 @@ if (command === "scope") {
     }
   }
   const tail = away ? dispatch.awayPostureTailFor(readOptional(readbackFile)) : "";
-  process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, mirror)}\n`);
+  // The off-Pi host reads the same queue scope the branch would, so its prompt
+  // carries the task the wake resolves to, not just the raw endpoint.
+  const taskLine = dispatch.wakeTaskLine(dispatch.scopeForUnreadWake(stateDir(), false, false), message);
+  process.stdout.write(`${dispatch.branchWakePrompt(message, report, tail, mirror, taskLine)}\n`);
 } else {
   usage();
 }

@@ -160,6 +160,22 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }
 
+test_stale_hc_window_wake_names_its_task() {
+  local home state out
+  home="$TMP_ROOT/hc-stale"
+  state="$home/state"
+  mkdir -p "$state"
+  printf 'project=demo\nwindow=default:t22\nbackend=hc\nhc_session=default\nhc_terminal=t22\n' > "$state/demo-hc.meta"
+  append_wake "$state" stale default:t22 "stale: default:t22 (no output for 300s)"
+
+  out=$(FM_HOME="$home" node "$DISPATCH" scope)
+  assert_contains "$out" "tasks=demo-hc" "a stale row keyed on an hc window must resolve to its task"
+  out=$(printf 'stale: default:t22 (no output for 300s)\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command')
+  assert_contains "$out" "FIRSTMATE SUPERVISION WAKE: stale: default:t22" "the stale wake must carry its reason"
+  assert_contains "$out" "Task for this wake: demo-hc" "the stale wake prompt must name the task the hc window belongs to"
+  pass "dispatch entry: a stale wake for an hc window names its task in the prompt, not only the raw endpoint"
+}
+
 
 # --- host loop ----------------------------------------------------------------
 
@@ -589,6 +605,7 @@ fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
+  test_stale_hc_window_wake_names_its_task \
   test_branch_outcomes_only_on_a_host_home_off_pi \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \

@@ -120,6 +120,7 @@ import {
   FM_BRANCH_DISPATCH_EVENT,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
+  wakeTaskLine,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
@@ -1576,7 +1577,7 @@ ${context.command}
         // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
         const postureTail = afk ? await awayPostureTail() : "";
         try {
-          await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail));
+          await session.prompt(branchWakePrompt(message, "fm_branch_report", postureTail, "", wakeTaskLine(scope, message)));
         } finally {
           wakeTaskScope = null;
         }
