@@ -1638,7 +1638,8 @@ SH
   # No real pipeline or process inventory is consulted by these fixtures.
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/no-mistakes"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/lsof"
-  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/no-mistakes" "$dir/fakebin/lsof"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/ps"
+  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/no-mistakes" "$dir/fakebin/lsof" "$dir/fakebin/ps"
   printf '%s\n' "$dir"
 }
 
