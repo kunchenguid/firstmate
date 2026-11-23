@@ -263,7 +263,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 | omp | `session_stop` in `.omp/extensions/fm-primary-turnend-guard.ts` | Blocking hook that compels one continuation |
 | Cursor | `stop` hook in `.cursor/hooks.json` | Cannot block, so it parks and returns at most one follow-up |
 | Grok | `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` | Native blocking, or one legacy `grok --resume` fallback |
-| Antigravity | `Stop` hook in `.agents/hooks.json` | Synchronous Stop-hook park running `bin/fm-watch-arm.sh` (or the supervision host) with bounded repair nag via `bin/fm-turnend-guard.sh --agy` |
+| Antigravity | `Stop` hook in `.agents/hooks.json` | Synchronous Stop-hook park running `bin/fm-watch-arm.sh` (or the supervision host) with bounded repair nag via `bin/fm-turnend-guard.sh --agy`; under `antigravity acp`, the bounded repair nag alone, without parking |
 
 The registrations in detail:
 
@@ -310,6 +310,7 @@ The registrations in detail:
 - Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 28800s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
   In linked crewmate worktrees or foreign checkouts, the wrapper stands down immediately with `{}`.
   In primary or persistent secondmate homes, the hook parks synchronously on `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host), keeping supervision continuity alive until an incoming wake event arrives or a bounded repair nag is returned via `bin/fm-turnend-guard.sh --agy`.
+  Under T3 Code's bundled `antigravity acp` server it never parks; [Antigravity park](#antigravity-park) owns that exception.
 
 ### Claude and Codex blocking
 
@@ -568,6 +569,10 @@ It polls the child every `FM_AGY_PARK_POLL` seconds (default 2) and waits on it 
 Before parking, the hook stands down with `{}` in crewmate or scout linked worktrees, passes through non-normal termination reasons, and verifies session-lock ownership so a foreign session never steals supervision.
 When `executionNum` reaches the loop ceiling (`FM_AGY_TURNEND_LOOP_CEILING`, default 180) while supervision is still needed, it returns one ceiling notice instead of parking; past the ceiling it emits `{}`.
 Each invocation publishes a unique claim in `state/.agy-park-owner` and yields cleanly with `{}` if a newer Stop hook supersedes this park while waiting.
+
+Under T3 Code's bundled Antigravity ACP server (`antigravity acp`), ACP awaits the Stop hook before completing the prompt turn, so a synchronous park would block incoming user messages until it returned.
+After the stand-down, lock, away, ceiling, and supervision-needed checks above, the hook therefore detects `antigravity acp` in its own ancestry (`fm_agy_acp_in_ancestry` in `bin/fm-agy-process-lib.sh`) and delegates immediately to `bin/fm-turnend-guard.sh --agy`, the bounded 3-block repair nag, without parking.
+The model owns watcher continuity there through a background `run_command` arm instead, as [the Antigravity ACP protocol](supervision-protocols/agy-acp.md) directs, and `fm_supervision_model` reports `persistent` rather than `autoarm`.
 
 ### Adapter failures in the pull guard
 

@@ -78,6 +78,7 @@ Codex and OpenCode are also verified and supported as primary harnesses; Codex u
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
 Antigravity CLI (`agy`) is verified as a primary too, using a tracked project-local `.agents/hooks.json` whose Stop hook parks on the watcher between turns like Cursor's.
+Under T3 Code's bundled Antigravity ACP server (`antigravity acp`), that Stop hook does not park, because ACP holds the prompt turn open until Stop returns; the agent arms the watcher as a background task instead.
 
 ### Install and launch
 
