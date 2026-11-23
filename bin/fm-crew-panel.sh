@@ -23,8 +23,13 @@
 # open-fleet and open-task split a Herdr pane to the right of the caller's pane
 # (open-fleet) or of the task's recorded pane (open-task), label the new pane
 # fm-crew-panel, and run the panel there with --watch. bin/fm-session-start.sh
-# runs open-fleet and bin/fm-spawn.sh runs open-task. Both are idempotent: a tab
-# that already has a fm-crew-panel pane gets no second panel. They do nothing,
+# runs open-fleet and bin/fm-spawn.sh runs open-task. Both are idempotent: they
+# make sure a panel runs, not only that a pane has the label. A tab that already
+# has a fm-crew-panel pane gets no second pane. When that pane runs the panel,
+# nothing changes. When only its login shell runs there (a Herdr session restore
+# keeps the label but not the command), the panel starts in that pane. When it
+# runs another program, or its processes cannot be read, the pane is left alone
+# and the command exits 1 with a message. They do nothing,
 # with exit 0, when config/crew-panel is off, in a secondmate home, or on any
 # backend other than Herdr. They exit 1 with a message when a Herdr call fails;
 # their callers treat that as a warning and continue.
@@ -113,10 +118,72 @@ load_herdr() {
   fm_backend_source herdr
 }
 
+# panel_command <panel-args...>: the shell command that runs the panel in a pane.
+panel_command() {
+  local cmd arg
+  cmd="exec env FM_HOME=$(printf '%q' "$FM_HOME") $(printf '%q' "$SCRIPT_DIR/fm-crew-panel.sh") --watch"
+  for arg in "$@"; do cmd="$cmd $(printf '%q' "$arg")"; done
+  printf '%s\n' "$cmd"
+}
+
+# panel_pane_state <process-info-json> <task-id-or-empty>: prints running when
+# the pane runs this panel (the fleet panel when the task id is empty), shell
+# when only the pane's login shell runs there, and other for anything else.
+panel_pane_state() {
+  printf '%s' "$1" | jq -r --arg task "$2" '
+    def base: tostring | ltrimstr("-") | split("/") | last;
+    def panel: (.argv // []) as $a
+      | ($a | any(.[]; base == "fm-crew-panel.sh")) and ($a | index("--watch") != null)
+        and (($a | index("--task")) as $i
+             | if $task == "" then $i == null else $i != null and $a[$i + 1] == $task end);
+    .result.process_info as $p
+    | ($p.foreground_processes // []) as $fg
+    | if any($fg[]; panel) then "running"
+      elif ($fg | length) > 0
+        and all($fg[]; .pid == $p.shell_pid
+          and ((.argv0 // .name // "") | base | IN("zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh")))
+      then "shell"
+      else "other" end' 2>/dev/null || printf 'other\n'
+}
+
+# reuse_panel <session> <pane> <panel-args...>: the tab already has a pane with
+# the panel label. A Herdr session restore keeps the label but brings the pane
+# back with only a login shell, so the label alone does not prove a panel runs.
+# Return 0 when the panel runs there, start the panel when only the shell runs,
+# and warn with exit 1 for anything else. Never close or reuse a pane that runs
+# another program.
+reuse_panel() {
+  local session=$1 pane=$2 info task='' prev='' arg
+  shift 2
+  for arg in "$@"; do
+    [ "$prev" != --task ] || task=$arg
+    prev=$arg
+  done
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || {
+    echo "fm-crew-panel: could not read the processes of panel pane $pane" >&2
+    return 1
+  }
+  case "$(panel_pane_state "$info" "$task")" in
+    running) return 0 ;;
+    shell)
+      fm_backend_herdr_cli "$session" pane run "$pane" "$(panel_command "$@")" >/dev/null 2>&1 || {
+        echo "fm-crew-panel: herdr could not start the panel in pane $pane" >&2
+        return 1
+      }
+      return 0
+      ;;
+    *)
+      echo "fm-crew-panel: panel pane $pane runs another program; the panel was not started" >&2
+      return 1
+      ;;
+  esac
+}
+
 # open_split <session> <pane> <panel-args...>: split <pane> to the right and run
-# the panel there, unless the pane's tab already has a panel.
+# the panel there, unless the pane's tab already has a panel pane; reuse_panel
+# then makes sure the panel runs in it.
 open_split() {
-  local session=$1 pane=$2 info tab ws panes out new cmd arg
+  local session=$1 pane=$2 info tab ws panes out new existing
   shift 2
   info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || {
     echo "fm-crew-panel: could not read herdr pane $pane" >&2
@@ -132,9 +199,11 @@ open_split() {
     echo "fm-crew-panel: could not list the panes of herdr tab $tab" >&2
     return 1
   }
-  if printf '%s' "$panes" | jq -e --arg tab "$tab" --arg label "$PANEL_LABEL" \
-    'any(.result.panes[]?; .tab_id == $tab and (.label // "") == $label)' >/dev/null 2>&1; then
-    return 0
+  existing=$(printf '%s' "$panes" | jq -r --arg tab "$tab" --arg label "$PANEL_LABEL" \
+    'first(.result.panes[]? | select(.tab_id == $tab and (.label // "") == $label) | .pane_id) // empty' 2>/dev/null)
+  if [ -n "$existing" ]; then
+    reuse_panel "$session" "$existing" "$@"
+    return $?
   fi
   out=$(fm_backend_herdr_cli "$session" pane split "$pane" --direction right \
     --ratio "${FM_CREW_PANEL_RATIO:-0.7}" --cwd "$FM_HOME" --no-focus 2>/dev/null) || {
@@ -151,9 +220,7 @@ open_split() {
     echo "fm-crew-panel: herdr could not label the panel pane" >&2
     return 1
   }
-  cmd="exec env FM_HOME=$(printf '%q' "$FM_HOME") $(printf '%q' "$SCRIPT_DIR/fm-crew-panel.sh") --watch"
-  for arg in "$@"; do cmd="$cmd $(printf '%q' "$arg")"; done
-  fm_backend_herdr_cli "$session" pane run "$new" "$cmd" >/dev/null 2>&1 || {
+  fm_backend_herdr_cli "$session" pane run "$new" "$(panel_command "$@")" >/dev/null 2>&1 || {
     fm_backend_herdr_cli "$session" pane close "$new" >/dev/null 2>&1 || true
     echo "fm-crew-panel: herdr could not start the panel" >&2
     return 1

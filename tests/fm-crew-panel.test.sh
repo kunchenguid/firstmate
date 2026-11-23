@@ -194,6 +194,10 @@ test_color_adds_no_visible_width() {
 
 # A stateful fake herdr: panes live in $HERDR_FAKE_DIR/panes as
 # "<pane> <tab> <workspace> <label>" lines. FM_FAKE_SPLIT_FAIL=1 fails a split.
+# A pane's foreground process is $HERDR_FAKE_DIR/proc.<pane>, one argv word per
+# line, with "-zsh" (the login shell) when the file is absent. `pane run` writes
+# the argv that the run command execs. FM_FAKE_PROCINFO_FAIL=1 fails
+# `pane process-info`.
 make_fake_herdr() {  # <dir>
   local fb=$1
   mkdir -p "$fb"
@@ -218,7 +222,22 @@ case "${1:-} ${2:-}" in
   "pane rename")
     awk -v p="$3" -v l="$4" '$1 == p { $4 = l } { print }' "$db" > "$db.tmp" && mv "$db.tmp" "$db"
     ;;
-  "pane run") ;;
+  "pane run")
+    eval "set -- $4"
+    while [ $# -gt 0 ]; do
+      case "$1" in exec|env|*=*) shift ;; *) break ;; esac
+    done
+    { printf 'bash\n'; printf '%s\n' "$@"; } > "$HERDR_FAKE_DIR/proc.$3"
+    ;;
+  "pane process-info")
+    [ "${FM_FAKE_PROCINFO_FAIL:-}" = 1 ] && { echo "process-info refused" >&2; exit 1; }
+    pane=$4
+    if [ -f "$HERDR_FAKE_DIR/proc.$pane" ]; then argv=$(jq -R . "$HERDR_FAKE_DIR/proc.$pane" | jq -s .)
+    else argv='["-zsh"]'; fi
+    jq -n --arg pane "$pane" --argjson argv "$argv" \
+      '{result: {process_info: {pane_id: $pane, shell_pid: 100,
+        foreground_processes: [{pid: 100, name: ($argv[0] | ltrimstr("-") | split("/") | last), argv0: $argv[0], argv: $argv}]}}}'
+    ;;
   "pane close")
     awk -v p="$3" '$1 != p' "$db" > "$db.tmp" && mv "$db.tmp" "$db"
     ;;
@@ -245,6 +264,16 @@ open_panel() {  # <world> <open-args...>
     HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=p-main "$PANEL" "$@"
 }
 
+label_pane() {  # <world> <pane> <tab> <workspace>: a labelled pane that Herdr restored
+  printf '%s %s %s fm-crew-panel\n' "$2" "$3" "$4" >> "$1/herdr/panes"
+}
+
+set_pane_process() {  # <world> <pane> <argv...>: the pane's foreground process
+  local w=$1 pane=$2
+  shift 2
+  printf '%s\n' "$@" > "$w/herdr/proc.$pane"
+}
+
 panel_count() {  # <world> <tab>
   awk -v t="$2" '$2 == t && $4 == "fm-crew-panel"' "$1/herdr/panes" | wc -l | tr -d ' '
 }
@@ -266,6 +295,61 @@ test_a_second_session_start_opens_no_second_fleet_panel() {
   open_panel "$w" open-fleet || fail "the second open-fleet failed"
   assert_equals 1 "$(panel_count "$w" t-main)" "a second start finds the panel and opens no other"
   pass "a second session start opens no second fleet panel"
+}
+
+test_a_restored_panel_pane_with_only_a_shell_gets_the_panel_started() {
+  local w
+  w=$(herdr_world restored-shell)
+  label_pane "$w" p-old t-main w-main
+  open_panel "$w" open-fleet || fail "open-fleet failed on a restored panel pane"
+  assert_equals 1 "$(panel_count "$w" t-main)" "the firstmate tab keeps one panel pane"
+  assert_no_grep "pane split" "$w/herdr/calls" "no second pane is split"
+  grep -F "pane run p-old " "$w/herdr/calls" > "$w/run" || fail "the panel starts in the restored pane"
+  assert_grep "fm-crew-panel.sh --watch" "$w/run" "the restored pane runs the panel in watch mode"
+  assert_no_grep "--task" "$w/herdr/calls" "the fleet panel starts, not a worker panel"
+  assert_no_grep "pane close" "$w/herdr/calls" "no pane is closed"
+  label_pane "$w" p-work-old t-work w-work
+  open_panel "$w" open-task arc-1 || fail "open-task failed on a restored panel pane"
+  grep -F "pane run p-work-old " "$w/herdr/calls" > "$w/run" || fail "the worker panel starts in its restored pane"
+  assert_grep "--task arc-1" "$w/run" "the restored worker pane runs that worker's panel"
+  pass "a restored panel pane with only a shell gets the panel started"
+}
+
+test_a_labelled_pane_running_the_panel_gets_no_second_start() {
+  local w
+  w=$(herdr_world running-panel)
+  label_pane "$w" p-old t-main w-main
+  set_pane_process "$w" p-old bash "$ROOT/bin/fm-crew-panel.sh" --watch --name crew
+  open_panel "$w" open-fleet || fail "open-fleet failed beside a running panel"
+  assert_no_grep "pane split" "$w/herdr/calls" "no pane is split"
+  assert_no_grep "pane run" "$w/herdr/calls" "the running panel is not started again"
+  label_pane "$w" p-work-old t-work w-work
+  set_pane_process "$w" p-work-old bash "$ROOT/bin/fm-crew-panel.sh" --watch --task arc-1 --name crew
+  open_panel "$w" open-task arc-1 || fail "open-task failed beside a running panel"
+  assert_no_grep "pane run" "$w/herdr/calls" "the running worker panel is not started again"
+  pass "a labelled pane running the panel gets no second start"
+}
+
+test_a_labelled_pane_running_another_program_is_left_alone() {
+  local w rc
+  w=$(herdr_world other-program)
+  label_pane "$w" p-old t-main w-main
+  set_pane_process "$w" p-old vim notes.md
+  open_panel "$w" open-fleet 2>"$w/err"
+  rc=$?
+  expect_code 1 "$rc" "open-fleet beside a labelled pane that runs another program"
+  assert_grep "runs another program" "$w/err" "the reason is printed"
+  assert_no_grep "pane run" "$w/herdr/calls" "nothing starts in that pane"
+  assert_no_grep "pane split" "$w/herdr/calls" "no pane is split"
+  assert_no_grep "pane close" "$w/herdr/calls" "no pane is closed"
+  rm -f "$w/herdr/proc.p-old"
+  : > "$w/herdr/calls"
+  FM_FAKE_PROCINFO_FAIL=1 open_panel "$w" open-fleet 2>"$w/err"
+  rc=$?
+  expect_code 1 "$rc" "open-fleet when process-info fails"
+  assert_grep "could not read" "$w/err" "the failed read is printed"
+  assert_no_grep "pane run" "$w/herdr/calls" "nothing starts when the pane cannot be read"
+  pass "a labelled pane running another program is left alone"
 }
 
 test_the_worker_panel_opens_in_the_worker_tab() {
@@ -455,6 +539,9 @@ test_no_line_passes_a_fixed_width
 test_color_adds_no_visible_width
 test_the_fleet_panel_opens_beside_firstmate
 test_a_second_session_start_opens_no_second_fleet_panel
+test_a_restored_panel_pane_with_only_a_shell_gets_the_panel_started
+test_a_labelled_pane_running_the_panel_gets_no_second_start
+test_a_labelled_pane_running_another_program_is_left_alone
 test_the_worker_panel_opens_in_the_worker_tab
 test_the_switch_off_opens_no_panel
 test_other_backends_open_no_panel
