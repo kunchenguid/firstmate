@@ -4512,10 +4512,7 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "merged-poll-upward: watcher failed: $(cat "$dir/watch-1.err")"
-  case "$(cat "$dir/watch-1.out")" in
-    check:*task-a.check.sh:*merged) ;;
-    *) fail "merged-poll-upward: the poll's own row was lost: $(cat "$dir/watch-1.out")" ;;
-  esac
+  assert_merged_sweep_output "$state" "$(cat "$dir/watch-1.out")"
   assert_grep "done [key=merged-task-a]: merged task-a $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
     "merged-poll-upward: a merge this home did not perform was never reported upward"
   [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
