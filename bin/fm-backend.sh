@@ -103,9 +103,9 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 
-# Snapshot the caller's inherited Herdr identity once: fm-spawn.sh later
-# reuses HERDR_PANE_ID for the task pane it creates or adopts. These variables
-# stay unexported so a new process snapshots its own environment.
+# Snapshot the caller's inherited Herdr identity once, so a later in-process
+# reassignment of HERDR_PANE_ID cannot move it. These variables stay
+# unexported so a new process snapshots its own environment.
 if [ -z "${FM_BACKEND_SELF_SNAPSHOT_TAKEN:-}" ]; then
   FM_BACKEND_SELF_SNAPSHOT_TAKEN=1
   FM_BACKEND_SELF_HERDR_TARGET=

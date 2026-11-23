@@ -2640,16 +2640,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
     }
   fi
   if [ "$BACKEND" = herdr ]; then
-    # fm-spawn uses HERDR_PANE_ID for the TASK's pane, while the herdr adapter
-    # reads that SAME name as the pane THIS process is itself running in
-    # (fm_backend_herdr_launcher_identity). The record is about to overwrite it,
-    # so keep what herdr actually injected: a rebind still has to prove its own
-    # launcher identity, and a task's recorded pane is not it.
-    RELAUNCH_LAUNCHER_PANE_ID=${HERDR_PANE_ID:-}
+    # The task's pane lives in HERDR_TASK_PANE_ID. HERDR_PANE_ID stays the
+    # launcher pane herdr injected: the adapter's launcher identity and every
+    # helper this process starts read it as the pane they are running in.
     HERDR_SES=$(fm_meta_get "$RELAUNCH_META" herdr_session)
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
-    HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+    HERDR_TASK_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
   fi
   if [ "$BACKEND" = rex ]; then
     FM_REX_TASK_SESSION_ID=$(fm_meta_get "$RELAUNCH_META" rex_session_id)
@@ -5054,8 +5051,7 @@ EOF
     # onto another herdr server - an identity change, published as a
     # self-consistent but wrong record.
     HERDR_REBIND_SES=${RELAUNCH_TARGET%%:*}
-    HERDR_CONTAINER_RAW=$(HERDR_PANE_ID="$RELAUNCH_LAUNCHER_PANE_ID" \
-      fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
+    HERDR_CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$PROJ_ABS" launcher-home "$HERDR_REBIND_SES") || {
       # container_ensure returns 1 for several unrelated reasons - a failed
       # version check, a server that will not start, an ambiguous workspace
       # label, a cross-session launcher identity, a failed workspace create -
@@ -5071,7 +5067,7 @@ EOF
       # would fire for EVERY named-session task reclaimed from a plain shell and
       # send the operator chasing a session mismatch that was never the cause.
       HERDR_AMBIENT_SES=$(fm_backend_herdr_session)
-      if [ -n "$RELAUNCH_LAUNCHER_PANE_ID" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
+      if [ -n "${HERDR_PANE_ID:-}" ] && [ "$HERDR_AMBIENT_SES" != "$HERDR_REBIND_SES" ]; then
         echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; this seat is running in herdr session '$HERDR_AMBIENT_SES', and a reclaim never moves a task to another session" >&2
       else
         echo "error: task $ID's endpoint could not be re-created in its recorded herdr session '$HERDR_REBIND_SES'; see the refusal above for what failed" >&2
@@ -5083,14 +5079,14 @@ EOF
     HERDR_SES=${CONTAINER%%:*}
     HERDR_WORKSPACE_ID=${CONTAINER#*:}
     HERDR_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$W" "$WT" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-    read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+    read -r HERDR_TAB_ID HERDR_TASK_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_TASK_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
     fi
-    T="$HERDR_SES:$HERDR_PANE_ID"
+    T="$HERDR_SES:$HERDR_TASK_PANE_ID"
     SES=$HERDR_SES
     WT_TARGET=$T
   fi
@@ -5175,10 +5171,10 @@ else
             HERDR_WORKSPACE_ID=$HERDR_RECOVERY_WORKSPACE_ID
             HERDR_SEEDED_DEFAULT_TAB_ID=""
             HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_TASK_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
             HERDR_PROJECTION_ABORT_CLEANUP=1
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_TASK_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=""
             ;;
           2)
@@ -5237,10 +5233,10 @@ else
             HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
             HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
             HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
-            HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
+            HERDR_TASK_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
             HERDR_PROJECTION_ABORT_CLEANUP=1
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+            HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_TASK_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
             # Opt-in project groups (docs/herdr-backend.md "Project groups"):
             # an empty key keeps the block-end placement. Off costs one file test.
@@ -5253,11 +5249,11 @@ else
             if [ -n "$HERDR_HOME_ID" ] &&
               fm_backend_herdr_projection_live_binding_matches \
                 "$HERDR_SES" "$HERDR_PROJECTION_ID" "$HERDR_WORKSPACE_ID" \
-                "$HERDR_TAB_ID" "$HERDR_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
+                "$HERDR_TAB_ID" "$HERDR_TASK_PANE_ID" "$HERDR_PARENT_WORKSPACE_ID" \
                 "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W" &&
               fm_backend_herdr_projection_journal_bind \
                 "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
-                "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+                "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_TASK_PANE_ID" \
                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
               :
             else
@@ -5282,15 +5278,15 @@ else
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
-      read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
+      read -r HERDR_TAB_ID HERDR_TASK_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
     fi
-    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
+    if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_TASK_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
     fi
-    T="$HERDR_SES:$HERDR_PANE_ID"
+    T="$HERDR_SES:$HERDR_TASK_PANE_ID"
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -7387,7 +7383,7 @@ preserve_relaunch_meta() {
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
-    echo "herdr_pane_id=$HERDR_PANE_ID"
+    echo "herdr_pane_id=$HERDR_TASK_PANE_ID"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"

@@ -1738,7 +1738,7 @@ if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
     test_backend_source_requires_unreadable_hermes_helper
   exit 0
 fi
-# Snapshot identity before spawn can reuse HERDR_PANE_ID.
+# Snapshot identity before any in-process reassignment of HERDR_PANE_ID.
 test_herdr_target_is_self_is_the_pane_the_process_started_in() {
   local dir out
   dir="$TMP_ROOT/herdr-self-target"
