@@ -198,6 +198,14 @@
 #                          the same verdict authorized recovery but the
 #                          relaunch itself failed; the attempt is ledgered and
 #                          counts toward the bound below
+#   check: worker <id> auto-relaunched after agent <state> (<window>)
+#   check: worker <id> auto-relaunch failed after agent <state>: <detail>
+#                          opt-in (config/worker-auto-relaunch): a ship or
+#                          scout whose agent read `dead` or `missing` at a
+#                          wedge or declared-wait recheck, with a non-terminal
+#                          last line and a clean local copy, went through
+#                          bin/fm-control.sh relaunch; attempts share the
+#                          secondmate ledger and bound (worker_dead_relaunch)
 #   check: secondmate <id> auto-relaunch paused after <n> attempts in <s>s; ...
 #                          a mate that kept dying exceeded its bounded relaunch
 #                          budget and is parked until a probe reads it live
@@ -1514,6 +1522,19 @@ _wedge_cap_rollback() {
   return 1
 }
 
+# 0 when resurface_absorbed would re-surface now: a changed <scope> always does,
+# otherwise both the absorb age and the throttle must be past their gates. Split
+# out so a caller can pay for an extra read only on a recheck that will fire.
+resurface_due() {  # <throttle-marker> <age> [scope] [min-age]
+  local throttle=$1 age=$2 scope=${3-} min_age=${4:-$PAUSE_RESURFACE_SECS}
+  if [ -z "$scope" ] || [ ! -e "$throttle" ] \
+    || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
+    [ "$age" -ge "$min_age" ] || return 1
+    [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 1   # 999999 when no prior re-surface
+  fi
+  return 0
+}
+
 # One bounded re-surface for a pane the watcher is deliberately absorbing, so no
 # absorb can rot invisibly. <age> is how long the current absorb has held and
 # <throttle> is the per-window marker whose mtime records the last re-surface, so
@@ -1529,11 +1550,7 @@ _wedge_cap_rollback() {
 # throttle keeps the cadence between repeats.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [status-file] [blocked-line] [overdue-marker]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} statusf=${7-} blocked_line=${8-} overdue_marker=${9-} snapshot=${10-} append_rc task
-  if [ -z "$scope" ] || [ ! -e "$throttle" ] \
-    || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
-    [ "$age" -ge "$min_age" ] || return 0
-    [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
-  fi
+  resurface_due "$throttle" "$age" "$scope" "$min_age" || return 0
   if [ -n "$blocked_line" ]; then
     task=${overdue_marker##*/}; task=${task#.paused-overdue-}
     ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || return 0
@@ -1908,14 +1925,11 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   key=$(window_key "$win")
   marker="$STATE/.dead-reported-$key"
   agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
-  case "$agent_state" in
-    dead) detail='the endpoint is still there with no agent running in it' ;;
-    missing) detail='the recorded endpoint is gone' ;;
-    *) rm -f "$marker"; return 1 ;;
-  esac
+  detail=$(agent_dead_detail "$agent_state") || { rm -f "$marker"; return 1; }
   # Re-arm the idle timer on BOTH paths below, so the backend probe above stays on
   # its once-per-STALE_ESCALATE_SECS budget instead of running on every poll.
   date +%s > "$since_file"
+  worker_dead_relaunch "$win" "$task" "$agent_state" && return 0
   id=$hash
   if gen=$(fm_busy_current_gen "$STATE" "$task"); then
     id=$gen
@@ -1932,6 +1946,72 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s %s' "$agent_state" "$id" > "$marker"
   clear_write_tracking "$key"
+  wake "$reason"
+}
+
+# The recovery-grade verdicts that mean no agent is left behind an endpoint, in
+# the words every dead-agent reason uses; 1 for every other verdict.
+agent_dead_detail() {  # <agent-state>
+  case "$1" in
+    dead) printf 'the endpoint is still there with no agent running in it' ;;
+    missing) printf 'the recorded endpoint is gone' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Opt-in automatic relaunch of an ordinary worker whose agent is gone, through
+# the same bin/fm-control.sh relaunch path a supervisor would run by hand. OFF
+# unless the home creates config/worker-auto-relaunch. Every gate must pass, or
+# this returns 1 and the caller reports the dead agent exactly as it would
+# without the flag: a ship or scout record, a last status line that is neither
+# captain-relevant nor a captain-held transfer, no review park, a local copy
+# whose `git status` reads clean, and fewer attempts in the shared relaunch
+# ledger (bin/fm-secondmate-liveness-lib.sh) than the secondmate bound allows
+# inside its window. fm-control itself still refuses any endpoint it cannot
+# prove stopped, and never touches the local copy. An attempted relaunch is
+# ledgered and reported as one check wake, success or failure; the wake exits
+# the cycle.
+worker_dead_relaunch() {  # <window> <task> <agent-state>
+  local win=$1 task=$2 agent_state=$3 meta kind last worktree dirty attempts note out rc=0 reason notify_key now detail
+  [ -e "$CONFIG/worker-auto-relaunch" ] || return 1
+  meta="$STATE/$task.meta"
+  kind=$(fm_meta_get "$meta" kind 2>/dev/null) || return 1
+  case "$kind" in ship|scout) ;; *) return 1 ;; esac
+  last=$(last_status_line "$STATE/$task.status")
+  if { [ -n "$last" ] && status_is_captain_relevant "$last"; } \
+    || status_is_captain_held "$last" || [ -e "$STATE/$task.review-park" ]; then
+    triage_log "auto-relaunch skipped for $task (last status line is terminal or a deliberate stop): $win"
+    return 1
+  fi
+  worktree=$(fm_meta_get "$meta" worktree 2>/dev/null) || worktree=''
+  if [ -z "$worktree" ] || ! dirty=$(git -C "$worktree" status --porcelain 2>/dev/null) || [ -n "$dirty" ]; then
+    triage_log "auto-relaunch skipped for $task (local copy is dirty or unreadable): $win"
+    return 1
+  fi
+  if ! attempts=$(fm_secondmate_liveness_recent_attempts "$task" "$SECONDMATE_LIVENESS_WINDOW_SECS") \
+    || [ "$attempts" -ge "$SECONDMATE_LIVENESS_MAX_ATTEMPTS" ]; then
+    triage_log "auto-relaunch skipped for $task (relaunch ledger unreadable or ${SECONDMATE_LIVENESS_MAX_ATTEMPTS} attempts in ${SECONDMATE_LIVENESS_WINDOW_SECS}s reached): $win"
+    return 1
+  fi
+  fm_secondmate_liveness_ledger_add "$task" attempt || return 1
+  note="The watcher relaunched this task automatically because its previous agent was found $agent_state (config/worker-auto-relaunch). Its last status line was: ${last:-none}. Re-read the status log and continue the task from the local copy."
+  out=$(FM_SPAWN_NO_GUARD=1 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    fm_run_timed "$SECONDMATE_LIVENESS_TIMEOUT" "$FM_ROOT/bin/fm-control.sh" "$task" relaunch --note "$note" 2>&1) || rc=$?
+  now=$(date +%s)
+  if [ "$rc" -eq 0 ]; then
+    fm_secondmate_liveness_ledger_add "$task" relaunched || true
+    reason="check: worker $task auto-relaunched after agent $agent_state ($win)"
+    notify_key="worker-relaunch-$task-$now"
+  else
+    fm_secondmate_liveness_ledger_add "$task" failed || true
+    # fm-control prints warnings ahead of the refusal, so name its last error.
+    detail=$(printf '%s\n' "$out" | grep '^error:' | tail -n 1) || true
+    [ -n "$detail" ] || detail=$(fm_sm_live_first_line "$out")
+    reason="check: worker $task auto-relaunch failed after agent $agent_state: $detail"
+    notify_key="worker-relaunch-failed-$task-$now"
+  fi
+  fm_wake_append check "$notify_key" "$reason" || exit 1
+  clear_write_tracking "$(window_key "$win")"
   wake "$reason"
 }
 
@@ -2504,8 +2584,12 @@ paused_recheck_silent() {  # <window> <statusf> <key> <declaration> <status-age>
 # quiet until the worker writes another status event. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it never re-reads crew state except through the opt-in superseded-wait
-# check (paused_wait_superseded) that runs first. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
+# check (paused_wait_superseded) that runs first, and it reads the agent's
+# backend state only once per paused recheck that is about to fire, so that
+# recheck names a dead agent (and, under config/worker-auto-relaunch, hands it
+# to worker_dead_relaunch) rather than asking to confirm the wait. The
+# re-surface age is anchored on the status file mtime, not a per-hash marker,
+# so a churny idle pane (a ticking
 # clock, a token counter) cannot keep resetting the cadence the way a hash-tied
 # timer would. The bounded re-surface itself is the shared resurface_absorbed
 # above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
@@ -2517,7 +2601,7 @@ paused_recheck_silent() {  # <window> <statusf> <key> <declaration> <status-age>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age silent=0
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age rc snapshot pause_age silent=0 agent_state agent_detail
   if paused_wait_superseded "$win" "$task"; then return 0; fi
   key=$(window_key "$win")
   pause_overdue_reconcile "$task" "$STATE/$task.status"; rc=$?
@@ -2581,6 +2665,17 @@ handle_paused_stale() {  # <window> <task> <hash>
   if [ "$silent" = 1 ] && paused_recheck_silent "$win" "$statusf" "$key" "$declaration" "$age"; then
     triage_log "absorbed stale (${detail}, unchanged declaration rechecked without a wake, age ${age}s): $win"
     return 0
+  fi
+  # A paused wait cannot clear while no agent is left to resume it, so a recheck
+  # that is about to fire reads the agent once and says so instead of asking to
+  # confirm the wait. A captain-held transfer stopped its agent on purpose, and a
+  # secondmate's endpoint liveness belongs to secondmate_liveness_tick.
+  if [ "$detail" != "captain-held, awaiting the captain" ] && [ "$(window_kind "$win")" != secondmate ] \
+    && resurface_due "$STATE/.paused-resurfaced-$key" "$age" "$declaration" "$min_age" \
+    && agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) \
+    && agent_detail=$(agent_dead_detail "$agent_state"); then
+    worker_dead_relaunch "$win" "$task" "$agent_state" && return 0
+    reason="${reason%% - *} - agent dead - $agent_detail, so the declared wait cannot clear on its own; reconcile this record, and check for unlanded work before any cleanup"
   fi
   if [ "$detail" = "paused, wait overdue" ]; then
     resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$statusf" "blocked [key=paused-overdue-$task]: paused ${pause_age}s, wait overdue - decide or release" "$STATE/.paused-overdue-$task" "$snapshot"

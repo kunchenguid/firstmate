@@ -279,3 +279,26 @@ archive_away_record() {  # <state>
   FM_HOME="$(dirname "$1")" FM_STATE_OVERRIDE="$1" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null 2>&1 \
     || fail "could not archive the away-posture record in $1"
 }
+
+# --- opt-in worker auto-relaunch (config/worker-auto-relaunch) ----------------
+# A firstmate root for FM_ROOT_OVERRIDE whose bin/fm-control.sh only records its
+# arguments to <dir>/control.log and exits FM_TEST_CONTROL_RC (default 0), so a
+# relaunch the watcher decides on is observable without launching an agent.
+make_fake_control_root() {  # <dir> -> root
+  local root="$1/fake-root"
+  mkdir -p "$root/bin"
+  cat > "$root/bin/fm-control.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$1/control.log'
+[ -z "\${FM_TEST_CONTROL_RC:-}" ] || { echo "warning: test preamble" >&2; echo "error: test relaunch refused" >&2; exit "\$FM_TEST_CONTROL_RC"; }
+exit 0
+SH
+  chmod +x "$root/bin/fm-control.sh"
+  printf '%s\n' "$root"
+}
+
+# A clean git local copy for <meta>'s task, recorded as its worktree=.
+attach_clean_worktree() {  # <dir> <meta>
+  fm_git_init_commit "$1/wt" >/dev/null 2>&1 || fail "could not create the local copy in $1/wt"
+  printf 'worktree=%s\n' "$1/wt" >> "$2"
+}

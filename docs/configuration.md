@@ -1137,6 +1137,19 @@ With the flag absent, every recheck wakes as before.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 `bin/fm-watch.sh`'s `handle_paused_stale` owns the exact condition.
 
+## Worker auto-relaunch (config/worker-auto-relaunch)
+
+The optional local, gitignored `config/worker-auto-relaunch` presence flag opts this home into a default-off automatic relaunch of an ordinary ship or scout whose agent is gone.
+With it present, when the foreground watcher reads a worker's agent as `dead` or `missing` at its wedge threshold or at a declared-wait recheck, it relaunches that worker through `bin/fm-control.sh <id> relaunch` with a progress note, in the same local copy.
+Every gate must pass first: the record is a ship or scout, its last status line is neither captain-relevant nor a captain-held transfer, it is not parked on review, `git status` in its local copy reads clean, and the shared relaunch ledger `state/.secondmate-relaunch-<id>` holds fewer than `FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS` attempts inside `FM_SECONDMATE_LIVENESS_WINDOW_SECS`.
+A failed gate leaves the unchanged dead-agent report, so a dirty copy, a finished lane, or a worker that keeps dying is never relaunched over.
+Each attempt is ledgered and reported as one `check: worker <id> auto-relaunched ...` or `check: worker <id> auto-relaunch failed ...` wake, and `FM_SECONDMATE_LIVENESS_TIMEOUT` bounds it.
+`bin/fm-control.sh` keeps its own refusals, including any endpoint it cannot prove stopped.
+
+With the flag absent, the watcher never relaunches an ordinary worker.
+The flag grants supervision autonomy, so it is a home-local choice and is not inherited by secondmate homes.
+`bin/fm-watch.sh`'s `worker_dead_relaunch` owns the exact gates and wording.
+
 ## Open-decision reminders (config/open-decision-reminders)
 
 The optional local, gitignored `config/open-decision-reminders` presence flag enables a default-off watcher backstop for unanswered keyed `needs-decision` and `blocked` records.
