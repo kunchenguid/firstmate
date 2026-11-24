@@ -655,7 +655,7 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 ### Named server and session routing
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
-Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+Every session-scoped Herdr invocation sets the environment and passes an explicit trailing `--session <name>`; all but the server launch go through `fm_backend_herdr_cli`.
 An environment variable alone is not reliable when another Herdr server is running.
 
 When the selected named server is not running, the adapter launches it without these inherited values:
