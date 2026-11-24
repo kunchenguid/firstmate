@@ -909,42 +909,51 @@ test_native_restart_rearms_undelivered_stale_warning() {
         housekeeping "$1"
       ' "$state" || exit 1
       [ -s "$state/.subsuper-escalations" ] || exit 1
-      # The native daemon has stopped without delivering its buffer.
+      # The native daemon has stopped without delivering its buffer. Stop keeps
+      # the delivery buffer for the return/catch-up path but ends the session's
+      # per-task episode state: the stale clock and its report marker are gone.
       "$ROOT/bin/fm-afk-launch.sh" stop || exit 1
       [ -s "$state/.subsuper-escalations" ] || exit 1
-      [ -f "$state/.subsuper-reported-stale-worker" ] || exit 1
-      # A warning already delivered for another condition must stay suppressed.
+      [ ! -e "$state/.subsuper-reported-stale-worker" ] || exit 1
+      [ ! -e "$marker" ] || exit 1
+      # A warning already delivered for another condition is the same
+      # session-scoped episode state; the next entry clears it too.
       printf 900 > "$state/.subsuper-reported-stale-delivered"
       "$ROOT/bin/fm-afk-launch.sh" enter --words 'supervise pending work' >/dev/null || exit 1
       first=$(cat "$state/.subsuper-escalations")
-      # Failed startup must restore both the queue and its suppression markers.
+      # Failed startup must restore both the queue and the markers it captured.
       bash -c '
         . "$0/bin/fm-afk-launch.sh"
         fm_afk_launch_record_write() { return 1; }
         ! fm_afk_launch_main start-native
       ' "$ROOT" || exit 1
       [ "$(cat "$state/.subsuper-escalations")" = "$first" ] || exit 1
-      [ -f "$state/.subsuper-reported-stale-worker" ] || exit 1
+      [ -f "$state/.subsuper-reported-stale-delivered" ] || exit 1
       "$ROOT/bin/fm-afk-launch.sh" start-native || exit 1
       assert_absent "$state/.subsuper-escalations" "fresh startup must discard the old queue"
       assert_absent "$state/.subsuper-reported-stale-worker" "discarding an undelivered warning must re-arm reporting"
-      assert_present "$state/.subsuper-reported-stale-delivered" "startup must preserve suppression of delivered warnings"
-      [ "$(cat "$marker")" = 1 ] || fail "restart must preserve the stale condition's age"
+      assert_absent "$state/.subsuper-reported-stale-delivered" "startup must drop the prior session's suppression markers"
+      [ ! -e "$marker" ] || fail "restart must drop the prior session's stale clock"
       out=$(t3_run 'fm_backend_t3code_busy_state thread-live')
       [ "$out" = unknown ] || fail "the restarted thread must remain unknown"
+      # The still-unknown thread is re-derived on THIS session's fresh clock: a
+      # new stale wake opens a new episode at 1000, so the recheck reports its
+      # own 100s, never the prior session's 999s.
       t3_run '
         . "$0/bin/fm-supervise-daemon.sh"
         _now() { printf 1000; }
         LOG="$1/daemon.log"
+        handle_wake "stale: thread-live" "$1"
         housekeeping "$1"
         _now() { printf 1100; }
         housekeeping "$1"
         housekeeping "$1"
       ' "$state" || exit 1
+      [ "$(cat "$marker")" = 1000 ] || fail "the new session must restart the stale clock"
       [ "$(wc -l < "$state/.subsuper-escalations" | tr -d "[:space:]")" = 1 ] \
         || fail "persistent uncertainty must queue exactly one replacement warning"
       assert_contains "$(cat "$state/.subsuper-escalations")" \
-        'stale persisted 999s (possible wedge): thread-live' "restart must report the retained stale condition"
+        'stale persisted 100s (possible wedge): thread-live' "restart must re-derive the stale condition on a fresh clock"
       # Once that replacement is delivered, uncertainty must not report again.
       t3_run '
         . "$0/bin/fm-supervise-daemon.sh"
@@ -959,7 +968,7 @@ test_native_restart_rearms_undelivered_stale_warning() {
       [ "$(wc -l < "$state/delivered.log" | tr -d "[:space:]")" = 1 ] || exit 1
     ) || fail "$session restart lost or duplicated the stale warning"
   done
-  pass "native restart re-arms discarded T3 stale warnings exactly once and preserves delivered suppression"
+  pass "native restart clears session episode state and re-derives T3 stale warnings once on a fresh clock"
 }
 
 test_housekeeping_preserves_unknown_stale_recheck() {
