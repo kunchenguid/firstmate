@@ -2932,6 +2932,139 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
   pass "fm-spawn --relaunch: resumes the bound Pi session only for a Pi registration"
 }
 
+# A Claude relaunch moves the pane's bound session to an id it chose only when
+# its launch carries that id with --session-id. A raw command has no slot for
+# the id, so moving the binding there would leave Herdr naming a session the
+# replacement never starts.
+test_herdr_raw_claude_relaunch_leaves_the_bound_session_alone() {
+  local dir out rc=0 harness log
+  for harness in claude 'claude --verbose'; do
+    herdr_case_or_skip fresh-session fresh-session || {
+      echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+      return 0
+    }
+    dir=$HERDR_CASE_DIR
+    rm -f "$dir/fake/herdr-stopped"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/claude"
+    chmod +x "$dir/fakebin/claude"
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"idle","agent_session":{"kind":"id","value":"31d009bf-1111-4222-8333-444444444444"}}}}\n' \
+      > "$dir/fake/herdr-agent-registration"
+    out=$(run_spawn "$dir" fresh-session --relaunch --harness "$harness") || rc=$?
+    expect_code 0 "$rc" "Herdr Claude relaunch should complete ($harness)"$'\n'"$out"
+    log=$(cat "$dir/fake/herdr-log")
+    if [ "$harness" = claude ]; then
+      assert_contains "$log" "pane report-agent-session %7" \
+        "a generated Claude relaunch should move the pane's bound session"
+    else
+      assert_not_contains "$log" "report-agent-session" \
+        "a raw Claude command cannot take the chosen id, so the bound session must stay"
+      assert_not_contains "$(cat "$dir/fake/launched-command")" "--session-id" \
+        "a raw Claude command must launch unchanged"
+    fi
+    rc=0
+  done
+  pass "fm-spawn --relaunch: only a generated Claude launch moves Herdr's bound session"
+}
+
+# A relaunch whose recorded pane is gone re-creates the endpoint in its bound
+# projection workspace and points the presentation journal at the new pane.
+# When the relaunch then aborts before the new task record is published, the
+# abort closes that pane, so the journal must name the recorded endpoint again;
+# otherwise the next reclaim finds a journal that disagrees with the record and
+# falls back to the launcher's workspace while the projection still lives.
+#
+# Canned/stateful fake only - never a real herdr session.
+make_herdr_projection_stub() {  # <case-dir>
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  rm -f "$fb/sleep"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+printf '%s\n' "$*" >> "$D/herdr-log"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true}}\n'
+  exit 0
+fi
+[ "${1:-}" != server ] || exit 0
+case "${1:-} ${2:-}" in
+  'session list')
+    printf '{"sessions":[{"name":"fmlab","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$D"
+    exit 0 ;;
+  'pane get')
+    if [ "${3:-}" = '%9' ] && [ -f "$D/new-pane-alive" ]; then
+      printf '{"result":{"pane":{"pane_id":"%%9","tab_id":"tabnew","workspace_id":"ws1","cwd":"%s","foreground_cwd":"%s"}}}\n' \
+        "$(cat "$D/cwd")" "$(cat "$D/cwd")"
+    else
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    fi
+    exit 0 ;;
+  'agent get') printf '{"error":{"code":"agent_not_found"}}\n'; exit 0 ;;
+  'pane process-info')
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[]}}}\n' "${3:-}"
+    exit 0 ;;
+  'pane run' | 'pane send-text')
+    case "${4:-}" in
+      'cd -- '*) [ ! -f "$D/cd-fails" ] || exit 1 ;;
+    esac
+    exit 0 ;;
+  'pane close')
+    [ "${3:-}" != '%9' ] || rm -f "$D/new-pane-alive"
+    exit 0 ;;
+  'workspace list')
+    printf '{"result":{"workspaces":[{"workspace_id":"wsp","label":"firstmate","focused":true,"active_tab_id":"ptab"},{"workspace_id":"ws1","label":"%s","focused":false,"active_tab_id":"keep"}]}}\n' \
+      "$(cat "$D/projection-label")"
+    exit 0 ;;
+  'tab list')
+    if [ "${4:-}" = wsp ]; then
+      printf '{"result":{"tabs":[{"tab_id":"ptab","focused":true}]}}\n'
+    elif [ -f "$D/new-pane-alive" ]; then
+      printf '{"result":{"tabs":[{"tab_id":"keep","focused":true},{"tab_id":"tabnew","focused":false}]}}\n'
+    else
+      printf '{"result":{"tabs":[{"tab_id":"keep","focused":true}]}}\n'
+    fi
+    exit 0 ;;
+  'tab create')
+    : > "$D/new-pane-alive"
+    printf '{"result":{"tab":{"tab_id":"tabnew"},"root_pane":{"pane_id":"%%9"}}}\n'
+    exit 0 ;;
+  'terminal title') printf '{"result":{"reason":"no_foreground_client"}}\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+}
+
+test_herdr_aborted_projection_rebind_restores_the_journal() {
+  local dir out rc=0 id=rbabort token=abcdefghijklmnopqrstuv label journal
+  command -v jq >/dev/null 2>&1 || {
+    echo "skip - herdr relaunch needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$(new_case rebind-abort "$id")
+  add_herdr_ship_task "$dir" "$id" fmlab '%gone'
+  make_herdr_projection_stub "$dir"
+  rm -f "$dir/fake/herdr-stopped"
+  mkdir -p "$dir/home/config"
+  printf 'on\n' > "$dir/home/config/herdr-presentation-spaces"
+  label="└ $id · p:$token"
+  printf '%s' "$label" > "$dir/fake/projection-label"
+  journal="$dir/home/state/$id.herdr-presentation"
+  printf 'version=2\ntask_id=%s\nprojection_id=%s\nhome=%s\nsession=fmlab\nworkspace_id=ws1\ntab_id=tab1\npane_id=%%7\nparent_workspace_id=wsp\nparent_label=firstmate\nworkspace_label=%s\ntask_label=fm-%s\n' \
+    "$id" "$token" "$(cd "$dir/home" && pwd -P)" "$label" "$id" > "$journal"
+  : > "$dir/fake/cd-fails"
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the relaunch should stop when the new endpoint cannot enter the worktree"$'\n'"$out"
+  assert_grep "tab create --workspace ws1" "$dir/fake/herdr-log" \
+    "the relaunch did not re-create the endpoint in its bound projection workspace"$'\n'"$out"
+  assert_grep "pane close %9" "$dir/fake/herdr-log" "the abort did not close the replacement pane"$'\n'"$out"
+  grep -qx 'tab_id=tab1' "$journal" || fail "the journal still names the closed replacement tab: $(cat "$journal")"
+  grep -qx 'pane_id=%7' "$journal" || fail "the journal still names the closed replacement pane: $(cat "$journal")"
+  grep -qx 'herdr_pane_id=%7' "$dir/home/state/$id.meta" || fail "the aborted relaunch changed the task record"
+  pass "fm-spawn --relaunch: an aborted projection rebind points the journal back at the recorded endpoint"
+}
+
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
   local dir out rc=0 log stray
   herdr_case_or_skip gone-herdr rl68 || {
@@ -3342,6 +3475,8 @@ test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
+test_herdr_raw_claude_relaunch_leaves_the_bound_session_alone
+test_herdr_aborted_projection_rebind_restores_the_journal
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session

@@ -903,6 +903,7 @@ Claude takes the opposite route, because a Claude relaunch is a fresh session by
 When the adopted pane already has a bound session, `bin/fm-spawn.sh` picks a new session id, moves the pane's binding to it with a `clear` report through `fm_backend_herdr_pane_rebind_agent_session`, and starts Claude with `--session-id <that id>` (`relaunch_fresh_session_args`; `fm_control_relaunch_fresh_session_flag` owns which adapters qualify).
 The new Claude then reports the session Herdr already holds, so its status and its idle time are its own.
 A pane with nothing bound needs no rebind and launches unchanged, and a rebind Herdr does not confirm only warns.
+A raw Claude launch command has no slot for the chosen id, so it leaves the binding where it is and launches unchanged.
 The other adapters have no fresh-session flag and keep their pre-existing behavior.
 
 The session file may not exist any more: Pi creates it at exactly that path, so the identity survives either way.

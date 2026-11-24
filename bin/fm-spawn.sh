@@ -1705,6 +1705,12 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+# Set by a relaunch that moved the presentation journal to its replacement
+# endpoint: an abort that closes that endpoint before the replacement record
+# is published points the journal back at the recorded one.
+HERDR_PROJECTION_ABORT_JOURNAL=
+HERDR_PROJECTION_ABORT_JOURNAL_TAB=
+HERDR_PROJECTION_ABORT_JOURNAL_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -1787,6 +1793,7 @@ spawn_abort_cleanup() {
     [ ! -e "$SPAWN_META_TMP" ] &&
     [ ! -L "$SPAWN_META_TMP" ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
+    HERDR_PROJECTION_ABORT_JOURNAL=
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ]; then
     RELAUNCH_REPLACEMENT_PENDING=0
@@ -1820,7 +1827,15 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
       SPAWN_ENDPOINT_CLOSED=1
+      if [ -n "$HERDR_PROJECTION_ABORT_JOURNAL" ] &&
+        ! fm_backend_herdr_projection_journal_replace_endpoint \
+          "$HERDR_PROJECTION_ABORT_JOURNAL" "$ID" \
+          "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+          "$HERDR_PROJECTION_ABORT_JOURNAL_TAB" "$HERDR_PROJECTION_ABORT_JOURNAL_PANE"; then
+        echo "warning: could not point the herdr presentation journal for $ID back at its recorded endpoint; the next relaunch of $ID may use the flat layout" >&2
+      fi
     fi
+    HERDR_PROJECTION_ABORT_JOURNAL=
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -2160,10 +2175,11 @@ spawn_herdr_presentation_order_lock_release() {
 # and a relaunch whose endpoint is gone share it, so a replacement endpoint
 # gets the same task-named workspace its first launch had.
 # The caller holds the session presentation lock, and $HERDR_PRESENTATION_JOURNAL
-# does not exist. Return 0 sets HERDR_PROJECTED=1, the endpoint globals, and
-# the abort cleanup, and keeps the lock until the launch Enter. Return 2 means
-# the parent is absent or ambiguous: the lock is released and the caller uses
-# the flat layout. Any refusal exits.
+# does not exist. A projection sets HERDR_PROJECTED=1, the endpoint globals,
+# and the abort cleanup, and keeps the lock until the launch Enter. An absent or
+# ambiguous parent leaves HERDR_PROJECTED=0 and releases the lock, and the
+# caller uses the flat layout. Any refusal exits. It always returns 0, so a
+# caller under errexit reads HERDR_PROJECTED rather than a status.
 spawn_herdr_project_task() {  # <cwd> <label-home> <parent-label>
   local cwd=$1 label_home=$2 parent_label=$3 launcher_status projection_id projection_label group_key home_id
   # The projected child is placed and bound UNDER this launcher's exact
@@ -2171,10 +2187,8 @@ spawn_herdr_project_task() {  # <cwd> <label-home> <parent-label>
   # directly; the label lookup is only the fallback for a launcher with
   # no herdr ancestry at all. A claimed-but-broken identity refuses here
   # rather than projecting under a guessed parent.
-  set +e
-  fm_backend_herdr_launcher_identity "$HERDR_SES"
-  launcher_status=$?
-  set -e
+  launcher_status=0
+  fm_backend_herdr_launcher_identity "$HERDR_SES" || launcher_status=$?
   case "$launcher_status" in
   0) HERDR_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID ;;
   2) HERDR_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_parent_workspace_exact \
@@ -2187,7 +2201,7 @@ spawn_herdr_project_task() {  # <cwd> <label-home> <parent-label>
   if [ -z "$HERDR_PARENT_WORKSPACE_ID" ]; then
     echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
     spawn_herdr_presentation_order_lock_release
-    return 2
+    return 0
   fi
   projection_id=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
   projection_label=$(fm_backend_herdr_projection_workspace_label "$ID" "$projection_id")
@@ -5190,6 +5204,9 @@ EOF
           0)
             HERDR_PROJECTED=1
             HERDR_SEEDED_DEFAULT_TAB_ID=""
+            HERDR_PROJECTION_ABORT_JOURNAL=$HERDR_PRESENTATION_JOURNAL
+            HERDR_PROJECTION_ABORT_JOURNAL_TAB=$HERDR_TAB_ID
+            HERDR_PROJECTION_ABORT_JOURNAL_PANE=$HERDR_PANE_ID
             HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
             HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
             HERDR_PROJECTION_ABORT_CLEANUP=1
@@ -5218,11 +5235,7 @@ EOF
           # The launcher's own pane names the parent workspace, exactly as
           # for a fresh spawn; the recorded pane id is not the launcher.
           HERDR_PANE_ID=$RELAUNCH_LAUNCHER_PANE_ID
-          set +e
           spawn_herdr_project_task "$WT" "$FM_HOME" "$HERDR_PARENT_LABEL"
-          HERDR_PROJECT_STATUS=$?
-          set -e
-          [ "$HERDR_PROJECT_STATUS" -eq 0 ] || [ "$HERDR_PROJECT_STATUS" -eq 2 ] || exit 1
         fi
         [ "$HERDR_PROJECTED" -eq 1 ] || spawn_herdr_presentation_order_lock_release
       fi
@@ -5373,11 +5386,7 @@ else
           ! fm_backend_herdr_presentation_default_supported "$STATE" "$HERDR_SES"; then
           :
         elif spawn_herdr_presentation_order_lock_acquire "$HERDR_SES"; then
-          set +e
           spawn_herdr_project_task "$PROJ_ABS" "$HERDR_LABEL_HOME" "$HERDR_PARENT_LABEL"
-          HERDR_PROJECT_STATUS=$?
-          set -e
-          [ "$HERDR_PROJECT_STATUS" -eq 0 ] || [ "$HERDR_PROJECT_STATUS" -eq 2 ] || exit 1
         else
           echo "warning: herdr presentation focus lock unavailable; using the ordinary flat layout without projection" >&2
         fi
@@ -7619,6 +7628,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
   RELAUNCH_REPLACEMENT_PENDING=0
+  HERDR_PROJECTION_ABORT_JOURNAL=
   SPAWN_META_PUBLISH_STARTED=0
   SPAWN_META_TMP=
 fi
@@ -7670,7 +7680,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
 fi
 LAUNCH=${LAUNCH//__PIRESUME__/$RESUME_ARGS}
 FRESH_SESSION_ARGS=
-if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_REBIND" -eq 0 ]; then
+# Move the pane's bound session only when this launch can carry the chosen id;
+# a raw command has no __CLAUDESESSION__ slot, so its session stays as Herdr has it.
+if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_REBIND" -eq 0 ] && [[ $LAUNCH == *__CLAUDESESSION__* ]]; then
   FRESH_SESSION_ARGS=$(relaunch_fresh_session_args "$HARNESS" "$BACKEND" "$T") || FRESH_SESSION_ARGS=
 fi
 LAUNCH=${LAUNCH//__CLAUDESESSION__/$FRESH_SESSION_ARGS}

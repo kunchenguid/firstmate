@@ -399,7 +399,7 @@ pass "real herdr $HERDR_VERSION: a fresh Claude replacement is started on the se
 # inherit.
 mkdir -p "$HOME_DIR/config"
 printf 'on\n' > "$HOME_DIR/config/herdr-presentation-spaces"
-LAUNCHER_OUT=$(herdr workspace create --cwd "$SCRATCH" --label "Zyx QA fm" --no-focus --session "$SESSION") \
+LAUNCHER_OUT=$(herdr workspace create --cwd "$SCRATCH" --label "renamed launcher" --no-focus --session "$SESSION") \
   || fail "could not create the launcher workspace"
 LAUNCHER_WS=$(printf '%s' "$LAUNCHER_OUT" | jq -r '.result.workspace.workspace_id')
 LAUNCHER_PANE=$(printf '%s' "$LAUNCHER_OUT" | jq -r '.result.root_pane.pane_id')

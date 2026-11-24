@@ -155,6 +155,7 @@ A seat that *claims* a herdr launcher pane belonging to a different session is r
 A seat with no herdr launcher pane at all - a plain ssh or cron shell, which is the ordinary way an operator reclaims - is not refused: placement falls back to the recorded session's labeled container, so the tab still lands in the session the record names.
 With presentation spaces enabled, the reclaim also keeps the task in a workspace of its own, so it never shows up as a second row under the reclaiming seat's name.
 When the task's version 2 journal still binds a surviving projection workspace, the new tab is created in that recorded workspace and the journal advances to the new tab and pane.
+If the reclaim then refuses before the record is republished, its abort closes the new pane and points the journal back at the recorded endpoint, so a retry still joins that workspace.
 When that projection workspace is gone too, the stale journal is retired and the reclaim creates a fresh task-named projection, exactly as a fresh spawn would.
 A task with no journal also gets a fresh projection.
 Any other journal shape, such as a version 1 attempt whose workspace still exists, falls back to the flat container, as does a home with presentation spaces disabled or a session where projection is unavailable ([`herdr-backend.md`](herdr-backend.md) "Restart recovery").
