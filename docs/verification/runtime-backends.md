@@ -1076,7 +1076,7 @@ Refresh the pin only after the candidate-pin guard passes, then verify the defau
 FM_COMPOSER_PI_BANNER_LIVE=1 bash bin/fm-test-run.sh tests/fm-composer-pi-codex-banner-live-e2e.test.sh
 ```
 
-Both commands produced:
+The guard produced:
 
 ```text
 # pi (1.3.0): rendered banner row: Error: Codex error: The usage limit has been reached
