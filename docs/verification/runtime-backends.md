@@ -137,6 +137,20 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Release on review
+
+On 2026-11-17, tmux 3.6a on Linux arm64 was checked with a private socket and a task window named `fm-lane` in session `lab`.
+The following commands returned the same server PID before and after the close, and the window ID from the first command was absent from the final inventory:
+
+```sh
+tmux display-message -p -t '=lab:=fm-lane' '#{socket_path}|#{pid}|#{window_id}'
+tmux kill-window -t '=lab:=fm-lane'
+tmux -S "$socket" display-message -p '#{pid}'
+tmux -S "$socket" list-windows -a -F '#{window_id}'
+```
+
+The portable release and relaunch regressions run with `bash bin/fm-test-run.sh tests/fm-park.test.sh tests/fm-control-relaunch.test.sh`.
+
 ### Agent liveness name sources
 
 Hermes Agent v0.21.7 was verified as a tmux worker on Linux on 2026-11-02: native Node TUI / Python module argv yielded `alive`, and the tool-side harness detector returned `hermes`.
@@ -2159,7 +2173,7 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 
 `tests/fm-backend-herdr.test.sh` pins the logic portably by driving the two signals apart - the same failed pane read yields `missing` under a stopped server and `unreadable` under a running one - and asserts that the husk classifier still refuses on that identical read.
 `tests/fm-control-herdr-smoke.test.sh` proves the Herdr-only drift recovery against a real binary in an isolated lab session.
-`tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
+[The tmux relaunch regressions](#release-on-review) check that a missing endpoint without closure proof receives no input and is never replaced.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
 ### Stale agent registration

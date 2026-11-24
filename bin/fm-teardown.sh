@@ -49,8 +49,8 @@
 # refresh_remote_refs has updated those refs from each remote when the local ones
 # do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# the forge (GitHub, Forgejo, or - only when config/park-on-review or
-# config/auto-land opts this home in - a GitLab merge request) reports a PR head
+# the forge (GitHub, Forgejo, or a GitLab merge request with landing opt-in as
+# documented in docs/configuration.md under "Park on review") reports a PR head
 # that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
@@ -159,6 +159,11 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# For a lane released on review, an absent or different slot claim plus the
+# matching release record and its endpoint closure proof let cleanup skip the
+# former copy. Teardown checks the current branch tip in the project clone
+# before deleting that branch, since the retained ref can move after release.
+# If the task still owns the slot, the normal worktree safeguards apply.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -1677,8 +1682,8 @@ pr_number_from_target() {
 # GitLab serves a merge request's head as refs/merge-requests/<n>/head; GitHub
 # and Forgejo serve a pull request's as refs/pull/<n>/head.
 ensure_commit_object() {
-  local target=$1 commit=$2 n ref
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  local target=$1 commit=$2 repo=$3 n ref
+  git -C "$repo" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   case "$target" in
     *"/-/merge_requests/"*)
       n=${target##*/-/merge_requests/}
@@ -1691,38 +1696,37 @@ ensure_commit_object() {
       ref="refs/pull/$n/head"
       ;;
   esac
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  git -C "$repo" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$repo" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
+  git -C "$repo" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
 patch_id_for_commit() {
-  local commit=$1
+  local commit=$1 repo=$2
   # Indentation can change semantics. Unsupported --verbatim yields no id,
   # so callers fall back to the content check or refuse, never ignore whitespace.
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+  git -C "$repo" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --verbatim 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
 unpushed_patches_are_in_pr_head() {
-  local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  local pr_head=$1 repo=$2 current=$3 base pr_patch_ids commit patch_id unpushed
+  base=$(git -C "$repo" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+    git -C "$repo" log --format=%H "$base..$pr_head" -- 2>/dev/null \
       | while IFS= read -r commit; do
-          patch_id_for_commit "$commit"
+          patch_id_for_commit "$commit" "$repo"
         done \
       | sed '/^$/d' \
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$repo" log --format=%H "$current" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
-    patch_id=$(patch_id_for_commit "$commit") || return 1
+    patch_id=$(patch_id_for_commit "$commit" "$repo") || return 1
     [ -n "$patch_id" ] || return 1
     printf '%s\n' "$pr_patch_ids" | grep -qxF "$patch_id" || return 1
   done <<EOF
@@ -1741,18 +1745,18 @@ EOF
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
 # The GitLab merged-MR read is opt-in with the park-on-review flags
-# (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
+# (bin/fm-park.sh, docs/configuration.md "Park on review"); without an opt-in a
 # GitLab MR goes through the GitHub read like any other target.
 gitlab_mr_landing_opted_in() {
-  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
+  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/release-on-review" ] || [ -e "$CONFIG/auto-land" ]
 }
 
 pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+  local branch=$1 repo=$2 revision=$3 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
+    target=$(fm_pr_number_from_branch "$repo" "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
@@ -1768,7 +1772,7 @@ pr_is_merged() {
     fm_pr_head_valid "$head" || return 1
     resolved_url=$FM_PR_URL
   else
-    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+    view=$(cd "$repo" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
     state=${view%%$'\t'*}
     remainder=${view#*$'\t'}
     [ "$state" != "$view" ] || return 1
@@ -1781,11 +1785,11 @@ pr_is_merged() {
     esac
   fi
   [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+  ensure_commit_object "$target" "$head" "$repo" || return 1
+  current=$(git -C "$repo" rev-parse --verify "$revision" 2>/dev/null) || return 1
+  if git -C "$repo" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
+  elif unpushed_patches_are_in_pr_head "$head" "$repo" "$current"; then
     landed=1
   fi
   [ "$landed" = 1 ] || return 1
@@ -1797,8 +1801,8 @@ pr_is_merged() {
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
+# first, then 3-way merges the default branch with the task's revision. When that revision
+# introduces nothing new (e.g. its change landed via squash) the
 # merged tree equals the default branch's tree. This isolates branch-only changes, so
 # unrelated commits the default branch gained past the merge-base do not count as
 # "added". Returns non-zero when inconclusive (no default ref, a merge conflict,
@@ -1806,20 +1810,20 @@ pr_is_merged() {
 # CONTENT_LANDED_PROOF_ERROR names a merge-tree option or execution failure
 # separately from a conflict or differing tree.
 content_in_default() {
-  local name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
+  local repo=$1 revision=$2 name=${BASE_BRANCH:-} ref default_tree merged_tree merge_status
   CONTENT_LANDED_PROOF_ERROR=
   [ -n "$name" ] || name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    git -C "$repo" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif git -C "$repo" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(git -C "$repo" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
+  merged_tree=$(git -C "$repo" merge-tree --write-tree "$ref" "$revision" 2>/dev/null) || {
     merge_status=$?
     case "$merge_status" in
       1) ;; # Git completed the merge and found conflicts.
@@ -1838,9 +1842,14 @@ content_in_default() {
 # default branch (fallback, which also covers the no-PR and gh-error paths). False
 # when neither proof establishes that the work landed.
 work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+  local branch=$1 repo=${2:-$WT} revision=${3:-HEAD} default
+  if [ "$MODE" = local-only ]; then
+    default=$(default_branch) || return 1
+    git -C "$repo" merge-base --is-ancestor "$revision" "$default"
+    return
+  fi
+  pr_is_merged "$branch" "$repo" "$revision" && return 0
+  content_in_default "$repo" "$revision"
 }
 
 # The completion links this teardown already holds locally. A retained scout
@@ -2176,7 +2185,7 @@ refresh_remote_refs() {
   [ "$REMOTE_REFS_REFRESHED" = 0 ] || return 0
   REMOTE_REFS_REFRESHED=1
   FM_DOD_REFRESH_FAILED=
-  fm_dod_refresh_remote_refs "$WT" 30
+  fm_dod_refresh_remote_refs "${1:-$WT}" 30
 }
 
 report_remote_refresh_failure() {
@@ -2754,6 +2763,7 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree>
 # step that would read or touch $WT consults teardown_owns_worktree, so a
 # reassigned slot is skipped consistently rather than by each step's own guess.
 TEARDOWN_SLOT_REASSIGNED=0
+TEARDOWN_RELEASED=0
 TEARDOWN_SLOT_REASSIGNED_TO=
 TEARDOWN_SLOT_REASSIGNED_HOME=
 require_owned_task_worktree_slot() {
@@ -2773,7 +2783,7 @@ require_owned_task_worktree_slot() {
 }
 
 teardown_owns_worktree() {
-  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ] && [ "$TEARDOWN_RELEASED" != 1 ]
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3701,8 +3711,50 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
-require_owned_task_worktree_slot || exit 1
+if [ -n "$(fm_meta_get "$STATE/$ID.review-park" released_at)$(fm_meta_get "$STATE/$ID.review-park" releasing)" ]; then
+  if [ -d "$WT" ]; then
+    fm_treehouse_slot_owner_state "$WT" "$ID"
+  else
+    FM_TREEHOUSE_SLOT_OWNER=absent
+  fi
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine) ;;
+    absent|other) TEARDOWN_RELEASED=1 ;;
+    *) echo "REFUSED: released slot ownership cannot be read" >&2; exit 1 ;;
+  esac
+fi
+if [ "$TEARDOWN_RELEASED" = 1 ]; then
+  RELEASED_BRANCH=$(fm_meta_get "$STATE/$ID.review-park" branch)
+  RELEASED_HEAD=$(fm_meta_get "$STATE/$ID.review-park" head)
+  if [ "$KIND" != ship ] || [ "$(fm_meta_get "$META" branch)" != "$RELEASED_BRANCH" ] \
+    || [ "$(fm_meta_get "$STATE/$ID.review-park" pr)" != "$PR_URL" ] \
+    || [ "$(fm_meta_get "$STATE/$ID.review-park" endpoint_closed)" != 1 ] \
+    || ! fm_pr_head_valid "$RELEASED_HEAD" \
+    || ! git check-ref-format --branch "$RELEASED_BRANCH" >/dev/null 2>&1; then
+    echo "REFUSED: released lane record does not match its task, branch, PR, and verified head" >&2
+    exit 1
+  fi
+  RELEASED_TIP=$(git -C "$PROJ" rev-parse --verify "refs/heads/$RELEASED_BRANCH" 2>/dev/null || true)
+  if [ -z "$RELEASED_TIP" ] || ! RELEASED_UNPUSHED=$(git -C "$PROJ" log --format=%H "$RELEASED_TIP" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null); then
+    echo "REFUSED: released branch $RELEASED_BRANCH cannot be inspected" >&2
+    exit 1
+  fi
+  if [ -n "$RELEASED_UNPUSHED" ]; then
+    refresh_remote_refs "$PROJ"
+    RELEASED_UNPUSHED=$(git -C "$PROJ" log --format=%H "$RELEASED_TIP" --not --exclude='no-mistakes/*' --remotes -- 2>/dev/null) || {
+      echo "REFUSED: released branch $RELEASED_BRANCH cannot be inspected" >&2
+      exit 1
+    }
+  fi
+  if [ -n "$RELEASED_UNPUSHED" ] && ! work_is_landed "$RELEASED_BRANCH" "$PROJ" "$RELEASED_TIP"; then
+    echo "REFUSED: released branch $RELEASED_BRANCH has work not on any remote and not landed" >&2
+    report_remote_refresh_failure
+    exit 1
+  fi
+else
+  require_exclusive_task_worktree_slot || exit 1
+  require_owned_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3835,7 +3887,7 @@ fi
 # refuses before any destructive step.
 TEARDOWN_HERDR_SESSION=
 TEARDOWN_HERDR_PANE=
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   teardown_herdr_preflight_target "$T" "$ID" || exit 1
   fm_backend_herdr_parse_target "$T" || exit 1
   TEARDOWN_HERDR_SESSION=$FM_BACKEND_HERDR_SESSION
@@ -3889,7 +3941,7 @@ teardown_herdr_journal_orphaned() {
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
 HERDR_PRESENTATION_PANE=
-if [ "$BACKEND" = herdr ] \
+if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ] \
    && { [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; }; then
   fm_backend_source herdr || true
   HERDR_PRESENTATION_SESSION=$(meta_value "$META" herdr_session)
@@ -3923,7 +3975,7 @@ if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   else
     echo "warning: herdr presentation focus lock unavailable; refusing a concurrent focus-unsafe pane close" >&2
   fi
-elif [ "$BACKEND" = herdr ]; then
+elif [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   if teardown_herdr_session_lock_held "$TEARDOWN_HERDR_SESSION"; then
     fm_backend_herdr_kill_serialized "$TEARDOWN_HERDR_SESSION" "$TEARDOWN_HERDR_PANE" 2>/dev/null || true
   else
@@ -3944,7 +3996,7 @@ fi
 # A refused or skipped Herdr close must stop before the reaper or Treehouse
 # return can end the pane shell in the task copy. Confirm the exact pane is gone
 # while the copy and every durable record are still intact.
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   fm_backend_source herdr || true
   if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
     echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
@@ -4088,7 +4140,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
-  :
+  if [ "$TEARDOWN_RELEASED" = 1 ]; then
+    git -C "$PROJ" branch -D "$RELEASED_BRANCH" >/dev/null || exit 1
+  fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -4099,9 +4153,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Remove our hook and environment files so a reused pool worktree cannot fire
   # signals for a dead task or hand a t3code env block or channel statement to
   # its next holder.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  remove_harness_worktree_wiring "$WT"
+  fm_control_remove_worktree_wiring "$META" "$WT" "$STATE" "$ID"
   if [ "$BACKEND" = t3code ]; then
     "$SCRIPT_DIR/fm-t3code-codex-env.sh" cleanup "$WT" || exit 1
     git -C "$WT" ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1 || rm -f "$WT/CLAUDE.local.md"
@@ -4135,7 +4187,7 @@ if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" 
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
     fm_backend_kill "$BACKEND" "$T" "" "fm-$ID" ) \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
-elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
+elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr ] && [ "$TEARDOWN_WINDOWLESS" != 1 ] && [ "$TEARDOWN_RELEASED" != 1 ]; then
   # Undo Firstmate's own opt-in Rex attention mark, progress, and tint first
   # (bin/fm-rex-marks.sh), so a pane the close cannot reach is not left showing
   # a stale request. A task with no cached record costs nothing.
@@ -4219,7 +4271,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" "$STATE/$ID.pr-register-refused" \
-  "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" \
+  "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" "$STATE/.review-park-release-error-$ID" \
   "$STATE/$ID.pr-register-timed-out" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
@@ -4301,6 +4353,8 @@ if [ "$TEARDOWN_POOL_SLOT_LOST" = 1 ]; then
   echo "teardown $ID finished its cleanup and removed its task record, but a returned pool slot did not come back clean (see the warning above); clear those paths so the pool can reuse the slot" >&2
 elif [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$TEARDOWN_RELEASED" = 1 ]; then
+  echo "teardown $ID complete (released on review; local branch removed)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else
