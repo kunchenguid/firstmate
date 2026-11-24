@@ -84,15 +84,10 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${SCRIPT_DIR:-/}/fm-omp-process-lib.sh"
 
-# How many processes every ancestry walk below examines: this process plus up
-# to fifteen parents. It deliberately matches fm_harness_ancestry_pids in
-# bin/fm-session-lock-lib.sh, so the session start digest's harness verdict and
-# the session lock's owner are found by walks of the same reach. A Codex
-# SessionStart hook runs fm-harness.sh nine parents below the native codex
-# process (hook shell, stop-park wrapper, session-start runner, the digest and
-# its bounded child), and the digest's later probes sit deeper still, so a
-# shorter walk reports a markerless Codex primary as unknown while the lock
-# still names it.
+# Keep the parent walks in sync with fm_harness_ancestry_pids in
+# bin/fm-session-lock-lib.sh. Otherwise the deeply nested Codex SessionStart
+# probes can miss the native process while the session lock still names it.
+# See docs/verification/runtime-backends.md for measured hook depths.
 HARNESS_ANCESTRY_HOPS=16
 
 # Print the harness named by a verified environment marker, or nothing when no
@@ -348,8 +343,8 @@ harness_ancestry() {  # [<pid>]
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
-# is eligible. Bounded to the same HARNESS_ANCESTRY_HOPS reach harness_ancestry
-# climbs, so a deep or pathological tree cannot make this walk unbounded.
+# is eligible. Limit the search to HARNESS_ANCESTRY_HOPS edges below the root
+# so a deep or pathological tree cannot make this walk unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0

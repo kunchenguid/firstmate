@@ -83,7 +83,6 @@ Run on the host under Claude Code 2.1.252 with the same two markers set, the sam
 ### Ancestry reach across the Codex SessionStart hook
 
 Codex publishes no marker, so its session start digest identifies Codex only if the ancestry walk reaches the native `codex` process from where the hook runs.
-The walk in `bin/fm-harness.sh` examines the probing process plus fifteen parents, the same reach as the session lock walker in `bin/fm-session-lock-lib.sh`.
 Verified on 2026-11-04 with codex-cli 0.166.0 on Linux 6.12.113 (arm64), through the installed `codex app-server` against a loopback model fixture with an isolated `CODEX_HOME`, `HOME`, and lab checkout:
 
 ```sh
@@ -3726,10 +3725,6 @@ FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=46017
 The portable park suite exercises registration and capability through a compiled harness ancestor, including below-minimum, intermediate, patch, future-major, malformed, prerelease, and failed-probe cases.
 The real installed CLI guard checks hook flags and native Stop response parsing in isolated app-server fixtures; it does not prove a resumed TUI's watcher cycle.
 The CLI emitted a nonfatal stale arg0 cleanup warning (`Cross-device link`) during the guard.
-A separate functional trial on 2026-11-05 with real `codex-cli 0.166.0` completed resumed startup, native queued worker-report delivery, primary handling and acknowledgement, and automatic next-Stop rearm.
-That trial included the ancestry fix described above, plus additional local cleanup-lock and resume-registration patches absent from this upstream change.
-It validates that local composition on 0.166.0, not the minimum-version comparison alone, every newly admitted release, or long-duration stability.
-The ancestry fix makes the native SessionStart hook reach the Codex process; resume-registration behavior remains unchanged and does not inherit that trial's live resume guarantee.
 
 ## hc
 
