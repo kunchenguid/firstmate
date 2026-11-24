@@ -111,6 +111,9 @@ assert_contains "$OUT" "GUARD_FIRED" "Stop hook turn-end guard did not fire on m
 rm -f "$HOME_DIR/state/live-task.meta" "$HOME_DIR/state/.turnend-blocks"
 OUT=$(run_agy "$HOME_DIR" "Reply with the single word CLEAN_EXIT and end your turn without running any command.")
 assert_contains "$OUT" "CLEAN_EXIT" "Stop hook did not allow clean exit on empty fleet in live agy run: $OUT"
+assert_not_contains "$OUT" "TURN WOULD END BLIND" "Stop hook wrongly nagged on an empty fleet in live agy run: $OUT"
+[ ! -e "$HOME_DIR/state/.turnend-blocks" ] \
+  || fail "Stop hook charged the repair-block budget on an empty fleet in live agy run"
 pass "agy primary live: Stop hook enforces non-blocking turn-end guard without parking"
 
 # --- --secondmate agy trust pre-seeding and launch -----------------------------

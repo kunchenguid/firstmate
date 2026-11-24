@@ -7,9 +7,9 @@
 # config/supervision-host elsewhere, never with config/supervision-host-off), the block
 # adds one state line and the host's main-side protocol
 # (docs/supervision-protocols/supervision-host.md, whose lines tagged
-# "{<harness>,...} " render only for the listed harnesses), and Grok's arm
-# command becomes the host; on a home that does not run it the output is
-# unchanged.
+# "{<harness>,...} " render only for the listed harnesses), and Grok's and
+# Antigravity's arm commands become the host; on a home that does not run it the
+# output is unchanged.
 set -eu
 
 # Template replacements must stay literal on Bash 5.2+ and stock macOS Bash.
