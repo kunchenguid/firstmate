@@ -1064,3 +1064,56 @@ test_marks_are_off_by_default
 test_marks_producer_converges_and_notifies_once
 test_marks_clear_removes_records_and_caches
 test_nm_run_progress_reads_captured_status
+
+# Capped away admission waits for startup only on tmux and Herdr. A rex spawn
+# opens a shell-only block; if that wait ran, worker_state would stay dead and
+# spawn would fail with "startup was not established". Success under a 2s
+# injectable wait is proof the wait was skipped, matching main.
+test_rex_capped_spawn_skips_startup_wait() {
+  local dir home id proj wt out rc t0 elapsed spawn_home
+  dir=$(new_case capped-spawn-skip-wait)
+  home="$dir/home"
+  id="rex-skip-wait-$$"
+  proj="$dir/project"
+  wt="$dir/wt"
+  spawn_home="$dir/user-home"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$spawn_home"
+  touch "$home/state/.last-watcher-beat"
+  printf 'claude\n' > "$home/config/crew-harness"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise a capped rex spawn.
+
+## Firstmate spec
+Verify rex does not enter the away startup wait.
+EOF
+  fm_git_identity fmtest fmtest@example.invalid
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$dir/fakebin"
+  fm_fake_exit0 "$dir/fakebin" treehouse
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null \
+    || fail "away entry failed"
+  t0=$SECONDS
+  rc=0
+  out=$(
+    HOME="$spawn_home" CLAUDE_CONFIG_DIR='' \
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
+      FM_SPAWN_START_WAIT_SECONDS=2 FM_SUPERVISION_ACTOR=main \
+      FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" \
+      FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+      PATH="$dir/bin:$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --scout --backend rex 2>&1
+  ) || rc=$?
+  elapsed=$((SECONDS - t0))
+  [ "$rc" -eq 0 ] || fail "capped rex spawn failed (rc=$rc): $out"
+  assert_contains "$out" "spawned $id" "capped rex spawn did not report success: $out"
+  assert_not_contains "$out" "startup was not established" \
+    "capped rex spawn entered the tmux/Herdr startup wait: $out"
+  [ "$elapsed" -le 15 ] || fail "capped rex spawn took ${elapsed}s, longer than a skipped wait allows: $out"
+  pass "a capped rex spawn skips the away startup wait and succeeds like main"
+}
+
+test_rex_capped_spawn_skips_startup_wait

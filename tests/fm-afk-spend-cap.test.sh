@@ -98,7 +98,7 @@ SH
     FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_BACKEND=tmux FM_SUPERVISION_ACTOR=main \
-      FM_SPAWN_NO_GUARD=1 TMUX=fake,1,0 FM_RESERVATION_ID="$id" \
+      FM_SPAWN_NO_GUARD=1 FM_SPAWN_START_WAIT_SECONDS=2 TMUX=fake,1,0 FM_RESERVATION_ID="$id" \
       FM_RESERVATION_WT="$dir/wt" PATH="$home/fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$dir/project" "${args[@]}" > "$home/launch.log" 2>&1 &
     SPAWN_PID=$!
@@ -188,7 +188,7 @@ SH
     case "$scenario" in
       rename-timeout|move-cancel|socket-cancel|rename-raw-cancel)
         [ "$rc" -ne 0 ] || fail "unconfirmed cancellation reported success"
-        [ "$scenario" != rename-timeout ] || assert_grep 'startup was not established within 30s' "$home/launch.log" "relocated startup did not reach timeout cancellation"
+        [ "$scenario" != rename-timeout ] || assert_grep 'startup was not established within 2s' "$home/launch.log" "relocated startup did not reach timeout cancellation"
         [ -f "$home/endpoint" ] && [ -f "$home/started" ] || fail "relocated worker did not survive"
         staged=$(cat "$home/staged-path")
         [ ! -f "$staged" ] || fail "unconfirmed cancellation left a runnable staged launch"
@@ -203,7 +203,7 @@ SH
         ;;
       timeout|cancel|failed|cleanup-refused)
         [ "$rc" -ne 0 ] || fail "unsuccessful startup reported success: $(cat "$home/launch.log")"
-        [ "$scenario" != timeout ] || assert_grep 'startup was not established within 30s' "$home/launch.log" "timeout did not report startup failure"
+        [ "$scenario" != timeout ] || assert_grep 'startup was not established within 2s' "$home/launch.log" "timeout did not report startup failure"
         staged=$(cat "$home/staged-path")
         [ ! -f "$staged" ] || fail "cancelled startup left a runnable staged launch"
         if [ "$scenario" = cleanup-refused ]; then
@@ -957,6 +957,35 @@ EOF
   [ "$failures" = 0 ] || fail "$failures waiting-worker cases failed"
 }
 
+# The reads share one total deadline (FM_AFK_LIVE_WORKERS_TIMEOUT, default 20s).
+# A probe that never answers is cut off; remaining records count as spending
+# without being read, and live-workers still returns promptly. The sleep is
+# longer than the bound so a missing deadline would stall; the test itself stays
+# fast because the bound is 2s.
+test_live_workers_total_budget_counts_unread_records() {
+  local home out err t0 elapsed i
+  home="$TMP_ROOT/live-budget"
+  install_tools "$home"
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+exit 1
+SH
+  chmod +x "$home/fakebin/tmux"
+  for i in 1 2 3; do
+    fm_write_meta "$home/state/slow-$i.meta" "window=firstmate:fm-slow-$i" "kind=ship"
+  done
+  err="$home/live-workers.err"
+  t0=$SECONDS
+  out=$(FM_AFK_LIVE_WORKERS_TIMEOUT=2 FM_SPAWN_CAP_LAUNCH_GRACE=0 count_workers "$home" 2>"$err")
+  elapsed=$((SECONDS - t0))
+  [ "$elapsed" -le 8 ] || fail "live-workers ignored its total time bound (${elapsed}s)"
+  [ "$out" = 3 ] || fail "records cut off by the time bound were not counted as spending: $out"
+  assert_contains "$(cat "$err")" "truncated" \
+    "live-workers did not report that remaining records were truncated: $(cat "$err")"
+  pass "live-workers shares one total time bound and counts unread remaining records as spending"
+}
+
 test_waiting_workers_require_proven_idle
 test_completed_run_unknown_activity
 test_bounded_presence_reads
@@ -972,3 +1001,4 @@ test_completed_run_busy_turn
 test_handoff_and_ready_use_production_crew_state
 test_other_delivery_modes_and_scout
 test_recent_spawn_generation_skips_endpoint_probe
+test_live_workers_total_budget_counts_unread_records

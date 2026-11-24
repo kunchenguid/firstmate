@@ -1581,6 +1581,40 @@ test_spawn_leases_slot_creates_thread_and_starts_launch_turn() {
   pass "fm-spawn.sh --backend t3code: leases the slot, launches the thread on it, records metadata, sends the launch brief"
 }
 
+# t3code launches without a pane. The away startup wait is tmux/Herdr only, so a
+# capped t3code spawn must still succeed like main and must not report the
+# pane-backed startup timeout.
+test_t3code_capped_spawn_skips_startup_wait() {
+  local proj wt data state id out fb t0 elapsed
+  id=$(t3_uid t3capskip1)
+  t3_task_id "$id"
+  t3_case capped-spawn-skip-wait
+  proj="$CASE_DIR/spawn-project"
+  wt="$CASE_DIR/spawn-wt"
+  data="$CASE_DIR/data"
+  state="$CASE_DIR/state"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$CASE_DIR/home/state"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null \
+    || fail "away entry failed"
+  FM_T3_PROJ="$proj" t3_world_set 'w.projects[0].workspaceRoot = process.env.FM_T3_PROJ'
+  fb=$(make_treehouse_fakebin "$CASE_DIR")
+  t0=$SECONDS
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$fb:$PATH" FM_T3_TREEHOUSE_LOG="$LOG" FM_T3_TREEHOUSE_WT="$wt" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$CASE_DIR/home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_PROJECTS_OVERRIDE="$CASE_DIR/unused-projects" FM_SPAWN_NO_GUARD=1 FM_SPAWN_START_WAIT_SECONDS=2 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --model claude-sonnet-5 --effort high --backend t3code 2>&1 )
+  elapsed=$((SECONDS - t0))
+  expect_code 0 $? "a capped t3code spawn should succeed like main"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "capped t3code spawn did not report success: $out"
+  assert_not_contains "$out" "startup was not established" \
+    "capped t3code spawn entered the tmux/Herdr startup wait: $out"
+  [ "$elapsed" -le 20 ] || fail "capped t3code spawn took ${elapsed}s: $out"
+  pass "a capped t3code spawn skips the away startup wait and succeeds like main"
+}
+
 test_spawn_codex_scout_writes_toml_env_with_traceparent() {
   local proj wt data state id out fb toml tp
   t3_require_tomllib test_spawn_codex_scout_writes_toml_env_with_traceparent || return 0
@@ -2780,6 +2814,7 @@ test_control_lib_tables
 test_control_exit_refused_before_any_call
 test_control_relaunch_refused_before_any_dispatch
 test_spawn_leases_slot_creates_thread_and_starts_launch_turn
+test_t3code_capped_spawn_skips_startup_wait
 test_claude_pr_tool_clause_version_boundary
 test_spawn_codex_preserves_tracked_codex_config
 test_tracked_codex_overlay_recovery
