@@ -21,12 +21,31 @@ fm_sup_stat_mtime() {
   fi
 }
 
+# Trust records live in the home's operator-owned config/trust/
+# (${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/trust), so a writer confined to state/
+# cannot authorize its own check, and homes whose state overrides share a parent
+# never share bindings. Only fm-check-register.sh and fm-procevent-when.sh write
+# there. Without a home it refuses. Both paths are resolved physically when they
+# exist, so spellings such as state/. or a symlink cannot hide a trust directory
+# inside state; one that resolves there is refused.
+fm_trust_dir() {  # <state-dir>
+  local real config=${FM_CONFIG_OVERRIDE:-${FM_HOME:+$FM_HOME/config}}
+  [ -n "$config" ] || return 1
+  if [ -e "$config" ]; then
+    config=$(cd -P -- "$config" 2>/dev/null && pwd -P) || return 1
+  fi
+  if real=$(cd -P -- "$1" 2>/dev/null && pwd -P); then
+    case "$config/trust/" in "$real"/*) return 1 ;; esac
+  fi
+  printf '%s/trust\n' "$config"
+}
+
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
 #   FM_SUP_SOURCES        count of registered process-to-event sources
 #   FM_SUP_CHECKS         count of registered custom checks: a state/<id>.check.sh
-#                         with the state/<id>.check-trust binding that
+#                         with the config/trust/<id>.check-trust binding that
 #                         bin/fm-check-register.sh writes. Task PR polls carry no
 #                         such binding and are torn down with their task, and the
 #                         relay shim keeps its own trust path, so neither counts
@@ -45,7 +64,7 @@ fm_sup_stat_mtime() {
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
-  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id trust_dir beat m age
   FM_SUP_IN_FLIGHT=0
   FM_SUP_NEEDED=false
   FM_SUP_WATCHER_FRESH=false
@@ -62,6 +81,7 @@ fm_supervision_status() {
     FM_SUP_SOURCES=$((FM_SUP_SOURCES + 1))
   done
   FM_SUP_CHECKS=0
+  trust_dir=$(fm_trust_dir "$state") || trust_dir=
   for check in "$state"/*.check.sh; do
     [ -e "$check" ] || continue
     id=${check##*/}
@@ -69,7 +89,7 @@ fm_supervision_status() {
     if [ "$id" = x-watch ]; then
       continue
     fi
-    [ -e "$state/$id.check-trust" ] || continue
+    [ -n "$trust_dir" ] && [ -e "$trust_dir/$id.check-trust" ] || continue
     FM_SUP_CHECKS=$((FM_SUP_CHECKS + 1))
   done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \

@@ -424,7 +424,8 @@ make_isolated_bin() {  # <name> <register-exit-code>
   mkdir -p "$bin"
   cp "$ROOT/bin/fm-startup-growth-check.sh" "$ROOT/bin/fm-pr-lib.sh" \
     "$ROOT/bin/fm-startup-memory-budget-lib.sh" "$ROOT/bin/fm-line-cap-lib.sh" \
-    "$ROOT/bin/fm-check-lib.sh" "$ROOT/bin/fm-startup-memory-budget.sh" "$bin/"
+    "$ROOT/bin/fm-check-lib.sh" "$ROOT/bin/fm-supervision-lib.sh" \
+    "$ROOT/bin/fm-startup-memory-budget.sh" "$bin/"
   if [ "$code" = 0 ]; then
     cp "$ROOT/bin/fm-check-register.sh" "$bin/fm-check-register.sh"
   else
@@ -461,7 +462,7 @@ test_failed_first_arm_leaves_the_home_plainly_unarmed() {
   out=$(FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$bin/fm-startup-growth-check.sh" arm 2>&1) || status=$?
   [ "$status" != 0 ] || fail "a failed registration reported a successful arm"
   assert_absent "$home/state/startup-growth.check.sh" "a failed first arm left an unregistered shim behind"
-  assert_absent "$home/state/startup-growth.check-trust" "a failed first arm left a trust binding behind"
+  assert_absent "$home/config/trust/startup-growth.check-trust" "a failed first arm left a trust binding behind"
   leftover=$(cd "$home/state" && ls -1 .startup-growth-check-shim.?????? 2>/dev/null || true)
   [ -z "$leftover" ] || fail "a failed arm leaked its staged shim: $leftover"
 }
@@ -475,15 +476,15 @@ test_failed_rearm_keeps_the_previously_armed_shim_and_trust() {
   FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$good/fm-startup-growth-check.sh" arm >/dev/null \
     || fail "first arm failed"
   shim=$(cat "$home/state/startup-growth.check.sh")
-  trust=$(cat "$home/state/startup-growth.check-trust")
+  trust=$(cat "$home/config/trust/startup-growth.check-trust")
 
   bad=$(make_isolated_bin rearm-fail-bad 1)
   out=$(FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$bad/fm-startup-growth-check.sh" arm 2>&1) || status=$?
   [ "$status" != 0 ] || fail "a failed re-registration reported a successful arm"
   assert_present "$home/state/startup-growth.check.sh" "a failed re-arm disarmed a working home"
-  assert_present "$home/state/startup-growth.check-trust" "a failed re-arm removed the trust binding of a working home"
+  assert_present "$home/config/trust/startup-growth.check-trust" "a failed re-arm removed the trust binding of a working home"
   assert_equals "$shim" "$(cat "$home/state/startup-growth.check.sh")" "a failed re-arm changed the armed shim"
-  assert_equals "$trust" "$(cat "$home/state/startup-growth.check-trust")" "a failed re-arm changed the trust binding"
+  assert_equals "$trust" "$(cat "$home/config/trust/startup-growth.check-trust")" "a failed re-arm changed the trust binding"
   out=$(env -u FM_HOME FM_ROOT_OVERRIDE="$root" FM_STARTUP_GROWTH_NOW=1000 \
     "$home/state/startup-growth.check.sh" 2>&1) || fail "the preserved shim no longer runs: $out"
   assert_present "$home/state/.startup-growth-check" "the preserved shim did not run the daily check"
@@ -586,7 +587,7 @@ test_arm_and_disarm_use_authenticated_custom_check() {
   out=$(FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$CHECK" arm)
   assert_contains "$out" 'armed: state/startup-growth.check.sh' "arm did not announce the check shim"
   assert_present "$home/state/startup-growth.check.sh" "arm did not write the check shim"
-  assert_present "$home/state/startup-growth.check-trust" "arm did not register trust for the check shim"
+  assert_present "$home/config/trust/startup-growth.check-trust" "arm did not register trust for the check shim"
 
   out=$(env -u FM_HOME FM_ROOT_OVERRIDE="$root" FM_STARTUP_GROWTH_NOW=1000 "$home/state/startup-growth.check.sh" 2>&1) \
     || fail "registered check shim failed: $out"
@@ -600,7 +601,7 @@ test_arm_and_disarm_use_authenticated_custom_check() {
 
   FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$CHECK" disarm >/dev/null
   assert_absent "$home/state/startup-growth.check.sh" "disarm left the check shim"
-  assert_absent "$home/state/startup-growth.check-trust" "disarm left the trust binding"
+  assert_absent "$home/config/trust/startup-growth.check-trust" "disarm left the trust binding"
 }
 
 test_initial_baseline_is_silent_and_records_metadata

@@ -1937,7 +1937,7 @@ EOF
     config="$dir/home/config"
     case "$case_name" in
       source) mkdir -p "$state/procevent"; : > "$state/procevent/fixture.source" ;;
-      registered-check) : > "$state/fixture.check.sh"; : > "$state/fixture.check-trust" ;;
+      registered-check) : > "$state/fixture.check.sh"; mkdir -p "$config/trust"; : > "$config/trust/fixture.check-trust" ;;
       empty) : ;;
       afk-with-source)
         mkdir -p "$state/procevent"
@@ -1955,6 +1955,41 @@ EOF
     [ -z "$out" ] || fail "OpenCode arm predicate case $case_name printed output: $out"
   done
   pass "watch-arm: the OpenCode arm plugin decides with the shared supervision predicate"
+}
+
+test_opencode_arm_plugin_counts_a_registered_check_without_fm_home() {
+  command -v node >/dev/null 2>&1 || { printf 'skip: node not found\n'; return 0; }
+  local driver dir repo out status
+  driver="$TMP_ROOT/arm-no-home-driver.mjs"
+  cat > "$driver" <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const root = process.env.WORKTREE;
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+await mod.FmPrimaryWatchArm({ client, directory: root, worktree: root });
+writeFileSync(`${root}/state/.lock`, `${process.pid}\n`);
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error(`the arm never ran (ensureArmed status ${status})`);
+  process.exit(1);
+}
+EOF
+  dir=$(make_arm_decision_fixture "opencode-arm-no-home")
+  repo="$dir/repo"
+  mkdir -p "$repo/state" "$repo/config/trust"
+  : > "$repo/state/fixture.check.sh"
+  : > "$repo/config/trust/fixture.check-trust"
+  out=$(cd "$repo" && env -u FM_HOME -u FM_CONFIG_OVERRIDE -u FM_STATE_OVERRIDE -u FM_ROOT_OVERRIDE \
+    WORKTREE="$repo" FM_ARM_LOG="$dir/arm.log" NODE_NO_WARNINGS=1 \
+    PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" node "$driver" 2>&1)
+  status=$?
+  expect_code 0 "$status" "OpenCode arm plugin must count a registered check when FM_HOME is not exported: $out"
+  pass "watch-arm: the OpenCode arm plugin counts a registered check without an exported FM_HOME"
 }
 
 test_append_wakes_handling_successor after-ack
@@ -1998,3 +2033,4 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
 test_opencode_arm_plugin_decides_with_the_shared_predicate
+test_opencode_arm_plugin_counts_a_registered_check_without_fm_home

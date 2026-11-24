@@ -922,7 +922,7 @@ test_arms_for_registered_custom_check_without_inflight() {
   dir=$(make_primary_dir "$TMP_ROOT/check-need")
   printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/state/issue-comments.check.sh"
   chmod 700 "$dir/state/issue-comments.check.sh"
-  FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-register.sh" issue-comments >/dev/null \
+  FM_HOME="$dir" "$ROOT/bin/fm-check-register.sh" issue-comments >/dev/null \
     || fail "fm-check-register.sh could not register the custom check"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?

@@ -125,7 +125,7 @@ test_empty_id_and_empty_state_refuse_without_stray_rm() {
     "empty state override refusal used the wrong stderr"
   assert_present "$home/state/override-empty.check.sh" \
     "empty state override deleted the home state check"
-  assert_present "$home/state/override-empty.check-trust" \
+  assert_present "$home/config/trust/override-empty.check-trust" \
     "empty state override deleted the home state trust binding"
   assert_rm_not_invoked "$log"
 
@@ -144,7 +144,7 @@ test_happy_path_removes_only_check_and_trust() {
   chmod 0700 "$sibling"
   printf 'keep-meta\n' > "$meta"
   assert_present "$home/state/demo-check.check.sh" "fixture check.sh missing before unregister"
-  assert_present "$home/state/demo-check.check-trust" "fixture check-trust missing before unregister"
+  assert_present "$home/config/trust/demo-check.check-trust" "fixture check-trust missing before unregister"
 
   status=0
   STATE='' ID='' FM_HOME="$home" "$UNREGISTER" demo-check >"$out" 2>"$err" || status=$?
@@ -152,7 +152,7 @@ test_happy_path_removes_only_check_and_trust() {
   assert_contains "$(cat "$out")" "unregistered: state/demo-check.check.sh" \
     "happy path did not report unregistration"
   assert_absent "$home/state/demo-check.check.sh" "happy path left check.sh behind"
-  assert_absent "$home/state/demo-check.check-trust" "happy path left check-trust behind"
+  assert_absent "$home/config/trust/demo-check.check-trust" "happy path left check-trust behind"
   assert_present "$sibling" "happy path deleted a sibling check.sh"
   assert_present "$meta" "happy path deleted an unrelated state file"
 
@@ -173,7 +173,7 @@ test_unsafe_hardlink_or_symlink_is_refused() {
   expect_code 1 "$status" "unregister hard-linked check.sh"
   assert_contains "$(cat "$err")" "unsafe to remove" "hard-link refusal used the wrong stderr"
   assert_present "$home/state/custom.check.sh" "hard-link refusal deleted check.sh"
-  assert_present "$home/state/custom.check-trust" "hard-link refusal deleted check-trust"
+  assert_present "$home/config/trust/custom.check-trust" "hard-link refusal deleted check-trust"
   assert_present "$alias" "hard-link refusal deleted the external alias"
 
   rm -f "$alias"
@@ -188,7 +188,7 @@ test_unsafe_hardlink_or_symlink_is_refused() {
   assert_contains "$(cat "$err")" "unsafe to remove" "symlink refusal used the wrong stderr"
   assert_present "$home/state/custom.check.sh" "symlink refusal removed the state symlink"
   assert_present "$home/outside.check.sh" "symlink refusal deleted the external target"
-  assert_present "$home/state/custom.check-trust" "symlink refusal deleted check-trust"
+  assert_present "$home/config/trust/custom.check-trust" "symlink refusal deleted check-trust"
 
   pass "hard-linked or symlinked artifacts are refused and left in place"
 }

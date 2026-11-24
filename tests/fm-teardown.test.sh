@@ -2295,6 +2295,40 @@ test_forced_secondmate_dirty_child_return_warns_and_completes() {
   pass "a forced secondmate teardown warns about a dirty child return and still completes"
 }
 
+test_forced_secondmate_child_cleanup_keeps_parent_check_trust() {
+  local case_dir home child_wt rc
+  case_dir=$(make_case secondmate-child-parent-trust)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$case_dir/config/trust"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  printf 'fm-custom-check-v1\n%064d\n' 0 > "$case_dir/config/trust/child-scout.check-trust"
+  chmod 0600 "$case_dir/config/trust/child-scout.check-trust"
+  child_wt="$case_dir/pool/6/repo"
+  mkdir -p "$case_dir/pool/6"
+  git -C "$case_dir/project" worktree add -q -b fm/child-scout "$child_wt" main
+  printf '{"worktrees":[{"name":"6","path":"%s"}]}\n' "$child_wt" \
+    > "$case_dir/pool/treehouse-state.json"
+  fm_write_meta "$home/state/child-scout.meta" \
+    "window=firstmate:fm-child-scout" \
+    "endpoint_task_id=child-scout" \
+    "worktree=$child_wt" \
+    "project=$case_dir/project" \
+    "kind=scout" \
+    "mode=local-only"
+  add_treehouse_that_leaves_residue "$case_dir"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 4 "$rc" "secondmate-child-parent-trust: a lost child slot should exit 4 after retirement"
+  assert_absent "$home" "secondmate-child-parent-trust: secondmate home was not removed"
+  assert_present "$case_dir/config/trust/child-scout.check-trust" \
+    "secondmate-child-parent-trust: child cleanup removed the parent home's trust record"
+  pass "a secondmate child's cleanup never touches the parent home's check trust"
+}
+
 test_return_that_removes_copy_warns_cannot_verify() {
   local case_dir wt rc
   case_dir=$(make_case return-removes-copy)
@@ -6668,6 +6702,7 @@ test_dirty_return_warns_which_slot_was_lost
 test_dirty_return_warns_even_when_a_later_step_refuses
 test_forced_secondmate_child_scout_nested_clone_returns_clean
 test_forced_secondmate_dirty_child_return_warns_and_completes
+test_forced_secondmate_child_cleanup_keeps_parent_check_trust
 test_return_that_removes_copy_warns_cannot_verify
 test_scout_ignored_files_survive_scratch_clean
 test_gh_error_and_content_absent_refuses

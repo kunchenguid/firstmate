@@ -85,7 +85,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/watched-tools.json"
 RECORD="$STATE/.tool-updates"
 CHECK_ID=tool-updates
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
-CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
 RECORD_SCHEMA=fm-tool-updates-v1
 # Wider than the digest default because one finding names two absolute paths and
@@ -100,6 +99,7 @@ MAX_LINE=1000
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+CHECK_TRUST=$(fm_custom_check_trust_path "$STATE" "$CHECK_ID")
 
 usage() {
   cat <<'EOF'

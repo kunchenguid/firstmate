@@ -57,7 +57,6 @@ CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA_DIR="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CHECK_ID=startup-growth
 CHECK_SHIM="$STATE/$CHECK_ID.check.sh"
-CHECK_TRUST="$STATE/$CHECK_ID.check-trust"
 RECORD="$STATE/.startup-growth-check"
 RECORD_SCHEMA_LINE=$'schema\tfm-startup-growth-check-v1'
 REGISTER_BIN="$SCRIPT_DIR/fm-check-register.sh"
@@ -71,6 +70,7 @@ BUDGET_BIN="$SCRIPT_DIR/fm-startup-memory-budget.sh"
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+CHECK_TRUST=$(fm_custom_check_trust_path "$STATE" "$CHECK_ID")
 
 usage() {
   sed -n '2,48{s/^# \{0,1\}//;p;}' "$0"

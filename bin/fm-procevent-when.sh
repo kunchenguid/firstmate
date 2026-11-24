@@ -15,8 +15,9 @@
 #
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
-#            hash-bound by a trust record the same way fm-check-register.sh
-#            binds a custom check. The action executable is resolved and its
+#            hash-bound by a trust record in the home's config/trust/, the
+#            same trust root fm-check-register.sh uses (fm_trust_dir), so a
+#            state/ writer cannot forge a watch. The action executable is resolved and its
 #            bytes are hash-bound at registration, then checked again immediately
 #            before the fire is claimed. The runner refuses a mutated spec or
 #            action without executing anything. Both argv vectors are executed
@@ -47,7 +48,9 @@
 #            generic runner then retires the registration itself.
 # source-id  Print the canonical source id for <name>.
 # retire     Stop the watch: retire the registration and remove the spec, trust
-#            record, and fired marker. Idempotent. Captured results and their
+#            record (and any old state/when/ trust record), and fired marker.
+#            Idempotent. A watch armed before trust moved out of state/ is
+#            refused at fire time; retire and re-arm it once. Captured results and their
 #            handled acknowledgements are never touched. Warns when the action
 #            had already fired without a captured outcome.
 # rebind-all Refresh the trust binding of every registered watch whose action
@@ -102,15 +105,28 @@ FM_ROOT_REAL=$(cd "$FM_ROOT" 2>/dev/null && pwd -P) || FM_ROOT_REAL=$FM_ROOT
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-check-lib.sh
+. "$SCRIPT_DIR/fm-check-lib.sh"
 
 WHEN_DIR="$STATE/when"
+# Empty when there is no home or the trust directory would resolve inside
+# state/; every trust check then fails closed.
+TRUST_DIR=$(fm_trust_dir "$STATE") || TRUST_DIR=
 OUTPUT_TAIL_BYTES=${FM_WHEN_OUTPUT_TAIL_BYTES:-8192}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,75p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 spec_file()  { printf '%s/%s.spec\n' "$WHEN_DIR" "$1"; }
-trust_file() { printf '%s/%s.trust\n' "$WHEN_DIR" "$1"; }
+trust_file() { [ -z "$TRUST_DIR" ] || printf '%s/%s.when-trust\n' "$TRUST_DIR" "$1"; }
+legacy_trust_file() { printf '%s/%s.trust\n' "$WHEN_DIR" "$1"; }
+
+trust_dir_ready() {  # create the operator-owned trust directory; print its device
+  [ -n "$TRUST_DIR" ] || return 1
+  (umask 077; mkdir -p -- "$TRUST_DIR") 2>/dev/null
+  [ -d "$TRUST_DIR" ] && [ ! -L "$TRUST_DIR" ] || return 1
+  fm_pr_file_device "$TRUST_DIR"
+}
 fired_file() { printf '%s/%s.fired\n' "$WHEN_DIR" "$1"; }
 
 when_name_valid() {
@@ -201,7 +217,8 @@ cmd_arm() {
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || die "watch directory is unavailable"
-  local tmp trust_tmp hash device action_path action_hash
+  local tmp trust_tmp hash device trust_device action_path action_hash
+  trust_device=$(trust_dir_ready) || die "trust directory is unavailable"
   action_path=$(action_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
   action_hash=$(fm_pr_sha256 "$action_path") || die "cannot hash the action executable"
   act[0]=$action_path
@@ -225,13 +242,13 @@ cmd_arm() {
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the spec"; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the spec"; }
   hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; die "cannot hash the spec"; }
-  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; die "cannot stage the trust record"; }
+  trust_tmp=$(umask 077; mktemp "$TRUST_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; die "cannot stage the trust record"; }
   printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot write the trust record"; }
   chmod 0600 "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot secure the trust record"; }
   mv -f -- "$tmp" "$(spec_file "$sid")" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot publish the spec"; }
   mv -f -- "$trust_tmp" "$(trust_file "$sid")" || { rm -f -- "$(spec_file "$sid")" "$trust_tmp"; die "cannot publish the trust record"; }
   if ! fm_pr_private_file_valid "$(spec_file "$sid")" 600 "$device" \
-    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$device"; then
+    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$trust_device"; then
     rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
     die "published spec failed validation"
   fi
@@ -254,7 +271,7 @@ cmd_arm() {
 # SPEC_* variables plus COND_ARGV and ACT_ARGV. Any structural or trust failure
 # returns 1 with a reason in SPEC_ERROR; nothing from the spec is executed.
 spec_load() {
-  local sid=$1 spec trust device hash want version line key value extra
+  local sid=$1 spec trust device trust_device hash want version line key value extra
   SPEC_ERROR=
   COND_ARGV=()
   ACT_ARGV=()
@@ -263,7 +280,9 @@ spec_load() {
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || { SPEC_ERROR="watch directory is unavailable"; return 1; }
   device=$(fm_pr_file_device "$WHEN_DIR") || { SPEC_ERROR="cannot inspect the watch directory"; return 1; }
   fm_pr_private_file_valid "$spec" 600 "$device" || { SPEC_ERROR="spec is missing or not private"; return 1; }
-  fm_pr_private_file_valid "$trust" 600 "$device" || { SPEC_ERROR="trust record is missing or not private"; return 1; }
+  [ -d "$TRUST_DIR" ] && [ ! -L "$TRUST_DIR" ] || { SPEC_ERROR="trust record is missing or not private"; return 1; }
+  trust_device=$(fm_pr_file_device "$TRUST_DIR") || { SPEC_ERROR="trust record is missing or not private"; return 1; }
+  fm_pr_private_file_valid "$trust" 600 "$trust_device" || { SPEC_ERROR="trust record is missing or not private"; return 1; }
   {
     IFS= read -r version && IFS= read -r want && ! IFS= read -r extra
   } < "$trust" || { SPEC_ERROR="trust record is malformed"; return 1; }
@@ -509,7 +528,8 @@ cmd_terminal() {
 # populated, using the given action hash. Mirrors cmd_arm's write block; the
 # only caller today is rebind_one, refreshing action_sha256 alone.
 publish_spec() {
-  local sid=$1 device=$2 action_hash=$3 tmp trust_tmp hash
+  local sid=$1 device=$2 action_hash=$3 tmp trust_tmp hash trust_device
+  trust_device=$(trust_dir_ready) || return 1
   tmp=$(umask 077; mktemp "$WHEN_DIR/.spec.XXXXXX") || return 1
   {
     printf 'fm-when-spec-v1\n'
@@ -529,13 +549,13 @@ publish_spec() {
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; return 1; }
-  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; return 1; }
+  trust_tmp=$(umask 077; mktemp "$TRUST_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; return 1; }
   printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; return 1; }
   chmod 0600 "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; return 1; }
   mv -f -- "$tmp" "$(spec_file "$sid")" || { rm -f -- "$tmp" "$trust_tmp"; return 1; }
   mv -f -- "$trust_tmp" "$(trust_file "$sid")" || { rm -f -- "$(spec_file "$sid")" "$trust_tmp"; return 1; }
   if ! fm_pr_private_file_valid "$(spec_file "$sid")" 600 "$device" \
-    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$device"; then
+    || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$trust_device"; then
     rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
     return 1
   fi
@@ -621,7 +641,7 @@ cmd_retire() {
     fi
   fi
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
-  rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
+  rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(legacy_trust_file "$sid")" "$(fired_file "$sid")"
   printf 'retired: %s\n' "$sid"
 }
 

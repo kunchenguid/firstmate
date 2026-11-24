@@ -88,7 +88,7 @@ out=$(when "$H" arm arm-test --interval 0.1 \
   --action "$ACT" "$TMP_ROOT/arm-act")
 assert_contains "$out" "armed: when-arm-test" "arm reports the canonical source id"
 assert_present "$H/state/when/when-arm-test.spec" "arm writes the private spec"
-assert_present "$H/state/when/when-arm-test.trust" "arm writes the trust binding"
+assert_present "$H/config/trust/when-arm-test.when-trust" "arm writes the trust binding"
 assert_present "$H/state/procevent/when-arm-test.source" "arm registers the process-event source"
 mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$H/state/when/when-arm-test.spec")
@@ -102,7 +102,7 @@ assert_contains "$sid" "when-arm-test" "source-id prints the canonical id"
 out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire reports the source"
 assert_absent "$H/state/when/when-arm-test.spec" "retire removes the spec"
-assert_absent "$H/state/when/when-arm-test.trust" "retire removes the trust binding"
+assert_absent "$H/config/trust/when-arm-test.when-trust" "retire removes the trust binding"
 assert_absent "$H/state/procevent/when-arm-test.source" "retire drops the registration"
 out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
@@ -424,8 +424,8 @@ when_ro "$H" arm rebind-out-of-repo --interval 0.1 --stable 1 \
   --condition true --action "$OUT_OF_REPO_ACT" "$TMP_ROOT/rebind-out-of-repo.log" >/dev/null
 
 SPEC_IN="$H/state/when/when-rebind-in-repo.spec"
-TRUST_IN="$H/state/when/when-rebind-in-repo.trust"
-TRUST_OUT="$H/state/when/when-rebind-out-of-repo.trust"
+TRUST_IN="$H/config/trust/when-rebind-in-repo.when-trust"
+TRUST_OUT="$H/config/trust/when-rebind-out-of-repo.when-trust"
 
 OUT=$(when_ro "$H" rebind-all) || fail "rebind-all failed with nothing to rebind: $OUT"
 assert_contains "$OUT" "0 rebound, 2 unchanged or out of scope, 0 failed" \
@@ -578,7 +578,7 @@ when "$H" arm torn-race --interval 0.05 --stable 1 \
   --action "$TORN_ACT" "$TORN_LOG" >/dev/null
 SID=$(when "$H" source-id torn-race)
 SPEC_TORN="$H/state/when/$SID.spec"
-TRUST_TORN="$H/state/when/$SID.trust"
+TRUST_TORN="$H/config/trust/$SID.when-trust"
 
 # Start the poller now, with the condition still false, so reconcile's own
 # brief use of this same per-sid lock (to claim and launch the source) is
@@ -645,5 +645,60 @@ assert_grep 'status: fired' "$RESULT" \
   "the reload must wait past the torn spec/trust window, not reject a legitimate rebind mid-publish"
 assert_grep 'v2 ran against' "$RESULT" "the fired action ran the rebound (v2) bytes, not a rejection from a torn read"
 pass "the fire-time reload never observes rebind_one's spec/trust publish mid-rename"
+
+# --- a trust record written only under state/ is refused ----------------------
+# A writer confined to state/ can hash a spec it wrote and forge the trust
+# record beside it; the runner must refuse because trust lives outside state/.
+H="$TMP_ROOT/h-state-trust"; new_home "$H"
+FORGED_LOG="$TMP_ROOT/state-trust-act"
+when "$H" arm state-trust --interval 0.1 --stable 1 \
+  --condition true --action "$ACT" "$FORGED_LOG" >/dev/null
+SID=$(when "$H" source-id state-trust)
+assert_present "$H/config/trust/$SID.when-trust" "arm writes the trust record under config/"
+rm -f "$H/config/trust/$SID.when-trust"
+printf 'fm-when-trust-v1\n%s\n' "$(fm_pr_sha256 "$H/state/when/$SID.spec")" > "$H/state/when/$SID.trust"
+chmod 0600 "$H/state/when/$SID.trust"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" "$SID" || fail "no outcome was captured for the state-only trust record"
+RESULT=$(first_result "$H" "$SID")
+assert_grep 'status: rejected' "$RESULT" "the outcome reports the trust refusal"
+assert_absent "$FORGED_LOG" "the action of a watch trusted only from state/ was not executed"
+pass "a trust record written only under state/ never makes a watch fire"
+
+# Other spellings of the same state directory must not move trust into it:
+# state/. and a symlink to state/ name the real parent, and a config/ that
+# resolves into state/ is refused outright.
+FORGED=$(cat "$H/state/when/$SID.trust")
+mkdir -p "$H/state/config/trust" "$H/state/trust"
+printf '%s\n' "$FORGED" > "$H/state/config/trust/$SID.when-trust"
+printf '%s\n' "$FORGED" > "$H/state/trust/$SID.when-trust"
+chmod 0600 "$H/state/config/trust/$SID.when-trust" "$H/state/trust/$SID.when-trust"
+ln -s "$H/state" "$TMP_ROOT/state-trust-link"
+rm -rf "$H/config"
+ln -s state "$H/config"
+for SPELLING in "$H/state/." "$TMP_ROOT/state-trust-link/." "$H/state"; do
+  OUT=$(FM_HOME="$H" FM_STATE_OVERRIDE="$SPELLING" "$ROOT/bin/fm-procevent-when.sh" run "$SID")
+  assert_contains "$OUT" "rejected" "a watch trusted from state/ is refused via $SPELLING"
+  assert_absent "$FORGED_LOG" "a watch trusted from state/ did not fire via $SPELLING"
+done
+rm -f "$H/config"
+for SPELLING in "$H/state/." "$TMP_ROOT/state-trust-link/."; do
+  OUT=$(FM_HOME="$H" FM_STATE_OVERRIDE="$SPELLING" "$ROOT/bin/fm-procevent-when.sh" run "$SID")
+  assert_contains "$OUT" "rejected" "a watch trusted from state/config/ is refused via $SPELLING"
+  assert_absent "$FORGED_LOG" "a watch trusted from state/config/ did not fire via $SPELLING"
+done
+pass "no spelling of the state directory lets a state/ trust record fire a watch"
+
+# A watch armed through a state/. override still fires once the runner sees
+# the canonical state path, because trust is keyed to the home.
+H="$TMP_ROOT/h-dot-state"; new_home "$H"
+ACTLOG="$TMP_ROOT/dot-state-act"
+FM_STATE_OVERRIDE="$H/state/." when "$H" arm dotstate --stable 1 \
+  --condition true --action "$ACT" "$ACTLOG" >/dev/null || fail "arm via state/. failed"
+assert_present "$H/config/trust/when-dotstate.when-trust" "arm via state/. binds under the home's config/"
+FM_STATE_OVERRIDE="$H/state/." pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-dotstate || fail "no outcome for a watch armed via state/."
+assert_grep 'status: fired' "$(first_result "$H" when-dotstate)" "a watch armed via state/. fires"
+pass "a watch armed through a state/. override fires under the canonical state path"
 
 printf 'all fm-procevent-when tests passed\n'

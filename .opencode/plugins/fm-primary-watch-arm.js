@@ -141,7 +141,7 @@ function supervisionNeeded(paths) {
       paths.root,
       paths.state,
     ],
-    { stdio: "ignore" },
+    { stdio: "ignore", env: { ...process.env, FM_HOME: paths.home, FM_CONFIG_OVERRIDE: paths.config } },
   );
   return result.status === 0;
 }

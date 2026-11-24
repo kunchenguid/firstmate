@@ -1418,18 +1418,18 @@ test_arm_registers_the_check_and_disarm_removes_it() {
   FM_HOME="$home" "$CHECK" arm >/dev/null || status=$?
   expect_code 0 "$status" "arm exit"
   assert_present "$home/state/tool-updates.check.sh" "arm did not write the check shim"
-  assert_present "$home/state/tool-updates.check-trust" "arm did not register the check's bytes"
+  assert_present "$home/config/trust/tool-updates.check-trust" "arm did not register the check's bytes"
   [ "$(stat -c %a "$home/state/tool-updates.check.sh" 2>/dev/null || stat -f %Lp "$home/state/tool-updates.check.sh")" = 700 ] \
     || fail "the check shim is not mode 700"
-  assert_grep 'fm-custom-check-v1' "$home/state/tool-updates.check-trust" "the trust binding has the wrong schema"
+  assert_grep 'fm-custom-check-v1' "$home/config/trust/tool-updates.check-trust" "the trust binding has the wrong schema"
 
   # Arming twice must stay valid rather than invalidating its own binding.
   FM_HOME="$home" "$CHECK" arm >/dev/null || fail "arming twice failed"
-  assert_grep 'fm-custom-check-v1' "$home/state/tool-updates.check-trust" "re-arming lost the trust binding"
+  assert_grep 'fm-custom-check-v1' "$home/config/trust/tool-updates.check-trust" "re-arming lost the trust binding"
 
   FM_HOME="$home" "$CHECK" disarm >/dev/null || fail "disarm failed"
   assert_absent "$home/state/tool-updates.check.sh" "disarm left the check shim behind"
-  assert_absent "$home/state/tool-updates.check-trust" "disarm left the trust binding behind"
+  assert_absent "$home/config/trust/tool-updates.check-trust" "disarm left the trust binding behind"
   assert_absent "$home/state/.tool-updates" "disarm left the report record behind"
   pass "arm registers a trusted check and disarm removes every trace"
 }
@@ -1453,7 +1453,7 @@ test_arm_refuses_a_symlink_at_the_shim_path() {
   expect_code 1 "$status" "arm over a symlink exit"
   [ "$(cat "$target")" = 'a file the shim must not touch' ] || fail "arm followed the symlink and overwrote its target"
   [ "$(stat -c %a "$target" 2>/dev/null || stat -f %Lp "$target")" = "$mode" ] || fail "arm changed the mode of the symlink's target"
-  assert_absent "$home/state/tool-updates.check-trust" "arm registered a shim it refused to write"
+  assert_absent "$home/config/trust/tool-updates.check-trust" "arm registered a shim it refused to write"
   pass "a symlink at the shim path is refused instead of followed"
 }
 
@@ -1471,7 +1471,8 @@ test_a_failed_registration_leaves_no_unregistered_shim() {
   # register failure has from arm's side.
   target="$TMP_ROOT/arm-register-fail/not-the-trust.txt"
   printf 'a file the trust binding must not touch\n' > "$target"
-  ln -s "$target" "$home/state/tool-updates.check-trust"
+  mkdir -p "$home/config/trust"
+  ln -s "$target" "$home/config/trust/tool-updates.check-trust"
 
   status=0
   FM_HOME="$home" "$CHECK" arm >/dev/null 2>&1 || status=$?
@@ -1505,7 +1506,7 @@ test_a_failed_rearm_leaves_no_shim_the_trust_binding_lost() {
   make_copy "$dir" "$TOOL" 'herdr 0.8.2'
   write_config "$home" "{\"tools\":[{\"name\":\"herdr\",\"command\":\"$TOOL\"}]}"
   FM_HOME="$home" "$CHECK" arm >/dev/null || fail "the first arm failed"
-  assert_present "$home/state/tool-updates.check-trust" "the first arm did not bind the shim"
+  assert_present "$home/config/trust/tool-updates.check-trust" "the first arm did not bind the shim"
 
   # A hash tool that answers with nothing makes the register write a binding it
   # then rejects, and it removes the old binding on the way out.
@@ -1521,7 +1522,7 @@ test_a_failed_rearm_leaves_no_shim_the_trust_binding_lost() {
   env FM_HOME="$home" PATH="$(fixture_path "$fake")" "$CHECK" arm >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "arm whose registration cannot hash exit"
   assert_absent "$home/state/tool-updates.check.sh" "a failed re-arm left a shim behind after the trust binding was removed"
-  assert_absent "$home/state/tool-updates.check-trust" "the failed registration left a trust binding behind"
+  assert_absent "$home/config/trust/tool-updates.check-trust" "the failed registration left a trust binding behind"
   pass "a re-arm that loses the trust binding leaves no shim behind"
 }
 
