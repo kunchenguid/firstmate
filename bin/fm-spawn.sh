@@ -7871,7 +7871,7 @@ else
 fi
 LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG") --target $(shell_quote "$T") --agent-bin $(shell_quote "$OSC7501_AGENT_BIN") >/dev/null || true
 $LAUNCH
-$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
+__fm_launch_status=\$?; $(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
@@ -7996,6 +7996,14 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 fi
+# Record the agent command's status, not disarm's, and do it before any
+# env-allowlist `sh -c` wrap so the exit file is written in the same shell.
+if spawn_away_startup_wait_applies; then
+  LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
+  LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+  LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
+  LAUNCH="$LAUNCH"$'\n'"printf '%s\n' \"\$__fm_launch_status\" > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_EXIT_FILE")"
+fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
   # A configured Orca source replaces destination expansion of allowlisted
@@ -8078,9 +8086,6 @@ else
     # before launching the worker, including on a later command failure.
     LAUNCH="command rm -- $(shell_quote "$LAUNCH_FILE") || { echo 'error: cannot remove private launch file; refusing worker launch' >&2; return 1 2>/dev/null || exit 1; }; $LAUNCH"
   fi
-  if spawn_away_startup_wait_applies; then
-    LAUNCH="$LAUNCH"$'\n'"printf '%s\n' \"\$?\" > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_EXIT_FILE")"
-  fi
   if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
     echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
     exit 1
@@ -8158,7 +8163,6 @@ else
     spawn_orca_wait_launch_consumed
     trap - HUP INT TERM
   fi
-fi
 fi
 if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   HERMES_READY=0

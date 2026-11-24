@@ -276,7 +276,6 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
     fi
     # A stalled backend must neither hang entry nor hold the spawn task-set
     # lock. Any timeout or failed read is unproven and remains counted.
-    # shellcheck disable=SC2016 # child positional parameters are intentional
     left=$((deadline - SECONDS))
     if [ "$left" -le 0 ]; then
       truncated=1
@@ -285,6 +284,7 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
     fi
     probe_secs=${FM_AFK_CONTRACT_PROBE_SECONDS:-10}
     [ "$probe_secs" -le "$left" ] || probe_secs=$left
+    # shellcheck disable=SC2016 # child positional parameters are intentional
     endpoint_state=$(fm_run_timed "$probe_secs" bash -c \
       '. "$1"; fm_backend_worker_state "$2" "$3"' \
       _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) \
@@ -348,7 +348,6 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
         ;;
       *) live=$((live + 1)); continue ;;
     esac
-    # shellcheck disable=SC2016 # child positional parameters are intentional
     left=$((deadline - SECONDS))
     if [ "$left" -le 0 ]; then
       truncated=1
@@ -357,6 +356,7 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
     fi
     detail_secs=${FM_AFK_CONTRACT_DETAIL_SECONDS:-5}
     [ "$detail_secs" -le "$left" ] || detail_secs=$left
+    # shellcheck disable=SC2016 # child positional parameters are intentional
     activity=$(fm_run_timed "$detail_secs" bash -c \
       '. "$1/fm-backend.sh"; . "$1/fm-busy-lib.sh"; fm_busy_classify_meta "$2" "$3" "$4"' \
       _ "$FM_AFK_CONTRACT_DIR" "$meta" "$id" "$state" 2>/dev/null) \

@@ -20,7 +20,7 @@ cleanup_launch() {
 trap cleanup_launch EXIT
 
 test_fresh_launch_reservation() {
-  local kind scenario entry dir home id out rc count i endpoint_state staged marker
+  local kind scenario entry dir home id out rc count i endpoint_state staged marker start_wait
   local -a args
   for entry in ship:delayed scout:delayed ship:raw scout:raw ship:timeout scout:cancel ship:failed scout:finished ship:cleanup-refused ship:rename-timeout scout:move-cancel ship:socket-cancel scout:rename-raw-cancel; do
     kind=${entry%:*}
@@ -95,10 +95,14 @@ SH
       args=('custom-agent --flag' "${args[@]}")
     fi
     SPAWN_RELEASE="$home/release"
+    start_wait=30
+    case "$scenario" in
+      timeout|rename-timeout) start_wait=2 ;;
+    esac
     FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_BACKEND=tmux FM_SUPERVISION_ACTOR=main \
-      FM_SPAWN_NO_GUARD=1 FM_SPAWN_START_WAIT_SECONDS=2 TMUX=fake,1,0 FM_RESERVATION_ID="$id" \
+      FM_SPAWN_NO_GUARD=1 FM_SPAWN_START_WAIT_SECONDS="$start_wait" TMUX=fake,1,0 FM_RESERVATION_ID="$id" \
       FM_RESERVATION_WT="$dir/wt" PATH="$home/fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$dir/project" "${args[@]}" > "$home/launch.log" 2>&1 &
     SPAWN_PID=$!
@@ -489,7 +493,7 @@ run:
   findings: none
 outcome: passed
 EOF
-  printf '  completed fm/worker %s 2026-10-04 10:00\n' "${head:0:7}" > "$dir/runs.toon"
+  printf '  completed fm/worker %s 2026-10-04 10:00  https://example.test/o/r/pull/9\n' "${head:0:7}" > "$dir/runs.toon"
   "$ROOT/bin/fm-busy-event.sh" arm "$dir/state" task --state idle \
     --source claude-hook --event stop >/dev/null || fail "run idle record failed"
   out=$(read_worker "$dir" task)
@@ -705,7 +709,7 @@ run:
   findings: none
 outcome: passed
 EOF
-  printf '  completed fm/worker %s 2026-10-04 10:00\n' "${head:0:7}" > "$dir/runs.toon"
+  printf '  completed fm/worker %s 2026-10-04 10:00  https://example.test/o/r/pull/9\n' "${head:0:7}" > "$dir/runs.toon"
   for harness in claude codex; do
     fm_write_meta "$dir/state/task.meta" "window=fixture:worker" "worktree=$dir/wt" \
       "project=$dir/wt" "kind=ship" "mode=no-mistakes" "harness=$harness"

@@ -1070,7 +1070,7 @@ test_nm_run_progress_reads_captured_status
 # spawn would fail with "startup was not established". Success under a 2s
 # injectable wait is proof the wait was skipped, matching main.
 test_rex_capped_spawn_skips_startup_wait() {
-  local dir home id proj wt out rc t0 elapsed spawn_home
+  local dir home id proj wt out rc t0 elapsed spawn_home n u
   dir=$(new_case capped-spawn-skip-wait)
   home="$dir/home"
   id="rex-skip-wait-$$"
@@ -1092,6 +1092,14 @@ EOF
   fm_git_worktree "$proj" "$wt" "fm/$id"
   mkdir -p "$dir/fakebin"
   fm_fake_exit0 "$dir/fakebin" treehouse
+  # The pane wait for `treehouse get` reads the block's foreground cwd. Seed
+  # the fake process view so consecutive reads settle on the isolated worktree
+  # instead of the fixture default /tmp.
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    u=$(printf '%08x-0000-7000-8000-%012x' "$n" "$n")
+    printf '{"foreground":{"pid":%s,"name":"zsh","path":"/bin/zsh","argv0":"-zsh","cwd":"%s"},"ancestors":[],"last_exit":null}\n' \
+      "$DEAD_PID" "$wt" >"$dir/fake/process/$u.json"
+  done
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null \
     || fail "away entry failed"
   t0=$SECONDS
@@ -1103,6 +1111,7 @@ EOF
       FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
       FM_SPAWN_START_WAIT_SECONDS=2 FM_SUPERVISION_ACTOR=main \
       FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" \
+      FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
       FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
       PATH="$dir/bin:$dir/fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --scout --backend rex 2>&1
