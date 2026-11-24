@@ -22,9 +22,15 @@ chmod +x "$TMP_ROOT/tools/gh" "$TMP_ROOT/tools/glab"
 follow() { bash "$ROOT/bin/fm-pr-follow.sh" "$@"; }
 surface() {
   printf '%s\n' "$$" > "$home/state/.lock"
-  printf 'follow-test\n' > "$home/state/.lock-session"
-  jq -n --arg owner "$$" --argjson now "$(date +%s)" --arg surface "$1" \
-    '{surface:$surface,owner:$owner,session:"follow-test",epoch:$now}' > "$home/state/.pr-follow-surface"
+  rm -f "$home/state/.lock-session"
+  if [ "$1" = claude-calm ]; then
+    printf 'follow-test\n' > "$home/state/.lock-session"
+    jq -n --arg owner "$$" --argjson now "$(date +%s)" \
+      '{surface:"claude-calm",owner:$owner,session:"follow-test",epoch:$now}' > "$home/state/.pr-follow-surface"
+  else
+    jq -n --arg owner "$$" --argjson now "$(date +%s)" --arg surface "$1" \
+      '{surface:$surface,owner:$owner,epoch:$now}' > "$home/state/.pr-follow-surface"
+  fi
 }
 fixture() {
   jq -n --arg state "$1" --arg head "${2:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}" \
@@ -120,6 +126,20 @@ surface codex
 if follow add https://github.com/example/project/pull/2 --requested 'Follow this' > "$TMP_ROOT/out" 2>&1; then fail 'unsupported surface enrolled'; fi
 assert_contains "$(< "$TMP_ROOT/out")" 'model-free outcome surface' 'missing clear surface refusal'
 pass 'bad reads preserve evidence and disabled or unsupported homes do not enroll'
+
+refused() {
+  if follow add https://github.com/example/project/pull/2 --requested 'Follow this' > "$TMP_ROOT/out" 2>&1; then fail "$1 enrolled"; fi
+  assert_contains "$(< "$TMP_ROOT/out")" 'model-free outcome surface' "$1 refusal is unclear"
+}
+surface pi
+printf '1\n' > "$home/state/.lock"
+refused 'a Pi heartbeat from another lock owner'
+surface claude-calm
+printf 'other-session\n' > "$home/state/.lock-session"
+refused 'a Claude heartbeat from another session'
+rm "$home/state/.lock-session"
+refused 'a Claude heartbeat without the session sidecar'
+pass 'a heartbeat from another owner or Claude session does not enroll'
 
 surface claude-calm
 fixture OPEN

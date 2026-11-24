@@ -4,8 +4,9 @@
 #        fm-pr-follow.sh remove <url> | list | arm | poll
 # config/pr-follow is opt-in, absent by default. add requires a live model-free
 # outcome surface. Pi/pi-signed and Claude's activated Calm mod publish the
-# private state/.pr-follow-surface JSON heartbeat {surface,owner,session,epoch}:
-# owner/session match .lock/.lock-session and epoch is at most 30 seconds old.
+# private state/.pr-follow-surface JSON heartbeat {surface,owner,epoch}: owner
+# matches .lock and epoch is at most 30 seconds old. Claude's heartbeat also
+# carries session, which must match .lock-session; a Pi home has no such file.
 # Other primaries refuse enrollment. An unavailable surface pauses observation
 # and reports once until it returns; it never falls back to model-only delivery.
 #
@@ -64,10 +65,11 @@ surface_available() {
   local owner session
   [ -f "$STATE/.pr-follow-surface" ] && [ ! -L "$STATE/.pr-follow-surface" ] || return 1
   owner=$(cat "$STATE/.lock" 2>/dev/null) || return 1
-  session=$(cat "$STATE/.lock-session" 2>/dev/null) || return 1
-  [ -n "$owner" ] && [ -n "$session" ] || return 1
+  session=$(cat "$STATE/.lock-session" 2>/dev/null) || session=
+  [ -n "$owner" ] || return 1
   jq -e --arg owner "$owner" --arg session "$session" --argjson now "$(date +%s)" '
-    (.surface | IN("pi","pi-signed","claude-calm")) and .owner == $owner and .session == $session
+    .owner == $owner
+    and ((.surface | IN("pi","pi-signed")) or (.surface == "claude-calm" and $session != "" and .session == $session))
     and (.epoch | type == "number") and .epoch <= $now and $now - .epoch <= 30
   ' "$STATE/.pr-follow-surface" >/dev/null 2>&1
 }

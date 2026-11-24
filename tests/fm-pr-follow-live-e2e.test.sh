@@ -17,14 +17,14 @@ cat "$FM_FOLLOW_FIXTURE"
 SH
 chmod +x "$TMP_ROOT/tools/gh"
 cat > "$TMP_ROOT/fixture.ts" <<'TS'
+import { execFileSync } from "node:child_process";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 export default function(pi) {
   pi.on("session_start", (_event, ctx) => {
     const state = `${process.env.FM_HOME}/state`;
     mkdirSync(state, {recursive:true});
-    writeFileSync(`${state}/.lock`, `${process.pid}\n`);
-    writeFileSync(`${state}/.lock-session`, `${ctx.sessionManager.getSessionId()}\n`);
+    execFileSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-lock.sh`], {stdio: "ignore"});
     writeFileSync(`${process.env.FM_HOME}/project-skills.json`, JSON.stringify(
       loadSkillsFromDir({dir: `${process.env.FM_ROOT_OVERRIDE}/.agents/skills`, source: "project"}).skills));
     // Pi keeps a never-prompted session in memory, so inspect its live entries.
@@ -88,7 +88,7 @@ for harness in pi pi-signed claude; do
     printf '%s\n' "$session" > "$home/state/.lock-session"
     command="exec env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CONFIG_DIR CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --session-id '$session' --setting-sources project --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --plugin-dir '$home/calm' --debug-file '$home/debug.log'"
   else
-    command="exec env PI_CODING_AGENT_DIR='$home/agent' $harness --offline --no-extensions --no-mcp --no-skills --no-prompt-templates --no-context-files --no-themes --session-dir '$home/sessions' -e '$TMP_ROOT/fixture.ts' -e '$ROOT/.pi/extensions/fm-branch-supervision.ts'"
+    command="exec env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID PI_CODING_AGENT_DIR='$home/agent' $harness --offline --no-extensions --no-mcp --no-skills --no-prompt-templates --no-context-files --no-themes --session-dir '$home/sessions' -e '$TMP_ROOT/fixture.ts' -e '$ROOT/.pi/extensions/fm-branch-supervision.ts'"
   fi
   tmux -L "$SOCKET" new-session -d -s subject -x 220 -y 55 -c "$home/project" \
     "export FM_HOME='$home' FM_ROOT_OVERRIDE='$ROOT' FM_STATE_OVERRIDE='$home/state' FM_DATA_OVERRIDE='$home/data' FM_CONFIG_OVERRIDE='$home/config' FM_FOLLOW_FIXTURE='$home/forge.json' PATH='$PATH'; $command"

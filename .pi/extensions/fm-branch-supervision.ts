@@ -1240,7 +1240,6 @@ export default function (pi: ExtensionAPI) {
         const staged = `${marker}.${process.pid}`;
         writeFileSync(staged, JSON.stringify({
           surface: "pi", owner: ownedLockPid,
-          session: readFileSync(join(state, ".lock-session"), "utf8").trim(),
           epoch: Math.floor(Date.now() / 1000),
         }), { mode: 0o600 });
         renameSync(staged, marker);
