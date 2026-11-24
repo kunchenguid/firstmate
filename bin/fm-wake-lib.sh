@@ -272,7 +272,7 @@ fm_watch_beacon_tick() {
 # activity. Outside a watcher, it does nothing so no library invents liveness.
 fm_watch_beacon_progress() {
   [ -n "${FM_WATCH_BEACON_PATH:-}" ] || return 0
-  if [ -n "${FM_WATCHER_PID:-}" ] && [ "$$" != "$FM_WATCHER_PID" ]; then
+  if [ -n "${FM_WATCHER_PID:-}" ] && { [ "${BASHPID:-$$}" != "$FM_WATCHER_PID" ] || [ "$BASH_SUBSHELL" -ne 0 ]; }; then
     if [ -n "${FM_WATCH_PROGRESS_PATH:-}" ]; then
       fm_watch_beacon_tick "$FM_WATCH_PROGRESS_PATH"
     fi

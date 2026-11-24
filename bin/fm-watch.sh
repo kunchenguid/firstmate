@@ -3481,7 +3481,7 @@ watcher_waited() {  # <command...>
     fm_capture_output_cleanup
     return 2
   fi
-  wait "$FM_ACTIVE_CHECK_PID"
+  watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
   rc=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || { fm_capture_output_cleanup; return 2; }
@@ -3502,7 +3502,7 @@ watcher_capture() {  # <backend> <target> <lines> [expected-label]
 # $PROGRESS_MARKER instead of touching $BEAT directly, so a frozen watcher parent
 # (e.g. SIGSTOP) cannot execute this loop and stops refreshing $BEAT.
 watcher_wait_child_progress() {
-  local pid=$1 last_seen=0 current
+  local pid=$1 last_seen=0 current rc=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ -e "$PROGRESS_MARKER" ]; then
       current=$(fm_path_mtime "$PROGRESS_MARKER" 2>/dev/null || true)
@@ -3513,8 +3513,9 @@ watcher_wait_child_progress() {
     fi
     sleep 0.2 2>/dev/null || sleep 1
   done
-  wait "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || rc=$?
   fm_watch_beacon_tick "$BEAT"
+  return "$rc"
 }
 
 # watcher_display_sync <helper>
@@ -3540,7 +3541,7 @@ watcher_display_sync() {
     fm_active_check_stop || exit 1
     return 1
   fi
-  watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
+  watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID" || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || exit 1
 }
@@ -4540,11 +4541,13 @@ EOF
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
   reconcile_overdue_pauses
-  pending=$(scan_signals)
+  watcher_waited scan_signals
+  pending=$WATCHER_CAPTURE
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     reconcile_overdue_pauses
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    watcher_waited scan_signals
+    pending=$(printf '%s\n%s' "$pending" "$WATCHER_CAPTURE")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see
@@ -4717,7 +4720,8 @@ EOF
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
+          watcher_waited pause_state_class "$w" "$task"
+          case "$WATCHER_CAPTURE" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
@@ -4829,7 +4833,8 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
+            watcher_waited pause_state_class "$w" "$task"
+            case "$WATCHER_CAPTURE" in
               working)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
@@ -4849,7 +4854,8 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+              watcher_waited pause_state_class "$w" "$task"
+              case "$WATCHER_CAPTURE" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
@@ -4900,7 +4906,8 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        case "$(pause_state_class "$w" "$task")" in
+        watcher_waited pause_state_class "$w" "$task"
+        case "$WATCHER_CAPTURE" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           # Inconclusive, but the declared wait itself still stands, so only the
           # per-hash bookkeeping resets. The re-surface throttle bounds the

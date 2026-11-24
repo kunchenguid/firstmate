@@ -223,12 +223,16 @@ test_crew_classification_refreshes_progress() {
     . "$1/bin/fm-classify-lib.sh"
     FM_CREW_STATE_BIN=$2
     FM_WATCH_BEACON_PATH=$3
+    FM_WATCH_PROGRESS_PATH=$3.progress
+    FM_WATCHER_PID=$$
     unset SECONDS
     SECONDS=100
     for state in working paused unknown; do
       touch -t 200001010000 "$3"
+      touch -t 200001010000 "$FM_WATCH_PROGRESS_PATH"
       result=$(crew_absorb_class "$state")
-      [ "$(fm_path_age "$3")" -le 1 ]
+      [ "$(fm_path_age "$3")" -gt 20 ]
+      [ "$(fm_path_age "$FM_WATCH_PROGRESS_PATH")" -le 1 ]
       case "$state:$result" in
         working:working|paused:paused|unknown:none) ;;
         *) exit 1 ;;
@@ -636,6 +640,49 @@ EOF
   pass "a watcher frozen with SIGSTOP during a display sweep trips the guard"
 }
 
+test_signal_scan_progress_requires_a_running_watcher() {
+  local dir home out pid i before after age real_od
+  dir=$(make_home signal-scan-progress)
+  home=$(case_home "$dir")
+  out="$dir/watch.out"
+  real_od=$(command -v od)
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/od" <<'EOF'
+#!/usr/bin/env bash
+if [ "$*" = '-An -v -tx1' ]; then
+  printf 'read\n' >> "$FM_HOME/scan-reads"
+  sleep 1
+fi
+exec "$FM_REAL_OD" "$@"
+EOF
+  chmod +x "$dir/fakebin/od"
+  for i in {1..30}; do
+    printf 'working: scanning fixture\n' > "$home/state/task-$i.status"
+  done
+  FM_REAL_OD="$real_od" PATH="$dir/fakebin:$PATH" start_slow_cycle_watcher "$home" "$out" 4
+  pid=$SEED_PID
+  i=0
+  while [ "$i" -lt 150 ]; do
+    [ -f "$home/scan-reads" ] && [ "$(wc -l < "$home/scan-reads")" -ge 2 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$i" -lt 150 ] || fail "signal scan never processed two records: $(cat "$out")"
+  sleep 5
+  age=$(age_of_beacon "$home/state/.last-watcher-beat")
+  [ "$age" -le 2 ] || fail "healthy long signal scan left a stale beacon ($age seconds)"
+  before=$(wc -l < "$home/scan-reads")
+  kill -STOP "$pid" || fail "could not freeze scanning watcher"
+  sleep 5
+  after=$(wc -l < "$home/scan-reads")
+  age=$(age_of_beacon "$home/state/.last-watcher-beat")
+  kill -CONT "$pid" || true
+  stop_pid "$pid"
+  [ "$after" -ge "$((before + 3))" ] || fail "signal scan stopped with its frozen parent"
+  [ "$age" -gt 4 ] || fail "signal scan refreshed its frozen parent beacon"
+  pass "signal scan progress keeps only a running watcher healthy"
+}
+
 fm_test_run \
   test_progress_refresh_is_throttled_and_inert_outside_a_watcher \
   test_crew_classification_refreshes_progress \
@@ -651,4 +698,5 @@ fm_test_run \
   test_explicit_grace_overrides_the_derived_default \
   test_explicit_heartbeat_cadence_still_governs \
   test_child_process_updates_progress_marker_not_beacon \
+  test_signal_scan_progress_requires_a_running_watcher \
   test_frozen_watcher_during_display_sweep_trips_guard
