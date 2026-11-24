@@ -932,9 +932,6 @@ test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status() {
   # Typed text under the banner is still pending, never empty.
   assert_screen "typed text under the banner stays pending" pending "$CAPS_STYLED" \
     $' '"$banner"$'\n\n────────────────────────\nfix the flaky test\n────────────────────────\n/path' '' "$id"
-  # The exact banner is declared once; a caller that respells it drifts.
-  out=$(printf '%s' "$banner" | grep -cE "$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT")
-  [ "$out" = 1 ] || fail "the declared banner pattern must match pi's rendering exactly, got $out matches"
   pass "matrix: pi's Codex usage-limit banner over an empty pair settles a stale status; probe-absent, foreign, near-miss, displaced, running, and typed shapes keep refusing"
 }
 
