@@ -351,7 +351,12 @@
 #   out as a transient rather than adopted and then refused, so a home that is
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   naming the last path seen and why it was rejected. On Windows (msys or
+#   cygwin OSTYPE), no backend reads the pane's own cwd at all: every spawn
+#   asks Git inside the endpoint shell for the root, because Treehouse's nested
+#   shell can leave the process cwd in the spawning project, and a shell that
+#   does not answer refuses rather than falling back to a stale process cwd
+#   (bin/fm-spawn-path-lib.sh owns the probe and its wait cost).
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -958,6 +963,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-spawn-path-lib.sh
+. "$SCRIPT_DIR/fm-spawn-path-lib.sh"
 # shellcheck source=bin/fm-kimi-trust-lib.sh
 . "$SCRIPT_DIR/fm-kimi-trust-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -5503,16 +5510,35 @@ spawn_send_text_line() { # <target> <text>
   esac
 }
 spawn_current_path() { # <target>
-  case "$BACKEND" in
-  tmux) fm_backend_tmux_current_path "$1" ;;
-  herdr) fm_backend_herdr_current_path "$1" ;;
-  zellij) fm_backend_zellij_current_path "$1" "$W" ;;
-  cmux) fm_backend_cmux_current_path "$1" "$W" ;;
-  paseo) fm_backend_paseo_current_path "$1" "$W" ;;
-  rex) fm_backend_rex_current_path "$1" "$W" ;;
-  tern) fm_backend_tern_current_path "$1" "$W" ;;
-  hc) fm_backend_hc_current_path "$1" "$W" ;;
+  # Windows process-cwd APIs can keep reporting the parent shell's directory
+  # after Treehouse enters a nested cmd.exe shell. Ask Git inside the endpoint
+  # instead, including at the final launch boundary and on relaunch. Never
+  # fall back to a stale process cwd when the shell does not answer.
+  # The read is returned through SPAWN_CURRENT_PATH, not stdout, so the
+  # polling loops that call this function can also see the shell probe's
+  # wait cost (SPAWN_PATH_PROBE_WAIT_TENTHS) and spend it out of their own
+  # wait budgets.
+  SPAWN_CURRENT_PATH=
+  SPAWN_PATH_PROBE_WAIT_TENTHS=0
+  case "$OSTYPE" in
+    msys*|cygwin*|win32*)
+      if fm_spawn_shell_worktree_path "$1"; then
+        SPAWN_CURRENT_PATH=$SPAWN_PATH_PROBE_RESULT
+      fi
+      return 0
+      ;;
   esac
+  case "$BACKEND" in
+  tmux) SPAWN_CURRENT_PATH=$(fm_backend_tmux_current_path "$1" || true) ;;
+  herdr) SPAWN_CURRENT_PATH=$(fm_backend_herdr_current_path "$1" || true) ;;
+  zellij) SPAWN_CURRENT_PATH=$(fm_backend_zellij_current_path "$1" "$W" || true) ;;
+  cmux) SPAWN_CURRENT_PATH=$(fm_backend_cmux_current_path "$1" "$W" || true) ;;
+  paseo) SPAWN_CURRENT_PATH=$(fm_backend_paseo_current_path "$1" "$W" || true) ;;
+  rex) SPAWN_CURRENT_PATH=$(fm_backend_rex_current_path "$1" "$W" || true) ;;
+  tern) SPAWN_CURRENT_PATH=$(fm_backend_tern_current_path "$1" "$W" || true) ;;
+  hc) SPAWN_CURRENT_PATH=$(fm_backend_hc_current_path "$1" "$W" || true) ;;
+  esac
+  return 0
 }
 spawn_send_literal() { # <target> <text>
   case "$BACKEND" in
@@ -5591,23 +5617,27 @@ spawn_enter_recorded_worktree() {
 # starts. Zellij and cmux implement this read with a shell probe, so keeping it
 # before launch prevents the probe from becoming input to a live worker.
 spawn_assert_agent_worktree() {
-  local expected seen i last_poll=19 agent_status
+  local expected seen i last_poll=19 agent_status budget=100 waited=0 reccd=0
   [ "$KIND" = secondmate ] && return 0
   case "$BACKEND" in orca|t3code) return 0 ;; esac
   expected=$(real_path_or_raw "$WT")
   # The out-of-pane Herdr lease no longer waits for the new shell to process
   # treehouse get. Allow its former minute of startup tolerance here, and
   # repeat the idempotent cd once in case input arrived before shell readiness.
-  [ "$BACKEND" != herdr ] || last_poll=120
+  [ "$BACKEND" != herdr ] || { last_poll=120; budget=605; }
   for i in $(seq 0 "$last_poll"); do
     [ "$i" -eq 0 ] || sleep 0.5
-    seen=$(spawn_current_path "$WT_TARGET" || true)
+    spawn_current_path "$WT_TARGET"
+    seen=$SPAWN_CURRENT_PATH
     if [ -n "$seen" ] && [ "$(real_path_or_raw "$seen")" = "$expected" ]; then
       return 0
     fi
-    if [ "$BACKEND" = herdr ] && [ "$i" -eq 20 ]; then
+    waited=$((waited + SPAWN_PATH_PROBE_WAIT_TENTHS + 5))
+    if [ "$BACKEND" = herdr ] && [ "$reccd" -eq 0 ] && [ "$waited" -ge 100 ]; then
+      reccd=1
       spawn_enter_recorded_worktree
     fi
+    [ "$waited" -lt "$budget" ] || break
   done
   echo "error: task $ID's worker started in '${seen:-unknown}', not its recorded worktree '$WT'; refusing to continue outside the copy holding its work" >&2
   if [ "$BACKEND" = herdr ] && fm_backend_herdr_parse_target "$WT_TARGET"; then
@@ -6075,9 +6105,13 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   # than wherever the pane happened to drift.
   relaunch_wt_real=$(real_path_or_raw "$WT")
   relaunch_seen=
+  relaunch_wait=0
   for _ in $(seq 1 10); do
-    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+    spawn_current_path "$WT_TARGET"
+    relaunch_seen=$SPAWN_CURRENT_PATH
     [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+    relaunch_wait=$((relaunch_wait + SPAWN_PATH_PROBE_WAIT_TENTHS + 5))
+    [ "$relaunch_wait" -lt 50 ] || break
     sleep 0.5
   done
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
@@ -6090,9 +6124,13 @@ elif [ "$RELAUNCH" -eq 1 ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     }
+    relaunch_wait=0
     for _ in $(seq 1 10); do
-      relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+      spawn_current_path "$WT_TARGET"
+      relaunch_seen=$SPAWN_CURRENT_PATH
       [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+      relaunch_wait=$((relaunch_wait + SPAWN_PATH_PROBE_WAIT_TENTHS + 5))
+      [ "$relaunch_wait" -lt 50 ] || break
       sleep 0.5
     done
     if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
@@ -6110,7 +6148,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   else
     spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
-    # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+    # Wait for the treehouse subshell: the pane enters the worktree. On Windows,
+    # spawn_current_path reads Git's root from inside that shell, not the
+    # parent's unchanged process cwd. Both paths retain the isolation screen.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an
     # automatic-rename slips through), display-message -t <bad-name> falls back to the
     # active client's window, which would misread firstmate's OWN pane path as the
@@ -6145,8 +6185,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     candidate=""
     last_seen=""
     last_reason="the pane reported no path"
+    settle_wait=0
     for _ in $(seq 1 60); do
-      p=$(spawn_current_path "$WT_TARGET" || true)
+      spawn_current_path "$WT_TARGET"
+      p=$SPAWN_CURRENT_PATH
       [ -z "$p" ] || last_seen="$p"
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
         p_real=$(real_path_or_raw "$p")
@@ -6160,6 +6202,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
+      settle_wait=$((settle_wait + SPAWN_PATH_PROBE_WAIT_TENTHS + 10))
+      [ "$settle_wait" -lt 600 ] || break
       sleep 1
     done
     if [ -z "$WT" ]; then
