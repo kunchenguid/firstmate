@@ -277,6 +277,18 @@ A concurrently appended wake has a higher sequence, remains queued, and keeps th
 Consequently, a watcher close during handling republishes the same generation as pending and forces one recovery turn even when no queue row remains, while the outstanding generation-bound acknowledgement stays valid.
 An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
 
+### Unacknowledged re-wake bound
+
+A handling turn that cannot acknowledge, for example because `bin/fm-wake-drain.sh` cannot run on a full temp disk, leaves its rows queued, so every later arm reopens the episode and resurfaces it again.
+The watcher therefore counts consecutive recovery wakes delivered since the last successful acknowledgement in `state/.recovery-resurfaces`, which survives watcher restarts.
+`FM_RECOVERY_RESURFACE_BUDGET` (default 3) recovery wakes are delivered as `check: rearm-resurface`.
+The next one is delivered once as `check: rearm-resurface paused - ...`, a notice that names the drain as the blocker.
+After that notice, recovery stops waking the session while the watcher keeps supervising and delivering every other wake.
+The bound never retires the episode or touches the queue, so the rows and the pending episode stay durable for the next drain.
+An acknowledgement that consumes rows or retires the episode clears the count, so a later failure starts again from zero and acknowledged recovery wakes never approach the bound.
+A count that cannot be written leaves delivery unbounded, as it was before this bound, rather than silencing recovery it cannot account for.
+The bound lives in the watcher's shared recovery path, so it applies on every harness and composes with any turn-end hook that drains for the model.
+
 ## Per-actor acknowledgement
 
 `bin/fm-wake-drain.sh` consumes the queue per actor, not per whole-queue cutoff.
@@ -522,6 +534,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
 - A handling successor that resurfaces a row appended between its predecessor's close and its own startup handoff.
+- The unacknowledged re-wake bound: failed-drain cycles resurface up to the budget, deliver one notice naming the drain, then stay silent with the episode and queued rows intact, and one acknowledgement restarts the count.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.

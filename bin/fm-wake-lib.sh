@@ -1449,6 +1449,71 @@ fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-s
   fm_recovery_transition "$1" handover-restore "$2" "$3"
 }
 
+# Unacknowledged recovery re-wake bound (docs/watcher-continuity.md
+# "Unacknowledged re-wake bound" owns the contract). The counter lives beside
+# the marker, is written under the marker lock, and never touches the marker or
+# the queue: the bound only decides whether one more recovery wake is spoken.
+# FM_RECOVERY_RESURFACE_BUDGET (default 3; empty, non-numeric, or 0 use 3) is
+# the number of plain recovery wakes allowed since the last successful
+# acknowledgement; the next one becomes the single notice and later ones stay
+# silent until an acknowledgement resets the count.
+fm_recovery_resurface_count_path() {  # <marker>
+  local dir=${1%/*}
+  [ "$dir" != "$1" ] || dir=.
+  printf '%s/.recovery-resurfaces\n' "$dir"
+}
+
+# Sets FM_RECOVERY_RESURFACE_VERDICT to wake, notice, or silent and
+# FM_RECOVERY_RESURFACE_COUNT to the consecutive unacknowledged recovery wakes
+# already delivered. A counter that cannot be locked or written answers wake,
+# so an unwritable state directory keeps the pre-bound delivery instead of
+# silencing recovery it cannot account for.
+FM_RECOVERY_RESURFACE_VERDICT=wake
+FM_RECOVERY_RESURFACE_COUNT=0
+fm_recovery_resurface_admit() {  # <marker>
+  local marker=$1 lock path budget count tmp
+  FM_RECOVERY_RESURFACE_VERDICT=wake
+  FM_RECOVERY_RESURFACE_COUNT=0
+  budget=${FM_RECOVERY_RESURFACE_BUDGET:-3}
+  case "$budget" in ''|*[!0-9]*|0) budget=3 ;; esac
+  path=$(fm_recovery_resurface_count_path "$marker")
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$lock" || return 0
+  count=$(cat "$path" 2>/dev/null || true)
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  # Strip leading zeros so a hand-edited 08 is not read as octal.
+  count=$((10#$count))
+  FM_RECOVERY_RESURFACE_COUNT=$count
+  if [ "$count" -gt "$budget" ]; then
+    FM_RECOVERY_RESURFACE_VERDICT=silent
+    fm_lock_release "$lock"
+    return 0
+  fi
+  if tmp=$(mktemp "${path}.tmp.XXXXXX" 2>/dev/null) \
+    && printf '%s\n' "$((count + 1))" > "$tmp" \
+    && chmod 0600 "$tmp" \
+    && _fm_atomic_replace "$tmp" "$path"; then
+    [ "$count" -lt "$budget" ] || FM_RECOVERY_RESURFACE_VERDICT=notice
+  else
+    [ -z "${tmp:-}" ] || rm -f -- "$tmp"
+  fi
+  fm_lock_release "$lock"
+  return 0
+}
+
+# Clear the count after a successful acknowledgement. Returns nonzero only
+# when a recorded count could not be removed.
+fm_recovery_resurface_reset() {  # <marker>
+  local marker=$1 lock path status=0
+  path=$(fm_recovery_resurface_count_path "$marker")
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  rm -f -- "$path" || status=1
+  fm_lock_release "$lock"
+  return "$status"
+}
+
 # fm_lock_reap_dead_link <lockdir>
 # Remove a dead real-directory lock, or a link lock without a nested mutex.
 # For links, renaming the

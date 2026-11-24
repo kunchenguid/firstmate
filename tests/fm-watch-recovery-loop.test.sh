@@ -305,6 +305,109 @@ test_handling_successor_resurfaces_a_row_appended_during_startup() {
   pass "a handling successor resurfaces a row appended during startup"
 }
 
+# Run one non-successor watcher cycle against <dir>, as a turn-end arm does.
+# Prints the watcher's actionable lines. Returns 0 when the watcher closed
+# with a wake inside <window> seconds, 1 when it was still supervising and was
+# stopped by the test.
+run_rewake_cycle() {  # <dir> <window>
+  local dir=$1 window=$2 child ticks=0 out="$1/cycle.out" status=0
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=600 \
+    "$WATCH" > "$out" 2>&1 &
+  child=$!
+  while [ "$ticks" -lt $((window * 10)) ] && kill -0 "$child" 2>/dev/null; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    kill -TERM "$child" 2>/dev/null || true
+    status=1
+  fi
+  wait "$child" 2>/dev/null || true
+  grep -E '^(signal:|stale:|check:|heartbeat)' "$out" || true
+  return "$status"
+}
+
+# Handle the delivered recovery wake successfully: drain, then run the exact
+# acknowledgement the drain printed.
+drain_and_acknowledge() {  # <dir>
+  local dir=$1 ack
+  ack=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" \
+    "$ROOT/bin/fm-wake-drain.sh" 2>&1 >/dev/null | sed -n 's/^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain.sh //p')
+  [ -n "$ack" ] || return 1
+  # shellcheck disable=SC2086 # The printed acknowledgement is two flag pairs.
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" $ack >/dev/null 2>&1
+}
+
+# T4: when the handling turn can never acknowledge (the drain cannot run, for
+# example on a full temp disk where every command fails before touching state),
+# each turn-end arm used to resurface the same episode forever. The bound lets
+# FM_RECOVERY_RESURFACE_BUDGET plain recovery wakes through, then exactly one
+# notice naming the blocker, then silence - without retiring the episode or
+# dropping its queued rows. One successful acknowledgement restarts the count,
+# and acknowledged recovery wakes are never counted toward the bound.
+test_unacknowledged_recovery_rewakes_are_bounded() {
+  local dir state lines cycle rc
+  dir=$(make_case recovery-rewake-bound)
+  state="$dir/state"
+  mkdir -p "$dir/home/data"
+  printf 'pending:downtime:bound.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  append_wake "$state" check seed "check: seed work the drain must present" \
+    || fail "fixture: could not queue the seed wake"
+
+  # The handling turn's drain fails every time, so nothing is acknowledged.
+  for cycle in 1 2 3; do
+    lines=$(run_rewake_cycle "$dir" 20); rc=$?
+    [ "$rc" -eq 0 ] && [ "$lines" = 'check: rearm-resurface' ] \
+      || fail "failed-drain cycle $cycle must resurface the recovery once: rc=$rc lines=$lines"
+  done
+  lines=$(run_rewake_cycle "$dir" 20); rc=$?
+  [ "$rc" -eq 0 ] && [ "$(printf '%s\n' "$lines" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the cycle past the bound must close with exactly one notice: rc=$rc lines=$lines"
+  case "$lines" in
+    'check: rearm-resurface paused - 3 consecutive recovery wakes ended without a successful wake drain acknowledgement, so bin/fm-wake-drain.sh cannot run'*) ;;
+    *) fail "the bound notice must name the drain as the blocker: $lines" ;;
+  esac
+  for cycle in 5 6; do
+    lines=$(run_rewake_cycle "$dir" 4); rc=$?
+    [ "$rc" -eq 1 ] && [ -z "$lines" ] \
+      || fail "failed-drain cycle $cycle past the notice must keep supervising without waking: rc=$rc lines=$lines"
+  done
+  grep -F 'check: seed work the drain must present' "$state/.wake-queue" >/dev/null \
+    || fail "the bound must not drop the queued wake: $(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -E '^(pending|announced):' "$state/.watcher-down" >/dev/null \
+    || fail "the bound must not retire the recovery episode: $(cat "$state/.watcher-down")"
+
+  # A working drain acknowledges; every acknowledged recovery wake starts over,
+  # so more acknowledged cycles than the bound all resurface normally.
+  drain_and_acknowledge "$dir" || fail "fixture: the recovered drain did not acknowledge"
+  for cycle in 1 2 3 4; do
+    append_wake "$state" check "work-$cycle" "check: later work $cycle" \
+      || fail "fixture: could not queue later work $cycle"
+    lines=$(run_rewake_cycle "$dir" 20); rc=$?
+    [ "$rc" -eq 0 ] && [ "$lines" = 'check: rearm-resurface' ] \
+      || fail "acknowledged recovery cycle $cycle must resurface normally: rc=$rc lines=$lines"
+    drain_and_acknowledge "$dir" || fail "fixture: acknowledged cycle $cycle did not acknowledge"
+  done
+
+  # A later failure counts again from zero.
+  append_wake "$state" check relapse "check: work queued before the drain broke again" \
+    || fail "fixture: could not queue the relapse wake"
+  for cycle in 1 2 3; do
+    lines=$(run_rewake_cycle "$dir" 20); rc=$?
+    [ "$rc" -eq 0 ] && [ "$lines" = 'check: rearm-resurface' ] \
+      || fail "after an acknowledgement, failed-drain cycle $cycle must count from zero: rc=$rc lines=$lines"
+  done
+  lines=$(run_rewake_cycle "$dir" 20); rc=$?
+  case "$lines" in
+    'check: rearm-resurface paused - 3 consecutive '*) ;;
+    *) fail "the renewed failure must reach the bound notice again: rc=$rc lines=$lines" ;;
+  esac
+  pass "unacknowledged recovery re-wakes stop after the bound with one notice, keep the episode durable, and reset on acknowledgement"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_resurfaces_a_row_appended_during_startup
+test_unacknowledged_recovery_rewakes_are_bounded
 test_unacknowledged_recovery_is_announced_once_per_generation
