@@ -2030,6 +2030,48 @@ PY
   pass "aborted registered invocations are named in console, FM_TEST_END and JSON; green suites name none"
 }
 
+test_nested_abort_is_not_attributed_to_parent_suite() {
+  local tmp repo suite rc
+  tmp=$(fm_test_tmproot fm-test-run-nested-abort)
+  repo="$tmp/repo"
+  suite=tests/fm-brief.test.sh
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cat >"$repo/$suite" <<EOF
+#!/usr/bin/env bash
+set -u
+if [ "\$#" -eq 0 ]; then
+  nested=\$(bash "\$0" child 2>&1)
+  printf '%s\n' "\$nested" >&2
+  exit 7
+fi
+. "$ROOT/tests/lib.sh"
+test_nested_failure() { fail 'nested fixture failed'; }
+test_nested_pending() { pass 'nested pending test ran'; }
+fm_test_run test_nested_failure test_nested_pending
+EOF
+  rc=0
+  "$repo/bin/fm-test-run.sh" --jobs 1 --json "$tmp/timing.json" "$suite" >"$tmp/output" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "runner must report the parent suite failure: $(cat "$tmp/output")"
+  python3 - "$tmp/output" "$tmp/timing.json" <<'PY' \
+    || fail "nested abort was hidden or attributed to the parent suite"
+import json, sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+assert "FM_TEST_ABORT failed=test_nested_failure skipped_after_failure=1 unexecuted=test_nested_pending" in lines
+end, = [line for line in lines if line.startswith("FM_TEST_END ")]
+assert "exit=7 " in end and end.endswith(" gate_skip=false"), end
+record, = json.loads(Path(sys.argv[2]).read_text())["scripts"]
+assert record["exit"] == 7, record
+assert record["failed_invocation"] == "", record
+assert record["skipped_after_failure"] == 0, record
+assert record["unexecuted_invocations"] == [], record
+PY
+  pass "nested abort output does not become the parent suite's result"
+}
+
 test_aggregate_json() {
   local tmp a b
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-aggjson.XXXXXX")
@@ -2126,6 +2168,7 @@ test_jobs_lists_a_portable_parallel_lane() {
 }
 
 test_aborted_invocations_are_named
+test_nested_abort_is_not_attributed_to_parent_suite
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection

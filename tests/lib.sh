@@ -179,9 +179,13 @@ fm_test_report_abort() {
   # An expected failure in a subshell must not report its parent's plan.
   [ "$$:$BASH_SUBSHELL" = "$FM_TEST_RUN_SHELL:$FM_TEST_RUN_SUBSHELL" ] || return 0
   FM_TEST_RUN_ACTIVE=0
-  local IFS=,
-  printf 'FM_TEST_ABORT failed=%s skipped_after_failure=%s unexecuted=%s\n' \
-    "$FM_TEST_CURRENT" "${#FM_TEST_PENDING[@]}" "${FM_TEST_PENDING[*]-}" >&2
+  local IFS=, abort
+  printf -v abort 'FM_TEST_ABORT failed=%s skipped_after_failure=%s unexecuted=%s' \
+    "$FM_TEST_CURRENT" "${#FM_TEST_PENDING[@]}" "${FM_TEST_PENDING[*]-}"
+  if [ "${FM_TEST_ABORT_OWNER:-}" = "$$" ] && [ -n "${FM_TEST_ABORT_FILE:-}" ]; then
+    printf '%s\n' "$abort" >"$FM_TEST_ABORT_FILE" || true
+  fi
+  printf '%s\n' "$abort" >&2
 }
 
 # Harness argument assertions reuse the emitted prefix rather than duplicating

@@ -36,8 +36,8 @@
 #                   tool this host could not exercise.
 #                   Every record also carries failed_invocation,
 #                   skipped_after_failure and unexecuted_invocations from the
-#                   tests/lib.sh FM_TEST_ABORT marker. Without that marker,
-#                   these are "", 0 and [], including for unregistered suites;
+#                   registered suite's abort report in tests/lib.sh. Without a
+#                   report, these are "", 0 and [], including for unregistered suites;
 #                   empty values alone do not prove suite completion.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
@@ -93,7 +93,7 @@
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
-#     When the suite emits FM_TEST_ABORT, appends failed_invocation=<name>,
+#     When the registered suite reports an abort, appends failed_invocation=<name>,
 #     skipped_after_failure=<n> and unexecuted=<comma-separated-names>.
 #
 # After all scripts (stdout):
@@ -2324,6 +2324,7 @@ if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
 fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
+RUN_TMP=$(cd "$RUN_TMP" && pwd)
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
@@ -2400,8 +2401,7 @@ record_script_result() {
     log "gate skip: $script: ${gate_reason:-<no reason given>}"
   fi
 
-  abort=$(grep '^FM_TEST_ABORT failed=' "$out" | tail -1 || true)
-  if [ -n "$abort" ]; then
+  if [ -f "$out.abort" ] && IFS= read -r abort <"$out.abort"; then
     failed_invocation=${abort#FM_TEST_ABORT failed=}
     failed_invocation=${failed_invocation%% skipped_after_failure=*}
     skipped_after_failure=${abort#* skipped_after_failure=}
@@ -2410,7 +2410,7 @@ record_script_result() {
   fi
   printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s' \
     "$end_iso" "$script" "$rc" "$duration" "$gate_skip"
-  if [ -n "$abort" ]; then
+  if [ -n "$failed_invocation" ]; then
     printf ' failed_invocation=%s skipped_after_failure=%s unexecuted=%s' \
       "$failed_invocation" "$skipped_after_failure" "$unexecuted"
   fi
@@ -2444,6 +2444,8 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
+  # shellcheck disable=SC2016
+  local -a suite_command=(bash -c 'FM_TEST_ABORT_OWNER=$$ FM_TEST_ABORT_FILE=$1 exec bash "$2"' _ "$out.abort" "$script")
   : "$id"
   set +e
   if [ "$stream" -eq 1 ]; then
@@ -2451,17 +2453,17 @@ run_script_bounded() {  # <script> <out> <stream> <id>
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
       fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
+        'out=$1; shift; "$@" 2>&1 | tee "$out"; exit "${PIPESTATUS[0]}"' _ "$out" "${suite_command[@]}"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      "${suite_command[@]}" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${suite_command[@]}" >"$out" 2>&1
     rc=$?
   else
-    bash "$script" >"$out" 2>&1
+    "${suite_command[@]}" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
