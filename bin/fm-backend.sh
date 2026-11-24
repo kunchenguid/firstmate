@@ -1048,16 +1048,16 @@ fm_backend_source() {  # <name>
       set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-composer-pi-adapter.sh
       ;;
     rex)
-      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh
+      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-composer-pi-adapter.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh
       ;;
     t3code)
-      set -- fm-composer-lib.sh fm-transition-lib.sh
+      set -- fm-composer-lib.sh fm-composer-pi-adapter.sh fm-transition-lib.sh
       ;;
     tern)
-      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-timeout-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh fm-cursor-lib.sh
+      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-composer-pi-adapter.sh fm-timeout-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh fm-cursor-lib.sh
       ;;
     hc)
-      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh fm-cursor-lib.sh
+      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh fm-composer-pi-adapter.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh fm-cursor-lib.sh
       ;;
     *)
       return 1
