@@ -159,7 +159,7 @@ Primary and persistent secondmate execution is verified through native `.agents/
 Session-open digest injection is implemented by `bin/fm-sessionstart-agy.sh` on the `SessionStart` event.
 PreToolUse seatbelts enforce execution safety through `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
 In primary and secondmate homes, watcher commands are classified by the shared arm-command policy, `cd` commands are denied in favor of absolute paths or `cwd`, and subagent invocations (`invoke_subagent`, `define_subagent`) are denied while inspection tools (`manage_subagents`, `manage_task`) remain permitted.
-Supervision continuity uses tracked background `run_command` execution (`WaitMsBeforeAsync: 500`) of `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park`) with reactive wakeup, backed by the fast non-blocking `Stop` hook guard `bin/fm-turnend-guard-agy.sh` delegating to `bin/fm-turnend-guard.sh --agy` under a 30s timeout.
+Supervision continuity uses tracked background `run_command` execution (`WaitMsBeforeAsync: 5000`) of `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park`) with reactive wakeup, backed by the fast non-blocking `Stop` hook guard `bin/fm-turnend-guard-agy.sh` delegating to `bin/fm-turnend-guard.sh --agy` under a 30s timeout.
 Session lock verification recognizes `agy` process ancestry via `bin/fm-session-lock-lib.sh`.
 
 ## What is still unproven

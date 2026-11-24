@@ -906,6 +906,7 @@ test_agy_secondmate_launch_pre_trusts_home_and_records_meta() {
   expect_code 0 "$rc" "agy secondmate spawn should succeed ($out)"
   store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
   assert_agy_trusted "$store" "$sm_home" "agy secondmate home was not pre-trusted"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "FM_SUPERVISION_MODEL=persistent" "agy secondmate launch must pin FM_SUPERVISION_MODEL=persistent"
   meta="$HOME_DIR/state/$id.meta"
   [ -f "$meta" ] || fail "agy secondmate spawn wrote no state/$id.meta"
   grep -Fq 'kind=secondmate' "$meta" || fail "agy secondmate meta missing kind=secondmate"

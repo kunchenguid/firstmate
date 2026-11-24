@@ -253,7 +253,7 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
     agy)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$agy_arm" ' as its own Antigravity tracked background run_command (WaitMsBeforeAsync: 500), never shell &.'
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$agy_arm" ' as its own Antigravity tracked background run_command (WaitMsBeforeAsync: 5000), never shell &.'
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'

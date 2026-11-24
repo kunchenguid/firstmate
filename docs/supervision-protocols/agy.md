@@ -7,7 +7,7 @@ When this session owns supervision and away mode is not active:
 2. Source `__FM_X_MODE_ENV__` first when Relay is active.
 3. First cycle: arm with Antigravity's tracked background tool, as its own call:
 
-   `run_command` with `WaitMsBeforeAsync: 500`, `IsDaemon: false`, and no `NotificationTimeoutSeconds` on:
+   `run_command` with `WaitMsBeforeAsync: 5000`, `IsDaemon: false`, and no `NotificationTimeoutSeconds` on:
    `[ -f __FM_X_MODE_ENV_SH__ ] && . __FM_X_MODE_ENV_SH__; exec __FM_AGY_ARM__`
 
 4. Trust only the arm's one-line status.

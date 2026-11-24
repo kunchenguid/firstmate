@@ -7725,7 +7725,7 @@ if [ "$KIND" = secondmate ]; then
   # receive extension to match fm_supervision_model's own table, so their pull
   # guard tolerates the extension hand-off exactly as a Pi primary does.
   case "$HARNESS" in
-  claude | cursor | agy) supervision_model=autoarm ;;
+  claude | cursor) supervision_model=autoarm ;;
   pi | pi-signed | omp) supervision_model=extension ;;
   *) supervision_model=persistent ;;
   esac
