@@ -93,8 +93,9 @@
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
-#     When the registered suite reports an abort, appends failed_invocation=<name>,
-#     skipped_after_failure=<n> and unexecuted=<comma-separated-names>.
+#     When the selected suite's shell reports an abort, appends
+#     failed_invocation=<name>, skipped_after_failure=<n> and
+#     unexecuted=<comma-separated-names>.
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
@@ -2401,6 +2402,8 @@ record_script_result() {
     log "gate skip: $script: ${gate_reason:-<no reason given>}"
   fi
 
+  # Each selected suite's shell has its own report file. Nested fixture output
+  # can contain an abort marker that belongs to a different suite.
   if [ -f "$out.abort" ] && IFS= read -r abort <"$out.abort"; then
     failed_invocation=${abort#FM_TEST_ABORT failed=}
     failed_invocation=${failed_invocation%% skipped_after_failure=*}

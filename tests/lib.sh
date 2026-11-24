@@ -134,9 +134,12 @@ pass() {
 # Derive the TAP plan 1..N from the registered function names and call them in
 # order. Each function must emit exactly one `ok - ` line via pass.
 # Register a new test by adding its function name to this call.
-# Print FM_TEST_COMPLETE after all registered calls return. If the EXIT trap
-# runs during a call, FM_TEST_ABORT names the current invocation and the
-# remaining registered invocations in order.
+# Print FM_TEST_COMPLETE after all registered calls return. If the suite's
+# shell exits during an invocation, even with status 0, its EXIT trap prints
+# an abort report to stderr.
+#   FM_TEST_ABORT failed=<name> skipped_after_failure=<n> unexecuted=<names>
+# The comma-separated list follows registration order and is empty if the
+# current invocation is the last one.
 # Abort reporting precedes a suite-owned EXIT handler installed before fm_test_run,
 # which receives the original exit status even if it exits explicitly.
 # An explicit fm_test_cleanup call during a test does not itself report an abort.
