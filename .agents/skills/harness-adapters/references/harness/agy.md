@@ -1,6 +1,6 @@
 # Antigravity CLI
 
-Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend.
+Antigravity's `agy` TUI was verified end to end with agy 1.2.0 on Linux through the Herdr backend.
 Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
@@ -20,7 +20,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 | Marker | None; a live TUI carries no `AGY_*` or `ANTIGRAVITY_*` variable. |
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
-| Effort | A model ID with effort siblings in the same reachable catalog supplies its own effort. Otherwise, Firstmate passes `--effort low\|medium\|high` when requested and records `xhigh` and `max` in metadata only. |
+| Effort | Firstmate omits `--effort` when `agy models` lists the selected ID and another ID that differs only in its trailing effort suffix (`-low`, `-medium`, `-high`, `-xhigh`, or `-max`). The model ID then sets the launch effort. Otherwise, Firstmate passes `--effort` for `low`, `medium`, and `high`. Task metadata records the requested effort in either case. |
 | Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
 
 ## Trust, and where the decision persists
