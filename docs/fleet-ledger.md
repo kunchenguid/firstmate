@@ -80,7 +80,7 @@ These are possible follow-ups, deliberately left out of this version:
 
 - session start, away-mode, and quiet-mode events;
 - relaunch events;
-- whether a worker is currently working or idle, and when a turn ends; subscribe to the Herdr runtime's own `pane.agent_status_changed` events for that ([Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback));
+- whether a worker is currently working or idle, and when a turn ends; see the [runtime backend event sources](architecture.md#runtime-session-backends) for native activity observations;
 - sequence numbers and gap detection;
 - rotation and continuity across rotated files;
 - backfill or replay of events from before the ledger was turned on;

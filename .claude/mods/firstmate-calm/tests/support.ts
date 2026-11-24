@@ -272,19 +272,39 @@ export function isStock(tree: unknown): boolean {
   return JSON.stringify(tree).includes(STOCK_TEXT);
 }
 
-/** The Raster element inside a Spinner drawing, or undefined when the drawing has none. */
-export function rasterOf(tree: unknown): { columns: number; rows: number; cells: string; key: string } | undefined {
+function drawingNodes(tree: unknown): unknown[] {
   const seen: unknown[] = [tree];
+  const nodes: unknown[] = [];
   while (seen.length > 0) {
     const node = seen.pop();
     if (node === null || typeof node !== "object") continue;
-    const element = node as { type?: unknown; props?: Record<string, unknown>; children?: unknown };
-    if (element.type === "Raster" && element.props !== undefined) {
-      return element.props as { columns: number; rows: number; cells: string; key: string };
-    }
+    nodes.push(node);
+    const element = node as { props?: Record<string, unknown>; children?: unknown };
     if (Array.isArray(element.children)) seen.push(...element.children);
     else if (element.children !== undefined) seen.push(element.children);
     if (element.props !== undefined && "children" in element.props) seen.push(element.props.children);
+  }
+  return nodes;
+}
+
+/** The Box wrapping a Spinner Raster, or undefined when the drawing has none. */
+export function boxOf(tree: unknown): { props?: Record<string, unknown> } | undefined {
+  for (const node of drawingNodes(tree)) {
+    const element = node as { type?: unknown; props?: Record<string, unknown> };
+    if (element.type === "Box" && element.props !== undefined && rasterOf(element) !== undefined) {
+      return element;
+    }
+  }
+  return undefined;
+}
+
+/** The Raster element inside a Spinner drawing, or undefined when the drawing has none. */
+export function rasterOf(tree: unknown): { columns: number; rows: number; cells: string; key: string } | undefined {
+  for (const node of drawingNodes(tree)) {
+    const element = node as { type?: unknown; props?: Record<string, unknown> };
+    if (element.type === "Raster" && element.props !== undefined) {
+      return element.props as { columns: number; rows: number; cells: string; key: string };
+    }
   }
   return undefined;
 }

@@ -112,7 +112,7 @@ while IFS=$'\t' read -r TAG VERSION_PREFIX EXPECTED MACOS_AARCH64_DIGEST MACOS_X
   DIR="$TMP_ROOT/$TAG"
   mkdir -p "$DIR"
   if ! curl -fsSL --max-time 300 -o "$DIR/herdr" \
-    "https://github.com/ogulcancelik/herdr/releases/download/$TAG/$ASSET"; then
+    "https://github.com/herdrdev/herdr/releases/download/$TAG/$ASSET"; then
     fail "could not download the pinned Herdr $TAG $ASSET asset; the floor mapping is unverified"
   fi
   GOT_DIGEST=$(shasum -a 256 "$DIR/herdr" | awk '{print $1}')

@@ -5,6 +5,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset FM_HERDR_LAB_FLEET_SESSION
+export HOME=/home/test
+unset XDG_CONFIG_HOME
+
 TMP_ROOT=$(fm_test_tmproot fm-herdr-lab)
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 FAKE_STATE="$TMP_ROOT/herdr-state"
@@ -20,6 +24,9 @@ cat > "$FAKEBIN/herdr" <<'SH'
 set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
+for var in HERDR_SOCKET_PATH HERDR_PANE_ID HERDR_TAB_ID HERDR_WORKSPACE_ID; do
+  [ -z "${!var+x}" ] || printf '%s %s\n' "$var" "$*" >> "$state/leaked-env"
+done
 # Herdr reads --session only as an option, so it must end the arguments or
 # sit immediately before the first -- delimiter.
 last=
@@ -31,25 +38,44 @@ done
 [ "${previous:-}" = --session ] || { echo "fake herdr: missing --session before any -- delimiter" >&2; exit 90; }
 session=$last
 default_socket=$(cat "$state/default-socket")
+# A custom-named fleet runs in a non-default session, leaving the literal
+# default session stopped.
+fleet_rows='[{default:true,name:"default",running:true,socket_path:$socket}]'
+if [ -n "${FM_FAKE_HERDR_FLEET:-}" ]; then
+  fleet_rows='[{default:true,name:"default",running:false,socket_path:"/home/test/.config/herdr/default.sock"},{default:false,name:$fleet,running:true,socket_path:$socket}]'
+fi
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
 
 case "$1 ${2:-}" in
   "session list")
     if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
+      jq -nc --arg socket "$default_socket" --arg fleet "${FM_FAKE_HERDR_FLEET:-}" "{sessions:$fleet_rows}"
     else
       running=false
       [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+      jq -nc --arg socket "$default_socket" --arg fleet "${FM_FAKE_HERDR_FLEET:-}" --arg name "$session" --argjson running "$running" \
+        "{sessions:($fleet_rows + [{default:false,name:\$name,running:\$running,socket_path:(\"/tmp/\" + \$name + \".sock\")}])}"
     fi
     ;;
   "server --session")
+    if [ -n "${FM_FAKE_HERDR_SERVER_NOISE:-}" ]; then
+      head -c "$FM_FAKE_HERDR_SERVER_NOISE" /dev/zero | tr '\0' x >&2
+      exit 1
+    fi
+    if [ -n "${FM_FAKE_HERDR_SERVER_FAIL:-}" ]; then
+      printf '%s\n' "$FM_FAKE_HERDR_SERVER_FAIL" >&2
+      exit 1
+    fi
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
     printf '%s\n' running > "$state/$session"
+    if [ -n "${FM_FAKE_HERDR_SERVER_STAY:-}" ]; then
+      # Stay alive after reporting running, like a real server.
+      printf '%s\n' "$$" > "$state/$session.pid"
+      exec "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_STAY"
+    fi
     ;;
   "status --json")
     if [ "$lab_state" = running ]; then
@@ -92,6 +118,9 @@ run_with_fake() {
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
+    FM_FAKE_HERDR_FLEET="${FM_FAKE_HERDR_FLEET:-}" \
+    FM_FAKE_HERDR_SERVER_FAIL="${FM_FAKE_HERDR_SERVER_FAIL:-}" \
+    FM_FAKE_HERDR_SERVER_STAY="${FM_FAKE_HERDR_SERVER_STAY:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
 }
@@ -108,6 +137,79 @@ test_refuses_unsafe_names() {
   fm_herdr_lab_validate_name "$generated" || fail "generated lab session name was refused"
   [ "${#generated}" -le 40 ] || fail "generated lab session name is too long for Herdr socket paths: $generated"
   pass "fm-herdr-lab: names fail closed and require the lab prefix"
+}
+
+test_refuses_names_over_the_socket_path_limit() {
+  local err="$TMP_ROOT/sun-path.err" status=0 name fixed
+  fixed="$HOME/.config/herdr/sessions//herdr-client.sock"
+  name=fm-lab-$(printf 'a%.0s' $(seq 1 $((103 - ${#fixed} - 7))))
+  fm_herdr_lab_check_socket_path "$name" || fail "a name exactly at the sun_path limit was refused"
+  fm_herdr_lab_check_socket_path "${name}a" 2>"$err" && fail "a name over the sun_path limit was accepted"
+  assert_contains "$(cat "$err")" "103-byte sun_path limit" "the refusal must name the limit"
+  HOME=/home/test/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_name long-label >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "name must refuse a label that overflows the socket path"
+  # Multibyte config root: fewer than 103 characters but more than 103 bytes.
+  local wide chars
+  wide=/home/test/$(printf 'é%.0s' $(seq 1 30))
+  chars=$(LC_ALL=C.UTF-8 bash -c 'p=$1/.config/herdr/sessions/fm-lab-x/herdr-client.sock; echo ${#p}' _ "$wide")
+  [ "$chars" -lt 103 ] || fail "multibyte fixture is not under 103 characters: $chars"
+  HOME=$wide fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    && fail "a path under 103 characters but over 103 bytes was accepted"
+  # XDG_CONFIG_HOME relocates the config root: long HOME + short XDG is accepted,
+  # short HOME + long XDG is refused.
+  HOME=/home/test/$(printf 'c%.0s' $(seq 1 90)) XDG_CONFIG_HOME=/x fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    || fail "a short XDG_CONFIG_HOME was refused because of a long HOME"
+  XDG_CONFIG_HOME=/x/$(printf 'c%.0s' $(seq 1 90)) fm_herdr_lab_check_socket_path fm-lab-x 2>/dev/null \
+    && fail "a long XDG_CONFIG_HOME was accepted"
+  status=0
+  run_with_fake fm_herdr_lab_prepare "${name}a" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "prepare must refuse an over-limit name"
+  status=0
+  run_with_fake fm_herdr_lab_provision "${name}a" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "provision must refuse an over-limit name"
+  [ ! -f "$FAKE_STATE/${name}a" ] || fail "provision started a server for an over-limit name"
+  pass "fm-herdr-lab: names whose client socket path exceeds sun_path are refused"
+}
+
+test_noisy_server_log_is_bounded() {
+  local name="fm-lab-server-noisy-$$" size
+  FM_FAKE_HERDR_SERVER_NOISE=300000 \
+    run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || true
+  size=$(wc -c < "$TRIPWIRES/$name.server.log" | tr -d ' ')
+  [ "$size" -le 4096 ] || fail "server log grew to $size bytes, over the 4096-byte cap"
+  [ "$size" -gt 0 ] || fail "server output was not captured"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: a noisy server leaves a bounded log"
+}
+
+test_captured_provision_returns_promptly() {
+  local name="fm-lab-captured-$$" started elapsed pid
+  started=$(date +%s)
+  # The server outlives provision. Command substitution waits for every
+  # holder of the pipe to close it, so a collector that kept the caller's
+  # stdout open would block until the server exits.
+  : "$(FM_FAKE_HERDR_SERVER_STAY=20 run_with_fake fm_herdr_lab_provision "$name" 2>&1)"
+  elapsed=$(($(date +%s) - started))
+  pid=$(cat "$FAKE_STATE/$name.pid" 2>/dev/null || true)
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  [ "$elapsed" -lt 10 ] || fail "captured provision held its output pipe open for ${elapsed}s"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: provision does not hold a captured output pipe open"
+}
+
+test_failed_server_start_reports_its_error_quickly() {
+  local name="fm-lab-server-fails-$$" err="$TMP_ROOT/server-fail.err" status=0 started elapsed
+  started=$(date +%s)
+  FM_FAKE_HERDR_SERVER_FAIL="Error: local socket name length exceeds capacity" \
+    run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>"$err" || status=$?
+  elapsed=$(($(date +%s) - started))
+  expect_code 1 "$status" "provision must fail when the server exits"
+  [ "$elapsed" -lt 10 ] || fail "provision waited ${elapsed}s for a server that had already exited"
+  assert_contains "$(cat "$err")" "exited before reporting running" "the failure must say the server exited"
+  assert_contains "$(cat "$err")" "local socket name length exceeds capacity" "the failure must show the server's own error"
+  assert_present "$TRIPWIRES/$name.server.log" "the server output was not kept in the state directory"
+  run_with_fake fm_herdr_lab_teardown "$name" >/dev/null 2>&1 || true
+  pass "fm-herdr-lab: a server that fails at startup reports its error without the full wait"
 }
 
 test_provision_run_and_guarded_teardown() {
@@ -222,6 +324,92 @@ test_changed_default_trips_after_teardown() {
   printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
   rm -f "$TRIPWIRES/$name.fleet-state.json"
   pass "fm-herdr-lab: changed default fleet state is a hard failure"
+}
+
+test_default_fleet_session_is_recorded() {
+  local name="fm-lab-default-fleet-$$"
+  : > "$FAKE_LOG"
+  FM_HERDR_LAB_FLEET_SESSION=default run_with_fake fm_herdr_lab_provision "$name" \
+    || fail "an explicit default fleet session failed to provision"
+  jq -e '.name == "default" and .default == true and .running == true' \
+    "$TRIPWIRES/$name.fleet-state.json" >/dev/null \
+    || fail "the default fleet tripwire did not record the running default session"
+  FM_HERDR_LAB_FLEET_SESSION=default run_with_fake fm_herdr_lab_teardown "$name" \
+    || fail "an explicit default fleet session failed teardown"
+  pass "fm-herdr-lab: the default fleet session stays the recorded tripwire"
+}
+
+test_custom_fleet_session_tripwire() {
+  local name="fm-lab-custom-fleet-$$" status=0 err="$TMP_ROOT/custom-fleet.err"
+  : > "$FAKE_LOG"
+  FM_FAKE_HERDR_FLEET=fleet-main run_with_fake fm_herdr_lab_provision "$name" 2>"$err" || status=$?
+  expect_code 1 "$status" "a custom-named fleet must not satisfy the default tripwire"
+  grep -F "exactly one running default session" "$err" >/dev/null \
+    || fail "the default tripwire refusal did not name the default session"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "a refused tripwire left a record behind"
+  assert_absent "$FAKE_STATE/$name" "a refused tripwire still started the lab session"
+
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "a custom fleet session failed to provision"
+  jq -e '.name == "fleet-main" and .default == false and .running == true and .socket_path == "/home/test/.config/herdr/herdr.sock"' \
+    "$TRIPWIRES/$name.fleet-state.json" >/dev/null \
+    || fail "the custom fleet tripwire did not record the running fleet session"
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_teardown "$name" || fail "a custom fleet session failed teardown"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "custom fleet teardown left its tripwire behind"
+
+  name="fm-lab-custom-change-$$"
+  status=0
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_provision "$name" || fail "custom fleet change fixture failed to provision"
+  printf '%s\n' '/changed/fleet.sock' > "$FAKE_STATE/default-socket"
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_teardown "$name" 2>"$err" || status=$?
+  expect_code 1 "$status" "a changed custom fleet session must fail teardown"
+  grep -F "FLEET-STATE TRIPWIRE FAILED: fleet-main session changed" "$err" >/dev/null \
+    || fail "the tripwire failure did not name the custom fleet session"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "failed custom tripwire should retain evidence"
+  printf '%s\n' '/home/test/.config/herdr/herdr.sock' > "$FAKE_STATE/default-socket"
+  FM_HERDR_LAB_FLEET_SESSION=fleet-main FM_FAKE_HERDR_FLEET=fleet-main \
+    run_with_fake fm_herdr_lab_teardown "$name" || fail "custom fleet change fixture cleanup failed"
+  pass "fm-herdr-lab: a custom fleet session is recorded and compared like the default session"
+}
+
+test_refuses_unsafe_fleet_session_names() {
+  local name="fm-lab-bad-fleet-$$" fleet status err="$TMP_ROOT/bad-fleet.err"
+  for fleet in fm-lab-other 'bad name' -leading other-fleet; do
+    status=0
+    : > "$FAKE_LOG"
+    FM_HERDR_LAB_FLEET_SESSION=$fleet FM_FAKE_HERDR_FLEET=fleet-main \
+      run_with_fake fm_herdr_lab_provision "$name" 2>"$err" || status=$?
+    expect_code 1 "$status" "fleet session '$fleet' must be refused"
+    assert_absent "$TRIPWIRES/$name.fleet-state.json" "refused fleet session '$fleet' left a tripwire"
+    assert_absent "$FAKE_STATE/$name" "refused fleet session '$fleet' still started the lab session"
+  done
+  grep -F "exactly one running other-fleet session" "$err" >/dev/null \
+    || fail "an absent custom fleet session was not named in the refusal"
+  for fleet in fm-lab-other 'bad name'; do
+    status=0
+    FM_HERDR_LAB_FLEET_SESSION=$fleet fm_herdr_lab_fleet_session >/dev/null 2>"$err" || status=$?
+    expect_code 1 "$status" "fleet session '$fleet' must fail validation"
+    grep -F "never a lab session" "$err" >/dev/null || fail "fleet session '$fleet' refusal lacked its reason"
+  done
+  pass "fm-herdr-lab: the fleet session can never be a lab or malformed session"
+}
+
+test_clears_inherited_herdr_pane_env() {
+  local name="fm-lab-pane-env-$$"
+  rm -f "$FAKE_STATE/leaked-env"
+  : > "$FAKE_LOG"
+  # shellcheck disable=SC2016 # the single-quoted script expands in the child shell
+  HERDR_SOCKET_PATH=/live/herdr.sock HERDR_PANE_ID=live-pane HERDR_TAB_ID=live-tab HERDR_WORKSPACE_ID=live-ws \
+    run_with_fake bash -c '. "$1"; fm_herdr_lab_provision "$2" && fm_herdr_lab_cli "$2" workspace list >/dev/null && fm_herdr_lab_teardown "$2"' \
+    _ "$ROOT/bin/fm-herdr-lab.sh" "$name" || fail "lab lifecycle failed under an inherited pane environment"
+  [ -s "$FAKE_LOG" ] || fail "the inherited pane environment fixture reached no Herdr call"
+  if [ -e "$FAKE_STATE/leaked-env" ]; then
+    fail "inherited Herdr pane variables reached a Herdr call: $(cat "$FAKE_STATE/leaked-env")"
+  fi
+  pass "fm-herdr-lab: Herdr calls never inherit the live pane's socket or pane identity"
 }
 
 test_stopped_owned_lab_can_reprovision() {
@@ -535,10 +723,18 @@ test_viewer_launcher_refuses_unsafe_arguments() {
 }
 
 test_refuses_unsafe_names
+test_refuses_names_over_the_socket_path_limit
+test_failed_server_start_reports_its_error_quickly
+test_noisy_server_log_is_bounded
+test_captured_provision_returns_promptly
 test_provision_run_and_guarded_teardown
 test_run_scopes_session_before_double_dash
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
+test_default_fleet_session_is_recorded
+test_custom_fleet_session_tripwire
+test_refuses_unsafe_fleet_session_names
+test_clears_inherited_herdr_pane_env
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
 test_timed_out_provision_cancels_late_launch

@@ -150,8 +150,7 @@ test_agy_control_mechanics_are_the_verified_ones() {
   [ "$(fm_control_harness_family agy)" = agy ] || fail "agy must map to its own family"
   fm_control_harness_supports_kind agy scout || fail "agy must run scouts"
   fm_control_harness_supports_kind agy ship || fail "agy must run ships"
-  fm_control_harness_supports_kind agy secondmate \
-    && fail "agy must refuse secondmates" || true
+  fm_control_harness_supports_kind agy secondmate || fail "agy must run secondmates"
   [ "$(fm_control_interrupt_key agy)" = Escape ] || fail "agy must interrupt on Escape"
   [ "$(fm_control_interrupt_repeat agy)" = 1 ] || fail "agy must interrupt on a single press"
   [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must need no clear key"
@@ -863,21 +862,38 @@ test_agy_missing_binary_refuses_before_pane_creation() {
   pass "fm-spawn: a missing agy executable refuses before pane creation"
 }
 
-test_agy_secondmate_is_refused() {
-  local id rec out rc
+test_agy_secondmate_launch_pre_trusts_home_and_records_meta() {
+  local id rec sm_home out rc store meta
   id="agy-secondmate-z6-$$"
-  rec=$(make_agy_spawn_case secondmate-refuse "$id")
+  rec=$(make_agy_spawn_case secondmate-launch "$id")
   read_agy_spawn_record "$rec"
+  sm_home="$CASE_DIR/sm-home"
+  mkdir -p "$sm_home/bin" "$sm_home/data" "$sm_home/state" "$sm_home/config" "$sm_home/projects"
+  : > "$sm_home/AGENTS.md"
+  printf '%s\n' "$id" > "$sm_home/.fm-secondmate-home"
+  printf '# Charter\n\nSecondmate charter for %s.\n' "$id" > "$sm_home/data/charter.md"
+  printf 'projects/\nstate/\ndata/\nconfig/\n.no-mistakes/\n' > "$sm_home/.gitignore"
+  git -C "$sm_home" init -q -b main
   rc=0
   out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
-    FM_SPAWN_NO_GUARD=1 PATH="$FAKEBIN_DIR:$BASE_PATH" \
-    "$SPAWN" "$id" --secondmate agy 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "an agy secondmate spawn should be refused"
-  assert_contains "$out" "agy is a verified crewmate/scout adapter only" \
-    "agy secondmate refusal lacked its concrete reason"
-  pass "fm-spawn: agy cannot be launched as a secondmate"
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$sm_home" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+    FM_FAKE_AGY_STATE="$CASE_DIR/agy.state" \
+    FM_FAKE_AGY_SETTINGS="$HOME_DIR/.gemini/antigravity-cli/settings.json" \
+    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=1 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$SPAWN" "$id" "$sm_home" --secondmate agy 2>&1) || rc=$?
+  expect_code 0 "$rc" "agy secondmate spawn should succeed ($out)"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  assert_agy_trusted "$store" "$sm_home" "agy secondmate home was not pre-trusted"
+  meta="$HOME_DIR/state/$id.meta"
+  [ -f "$meta" ] || fail "agy secondmate spawn wrote no state/$id.meta"
+  grep -Fq 'kind=secondmate' "$meta" || fail "agy secondmate meta missing kind=secondmate"
+  grep -Fq 'harness=agy' "$meta" || fail "agy secondmate meta missing harness=agy"
+  pass "fm-spawn: agy secondmate pre-trusts the secondmate home and records kind=secondmate"
 }
 
 test_agy_spawn_arms_no_busy_wiring() {
@@ -926,5 +942,5 @@ test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
-test_agy_secondmate_is_refused
+test_agy_secondmate_launch_pre_trusts_home_and_records_meta
 test_agy_spawn_arms_no_busy_wiring
