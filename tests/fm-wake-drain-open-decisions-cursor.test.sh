@@ -190,7 +190,7 @@ test_read_failure_preserves_state_for_retry() {
   state="$dir/state"
   reader="$dir/fail-reader"
   statusfile="$state/task4.status"
-  cursor="$state/.task4.open-decisions-cursor"
+  cursor="$state/.task4.open-decisions-cursor.timed"
   out="$dir/drain.out"
 
   printf 'needs-decision [key=x]: something important\n' > "$statusfile"
@@ -228,7 +228,7 @@ test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
   fakebin="$dir/failbin"
   mkdir -p "$fakebin"
   statusfile="$state/task5.status"
-  cursor="$state/.task5.open-decisions-cursor"
+  cursor="$state/.task5.open-decisions-cursor.timed"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
   real_cat=$(command -v cat)
@@ -278,7 +278,7 @@ test_pre_fix_cursor_refolds_corr_tagged_decision() {
   dir=$(make_case cursor-corr-tag-migration)
   state="$dir/state"
   status="$state/task7.status"
-  cursor="$state/.task7.open-decisions-cursor"
+  cursor="$state/.task7.open-decisions-cursor.timed"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
 
@@ -311,7 +311,7 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   dir=$(make_case cursor-fold-version)
   state="$dir/state"
   status="$state/task6.status"
-  cursor="$state/.task6.open-decisions-cursor"
+  cursor="$state/.task6.open-decisions-cursor.timed"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
 
@@ -352,7 +352,7 @@ test_terminal_supersession_reaches_cached_drains() {
   for kind in scout ship secondmate; do
     for terminal in 'done' failed; do
       dir=$(make_case "terminal-$kind-$terminal")
-      state="$dir/state"; status="$state/task.status"; cursor="$state/.task.open-decisions-cursor"; out="$dir/drain.out"
+      state="$dir/state"; status="$state/task.status"; cursor="$state/.task.open-decisions-cursor.timed"; out="$dir/drain.out"
       printf 'kind=%s\n' "$kind" > "$state/task.meta"
       printf 'blocked [key=access]: waiting\n' > "$status"
       FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "initial blocked drain failed"
