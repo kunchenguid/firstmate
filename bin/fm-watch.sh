@@ -940,6 +940,7 @@ recorded_windows() {
 # whenever no sweep is running, which is what scopes retire_unrecorded_endpoint
 # below to the sweep.
 SWEEP_ENDPOINT=
+SWEEP_RETIRED=0
 
 # endpoint_record_gone <window>: 0 once NO task record in STATE names <window>.
 #
@@ -1000,6 +1001,7 @@ retire_unrecorded_endpoint() {  # <window>
   [ -n "$w" ] && [ "$w" = "$SWEEP_ENDPOINT" ] || return 1
   endpoint_record_gone "$w" || return 1
   retire_endpoint_markers "$w"
+  SWEEP_RETIRED=1
   return 0
 }
 
@@ -1610,12 +1612,14 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
   if [ -n "$blocked_line" ]; then
     task=${overdue_marker##*/}; task=${task#.paused-overdue-}
     ! status_open_decisions "$statusf" | grep -Fq "paused-overdue-$task" || return 0
+    retire_unrecorded_endpoint "$win" && return 0
     fm_wake_status_append_self_announced "$STATE" "$statusf" "$blocked_line"; append_rc=$?
     [ "$append_rc" -eq 0 ] || [ "$append_rc" -eq 1 ] || exit 1
     if printf '%s\n' "$snapshot" > "$overdue_marker"; then
       pause_overdue_reconcile "$task" "$statusf" || return 0
     fi
   fi
+  retire_unrecorded_endpoint "$win" && return 0
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
   wake "$reason"
@@ -1930,6 +1934,7 @@ wedge_defer_validating() {  # <window> <since-file> <triage-label> <idle-age> <t
   local win=$1 since_file=$2 label=$3 age=$4 task=$5 verdict run step key vsf vage
   [ -e "$CONFIG/wedge-defer-validating" ] || return 1
   verdict=$(crew_run_is_validating "$task") || return 1
+  retire_unrecorded_endpoint "$win" && return 0
   run=${verdict%% *}; step=${verdict#* }
   key=$(window_key "$win")
   vsf="$STATE/.validating-since-$key"
@@ -1988,6 +1993,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   esac
   # Re-arm the idle timer on BOTH paths below, so the backend probe above stays on
   # its once-per-STALE_ESCALATE_SECS budget instead of running on every poll.
+  retire_unrecorded_endpoint "$win" && return 0
   date +%s > "$since_file"
   id=$hash
   if gen=$(fm_busy_current_gen "$STATE" "$task"); then
@@ -2245,7 +2251,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       if [ "$_wrb_gate" -eq 1 ]; then
         triage_log "wedge_timer_check: rollback-failed sentinel active for $win (TTL $FM_ROLLBACK_SENTINEL_TTL_SECS); escalations silenced to prevent queue-flood under persistent fs failure; operator can rm the sentinel for immediate re-engagement"
         wedge_dead_record "$win" "$since_file" "$label" "$_wrb_age" "$hash" "$task" \
-          || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
+          || { retire_unrecorded_endpoint "$win" && return 0; fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
       fi
       return 0
     fi
@@ -2286,14 +2292,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # an earlier configured run cannot silence a window once the cap is off.
         if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && _wedge_cap_marker_stands "$_wkey"; then
           wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task" \
-            || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
+            || { retire_unrecorded_endpoint "$win" && return 0; fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
           return 0
         fi
-        if evidence=$(wedge_wait_evidence "$task") &&
-           wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
-          return 0
+        if evidence=$(wedge_wait_evidence "$task"); then
+          retire_unrecorded_endpoint "$win" && return 0
+          if wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
+            return 0
+          fi
         fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
+          retire_unrecorded_endpoint "$win" && return 0
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
         fi
@@ -2308,6 +2317,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         guard_note=''
         if guard=$(wedge_guard_evidence "$task" "$win"); then
+          retire_unrecorded_endpoint "$win" && return 0
           if wedge_defer_guard "$win" "$since_file" "$label" "$age" "$guard"; then
             return 0
           fi
@@ -2325,6 +2335,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           read -r _ _ _ stream_ts <<< "$stream_snapshot"
           stream_detail=", model stream silent for $(( $(date +%s) - stream_ts ))s (foreground request)"
         fi
+        # Slow deferral, backend, and guard reads above can outlive a
+        # concurrent cleanup; recheck retirement before committing an escalation
+        # count or publishing a stale wake.
+        retire_unrecorded_endpoint "$win" && return 0
         # The count is cap state - the only state the ceiling below is computed
         # from - so whatever the counter file holds is validated to a count here,
         # like every other marker this ladder reads, rather than reaching the
@@ -2357,6 +2371,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if [ "$FM_WEDGE_MAX_ESCALATIONS" -gt 0 ] && [ "$n" -ge "$FM_WEDGE_MAX_ESCALATIONS" ]; then
           _wrb_cap_reason="$reason, PERMANENTLY-WEDGED: FM_WEDGE_MAX_ESCALATIONS=$FM_WEDGE_MAX_ESCALATIONS reached - no further wedge escalations for this WINDOW while its cap marker stands: until FM_CAP_HORIZON_SECS elapses, the crew resumes, or the operator manually removes STATE/.wedge-permanent-<key>"
           _wrb_cap_reason=$(stale_reason_naming_dialog "$_wrb_cap_reason" "$dialog")
+          retire_unrecorded_endpoint "$win" && return 0
           _wrb_cap_status=0
           if [ -n "$stream_snapshot" ]; then
             _wedge_cap_terminal_append "$win" "$_wkey" "$_wrb_cap_reason" busy_stream_snapshot_current "$task" "$stream_snapshot" || _wrb_cap_status=$?
@@ -2381,6 +2396,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             triage_log "wedge fm_wake_append FAILED for cap on $win, no cap marker written (next poll will retry)"
             exit 1
           fi
+          retire_unrecorded_endpoint "$win" && return 0
           # A stream observation deferred its count until its guarded terminal
           # append was published; commit it before the cap marker supersedes it.
           [ -z "$stream_snapshot" ] || wedge_write_escalation_count "$win" "$_wkey" "$escalation_file" "$since_file" "$n"
@@ -2418,6 +2434,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           return 0
         fi
         reason=$(stale_reason_naming_dialog "$reason" "$dialog")
+        retire_unrecorded_endpoint "$win" && return 0
         if [ -n "$stream_snapshot" ]; then
           append_status=0
           fm_wake_append_guarded busy_stream_snapshot_current stale "$win" "$reason" "$task" "$stream_snapshot" || append_status=$?
@@ -2428,6 +2445,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             return 0
           fi
           [ "$append_status" -eq 0 ] || exit 1
+          retire_unrecorded_endpoint "$win" && return 0
           wedge_write_escalation_count "$win" "$_wkey" "$escalation_file" "$since_file" "$n"
         else
           fm_wake_append stale "$win" "$reason" || exit 1
@@ -2462,6 +2480,7 @@ wedge_defer_t3code_running() {  # <window> <since-file> <triage-label> <idle-age
   [ "$(fm_backend_t3code_probe "$win")" = running ] || return 1
   turn_age=$(fm_backend_t3code_turn_age "$win") || return 1
   [ "$turn_age" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
+  retire_unrecorded_endpoint "$win" && return 0
   clear_write_tracking "$(window_key "$win")"
   date +%s > "$since_file"
   triage_log "absorbed $label (T3 session still running, turn ${turn_age}s, idle ${age}s), timer reset: $win"
@@ -4660,6 +4679,7 @@ EOF
       continue
     fi
     SWEEP_ENDPOINT=$w
+    SWEEP_RETIRED=0
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -4711,7 +4731,9 @@ EOF
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
+          pause_class=$(pause_state_class "$w" "$task")
+          retire_unrecorded_endpoint "$w" && continue
+          case "$pause_class" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
@@ -4749,6 +4771,7 @@ EOF
           # over the log) a chance to override before trusting the log.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             if crew_is_provably_working "$(window_to_task "$w" "$STATE")"; then
+              retire_unrecorded_endpoint "$w" && continue
               printf '%s' "$h" > "$sf"
               # Pre-cap shape kept the count here (keep-count contract).
               wedge_episode_end "$key" 0 1
@@ -4825,7 +4848,9 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
+            pause_class=$(pause_state_class "$w" "$task")
+            retire_unrecorded_endpoint "$w" && continue
+            case "$pause_class" in
               working)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
@@ -4845,7 +4870,9 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+              pause_class=$(pause_state_class "$w" "$task")
+              retire_unrecorded_endpoint "$w" && continue
+              case "$pause_class" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
@@ -4896,7 +4923,9 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        case "$(pause_state_class "$w" "$task")" in
+        pause_class=$(pause_state_class "$w" "$task")
+        retire_unrecorded_endpoint "$w" && continue
+        case "$pause_class" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           # Inconclusive, but the declared wait itself still stands, so only the
           # per-hash bookkeeping resets. The re-surface throttle bounds the
@@ -4915,9 +4944,18 @@ EOF
         clear_pause_tracking "$key"
       fi
     fi
+    # Reconcile retirement before leaving the sweep iteration so no
+    # classification, deferral, or hash-tracking write that raced a concurrent
+    # cleanup can leave markers behind on a record-less endpoint.
+    if [ "$SWEEP_RETIRED" -eq 0 ]; then
+      retire_unrecorded_endpoint "$w" || true
+    else
+      watcher_endpoint_markers_clear "$STATE" "$w" || true
+    fi
   done < <(recorded_windows)
   # The sweep is over, so no route may treat a later call as sweep-held.
   SWEEP_ENDPOINT=
+  SWEEP_RETIRED=0
 
   # Collect a completed hygiene scan before launching another one. The report
   # child keeps endpoint/backlog reads out of the polling path. Only a home

@@ -23,7 +23,7 @@ A timed-out shard may upload no artifact, so a complete green run is what keeps 
 The 2026-11-13 `tests/fm-pi-bash-timeout.test.sh` serial hint is a provisional local measurement of 1486 ms, the slowest of five successful `bin/fm-test-run.sh tests/fm-pi-bash-timeout.test.sh` samples (1288-1486 ms) on a macOS arm64 host, collected separately from coverage and lint checks.
 Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
 
-The 2026-11-10 `tests/fm-watch-endpoint-retirement.test.sh` serial hint is a provisional local measurement of 30000 ms, above the slowest of three `bin/fm-test-run.sh` samples (26417-28446 ms) on a Linux x86_64 host, until the next CI refresh replaces it with an Ubuntu timing-artifact maximum.
+The 2026-11-24 `tests/fm-watch-endpoint-retirement.test.sh` serial hint is a provisional local measurement of 46000 ms, above a local `bin/fm-test-run.sh` sample (44724 ms) on a Linux x86_64 host, until the next CI refresh replaces it with an Ubuntu timing-artifact maximum.
 
 ## Parallel lanes
 

@@ -88,15 +88,18 @@ SH
 # watcher must stay a child of THIS shell, so this is a launcher rather than a
 # command substitution the caller captures a pid from.
 ROUND_PID=''
-launch_stale_round() {  # <case-dir>
+launch_stale_round() {  # <case-dir> [extra env assignments...]
   local dir=$1 state="$1/state" fakebin="$1/fakebin"
-  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$CASE_WINDOW" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+  shift
+  mkdir -p "$dir/config"
+  env PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$CASE_WINDOW" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_CONFIG_OVERRIDE="$dir/config" \
     FM_TEST_RETIRE_META="$(cat "$dir/retire-meta.path" 2>/dev/null || true)" \
     FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" &
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$dir/watch.out" &
   ROUND_PID=$!
 }
 
@@ -120,13 +123,32 @@ assert_endpoint_markers_gone() {  # <state> <label>
   done < <(endpoint_marker_paths "$state")
 }
 
+# Wait for two whole poll cycles back-to-back without discarding the beat file
+# between them (three distinct beat timestamps = two complete cycles).
+wait_two_poll_cycles() {  # <state> <pid> [limit-ticks]
+  local state=$1 pid=$2 limit=${3:-300} beat prev now i=0
+  wait_poll_cycle "$state" "$pid" "$limit" || return 1
+  beat="$state/.last-watcher-beat"
+  prev=$(file_mtime "$beat")
+  while [ "$i" -lt "$limit" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    now=$(file_mtime "$beat")
+    if [ -n "$now" ] && [ "$now" != "$prev" ]; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # --- the control lane: a recorded endpoint still alarms -----------------------
 # Without this, every quiet assertion below would also pass on a watcher that
 # simply stopped detecting stale panes.
 test_control_lane_still_surfaces_a_recorded_endpoint() {
-  local dir state out drain_out key
+  local dir state out key
   dir=$(make_stale_endpoint_case control-recorded); state="$dir/state"
-  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  out="$dir/watch.out"
   key=$(watch_window_key "$CASE_WINDOW")
 
   launch_stale_round "$dir"
@@ -148,8 +170,7 @@ test_no_wake_when_the_record_is_retired_during_the_capture() {
 
   launch_stale_round "$dir"
   # Two whole poll cycles, so a wake that is merely late still fails the case.
-  wait_poll_cycle "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited instead of absorbing: $(cat "$dir/watch.out")" ; }
-  wait_poll_cycle "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited on a later cycle: $(cat "$dir/watch.out")" ; }
+  wait_two_poll_cycles "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited instead of absorbing: $(cat "$dir/watch.out")" ; }
   [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 0 ] \
     || { reap "$ROUND_PID"; fail "$label: a stale wake was queued for an endpoint with no task record" ; }
   [ ! -s "$dir/watch.out" ] || { reap "$ROUND_PID"; fail "$label: the watcher printed a wake: $(cat "$dir/watch.out")" ; }
@@ -168,8 +189,7 @@ test_no_wake_when_the_record_is_retired_during_classification() {
   retire_meta_on_classification "$dir" "$state/freed.meta"
 
   launch_stale_round "$dir"
-  wait_poll_cycle "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited instead of absorbing: $(cat "$dir/watch.out")" ; }
-  wait_poll_cycle "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited on a later cycle: $(cat "$dir/watch.out")" ; }
+  wait_two_poll_cycles "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited instead of absorbing: $(cat "$dir/watch.out")" ; }
   [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 0 ] \
     || { reap "$ROUND_PID"; fail "$label: a stale wake was queued for an endpoint whose record went mid-classification" ; }
   [ ! -s "$dir/watch.out" ] || { reap "$ROUND_PID"; fail "$label: the watcher printed a wake: $(cat "$dir/watch.out")" ; }
@@ -225,8 +245,189 @@ test_retirement_never_touches_legacy_orphans() {
   pass "retiring a freed endpoint drops its v3 family and leaves every legacy orphan inert and untouched"
 }
 
+# --- the record goes while pause_state_class returns working ------------------
+# Greptile P2: if cleanup removes the record while fm-crew-state.sh runs and the
+# reader still returns `working` from its earlier observation, the post-capture
+# check has already passed and the `working` branch must not recreate .stale- or
+# .stale-since- after teardown cleared them.
+test_no_markers_recreated_when_record_is_retired_during_working_classification() {
+  local dir state key label working_verdict
+  working_verdict='state: working · source: run-step · run 01TEST running (review)'
+  key=$(watch_window_key "$CASE_WINDOW")
+
+  # Control lane: with the record standing, this exact verdict enters the
+  # working branch and writes .stale- and .stale-since-.
+  dir=$(make_stale_endpoint_case working-classification-control); state="$dir/state"
+  label="working classification control"
+  launch_stale_round "$dir" "FM_FAKE_CREW_STATE=$working_verdict"
+  wait_poll_cycle "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited instead of absorbing: $(cat "$dir/watch.out")" ; }
+  [ -e "$state/.stale-$key" ] || { reap "$ROUND_PID"; fail "$label: expected .stale- marker on recorded working pane" ; }
+  [ -e "$state/.stale-since-$key" ] || { reap "$ROUND_PID"; fail "$label: expected .stale-since- marker on recorded working pane" ; }
+  grep -Fq "absorbed non-terminal stale (provably working): $CASE_WINDOW" "$state/.watch-triage.log" \
+    || { reap "$ROUND_PID"; fail "$label: expected provably-working absorb triage line" ; }
+  reap "$ROUND_PID"
+
+  # Retired lane: the current-state reader deletes the meta while returning
+  # `working`. Neither .stale- nor .stale-since- (nor any other v3 marker) may
+  # survive, and no wake may be queued.
+  dir=$(make_stale_endpoint_case retired-during-working-classification); state="$dir/state"
+  label="retired during working classification"
+  retire_meta_on_classification "$dir" "$state/freed.meta"
+  launch_stale_round "$dir" "FM_FAKE_CREW_STATE=$working_verdict"
+  wait_two_poll_cycles "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: the watcher exited instead of absorbing: $(cat "$dir/watch.out")" ; }
+  [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 0 ] \
+    || { reap "$ROUND_PID"; fail "$label: a stale wake was queued for a retired endpoint" ; }
+  [ ! -s "$dir/watch.out" ] || { reap "$ROUND_PID"; fail "$label: the watcher printed a wake: $(cat "$dir/watch.out")" ; }
+  assert_endpoint_markers_gone "$state" "$label"
+  grep -Fq "retired the watcher markers of an endpoint no task record names: $CASE_WINDOW" "$state/.watch-triage.log" \
+    || { reap "$ROUND_PID"; fail "$label: the retirement was not recorded in the triage log" ; }
+  if grep -Fq "absorbed non-terminal stale (provably working): $CASE_WINDOW" "$state/.watch-triage.log"; then
+    reap "$ROUND_PID"
+    fail "$label: the post-classification working branch ran after retirement"
+  fi
+  reap "$ROUND_PID"
+  pass "a current-state reader that removes the record while returning working cannot recreate .stale- or .stale-since- markers"
+}
+
+# Build a stably stale pane already sitting past STALE_ESCALATE_SECS with a
+# trusted wedge evidence guard that optionally retires <meta> while executing.
+make_wedge_guard_case() {  # <name> <retire:0|1>
+  local name=$1 retire=$2 dir state key guard
+  dir=$(make_stale_endpoint_case "$name"); state="$dir/state"
+  key=$(watch_window_key "$CASE_WINDOW")
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$(hash_text "idle prompt, finished")" > "$state/.stale-$key"
+  printf '%s\n' "$(( $(date +%s) - 200 ))" > "$state/.stale-since-$key"
+  mkdir -p "$dir/config"
+  guard="$dir/guard.sh"
+  cat > "$guard" <<'SH'
+#!/usr/bin/env bash
+printf 'ran\n' >> "${0%/*}/guard.ran"
+if [ -n "${FM_TEST_RETIRE_META:-}" ]; then
+  rm -f "$FM_TEST_RETIRE_META"
+fi
+printf '{"status":"OK","recommendation":"no issue"}\n'
+SH
+  chmod 700 "$guard"
+  printf '%s\n' "$guard" > "$dir/config/wedge-evidence-guards"
+  chmod 600 "$dir/config/wedge-evidence-guards"
+  if [ "$retire" = 1 ]; then
+    printf '%s\n' "$state/freed.meta" > "$dir/retire-meta.path"
+  fi
+  printf '%s\n' "$dir"
+}
+
+# --- the record goes while wedge_guard_evidence runs --------------------------
+# Greptile P1: wedge_timer_check must recheck retirement after slow guard reads
+# immediately before writing the escalation count or appending an ordinary or
+# capped stale wake.
+test_no_wake_or_count_when_record_is_retired_during_wedge_guard() {
+  local dir state key label
+  key=$(watch_window_key "$CASE_WINDOW")
+
+  # Control lane: with the record standing, the guard runs and wedge_timer_check
+  # writes the escalation count and queues escalation 1.
+  dir=$(make_wedge_guard_case wedge-guard-control 0); state="$dir/state"
+  label="wedge guard control"
+  launch_stale_round "$dir" FM_STALE_ESCALATE_SECS=1
+  wait_for_exit "$ROUND_PID" 100 || { reap "$ROUND_PID"; fail "$label: watcher did not escalate a recorded pane past threshold" ; }
+  [ -s "$dir/guard.ran" ] || fail "$label: expected wedge_guard_evidence to execute the configured guard"
+  grep -Fq "possible wedge, escalation 1" "$dir/watch.out" || fail "$label: expected escalation 1 wake: $(cat "$dir/watch.out")"
+  [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 1 ] || fail "$label: expected one queued stale row"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "$label: expected escalation count 1"
+  ack_stopped_cycle "$state" || fail "$label: could not acknowledge the intentional stop"
+
+  # Retired uncapped lane: cleanup removes the record while wedge_guard_evidence
+  # runs; no escalation count may be written and no stale wake may be queued.
+  dir=$(make_wedge_guard_case wedge-guard-retired-uncapped 1); state="$dir/state"
+  label="wedge guard retired uncapped"
+  launch_stale_round "$dir" FM_STALE_ESCALATE_SECS=1
+  wait_two_poll_cycles "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: watcher exited instead of dropping the retired wake: $(cat "$dir/watch.out")" ; }
+  [ -s "$dir/guard.ran" ] || { reap "$ROUND_PID"; fail "$label: expected wedge_guard_evidence to execute the guard" ; }
+  [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 0 ] \
+    || { reap "$ROUND_PID"; fail "$label: stale wake was queued after record retired during wedge_guard_evidence" ; }
+  [ ! -s "$dir/watch.out" ] || { reap "$ROUND_PID"; fail "$label: watcher printed a wake: $(cat "$dir/watch.out")" ; }
+  assert_endpoint_markers_gone "$state" "$label"
+  grep -Fq "retired the watcher markers of an endpoint no task record names: $CASE_WINDOW" "$state/.watch-triage.log" \
+    || { reap "$ROUND_PID"; fail "$label: retirement was not recorded in triage log" ; }
+  reap "$ROUND_PID"
+
+  # Retired capped lane: same retirement during wedge_guard_evidence with
+  # FM_WEDGE_MAX_ESCALATIONS=1 must suppress the capped PERMANENTLY-WEDGED wake
+  # and leave no escalation count or cap markers behind.
+  dir=$(make_wedge_guard_case wedge-guard-retired-capped 1); state="$dir/state"
+  label="wedge guard retired capped"
+  launch_stale_round "$dir" FM_STALE_ESCALATE_SECS=1 FM_WEDGE_MAX_ESCALATIONS=1
+  wait_two_poll_cycles "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: watcher exited instead of dropping the retired capped wake: $(cat "$dir/watch.out")" ; }
+  [ -s "$dir/guard.ran" ] || { reap "$ROUND_PID"; fail "$label: expected wedge_guard_evidence to execute the guard" ; }
+  [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 0 ] \
+    || { reap "$ROUND_PID"; fail "$label: capped stale wake was queued after record retired during wedge_guard_evidence" ; }
+  [ ! -s "$dir/watch.out" ] || { reap "$ROUND_PID"; fail "$label: watcher printed a capped wake: $(cat "$dir/watch.out")" ; }
+  assert_endpoint_markers_gone "$state" "$label"
+  grep -Fq "retired the watcher markers of an endpoint no task record names: $CASE_WINDOW" "$state/.watch-triage.log" \
+    || { reap "$ROUND_PID"; fail "$label: retirement was not recorded in triage log" ; }
+  reap "$ROUND_PID"
+  pass "a cleanup that retires a task record during wedge_guard_evidence prevents escalation count writes and ordinary or capped stale wakes"
+}
+
+# --- the record goes before resurface_absorbed publishes ----------------------
+# Greptile P1 (resurface_absorbed): when a declared pause reaches
+# handle_paused_stale -> paused_wait_superseded -> resurface_absorbed and the
+# record is retired during the supersession read, resurface_absorbed must drop
+# markers and publish no stale wake or throttle marker.
+test_no_wake_when_record_is_retired_before_resurface_absorbed() {
+  local dir state key label terminal_verdict
+  terminal_verdict='state: done · source: nm · run: 01TEST'
+  key=$(watch_window_key "$CASE_WINDOW")
+
+  # Control lane: a paused secondmate with fresh .paused-rechecked- bypasses
+  # fm-crew-state.sh in pause_state_class, then paused_wait_superseded reads the
+  # terminal run and resurface_absorbed surfaces the stale wake.
+  dir=$(make_stale_endpoint_case resurface-control); state="$dir/state"
+  label="resurface_absorbed control"
+  printf 'window=%s\nkind=secondmate\nharness=grok\nbackend=tmux\n' "$CASE_WINDOW" > "$state/freed.meta"
+  printf 'paused: waiting on upstream\n' > "$state/freed.status"
+  printf '%s' "$(seen_sig "$state/freed.status")" > "$state/.seen-freed_status"
+  printf '%s' "$(hash_text "idle prompt, finished")" > "$state/.stale-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  mkdir -p "$dir/config"
+  : > "$dir/config/paused-wait-supersession"
+  launch_stale_round "$dir" "FM_FAKE_CREW_STATE=$terminal_verdict"
+  wait_for_exit "$ROUND_PID" 100 || { reap "$ROUND_PID"; fail "$label: watcher did not surface superseded pause via resurface_absorbed" ; }
+  grep -Fq "paused wait superseded" "$dir/watch.out" || fail "$label: expected superseded pause wake: $(cat "$dir/watch.out")"
+  [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 1 ] || fail "$label: expected one queued stale row"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "$label: expected .paused-resurfaced- throttle marker"
+  ack_stopped_cycle "$state" || fail "$label: could not acknowledge the intentional stop"
+
+  # Retired lane: the supersession fm-crew-state.sh read removes freed.meta
+  # right before resurface_absorbed runs.
+  dir=$(make_stale_endpoint_case resurface-retired); state="$dir/state"
+  label="resurface_absorbed retired"
+  printf 'window=%s\nkind=secondmate\nharness=grok\nbackend=tmux\n' "$CASE_WINDOW" > "$state/freed.meta"
+  printf 'paused: waiting on upstream\n' > "$state/freed.status"
+  printf '%s' "$(seen_sig "$state/freed.status")" > "$state/.seen-freed_status"
+  printf '%s' "$(hash_text "idle prompt, finished")" > "$state/.stale-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  mkdir -p "$dir/config"
+  : > "$dir/config/paused-wait-supersession"
+  retire_meta_on_classification "$dir" "$state/freed.meta"
+  launch_stale_round "$dir" "FM_FAKE_CREW_STATE=$terminal_verdict"
+  wait_two_poll_cycles "$state" "$ROUND_PID" || { reap "$ROUND_PID"; fail "$label: watcher exited instead of dropping retired resurface wake: $(cat "$dir/watch.out")" ; }
+  [ "$(queued_stale_rows "$state" "$CASE_WINDOW")" = 0 ] \
+    || { reap "$ROUND_PID"; fail "$label: stale wake was queued through resurface_absorbed for a retired endpoint" ; }
+  [ ! -s "$dir/watch.out" ] || { reap "$ROUND_PID"; fail "$label: watcher printed a wake: $(cat "$dir/watch.out")" ; }
+  assert_endpoint_markers_gone "$state" "$label"
+  reap "$ROUND_PID"
+  pass "a cleanup that retires a task record before resurface_absorbed leaves no stale wake or throttle marker"
+}
+
 fm_test_run \
   test_control_lane_still_surfaces_a_recorded_endpoint \
   test_no_wake_when_the_record_is_retired_during_the_capture \
   test_no_wake_when_the_record_is_retired_during_classification \
-  test_retirement_never_touches_legacy_orphans
+  test_retirement_never_touches_legacy_orphans \
+  test_no_markers_recreated_when_record_is_retired_during_working_classification \
+  test_no_wake_or_count_when_record_is_retired_during_wedge_guard \
+  test_no_wake_when_record_is_retired_before_resurface_absorbed
