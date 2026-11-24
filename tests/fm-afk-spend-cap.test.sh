@@ -155,6 +155,11 @@ SH
         [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || fail "return count failed: $out"
         assert_contains "$out" '1 task(s) live at return.' "return dropped a delivered launch reservation: $out"
         touch "$home/started"
+        # Raw admission treats pane-command `other` as ambiguous until the
+        # staged start marker exists, so a simulated start must write it too.
+        if [ -f "$home/raw" ] && [ -f "$home/staged-path" ]; then
+          touch "$(cat "$home/staged-path").start"
+        fi
         ;;
       cancel) kill -TERM "$SPAWN_PID" ;;
       timeout) ;;
@@ -990,6 +995,128 @@ SH
   pass "live-workers shares one total time bound and counts unread remaining records as spending"
 }
 
+# OSC 7501 arm/disarm classify as `other` (ambiguous). A capped raw command
+# that exits 127 must not treat that probe as a successful start.
+test_capped_raw_exit_127_rolls_back() {
+  local home proj wt id out rc row fakebin
+  home="$TMP_ROOT/raw-127/home"
+  proj="$TMP_ROOT/raw-127/project"
+  wt="$TMP_ROOT/raw-127/wt"
+  id="raw-127-$$"
+  fakebin="$TMP_ROOT/raw-127/fakebin"
+  fm_test_spawn_home "$home" claude
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fm_test_spawn_brief "$home" "$id"
+  mkdir -p "$fakebin"
+  fm_fake_exit0 "$fakebin" treehouse no-mistakes
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+window_file="$(dirname "$0")/.spawn-window"
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+      *"#{pane_current_command}"*) printf 'sleep\n'; exit 0 ;;
+    esac
+    printf 'firstmate\n'
+    exit 0
+    ;;
+  list-windows)
+    [ ! -s "$window_file" ] || cat "$window_file"
+    exit 0
+    ;;
+  new-window)
+    name=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" = -n ] && name=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$name" > "$window_file"
+    printf '@1\n'
+    exit 0
+    ;;
+  kill-window)
+    : > "$window_file"
+    exit 0
+    ;;
+  send-keys)
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "-l" ]; then
+        case "$a" in
+          ". '"*"'")
+            staged=${a#". '"}
+            staged=${staged%"'"}
+            if [ -f "$staged" ]; then
+              (sleep 0.5; bash "$staged") >/dev/null 2>&1 &
+            fi
+            ;;
+        esac
+      fi
+      prev=$a
+    done
+    exit 0
+    ;;
+  has-session|new-session|set-window-option) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+      > "$home/data/backlog.md"
+    tasks-axi add "$id" "capped raw 127 fixture" --kind ship \
+      --file "$home/data/backlog.md" >/dev/null \
+      || fail "could not seed the capped raw-127 backlog row"
+  fi
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+    || fail "capped raw-127 away entry failed"
+  rc=0
+  out=$(
+    FM_SUPERVISION_ACTOR=main FM_BACKEND=tmux FM_SPAWN_START_WAIT_SECONDS=8 \
+      fm_test_run_spawn "$home" "$wt" "$fakebin" \
+      "$id" "$proj" 'no-such-fm-raw-cmd-127 --typo' --mode no-mistakes --yolo off
+  ) || rc=$?
+  [ "$rc" -ne 0 ] || fail "capped raw command that exited 127 reported success: $out"
+  assert_contains "$out" "exited with status 127" "capped raw 127 did not report the command exit: $out"
+  [ ! -e "$home/state/$id.meta" ] || fail "capped raw 127 kept its task record"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    row=$(tasks-axi show "$id" --file "$home/data/backlog.md" 2>/dev/null |
+      sed -n 's/^  state: *//p' | head -1)
+    [ "$row" = queued ] || fail "capped raw 127 left backlog at ${row:-missing}"
+  fi
+  pass "a capped raw launch that exits 127 rolls back its record and queued backlog row"
+}
+
+test_spend_cap_forwards_truncation_note() {
+  local home out rc i
+  home="$TMP_ROOT/trunc-note"
+  install_tools "$home"
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+sleep 30
+exit 1
+SH
+  chmod +x "$home/fakebin/tmux"
+  mkdir -p "$home/data" "$home/config" "$home/projects"
+  for i in 1 2 3; do
+    fm_write_meta "$home/state/slow-$i.meta" "window=firstmate:fm-slow-$i" "kind=ship"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+    || fail "truncation-note away entry failed"
+  rc=0
+  out=$(PATH="$home/fakebin:$PATH" NM_HOME="$home/unused-nm-home" \
+    FM_HOME="$home" FM_SUPERVISION_ACTOR=main FM_AFK_LIVE_WORKERS_TIMEOUT=2 \
+    "$ROOT/bin/fm-spawn.sh" fresh "$home/absent-project" \
+    --mode no-mistakes --yolo off 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "truncated spend-cap spawn did not refuse: $out"
+  assert_contains "$out" "caps concurrent workers" "truncated spend-cap spawn did not refuse admission: $out"
+  assert_contains "$out" "live-workers truncated: remaining records counted as spending" \
+    "spawn swallowed the live-workers truncation note: $out"
+  pass "spend-cap admission forwards the live-workers truncation note"
+}
+
 test_waiting_workers_require_proven_idle
 test_completed_run_unknown_activity
 test_bounded_presence_reads
@@ -1006,3 +1133,5 @@ test_handoff_and_ready_use_production_crew_state
 test_other_delivery_modes_and_scout
 test_recent_spawn_generation_skips_endpoint_probe
 test_live_workers_total_budget_counts_unread_records
+test_capped_raw_exit_127_rolls_back
+test_spend_cap_forwards_truncation_note

@@ -2285,7 +2285,7 @@ if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
 spawn_refuse_if_away_spend_cap() {
-  local cap live
+  local cap live live_err
   [ "$RELAUNCH" -ne 1 ] || return 0
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
@@ -2296,7 +2296,16 @@ spawn_refuse_if_away_spend_cap() {
   '' | *[!0-9]* | 0) return 0 ;;
   esac
   SPAWN_AWAY_ADMISSION=1
-  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  live_err=$(mktemp) || live_err=
+  if [ -n "$live_err" ]; then
+    live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>"$live_err" || true)
+    if grep -qxF 'live-workers truncated: remaining records counted as spending' "$live_err"; then
+      echo "live-workers truncated: remaining records counted as spending" >&2
+    fi
+    rm -f "$live_err"
+  else
+    live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  fi
   case "$live" in
   '' | *[!0-9]*)
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
@@ -7998,9 +8007,14 @@ fi
 LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
 LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
 LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
+LAUNCH_START_FILE="$LAUNCH_FILE.start"
 # Record the agent command's status, not disarm's, and do it before any
 # env-allowlist `sh -c` wrap so the exit file is written in the same shell.
+# A start marker after arm lets the capped wait tell OSC 7501's `other`
+# children from the raw command itself.
 if spawn_away_startup_wait_applies; then
+  spawn_launch_rest=${LAUNCH#*$'\n'}
+  LAUNCH="${LAUNCH%%$'\n'*}"$'\n'"printf '1\n' > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_START_FILE")"$'\n'"$spawn_launch_rest"
   LAUNCH="$LAUNCH"$'\n'"printf '%s\n' \"\$__fm_launch_status\" > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_EXIT_FILE")"
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
@@ -8296,8 +8310,16 @@ if [ "$SPAWN_START_PENDING" = 1 ]; then
       '. "$1"; fm_backend_worker_state "$2" "$3"' _ \
       "$SCRIPT_DIR/fm-backend.sh" "$BACKEND" "$T" 2>/dev/null) || spawn_start_state=unreadable
     case "$spawn_start_state" in
-      alive) break ;;
-      ambiguous) [ "$RAW_LAUNCH" != 1 ] || break ;;
+      alive)
+        [ -f "$LAUNCH_EXIT_FILE" ] && continue
+        break
+        ;;
+      ambiguous)
+        if [ "$RAW_LAUNCH" = 1 ] && [ -f "$LAUNCH_START_FILE" ]; then
+          [ -f "$LAUNCH_EXIT_FILE" ] && continue
+          break
+        fi
+        ;;
     esac
     if [ "$SECONDS" -ge "$spawn_start_deadline" ]; then
       echo "error: task $ID's startup was not established within ${spawn_start_wait}s (endpoint: $spawn_start_state)" >&2
