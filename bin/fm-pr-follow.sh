@@ -69,7 +69,7 @@ surface_available() {
   [ -n "$owner" ] || return 1
   jq -e --arg owner "$owner" --arg session "$session" --argjson now "$(date +%s)" '
     .owner == $owner
-    and ((.surface | IN("pi","pi-signed")) or (.surface == "claude-calm" and $session != "" and .session == $session))
+    and (.surface == "pi" or (.surface == "claude-calm" and $session != "" and .session == $session))
     and (.epoch | type == "number") and .epoch <= $now and $now - .epoch <= 30
   ' "$STATE/.pr-follow-surface" >/dev/null 2>&1
 }
