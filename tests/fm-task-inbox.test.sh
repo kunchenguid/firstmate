@@ -675,6 +675,52 @@ test_handled_mv_dedups_by_sequence() {
   pass "inbox: the handled mv is the idempotent ack and sequences are never reissued"
 }
 
+# A record gets the mode an ordinary file created in the inbox folder gets, so
+# the folder's permissions (umask, or a default ACL that ignores the umask)
+# decide who can read it, never a fixed private staging mode.
+mode_of() {  # <path> -> permission string, portable across GNU and BSD
+  # shellcheck disable=SC2012 # fixture names are plain; ls -ln is the portable mode read
+  ls -ln "$1" | cut -c1-10
+}
+
+test_record_mode_matches_an_ordinary_file() {
+  local mask state rec ref
+  for mask in 022 077; do
+    state="$TMP_ROOT/mode-$mask/state"; mkdir -p "$state/t1.inbox"
+    # A plain folder: drop any default ACL inherited from the temp root.
+    ! command -v setfacl >/dev/null 2>&1 || setfacl -k "$state/t1.inbox" 2>/dev/null || :
+    rec=$( umask "$mask"; inbox_lib "$state" fm_task_inbox_write "$state" t1 "hello" )
+    ref="$state/t1.inbox/ordinary"
+    ( umask "$mask"; : > "$ref" )
+    [ "$(mode_of "$rec")" = "$(mode_of "$ref")" ] \
+      || fail "umask $mask: record mode $(mode_of "$rec") differs from an ordinary file's $(mode_of "$ref")"
+  done
+  pass "inbox: a record gets an ordinary file's mode under umask 022 and 077"
+}
+
+test_record_inherits_an_effective_default_acl() {
+  local state dir other rec ref
+  state="$TMP_ROOT/acl/state"; dir="$state/t1.inbox"; mkdir -p "$dir"
+  other=$(( $(id -u) + 4321 ))
+  # A user namespace that maps only this uid rejects a foreign one; the named
+  # entry for this uid still exercises the same mask computation.
+  if ! command -v setfacl >/dev/null 2>&1 || ! command -v getfacl >/dev/null 2>&1 \
+    || ! setfacl -k "$dir" 2>/dev/null \
+    || { ! setfacl -d -m "u:$other:r" "$dir" 2>/dev/null \
+      && ! { other=$(id -u); setfacl -d -m "u:$other:r" "$dir" 2>/dev/null; }; }; then
+    printf 'skip: inbox: no default POSIX ACL support here\n'
+    return 0
+  fi
+  rec=$( umask 077; inbox_lib "$state" fm_task_inbox_write "$state" t1 "hello" )
+  ref="$dir/ordinary"
+  ( umask 077; : > "$ref" )
+  getfacl -cpn "$ref" 2>/dev/null | grep -qx "user:$other:r--" \
+    || fail "an ordinary file should carry an effective entry for uid $other: $(getfacl -cpn "$ref" 2>&1)"
+  [ "$(getfacl -cpn "$rec" 2>&1)" = "$(getfacl -cpn "$ref" 2>&1)" ] \
+    || fail "record ACL differs from an ordinary file's: $(getfacl -cpne "$rec" 2>&1)"
+  pass "inbox: a record inherits the folder's default ACL with an effective mask"
+}
+
 test_concurrent_writers_never_clobber() {
   local state i pids=() count
   state="$TMP_ROOT/race/state"; mkdir -p "$state"
@@ -1384,6 +1430,8 @@ test_idempotent_write_prefilter_error_preserves_retry
 test_idempotent_write_follows_ack_before_prefilter_open
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
+test_record_mode_matches_an_ordinary_file
+test_record_inherits_an_effective_default_acl
 test_concurrent_writers_never_clobber
 test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
