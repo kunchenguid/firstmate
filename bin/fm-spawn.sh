@@ -1889,11 +1889,19 @@ spawn_capped_source_line() {
         ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit"
       ;;
     *)
-      # A sourced `return` skips the capture block, so restore the pane's own
-      # EXIT trap here. The fallback still records N when the exit file is new.
       # shellcheck disable=SC2016 # $? and $__fm_s expand in the pane, not here.
-      printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }; [ ! -f %s ] || { trap - EXIT; . %s; rm -f %s; unset -f __fm_capped_on_exit; }' \
-        ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit" "$qtraps" "$qtraps" "$qtraps"
+      if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+        # The capture frame runs in `/bin/sh -c`, so the traps file is the
+        # child's. Restoring it here would wipe the pane's own EXIT trap.
+        printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }; rm -f %s' \
+          ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit" "$qtraps"
+      else
+        # A sourced `return` skips the capture block, so restore the pane's
+        # own EXIT trap here. The fallback still records N when the exit
+        # file is new.
+        printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }; [ ! -f %s ] || { trap - EXIT; . %s; rm -f %s; unset -f __fm_capped_on_exit; }' \
+          ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit" "$qtraps" "$qtraps" "$qtraps"
+      fi
       ;;
   esac
 }

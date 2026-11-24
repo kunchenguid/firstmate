@@ -1518,7 +1518,7 @@ SH
   qshell=$(printf '%q' "$real_shell")
   qhome=$(printf '%q' "$spawn_home")
   if [ -n "$login" ]; then
-    rcfile="trap 'echo SURVIVED > \"\$HOME/trap.fired\"' EXIT"
+    rcfile="trap 'echo SURVIVED >> \"\$HOME/trap.fired\"' EXIT"
     cat > "$spawn_home/.profile" <<EOF
 $rcfile
 export PATH=$qfake:\$PATH
@@ -1672,6 +1672,83 @@ test_capped_raw_return_restores_trap() {
   pass "a capped raw return 4 restores the prior EXIT trap on bash, zsh, and dash"
 }
 
+capped_allowlist_signal_keeps_trap_with() {  # <pane-shell> <signal> <status>
+  local pane_shell=$1 signal=$2 expect=$3 home proj wt id fakebin shim rc out
+  local exitf staged inspected i target trap_live fired
+  home="$TMP_ROOT/allowlist-$signal-$pane_shell/home"
+  proj="$TMP_ROOT/allowlist-$signal-$pane_shell/project"
+  wt="$TMP_ROOT/allowlist-$signal-$pane_shell/wt"
+  id="allowlist-$signal-$pane_shell-$$"
+  fakebin="$TMP_ROOT/allowlist-$signal-$pane_shell/fakebin"
+  REAL_TMUX_SOCKET="fm-allowlist-$signal-$pane_shell-$$"
+  capped_real_tmux_open "$pane_shell" "$home" "$proj" "$wt" "$id" "$fakebin" login
+  shim=$(cat "$home/real-tmux-shim")
+  : > "$home/config/launch-env-allowlist"
+  rc=0
+  FM_TEST_PANE_SHELL=$pane_shell FM_FAKE_PANE_SHELL=$pane_shell \
+    capped_real_tmux_spawn_env "$home" "$shim" "$fakebin" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "kill -$signal \$\$" \
+    --mode no-mistakes --yolo off >"$home/launch.log" 2>&1 &
+  # shellcheck disable=SC2031 # $! is this background spawn, captured before any later command substitution.
+  SPAWN_PID=$!
+  exitf=
+  for i in $(seq 1 80); do
+    exitf=$(wait_capped_launch_artifact "$id" ".exit" 1) && break
+    kill -0 "$SPAWN_PID" 2>/dev/null || break
+  done
+  [ -n "$exitf" ] || fail "capped allowlist $signal on $pane_shell wrote no exit file: $(cat "$home/launch.log")"
+  staged=${exitf%.exit}
+  [ -f "$staged" ] || fail "capped allowlist $signal on $pane_shell lost its staged launch file"
+  case "$(cat "$staged")" in
+    *"/bin/sh -c "*) ;;
+    *) fail "capped allowlist $signal on $pane_shell did not wrap the frame in /bin/sh -c" ;;
+  esac
+  target="firstmate:fm-$id"
+  trap_live=$home/trap.live
+  # dash does not run EXIT on SIGHUP from tmux kill-window, so ask the pane
+  # to dump its traps and then `exit` while it is still at the prompt.
+  "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" send-keys -t "$target" -l \
+    "trap >'$trap_live'; echo INSPECTED >'$home/inspected'; exit" 2>/dev/null || true
+  "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" send-keys -t "$target" Enter 2>/dev/null || true
+  inspected=
+  for i in $(seq 1 20); do
+    [ -f "$home/inspected" ] && inspected=1 && break
+    sleep 0.1
+  done
+  for i in $(seq 1 20); do
+    [ -f "$home/user-home/trap.fired" ] && break
+    sleep 0.1
+  done
+  wait "$SPAWN_PID" || rc=$?
+  SPAWN_PID=
+  out=$(cat "$home/launch.log")
+  "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
+  REAL_TMUX_SOCKET=
+  [ "$rc" -ne 0 ] || fail "capped allowlist $signal on $pane_shell reported success: $out"
+  [ "$(cat "$exitf")" = "$expect" ] \
+    || fail "capped allowlist $signal on $pane_shell wrote exit $(cat "$exitf"), not $expect"
+  [ -n "$inspected" ] \
+    || fail "capped allowlist $signal on $pane_shell pane was gone before trap inspect"
+  grep -q SURVIVED "$trap_live" 2>/dev/null \
+    || fail "capped allowlist $signal on $pane_shell wiped the pane EXIT trap: $(cat "$trap_live" 2>/dev/null)"
+  fired=$(grep -c SURVIVED "$home/user-home/trap.fired" 2>/dev/null || true)
+  [ "$fired" = 1 ] \
+    || fail "capped allowlist $signal on $pane_shell EXIT trap fired ${fired:-0} time(s), not once: $(cat "$home/user-home/trap.fired" 2>/dev/null)"
+}
+
+test_capped_allowlist_signal_keeps_pane_trap() {
+  local pane_shell
+  command -v zsh >/dev/null 2>&1 \
+    || fail "zsh is required to prove an allowlisted signal keeps the pane EXIT trap"
+  command -v dash >/dev/null 2>&1 \
+    || fail "dash is required to prove an allowlisted signal keeps the pane EXIT trap"
+  for pane_shell in bash zsh dash; do
+    capped_allowlist_signal_keeps_trap_with "$pane_shell" KILL 137
+    capped_allowlist_signal_keeps_trap_with "$pane_shell" TERM 143
+  done
+  pass "an allowlisted kill -KILL/\$\$ or kill -TERM/\$\$ keeps the pane EXIT trap on bash, zsh, and dash"
+}
+
 test_waiting_workers_require_proven_idle
 test_completed_run_unknown_activity
 test_bounded_presence_reads
@@ -1700,3 +1777,4 @@ test_capped_posix_exit_trap_survives
 test_capped_herdr_empty_process_info_uses_shell
 test_capped_dash_missing_traps_still_disarms
 test_capped_raw_return_restores_trap
+test_capped_allowlist_signal_keeps_pane_trap
