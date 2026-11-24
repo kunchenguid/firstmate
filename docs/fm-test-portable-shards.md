@@ -6,12 +6,13 @@
 
 ## Verification inputs
 
-Balance hints come from successful Ubuntu CI samples, not from local runs.
+Successful Ubuntu CI runs provide the standard balance hints.
 The concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md) establishes concurrency safety, not serial CI duration.
 Local timings are not interchangeable with CI timings: platform and machine load can affect each script differently and change their relative weights.
-The `tests/fm-claude-add-dir-trust-live.test.sh` hint is a provisional 83 ms capability skip measured on Linux on 2026-11-17 with `PATH=/usr/bin:/bin bash bin/fm-test-run.sh tests/fm-claude-add-dir-trust-live.test.sh` and Claude absent from that path; replace it with a CI sample on the next refresh.
 
-The committed table records the slowest successful `duration_ms` per `tests/*.test.sh` across green main CI runs [43359484992](https://github.com/kunchenguid/firstmate/actions/runs/43359484992), [43331691300](https://github.com/kunchenguid/firstmate/actions/runs/43331691300), and [43209319634](https://github.com/kunchenguid/firstmate/actions/runs/43209319634), refreshed 2026-11-13.
+The 2026-11-13 refresh used the slowest successful `duration_ms` per `tests/*.test.sh` across green main CI runs [43359484992](https://github.com/kunchenguid/firstmate/actions/runs/43359484992), [43331691300](https://github.com/kunchenguid/firstmate/actions/runs/43331691300), and [43209319634](https://github.com/kunchenguid/firstmate/actions/runs/43209319634).
+The table uses a provisional local skip duration for `tests/fm-claude-add-dir-trust-live.test.sh` until the next CI refresh.
+The 2026-11-17 Linux measurement used `PATH=/usr/bin:/bin bash bin/fm-test-run.sh tests/fm-claude-add-dir-trust-live.test.sh`, with Claude absent from that path.
 Failed or cancelled scripts are ignored, so a timeout does not become a packing weight.
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
 A passing coverage guard does not establish a healthy job duration; refresh the table from uploaded timing artifacts when a member grows or the lane gains scripts.

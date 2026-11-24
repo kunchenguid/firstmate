@@ -1575,9 +1575,11 @@ The environment prefix, session settings, model, effort flags, and the task-chan
 Every Firstmate-built Claude command line, in both modes, also passes `--add-dir` for exactly this task's Firstmate channel directories, resolved to real paths: a secondmate gets the parent home's `state/<id>.inbox` it reads its steers from; a ship or scout worker gets this home's `state/operational-inbox` (its launch record), `state/<id>.inbox` (its steers), `data/<id>` (its brief and report), and the code root's `.agents/skills`.
 The grant exists because Claude Code path-checks the Read/Glob/Grep file tools against cwd plus `--add-dir`, and since 2.1.257 the first outside read in `auto` mode parks the pane on a one-time interactive question, while a "Block" answer there writes `permissions.blockReadsOutsideWorkingDirectories` into user settings and then refuses the same reads under bypass too.
 It never covers the whole `state/` or anything wider.
-Before a Claude spawn or relaunch, Firstmate pre-registers trust for those exact channel directories in the selected Claude configuration, covering the separate added-directory startup prompt introduced in Claude Code 2.1.326.
+Before a Claude spawn or relaunch, Firstmate registers trust for those exact channel directories in the selected Claude configuration.
+This clears the separate added-directory startup prompt [observed in Claude Code 2.1.326](verification/runtime-backends.md#added-task-channel-directories).
 Channel entries grant directory trust only and leave external `CLAUDE.md` import consent to the existing workspace rules.
-If a channel cannot be prepared or its exact path cannot be registered, Firstmate refuses the launch.
+Each channel directory must resolve to its declared path under its configured root.
+Firstmate refuses the launch if a channel redirects through a symlink or if preparation or trust registration fails.
 When a custom launcher runs Claude with a separate configuration store, such as a container-private `.claude.json`, that launcher needs to register the paths in the worker's own context.
 
 Any other value or an unreadable file refuses every spawn from that home, whichever harness it would launch.
