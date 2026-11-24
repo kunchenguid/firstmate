@@ -129,6 +129,11 @@ remote_launch_command() {
   [ -n "$staged" ] && [ -f "$staged" ] || return 1
   cat "$staged"
 }
+# Just the launch body: the staged file's first line carries the pre-launch
+# exports, so dropping it leaves what the launch command establishes on its own.
+remote_launch_body() {
+  remote_launch_command | sed '1d'
+}
 # The pre-launch export statements, split back out of the launch's first line so
 # each one can be asserted on its own.
 remote_pane_exports() {
@@ -153,9 +158,13 @@ run_remote_launch() {  # <label>
 # synthetic pane environment carrying the contrary value.
 replay_remote_launch() {  # <preamble|bare>
   local shape=$1 preamble='' launch
-  launch=$(remote_launch_command)
+  if [ "$shape" = bare ]; then
+    launch=$(remote_launch_body)
+  else
+    launch=$(remote_launch_command)
+    preamble=$(remote_pane_exports)
+  fi
   [ -n "$launch" ] || fail "the remote pane received no launch command"
-  [ "$shape" = bare ] || preamble=$(remote_pane_exports)
   env -i HOME="$TMP_ROOT/pane-home" PATH="$PROBEBIN:$PATH" TERM=xterm \
     COMPACT_ADVISER_DISABLE="$CONTRARY" \
     /bin/sh -c "$preamble

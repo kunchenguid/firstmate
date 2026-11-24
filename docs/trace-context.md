@@ -104,7 +104,7 @@ This is a deliberate, source-owned choice:
   On pane backends, if the pre-launch carrier export fails, Firstmate omits the `traceparent=` metadata claim and still launches the task.
   If a pane backend reports that failed trace input could not be cleared, Firstmate refuses to append the launch command rather than risk launching with an unknown partial carrier.
   If recording the carrier fails after a pane export, Firstmate unsets `TRACEPARENT` in the launch command and still launches the task, so the child never receives an identity absent from its metadata.
-  On Herdr the carrier rides the one text write a spawn types (see [Herdr runtime backend](herdr-backend.md#sending-text-and-keys)), so an unrecordable carrier is left out of that write and unset in the launch, and a launch write that never lands refuses the spawn instead of leaving a partial carrier behind.
+  On Herdr the carrier rides the one text write a spawn types (see [Herdr runtime backend](herdr-backend.md#sending-text-and-keys)), so a carrier that cannot be recorded is carried in that write and unset inside the launch, and a launch write that never lands refuses the spawn instead of leaving a partial carrier behind.
   T3 Code records the carrier before including it in the [per-directory harness environment](t3code-backend.md#per-directory-harness-environment); a recording failure omits the carrier, while an environment installation failure refuses the launch.
 - **Metadata-only.**
   The value lives in the task's launch environment and in `state/<id>.meta`.
