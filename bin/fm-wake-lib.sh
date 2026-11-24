@@ -1970,16 +1970,16 @@ fm_local_firstmate_state_dirs() {  # <first-state>
   done
 }
 
-# The one lock serializing Treehouse slot allocation and return for a project,
-# and project capacity admission (bin/fm-project-capacity-lib.sh), which a
-# fresh spawn evaluates under it on every backend.
+# The one lock serializing project capacity admission across homes
+# (bin/fm-project-capacity-lib.sh). A fresh spawn evaluates capacity under it
+# on every backend.
 #
 # It is anchored in the local root home's state directory so that every home on
-# this machine that can reach the same pool - the root, and each secondmate home
-# below it, including a remote-seeded home and its own local descendants -
-# derives the identical path. Its identity is the project's resolved origin, so
-# separate clones of one origin share a single lock; an origin-less local-only
-# project falls back to its own worktree top instead of failing to resolve.
+# this machine - the root, and each secondmate home below it, including a
+# remote-seeded home and its own local descendants - derives the identical
+# path. Its identity is the project's resolved origin, so separate clones of
+# one origin share a single lock; an origin-less local-only project falls back
+# to its own worktree top instead of failing to resolve.
 fm_treehouse_project_lock_path() {  # <project-dir>
   local project=$1 root origin identity hash top
   [ -d "$project" ] || return 1
@@ -2011,16 +2011,23 @@ fm_treehouse_project_lock_path() {  # <project-dir>
 # secondmate home keeps standalone clones of its projects (bin/fm-home-seed.sh),
 # so a slot from that shared pool is a worktree of another home's clone, and the
 # spawn's worktree-of-project checks correctly refuse it. The root home keeps
-# the default pool unchanged; every other local home roots its pools under its
-# own state directory, so its slots are worktrees of its own clones. A remote
+# the default pool unchanged; every other local home roots its pools at
+# ${TREEHOUSE_ROOT:-$HOME/.treehouse}/fm-secondmate/<home-id>, outside the
+# Firstmate home, so a slot's ancestors never include that home's CLAUDE.md or
+# AGENTS.md. <home-id> is the git object id of the resolved home path. A remote
 # home is the root of its own machine and keeps the default.
 fm_treehouse_spawn_root() {  # <home> <state-dir>
-  local home=$1 state=$2 resolved root
+  local home=$1 state=$2 resolved root id base
   resolved=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
   root=$(fm_firstmate_root_home "$resolved") || return 1
   [ "$root" != "$resolved" ] || return 0
-  state=$(CDPATH='' cd -- "$state" 2>/dev/null && pwd -P) || return 1
-  printf '%s/treehouse\n' "$state"
+  [ -d "$state" ] || return 1
+  id=$(printf '%s' "$resolved" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -n "$id" ] || return 1
+  base=${TREEHOUSE_ROOT:-}
+  [ -n "$base" ] || [ -z "${HOME:-}" ] || base=$HOME/.treehouse
+  [ -n "$base" ] || return 1
+  printf '%s/fm-secondmate/%s\n' "$base" "$id"
 }
 
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.

@@ -1576,7 +1576,8 @@ treehouse_pool_report() {
   case "$threshold" in ''|*[!0-9]*) threshold=30 ;; esac
   now=$(date +%s)
   records=$(mktemp "${TMPDIR:-/tmp}/fm-pool-records.XXXXXX") || return 0
-  for state in "$root"/*/treehouse-state.json; do
+  for state in "$root"/*/treehouse-state.json \
+               "$root"/fm-secondmate/*/.treehouse/*/treehouse-state.json; do
     [ -f "$state" ] || continue
     pool_count=$((pool_count + 1))
     pool=${state%/treehouse-state.json}

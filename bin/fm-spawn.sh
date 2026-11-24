@@ -354,8 +354,8 @@
 #   naming the last path seen and why it was rejected.
 #   The root home acquires every task slot (the pane's `treehouse get` and the
 #   Herdr and t3code durable leases alike) from Treehouse's default pool; a
-#   local secondmate home passes `--root` so its slot comes from a pool under
-#   its own state directory and is a worktree of that home's own clone, never
+#   local secondmate home passes `--root` so its slot comes from a pool outside
+#   the Firstmate home and is a worktree of that home's own clone, never
 #   another home's (bin/fm-wake-lib.sh's fm_treehouse_spawn_root owns the choice).
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific

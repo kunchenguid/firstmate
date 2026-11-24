@@ -163,17 +163,19 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
 }
 
 test_local_secondmate_leases_from_its_own_pool() {
-  local id=lease-secondmate-pool dir out status state
+  local id=lease-secondmate-pool dir out status root
   dir=$(make_lease_case "$id")
   mkdir -p "$dir/parent-home/state"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
     "$dir/parent-home" > "$dir/home/.fm-secondmate-parent"
-  state=$(CDPATH='' cd -- "$dir/home/state" && pwd -P)
+  root=$(FM_HOME="$dir/home" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2" "$2/state"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$dir/home")
+  [ -n "$root" ] || fail "a local secondmate spawn root was empty"
   out=$(run_lease_spawn "$dir" "$id")
   status=$?
   expect_code 0 "$status" "a local secondmate's herdr spawn should succeed"$'\n'"$out"
-  grep -Fqx -- "--root $state/treehouse get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
-    || fail "a local secondmate's lease did not come from the pool under its own state: $(cat "$dir/fake/treehouse-log")"
+  grep -Fqx -- "--root $root get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
+    || fail "a local secondmate's lease did not come from its own outside-home pool: $(cat "$dir/fake/treehouse-log")"
   assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
   pass "a local secondmate's herdr spawn leases its copy from a pool of its own clone"
 }
