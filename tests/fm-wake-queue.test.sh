@@ -3041,8 +3041,8 @@ SH
 test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   # This fixture has no primary. Keep live harness discovery outside its lock
   # deadline measurement without changing the drain or acknowledgement bounds.
-  local FM_TEST_HARNESS=unknown FM_SUPERVISION_MODEL=persistent
-  export FM_TEST_HARNESS FM_SUPERVISION_MODEL
+  local FM_TEST_HARNESS=unknown
+  export FM_TEST_HARNESS
   local dir state status queue_out queue_err first_out first_err second_out second_err replay_out replay_err
   local queue_holder presentation_holder ack_holder i start elapsed rc advisory_count
   dir=$(make_case presentation-lock-deadline)
