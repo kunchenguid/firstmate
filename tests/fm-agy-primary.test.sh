@@ -227,6 +227,32 @@ test_sessionstart_agy_primary_secondmate_and_worktree_scope() {
   pass "fm-sessionstart-agy: runs in primary and seeded secondmate homes, stands down in worktree, and detects agy across 10+ hops"
 }
 
+test_sessionstart_agy_resets_turnend_budget() {
+  local dir payload out decision i
+  dir=$(make_primary_dir "$TMP_ROOT/session-budget")
+  install_digest_fixture "$dir"
+  : > "$dir/state/task1.meta"
+  printf '3\n' > "$dir/state/.turnend-blocks"
+
+  AGY_CHILD_CMD='"$FM_HOME/bin/fm-sessionstart-agy.sh"'
+  out=$(printf '{"sessionId":"s-new","conversationId":"c-new","workspacePaths":["%s"],"source":"startup"}' "$dir" \
+    | run_under_agy FM_HOME="$dir" 2>/dev/null)
+  [ ! -e "$dir/state/.turnend-blocks" ] \
+    || fail "a fresh agy session start must clear the previous session's state/.turnend-blocks"
+  printf '%s' "$out" | jq -e '.injectSteps[0].systemMessage.systemMessage | length > 0' >/dev/null 2>&1 \
+    || fail "fresh agy session start must still inject the digest: $out"
+
+  payload='{"sessionId":"s-new","conversationId":"c-new","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
+  for i in 1 2 3; do
+    out=$(run_agy_stop "$dir" "$payload")
+    decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
+    assert_equals "continue" "$decision" "fresh session repair nag $i must return decision=continue"
+  done
+  out=$(run_agy_stop "$dir" "$payload")
+  assert_equals "{}" "$out" "fresh session must still fail open with {} after 3 repair blocks"
+  pass "fm-sessionstart-agy: a fresh session clears an exhausted state/.turnend-blocks and regains its 3-block nag budget"
+}
+
 # --- 3. bin/fm-turnend-guard-agy.sh & bin/fm-turnend-guard.sh --agy ----------
 
 run_agy_stop() {
@@ -474,6 +500,7 @@ test_session_lock_agy_ancestry_and_supervision_model() {
 fm_test_run \
   test_agents_hooks_json_registration_and_cwd_contract \
   test_sessionstart_agy_primary_secondmate_and_worktree_scope \
+  test_sessionstart_agy_resets_turnend_budget \
   test_turnend_guard_agy_empty_fleet_and_healthy_watcher \
   test_turnend_guard_agy_bounded_repair_nag \
   test_turnend_guard_agy_non_normal_reasons \

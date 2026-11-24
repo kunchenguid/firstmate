@@ -14,6 +14,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 SOURCE=
 while [ $# -gt 0 ]; do
@@ -43,6 +46,10 @@ if [ -z "$DIGEST" ] || ! command -v jq >/dev/null 2>&1; then
   printf '{}\n'
   exit 0
 fi
+
+case "$SOURCE" in
+  ''|startup|new) rm -f "$STATE/.turnend-blocks" 2>/dev/null || true ;;
+esac
 
 jq -cn --arg msg "$DIGEST" '{injectSteps:[{systemMessage:{systemMessage:$msg}}]}'
 exit 0
