@@ -1485,6 +1485,7 @@ fm_recovery_resurface_admit() {  # <marker>
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   # Strip leading zeros so a hand-edited 08 is not read as octal.
   count=$((10#$count))
+  # shellcheck disable=SC2034 # Output read by callers after this function returns.
   FM_RECOVERY_RESURFACE_COUNT=$count
   if [ "$count" -gt "$budget" ]; then
     FM_RECOVERY_RESURFACE_VERDICT=silent
@@ -1495,6 +1496,7 @@ fm_recovery_resurface_admit() {  # <marker>
     && printf '%s\n' "$((count + 1))" > "$tmp" \
     && chmod 0600 "$tmp" \
     && _fm_atomic_replace "$tmp" "$path"; then
+    # shellcheck disable=SC2034 # Output read by callers after this function returns.
     [ "$count" -lt "$budget" ] || FM_RECOVERY_RESURFACE_VERDICT=notice
   else
     [ -z "${tmp:-}" ] || rm -f -- "$tmp"
