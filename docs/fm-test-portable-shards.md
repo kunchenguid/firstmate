@@ -15,11 +15,6 @@ Failed or cancelled scripts are ignored, so a timeout does not become a packing 
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
 A passing coverage guard does not establish a healthy job duration; refresh the table from uploaded timing artifacts when a member grows or the lane gains scripts.
 
-Rows added between refreshes carry their own provenance note in the table header, and the next refresh replaces them with CI maxima.
-The two Wintermolt suites added 2026-11-21 are the current example: `tests/fm-wintermolt-harness.test.sh` carries a provisional 83584 ms local measurement and `tests/fm-wintermolt-signals-live-e2e.test.sh` a 506 ms local live-guard skip, both from the adapter-verification macOS host, because they landed after the 2026-11-13 refresh.
-
-A newly added serial suite joins the portable serial shards by derivation rather than by editing a list, so the Wintermolt pair inherited the existing shard count instead of changing it.
-
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains a separate measurement and is skipped by the portable CI shards.
 Measure that script through the focused Git Bash runner rather than a portable skip.
 
