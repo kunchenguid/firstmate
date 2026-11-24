@@ -308,7 +308,7 @@ The registrations in detail:
   pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
 - Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 30s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
-  In linked crewmate worktrees, foreign lock-owner sessions, non-normal termination reasons, or `continuationActive` turns, the wrapper stands down immediately with `{}`.
+  In linked crewmate worktrees, foreign lock-owner sessions, or non-normal termination reasons, the wrapper stands down immediately with `{}`.
   In primary or persistent secondmate homes, it delegates synchronously without parking to `bin/fm-turnend-guard.sh --agy` for a bounded 3-block repair nag when supervision is missing.
 
 ### Claude and Codex blocking
@@ -562,7 +562,7 @@ Because synchronous Stop-hook parking keeps the interactive session in a working
 
 - It stands down with `{}` when the payload is empty, malformed, or `jq` is absent.
 - It stands down with `{}` in crewmate or scout linked worktrees (`fm_primary_scope_matches`).
-- It passes through non-normal termination reasons (`terminationReason` other than `NO_TOOL_CALL`) and `continuationActive: true` turns with `{}` so hook-triggered continuations never loop.
+- It passes through non-normal termination reasons (`terminationReason` other than `NO_TOOL_CALL`) with `{}` so hook-triggered continuations never loop.
 - It checks session-lock ownership via `bin/fm-session-lock-lib.sh` so a read-only session owned by another live session passes through with `{}`.
 - Otherwise it delegates directly to `bin/fm-turnend-guard.sh --agy`, returning `{}` when supervision is healthy or not needed and a bounded 3-block repair nag (`{"decision":"continue","reason":"..."}`) when supervision is missing.
 

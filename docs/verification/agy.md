@@ -160,6 +160,7 @@ Session-open digest injection is implemented by `bin/fm-sessionstart-agy.sh` on 
 PreToolUse seatbelts enforce execution safety through `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
 In primary and secondmate homes, watcher commands are classified by the shared arm-command policy, `cd` commands are denied in favor of absolute paths or `cwd`, and subagent invocations (`invoke_subagent`, `define_subagent`) are denied while inspection tools (`manage_subagents`, `manage_task`) remain permitted.
 Supervision continuity uses tracked background `run_command` execution (`WaitMsBeforeAsync: 5000`) of `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park`) with reactive wakeup, backed by the fast non-blocking `Stop` hook guard `bin/fm-turnend-guard-agy.sh` delegating to `bin/fm-turnend-guard.sh --agy` under a 30s timeout.
+The background arm and its reactive wakeup were observed interactively in the `agy` TUI, not in this record's automated run: `tests/fm-agy-primary-live-e2e.test.sh` drives `agy -p` one-shot, which covers only the `Stop` turn-end guard.
 Session lock verification recognizes `agy` process ancestry via `bin/fm-session-lock-lib.sh`.
 
 ## What is still unproven
@@ -167,6 +168,7 @@ Session lock verification recognizes `agy` process ancestry via `bin/fm-session-
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
+Interactive reactive wakeup for the tracked background `run_command` arm is not yet covered by automated e2e; the live suite runs `agy -p` one-shot against the `Stop` turn-end guard only, so that wake path rests on interactive observation.
 
 ## Refreshing this record
 

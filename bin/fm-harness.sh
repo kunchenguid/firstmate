@@ -335,8 +335,9 @@ harness_ancestry() {  # [<pid>]
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
-# is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
-# or pathological tree cannot make this walk unbounded.
+# is eligible. Deliberately bounded to eight levels down while harness_ancestry
+# climbs sixteen up, so a deep or pathological tree cannot make this walk
+# unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0

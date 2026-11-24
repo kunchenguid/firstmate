@@ -4,7 +4,7 @@
 # Antigravity evaluates project-local .agents/hooks.json (Stop event) at the
 # end of every agent turn synchronously. Because synchronous parking in Stop
 # blocks the interactive agent loop and queues user input, Antigravity primary
-# supervision uses a tracked background run_command task (WaitMsBeforeAsync: 500)
+# supervision uses a tracked background run_command task (WaitMsBeforeAsync: 5000)
 # for bin/fm-watch-arm.sh (or bin/fm-supervision-host.sh park), while this
 # hook runs fast as a turn-end backstop delegating to bin/fm-turnend-guard.sh
 # --agy.
@@ -14,8 +14,6 @@
 #   - Stand down in crewmate/scout linked worktrees (fm_primary_scope_matches).
 #   - Pass through non-normal terminationReason values (anything non-empty
 #     other than NO_TOOL_CALL) with {}.
-#   - Pass through when continuationActive is true so a Stop-triggered
-#     continuation never re-triggers the guard in a loop.
 #   - Verify session-lock ownership via bin/fm-session-lock-lib.sh so a
 #     read-only or foreign session never blocks turn completion.
 set -u
@@ -46,9 +44,6 @@ TERM_REASON=$(printf '%s' "$PAYLOAD" | jq -r '.terminationReason // empty' 2>/de
 if [ -n "$TERM_REASON" ] && [ "$TERM_REASON" != "NO_TOOL_CALL" ]; then
   allow_stop
 fi
-
-CONT_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r 'if .continuationActive == true then "true" else "false" end' 2>/dev/null || printf 'false')
-[ "$CONT_ACTIVE" = "true" ] && allow_stop
 
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)

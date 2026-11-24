@@ -288,16 +288,10 @@ test_turnend_guard_agy_bounded_repair_nag() {
   pass "fm-turnend-guard --agy & fm-turnend-guard-agy: bounded repair nag blocks 3 times then fails open with {}"
 }
 
-test_turnend_guard_agy_continuation_and_non_normal_reasons() {
+test_turnend_guard_agy_non_normal_reasons() {
   local dir reason_code payload out status
   dir=$(make_primary_dir "$TMP_ROOT/stop-reasons")
   : > "$dir/state/task1.meta"
-
-  payload='{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"NO_TOOL_CALL","continuationActive":true}'
-  out=$(run_agy_stop "$dir" "$payload")
-  status=$?
-  expect_code 0 "$status" "continuationActive=true must exit 0"
-  assert_equals "{}" "$out" "continuationActive=true must return {} so Stop continuations never loop"
 
   for reason_code in USER_CANCELED ERROR MAX_INVOCATIONS MAX_FORCED_INVOCATIONS MAX_TOKEN_BUDGET_EXCEEDED; do
     payload=$(printf '{"sessionId":"s-1","conversationId":"c-1","executionNum":1,"terminationReason":"%s","continuationActive":false}' "$reason_code")
@@ -306,7 +300,7 @@ test_turnend_guard_agy_continuation_and_non_normal_reasons() {
     expect_code 0 "$status" "terminationReason=$reason_code must exit 0"
     assert_equals "{}" "$out" "terminationReason=$reason_code must return {}"
   done
-  pass "fm-turnend-guard-agy: continuationActive=true and non-normal terminationReason values pass through with {}"
+  pass "fm-turnend-guard-agy: non-normal terminationReason values pass through with {}"
 }
 
 test_turnend_guard_agy_foreign_lock_and_worktree_scope() {
@@ -482,7 +476,7 @@ fm_test_run \
   test_sessionstart_agy_primary_secondmate_and_worktree_scope \
   test_turnend_guard_agy_empty_fleet_and_healthy_watcher \
   test_turnend_guard_agy_bounded_repair_nag \
-  test_turnend_guard_agy_continuation_and_non_normal_reasons \
+  test_turnend_guard_agy_non_normal_reasons \
   test_turnend_guard_agy_foreign_lock_and_worktree_scope \
   test_arm_pretool_check_agy \
   test_cd_pretool_check_agy \
