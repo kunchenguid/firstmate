@@ -3505,19 +3505,19 @@ watcher_capture() {  # <backend> <target> <lines> [expected-label]
 # $PROGRESS_MARKER instead of touching $BEAT directly, so a frozen watcher parent
 # (e.g. SIGSTOP) cannot execute this loop and stops refreshing $BEAT.
 watcher_wait_child_progress() {
-  local pid=$1 last_seen=0 current rc=0
+  local pid=$1 last_seen=0 current rc=0 beat=${BEAT:-} marker=${PROGRESS_MARKER:-}
   while kill -0 "$pid" 2>/dev/null; do
-    if [ -e "$PROGRESS_MARKER" ]; then
-      current=$(fm_path_mtime "$PROGRESS_MARKER" 2>/dev/null || true)
+    if [ -n "$marker" ] && [ -e "$marker" ]; then
+      current=$(fm_path_mtime "$marker" 2>/dev/null || true)
       if [ -n "$current" ] && [ "$current" != "$last_seen" ]; then
         last_seen=$current
-        fm_watch_beacon_tick "$BEAT"
+        if [ -n "$beat" ]; then fm_watch_beacon_tick "$beat"; fi
       fi
     fi
     sleep 0.2 2>/dev/null || sleep 1
   done
   wait "$pid" 2>/dev/null || rc=$?
-  fm_watch_beacon_tick "$BEAT"
+  if [ -n "$beat" ]; then fm_watch_beacon_tick "$beat"; fi
   return "$rc"
 }
 
