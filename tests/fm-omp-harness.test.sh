@@ -1053,6 +1053,89 @@ EOF
   pass ".omp watch extension: a host close split across stream chunks reaches main as one whole follow-up"
 }
 
+# omp merges queued follow-ups into one prompt or one text part joined by a
+# blank line. Replayed wakes it consumed that way must each leave the handoff;
+# text that does not carry a wake's full content must leave it untouched.
+test_watch_extension_consumes_wakes_merged_into_one_message() {
+  local scenario repo home out status
+  for scenario in merged-prompt merged-part single partial identical-once identical-both duplicate-events no-match; do
+    repo="$TMP_ROOT/watch-merged-$scenario/repo"; home="$TMP_ROOT/watch-merged-$scenario/home"
+    install_omp_extension_fixture "$repo"
+    mkdir -p "$home/state"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+sleep 30
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_OMP_ARM_READY_TIMEOUT_MS=3000 SCENARIO="$scenario" \
+      EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const dir = `${process.env.FM_HOME}/state/extensions/omp-primary-watch`;
+const handoff = `${dir}/session-replacement-actionable.json`;
+// Each scenario: the pending wakes seeded into the handoff, the events omp
+// raises after replaying them (text built from the replayed follow-ups), and
+// the wake messages that must still ride the handoff afterwards.
+const all = (r) => r.map((x) => x.m).join("\n\n");
+const scenarios = {
+  "merged-prompt": { seed: ["a", "b", "c"], events: [["before_agent_start", all]], left: [] },
+  "merged-part": { seed: ["a", "b", "c"], events: [["message_start", all]], left: [] },
+  single: { seed: ["a", "b", "c"], events: [["before_agent_start", (r) => r[1].m]], left: ["a", "c"] },
+  partial: { seed: ["a", "b", "c"], events: [["message_start", (r) => `${r[2].m}\n\n${r[0].m}`]], left: ["b"] },
+  "identical-once": { seed: ["a", "a"], events: [["before_agent_start", (r) => r[0].m]], left: ["a"] },
+  "identical-both": { seed: ["a", "a"], events: [["before_agent_start", all]], left: [] },
+  "duplicate-events": { seed: ["a", "b"], events: [["before_agent_start", all], ["message_start", all]], left: [] },
+  "no-match": {
+    seed: ["a", "b"],
+    events: [
+      ["before_agent_start", () => "hi"],
+      ["message_start", (r) => r[0].m.slice(1)],
+      ["message_start", () => "signal: omp-merge-a"],
+      ["before_agent_start", (r) => r[0].m.slice(0, -1)],
+    ],
+    left: ["a", "b"],
+  },
+};
+const scenario = scenarios[process.env.SCENARIO];
+const seeded = scenario.seed.map((id, i) => ({ version: 1, token: `1-1-${i + 1}`, message: `signal: omp-merge-${id}`, predecessorArmPid: "" }));
+mkdirSync(dir, { recursive: true });
+writeFileSync(handoff, `${JSON.stringify({ version: 2, pending: seeded })}\n`);
+const handlers = new Map(); const sent = [];
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+await handlers.get("session_start")({ type: "session_start" }, {});
+for (let i = 0; i < 60 && sent.length < seeded.length; i += 1) await new Promise((r) => setTimeout(r, 100));
+if (sent.length !== seeded.length) throw new Error(`expected ${seeded.length} replays, saw ${sent.length}: ${JSON.stringify(sent)}`);
+for (const [event, build] of scenario.events) {
+  const text = build(sent);
+  const payload = event === "before_agent_start"
+    ? { type: event, prompt: text }
+    : { type: event, message: { role: "user", content: [{ type: "text", text }] } };
+  await handlers.get(event)(payload, {});
+}
+await handlers.get("session_shutdown")({}, {});
+if (sent.length !== seeded.length) throw new Error(`consumption must not send more follow-ups: ${JSON.stringify(sent.slice(seeded.length))}`);
+const left = existsSync(handoff) ? JSON.parse(readFileSync(handoff, "utf8")).pending.map((p) => p.message.replace("signal: omp-merge-", "")) : [];
+if (left.join(",") !== scenario.left.join(",")) throw new Error(`${process.env.SCENARIO}: handoff kept [${left}], expected [${scenario.left}]`);
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "omp watch extension merged wakes ($scenario): $out"
+    [ -z "$out" ] || fail "omp watch extension merged wakes test printed output ($scenario): $out"
+  done
+  pass ".omp watch extension: every wake omp merged into one message is consumed, and a message without a wake's full text consumes nothing"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_bun_package_omp_identity_unit_shapes
@@ -1074,3 +1157,4 @@ test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole
+test_watch_extension_consumes_wakes_merged_into_one_message
