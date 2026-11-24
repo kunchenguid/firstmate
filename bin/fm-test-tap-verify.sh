@@ -6,11 +6,7 @@
 # workflow. This helper is the replacement: the suite declares its own plan,
 # and the helper checks that the run matched it.
 #
-# A suite declares its plan by calling fm_test_run (tests/lib.sh) with the
-# test function names. That prints a TAP plan `1..N` (N is the number of
-# names, so adding a test is adding a name, not bumping a numeral), runs
-# each function (each must emit exactly one `ok - ` line), then prints
-# `FM_TEST_COMPLETE`.
+# See fm_test_run in tests/lib.sh for the suite registration and output contract.
 #
 # This script runs TEST_SCRIPT under the Bash that is running this helper
 # and verifies:

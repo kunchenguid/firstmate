@@ -131,15 +131,15 @@ pass() {
 }
 
 # fm_test_run <test-function>...
-# Print a TAP plan 1..N derived from the function names (N is $#), run each
-# function (each must emit exactly one `ok - ` line via pass), then print
-# FM_TEST_COMPLETE after all registered calls return. If the suite exits during
-# a call, FM_TEST_ABORT names that invocation and the registered names never run.
+# Derive the TAP plan 1..N from the registered function names and call them in
+# order. Each function must emit exactly one `ok - ` line via pass.
+# Register a new test by adding its function name to this call.
+# Print FM_TEST_COMPLETE after all registered calls return. If the EXIT trap
+# runs during a call, FM_TEST_ABORT names the current invocation and the
+# remaining registered invocations in order.
 # Abort reporting precedes a suite-owned EXIT handler installed before fm_test_run,
 # which receives the original exit status even if it exits explicitly.
 # An explicit fm_test_cleanup call during a test does not itself report an abort.
-# Adding a test is adding a name to this call; N is not a separately maintained
-# numeral. The names given are the names run.
 # bin/fm-test-tap-verify.sh is the completeness checker the stock macOS Bash
 # job uses against that plan and marker.
 fm_test_run() {
