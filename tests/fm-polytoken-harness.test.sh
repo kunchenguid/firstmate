@@ -43,6 +43,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$ROOT/tests/fixtures.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
 # from inside another harness inherits those markers, which outrank the fake
@@ -573,7 +575,8 @@ case "\$subcmd" in
 esac
 SH
   chmod +x "$fakebin/polytoken"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  fm_test_fake_treehouse "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
