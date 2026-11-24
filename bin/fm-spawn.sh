@@ -5574,8 +5574,11 @@ spawn_lease_herdr_slot() {
 # Enter the exact copy recorded for this task immediately before trust setup and
 # launch. Herdr restores a pane's shell cwd from its durable tab layout, so a
 # treehouse subshell's foreground cwd is not enough to keep a later pane restart
-# out of the primary checkout. The same explicit cd gives every backend one
-# launch boundary and makes a dropped or ignored cwd change a refusal.
+# out of the primary checkout. The explicit cd is that launch boundary, and the
+# pre-launch path read makes a dropped or ignored cwd change a refusal. Herdr
+# skips the cd when its pane shell already reports the recorded worktree,
+# because `pane run` returns before its submit and a needless write is one more
+# line the launch literal could fuse onto.
 spawn_enter_recorded_worktree() {
   local seen
   [ "$KIND" = secondmate ] && return 0
@@ -7934,9 +7937,9 @@ else
 # which zsh rejects with `export: not valid in this context`, so the agent never
 # started and the worker was dead on deck. Herdr therefore carries the same
 # statements at the head of the staged launch command (`spawn_prelaunch_export`
-# below plus the staging site): the whole pre-launch is one text write, and the
-# sourcing shell still executes the statements in the pane's own shell before
-# the launch runs.
+# below plus the staging site): the exports and the launch are one text write,
+# and the sourcing shell still executes the statements in the pane's own shell
+# before the launch runs.
 SPAWN_PRELAUNCH_EXPORT_TEXT=
 spawn_prelaunch_export() { # <statement>
   if [ "$BACKEND" = herdr ]; then
