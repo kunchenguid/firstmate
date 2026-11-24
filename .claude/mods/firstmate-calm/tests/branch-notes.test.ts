@@ -76,6 +76,26 @@ describe("supervision notes", () => {
     expect(files.get(`${STATE}/.branch-notices-cursor`)).toBe("1\n");
   });
 
+  test("a resumed session does not replay an unprocessed outcome that a newer notice follows", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(`${HOME}/config/pr-follow`, "");
+    files.set(`${STATE}/.lock`, "123\n");
+    files.set(`${STATE}/.lock-session`, "session-1\n");
+    files.set(CURSOR, "4\n");
+    files.set(PROCESSED, "4\n");
+    const rows: Row[] = [
+      { seq: 5, task: "fm-b", verdict: "captain", summary: "decision waiting" },
+      { seq: 6, task: "fleet", verdict: "notice", summary: "MERGED: https://github.com/example/project/pull/1" },
+    ];
+    files.set(TAIL, tail(rows));
+    files.set(`${STATE}/branch-outcomes.jsonl`, tail(rows));
+    await $.session.start(sessionStart);
+    const first = ["⚓ [seq 5] fm-b: decision waiting", "⚓ MERGED: https://github.com/example/project/pull/1"];
+    expect(journal.logs).toEqual(first);
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(first);
+  });
+
   test("another session cannot display notices or advertise readiness", async ($, on) => {
     const { files, journal } = world(on);
     files.set(`${HOME}/config/pr-follow`, "");

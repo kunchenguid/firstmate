@@ -310,13 +310,13 @@ async function followTail($: EngineInterface, current: NotesState): Promise<void
   const tail = await readIfChanged($, `${current.state}/.branch-outcomes-tail.jsonl`, current.tailStamp);
   if (tail === undefined) return;
   const rows = parseOutcomeTail(tail.text);
-  const ordinary = rows.filter((row) => row.verdict !== "notice");
+  const quietNotices = rows.map((row) => row.verdict === "notice" ? { ...row, silent: true } : row);
   let lines: string[];
   if (current.lastSeen === undefined) {
-    lines = replayOutcomeNotes(ordinary, current.cursor, current.processed, current.shown);
+    lines = replayOutcomeNotes(quietNotices, current.cursor, current.processed, current.shown);
     current.lastSeen = rows[rows.length - 1]?.seq;
   } else {
-    const fresh = newOutcomeNotes(rows.map((row) => row.verdict === "notice" ? { ...row, silent: true } : row), current.lastSeen);
+    const fresh = newOutcomeNotes(quietNotices, current.lastSeen);
     lines = fresh.lines;
     current.lastSeen = fresh.lastSeen;
   }
