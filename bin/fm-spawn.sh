@@ -7365,9 +7365,10 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx cleanup_recovery polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
+    $1 == "cleanup_recovery" && $2 == "launch" { next }
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
@@ -8181,7 +8182,10 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   if [ "$HERMES_READY" != 1 ]; then
     echo "error: Hermes did not reach its TUI or process its brief in $T; inspect profile setup, provider errors, and first-run consent (only an already-selected No thanks is answered)" >&2
     rovo_endpoint_cleanup
-    if [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; then
+    # A capped tmux/Herdr start still owns closure through spawn_cancel_pending_start
+    # on abort. Do not disable rollback here: that path has not run yet, so
+    # SPAWN_ENDPOINT_CLOSED is still 0 even when the endpoint will close.
+    if [ "$SPAWN_START_PENDING" != 1 ] && [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; then
       # Hermes may still finish starting there, so the record stays for
       # supervision and teardown instead of being rolled back.
       SPAWN_FRESH_COMMIT_PENDING=0
