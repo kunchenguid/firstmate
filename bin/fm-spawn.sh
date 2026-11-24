@@ -1837,10 +1837,13 @@ echo \$__fm_launch_status > $qstage && mv -f -- $qstage $qexit"
     *)
       # Save every trap the pane shell already had (`trap > file`, not $(trap):
       # zsh and dash print nothing there). Restore it after our EXIT trap, so
-      # an ssh-agent cleanup from an rc file still runs. A 0 from this trap is
-      # pane death (bash and fish both report 0 on SIGHUP / tmux kill-session
-      # before the capture line), not a successful launch, so map it to 129.
-      restore_trap="trap - EXIT; . $qtraps; rm -f $qtraps"
+      # an ssh-agent cleanup from an rc file still runs. Skip the source when
+      # a /tmp cleaner already removed the file: dash otherwise abandons the
+      # rest of the launch, including the typed fallback. A 0 from this trap
+      # is pane death (bash and fish both report 0 on SIGHUP / tmux
+      # kill-session before the capture line), not a successful launch, so
+      # map it to 129.
+      restore_trap="trap - EXIT; [ ! -f $qtraps ] || . $qtraps; rm -f $qtraps"
       # shellcheck disable=SC2016 # $?, $1, and $s expand in the pane, not here.
       trap_block="trap > $qtraps
 __fm_capped_on_exit() {
@@ -1873,10 +1876,11 @@ ${disarm}"
 }
 
 spawn_capped_source_line() {
-  local qfile qstage qexit dialect
+  local qfile qstage qexit qtraps dialect
   qfile=$(shell_quote "$LAUNCH_FILE")
   qstage=$(shell_quote "$LAUNCH_STAGE")
   qexit=$(shell_quote "$LAUNCH_EXIT_FILE")
+  qtraps=$(shell_quote "$LAUNCH_DIR/.launch.$SPAWN_GEN.traps")
   dialect=$(spawn_capped_pane_dialect)
   case "$dialect" in
     fish)
@@ -1885,9 +1889,11 @@ spawn_capped_source_line() {
         ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit"
       ;;
     *)
+      # A sourced `return` skips the capture block, so restore the pane's own
+      # EXIT trap here. The fallback still records N when the exit file is new.
       # shellcheck disable=SC2016 # $? and $__fm_s expand in the pane, not here.
-      printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }' \
-        ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit"
+      printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }; [ ! -f %s ] || { trap - EXIT; . %s; rm -f %s; unset -f __fm_capped_on_exit; }' \
+        ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit" "$qtraps" "$qtraps" "$qtraps"
       ;;
   esac
 }

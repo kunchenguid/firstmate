@@ -1492,6 +1492,186 @@ test_capped_herdr_empty_process_info_uses_shell() {
   pass "empty Herdr process-info with SHELL=/usr/bin/fish picks the fish dialect"
 }
 
+# Real tmux session on a private socket. login=1 execs a login shell so the
+# throwaway HOME can install a pre-existing EXIT trap.
+capped_real_tmux_open() {  # <pane-shell> <home> <proj> <wt> <id> <fakebin> [login]
+  local pane_shell=$1 home=$2 proj=$3 wt=$4 id=$5 fakebin=$6 login=${7:-}
+  local real_tmux real_shell shim spawn_home qfake qwt qshell qhome pane_cmd rcfile
+  [ -n "$FM_TEST_REAL_TMUX" ] || fail "tmux is required to prove capped pane-shell restore"
+  command -v "$pane_shell" >/dev/null 2>&1 \
+    || fail "$pane_shell is required to prove capped pane-shell restore"
+  real_tmux=$FM_TEST_REAL_TMUX
+  real_shell=$(command -v "$pane_shell")
+  [ -n "$real_shell" ] || fail "could not resolve $pane_shell"
+  capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
+  spawn_home=$home/user-home
+  mkdir -p "$spawn_home"
+  shim="$home/../shim"
+  mkdir -p "$shim"
+  cat > "$shim/tmux" <<SH
+#!/usr/bin/env bash
+exec "$real_tmux" -f /dev/null -L "$REAL_TMUX_SOCKET" "\$@"
+SH
+  chmod +x "$shim/tmux"
+  qfake=$(printf '%q' "$fakebin")
+  qwt=$(printf '%q' "$wt")
+  qshell=$(printf '%q' "$real_shell")
+  qhome=$(printf '%q' "$spawn_home")
+  if [ -n "$login" ]; then
+    rcfile="trap 'echo SURVIVED > \"\$HOME/trap.fired\"' EXIT"
+    cat > "$spawn_home/.profile" <<EOF
+$rcfile
+export PATH=$qfake:\$PATH
+EOF
+    cp "$spawn_home/.profile" "$spawn_home/.bash_profile"
+    cp "$spawn_home/.profile" "$spawn_home/.zprofile"
+    cp "$spawn_home/.profile" "$spawn_home/.zshenv"
+    pane_cmd="export PATH=$qfake:\$PATH HOME=$qhome ZDOTDIR=$qhome; cd $qwt && exec $qshell -l"
+  else
+    pane_cmd="export PATH=$qfake:\$PATH HOME=$qhome; cd $qwt && exec $qshell"
+  fi
+  "$real_tmux" -f /dev/null -L "$REAL_TMUX_SOCKET" new-session -d -s firstmate -n supervisor \
+    || fail "real tmux: could not create the firstmate session for $pane_shell"
+  "$real_tmux" -L "$REAL_TMUX_SOCKET" set-option -g remain-on-exit on
+  "$real_tmux" -L "$REAL_TMUX_SOCKET" set-option -t firstmate default-shell /bin/bash
+  "$real_tmux" -L "$REAL_TMUX_SOCKET" set-option -t firstmate default-command "$pane_cmd"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+    || fail "real-tmux away entry failed"
+  printf '%s' "$shim" > "$home/real-tmux-shim"
+}
+
+capped_real_tmux_spawn_env() {  # <home> <shim> <fakebin> <cmd...>
+  local home=$1 shim=$2 fakebin=$3
+  shift 3
+  env -u TMUX FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" \
+    CLAUDE_CONFIG_DIR= FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SUPERVISION_ACTOR=main \
+    FM_TEST_SPAWN_START_WAIT_SECONDS="${FM_TEST_SPAWN_START_WAIT_SECONDS:-8}" \
+    PATH="$shim:$fakebin:$PATH" "$@"
+}
+
+wait_capped_launch_artifact() {  # <id> <suffix> [samples]
+  local id=$1 suffix=$2 samples=${3:-80} i f
+  for i in $(seq 1 "$samples"); do
+    for f in /tmp/fm-"$id"+*/launch.*"$suffix"; do
+      if [ -f "$f" ]; then
+        printf '%s' "$f"
+        return 0
+      fi
+    done
+    sleep 0.1
+  done
+  return 1
+}
+
+test_capped_dash_missing_traps_still_disarms() {
+  local home proj wt id fakebin shim rc out exitf staged disarm_line
+  command -v dash >/dev/null 2>&1 \
+    || fail "dash is required to prove a missing saved-trap file still disarms"
+  home="$TMP_ROOT/dash-missing-traps/home"
+  proj="$TMP_ROOT/dash-missing-traps/project"
+  wt="$TMP_ROOT/dash-missing-traps/wt"
+  id="dash-missing-traps-$$"
+  fakebin="$TMP_ROOT/dash-missing-traps/fakebin"
+  REAL_TMUX_SOCKET="fm-dash-traps-$$"
+  capped_real_tmux_open dash "$home" "$proj" "$wt" "$id" "$fakebin"
+  shim=$(cat "$home/real-tmux-shim")
+  rc=0
+  out=$(
+    FM_TEST_PANE_SHELL=dash FM_FAKE_PANE_SHELL=dash \
+      capped_real_tmux_spawn_env "$home" "$shim" "$fakebin" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" \
+      "for f in /tmp/fm-${id}+*/.launch.*.traps; do rm -f \"\$f\"; done; echo AGENT_OK" \
+      --mode no-mistakes --yolo off
+  ) || rc=$?
+  "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
+  REAL_TMUX_SOCKET=
+  [ "$rc" -eq 0 ] || fail "capped dash spawn with a deleted trap file failed: $out"
+  exitf=$(wait_capped_launch_artifact "$id" ".exit" 1) || exitf=
+  [ -n "$exitf" ] && [ "$(cat "$exitf")" = 0 ] \
+    || fail "capped dash missing-traps did not write exit file 0: $(cat "$exitf" 2>/dev/null)"
+  staged=$(printf '%s' "$exitf" | sed 's/\.exit$//')
+  [ -f "$staged" ] || fail "capped dash missing-traps lost its staged launch file"
+  disarm_line=$(tail -n 1 "$staged")
+  case "$disarm_line" in
+    *fm-osc7501.sh*disarm*) ;;
+    *) fail "capped dash missing-traps launch had no disarm line: $disarm_line" ;;
+  esac
+  [ -z "$(compgen -G "/tmp/fm-$id+*/.launch.*.traps" || true)" ] \
+    || fail "capped dash missing-traps left a trap file behind"
+  pass "a capped dash launch still writes its exit file and runs disarm when the saved-trap file is gone"
+}
+
+capped_raw_return_restores_trap_with() {  # <pane-shell>
+  local pane_shell=$1 home proj wt id fakebin shim rc out exitf trapsf inspected i
+  local target fn_out trap_live
+  home="$TMP_ROOT/return4-$pane_shell/home"
+  proj="$TMP_ROOT/return4-$pane_shell/project"
+  wt="$TMP_ROOT/return4-$pane_shell/wt"
+  id="return4-$pane_shell-$$"
+  fakebin="$TMP_ROOT/return4-$pane_shell/fakebin"
+  REAL_TMUX_SOCKET="fm-return4-$pane_shell-$$"
+  capped_real_tmux_open "$pane_shell" "$home" "$proj" "$wt" "$id" "$fakebin" login
+  shim=$(cat "$home/real-tmux-shim")
+  rc=0
+  FM_TEST_PANE_SHELL=$pane_shell FM_FAKE_PANE_SHELL=$pane_shell \
+    capped_real_tmux_spawn_env "$home" "$shim" "$fakebin" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" 'return 4' \
+    --mode no-mistakes --yolo off >"$home/launch.log" 2>&1 &
+  # shellcheck disable=SC2031 # $! is this background spawn, captured before any later command substitution.
+  SPAWN_PID=$!
+  exitf=
+  for i in $(seq 1 80); do
+    exitf=$(wait_capped_launch_artifact "$id" ".exit" 1) && break
+    kill -0 "$SPAWN_PID" 2>/dev/null || break
+  done
+  [ -n "$exitf" ] || fail "capped return 4 on $pane_shell wrote no exit file: $(cat "$home/launch.log")"
+  target="firstmate:fm-$id"
+  fn_out=$home/fn.out
+  trap_live=$home/trap.live
+  "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" send-keys -t "$target" -l \
+    "type __fm_capped_on_exit >'$fn_out' 2>&1; trap >'$trap_live'; echo INSPECTED >'$home/inspected'" \
+    2>/dev/null || true
+  "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" send-keys -t "$target" Enter 2>/dev/null || true
+  inspected=
+  for i in $(seq 1 20); do
+    [ -f "$home/inspected" ] && inspected=1 && break
+    sleep 0.1
+  done
+  wait "$SPAWN_PID" || rc=$?
+  SPAWN_PID=
+  out=$(cat "$home/launch.log")
+  "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
+  REAL_TMUX_SOCKET=
+  [ "$rc" -ne 0 ] || fail "capped return 4 on $pane_shell reported success: $out"
+  [ "$(cat "$exitf")" = 4 ] \
+    || fail "capped return 4 on $pane_shell wrote exit $(cat "$exitf"), not 4"
+  trapsf="$(dirname "$exitf")/.launch.$(basename "$exitf" .exit | sed 's/^launch.//').traps"
+  [ ! -e "$trapsf" ] || fail "capped return 4 on $pane_shell left $trapsf"
+  if [ -n "$inspected" ]; then
+    grep -Eq 'is a (shell )?function' "$fn_out" 2>/dev/null \
+      && fail "capped return 4 on $pane_shell left __fm_capped_on_exit: $(cat "$fn_out")"
+    grep -q SURVIVED "$trap_live" 2>/dev/null \
+      || fail "capped return 4 on $pane_shell did not restore the prior EXIT trap: $(cat "$trap_live" 2>/dev/null)"
+  else
+    [ "$(cat "$home/user-home/trap.fired" 2>/dev/null)" = SURVIVED ] \
+      || fail "capped return 4 on $pane_shell did not fire the restored EXIT trap"
+  fi
+}
+
+test_capped_raw_return_restores_trap() {
+  local pane_shell
+  command -v zsh >/dev/null 2>&1 \
+    || fail "zsh is required to prove a raw return restores the pane EXIT trap"
+  command -v dash >/dev/null 2>&1 \
+    || fail "dash is required to prove a raw return restores the pane EXIT trap"
+  for pane_shell in bash zsh dash; do
+    capped_raw_return_restores_trap_with "$pane_shell"
+  done
+  pass "a capped raw return 4 restores the prior EXIT trap on bash, zsh, and dash"
+}
+
 test_waiting_workers_require_proven_idle
 test_completed_run_unknown_activity
 test_bounded_presence_reads
@@ -1518,3 +1698,5 @@ test_spend_cap_forwards_truncation_note
 test_capped_kill_pane_rolls_back
 test_capped_posix_exit_trap_survives
 test_capped_herdr_empty_process_info_uses_shell
+test_capped_dash_missing_traps_still_disarms
+test_capped_raw_return_restores_trap
