@@ -66,9 +66,16 @@ case "$1" in
   send-keys)
     case "$*" in
       *launch.*.sh*)
-        staged=${*: -1}
-        staged=${staged#". '"}
-        staged=${staged%"'"}
+        staged=
+        prev=
+        for a in "$@"; do
+          if [ "$prev" = "-l" ]; then
+            case "$a" in
+              ". '"*) rest=${a#". '"}; staged=${rest%%"'"*} ;;
+            esac
+          fi
+          prev=$a
+        done
         printf '%s\n' "$staged" > "$FM_HOME/staged-path"
         touch "$FM_HOME/paused"
         for _ in $(seq 1 200); do
@@ -995,23 +1002,12 @@ SH
   pass "live-workers shares one total time bound and counts unread remaining records as spending"
 }
 
-# OSC 7501 arm/disarm classify as `other` (ambiguous). A capped raw command
-# that exits 127 must not treat that probe as a successful start.
-# pane_shell is bash (executes the staged file) or fish (sources it).
-capped_raw_exit_127_rolls_back_with() {  # <pane-shell>
-  local pane_shell=$1 home proj wt id out rc row fakebin label
-  label=$pane_shell
-  home="$TMP_ROOT/raw-127-$pane_shell/home"
-  proj="$TMP_ROOT/raw-127-$pane_shell/project"
-  wt="$TMP_ROOT/raw-127-$pane_shell/wt"
-  id="raw-127-$pane_shell-$$"
-  fakebin="$TMP_ROOT/raw-127-$pane_shell/fakebin"
-  fm_test_spawn_home "$home" claude
-  fm_git_worktree "$proj" "$wt" "fm/$id"
-  fm_test_spawn_brief "$home" "$id"
-  mkdir -p "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse no-mistakes
-  cat > "$fakebin/tmux" <<'SH'
+# Fake tmux for capped spawn tests. Runs the typed `. 'path'; fallback` line
+# with FM_FAKE_PANE_SHELL (bash, dash, or fish). Optional
+# FM_FAKE_PANE_GIT_CONFIG_COUNT is exported into that pane. Copies the staged
+# exit file to $FM_HOME/launch.exit and records the staged path.
+write_capped_pane_tmux() {  # <fakebin>
+  cat > "$1/tmux" <<'SH'
 #!/usr/bin/env bash
 window_file="$(dirname "$0")/.spawn-window"
 case "${1:-}" in
@@ -1047,19 +1043,23 @@ case "${1:-}" in
     for a in "$@"; do
       if [ "$prev" = "-l" ]; then
         case "$a" in
-          ". '"*"'")
-            staged=${a#". '"}
-            staged=${staged%"'"}
+          ". '"*)
+            rest=${a#". '"}
+            staged=${rest%%"'"*}
+            printf '%s\n' "$staged" > "$FM_HOME/staged-path"
             if [ -f "$staged" ]; then
               (
                 sleep 0.5
-                if [ "${FM_FAKE_PANE_SHELL:-bash}" = fish ]; then
-                  fish -c "source '$staged'"
-                else
-                  bash "$staged"
+                if [ -n "${FM_FAKE_PANE_GIT_CONFIG_COUNT:-}" ]; then
+                  export GIT_CONFIG_COUNT="$FM_FAKE_PANE_GIT_CONFIG_COUNT"
                 fi
+                case "${FM_FAKE_PANE_SHELL:-bash}" in
+                  fish) fish -c "$a" ;;
+                  dash) dash -c "$a" ;;
+                  *) bash -c "$a" ;;
+                esac
                 [ ! -f "$staged.exit" ] || cp "$staged.exit" "$FM_HOME/launch.exit"
-              ) >/dev/null 2>&1 &
+              ) >"$FM_HOME/pane.out" 2>"$FM_HOME/pane.err" &
             fi
             ;;
         esac
@@ -1072,24 +1072,52 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin/tmux"
+  chmod +x "$1/tmux"
+}
+
+capped_spawn_home() {  # <home> <proj> <wt> <id> <fakebin>
+  fm_test_spawn_home "$1" claude
+  fm_git_worktree "$2" "$3" "fm/$4"
+  fm_test_spawn_brief "$1" "$4"
+  mkdir -p "$5"
+  fm_fake_exit0 "$5" treehouse no-mistakes
+  write_capped_pane_tmux "$5"
   if command -v tasks-axi >/dev/null 2>&1; then
     printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
-      > "$home/data/backlog.md"
-    tasks-axi add "$id" "capped raw 127 $label fixture" --kind ship \
-      --file "$home/data/backlog.md" >/dev/null \
-      || fail "could not seed the capped raw-127 $label backlog row"
+      > "$1/data/backlog.md"
+    tasks-axi add "$4" "capped spawn fixture" --kind ship \
+      --file "$1/data/backlog.md" >/dev/null \
+      || fail "could not seed the capped spawn backlog row"
   fi
+}
+
+run_capped_spawn() {  # <pane-shell> <home> <wt> <fakebin> <id> <proj> [spawn-args...]
+  local pane_shell=$1 home=$2 wt=$3 fakebin=$4
+  shift 4
+  export FM_FAKE_PANE_SHELL="$pane_shell" FM_TEST_PANE_SHELL="$pane_shell"
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
-    || fail "capped raw-127 $label away entry failed"
+    || fail "capped spawn away entry failed"
+  FM_SUPERVISION_ACTOR=main FM_BACKEND=tmux \
+    FM_TEST_SPAWN_START_WAIT_SECONDS="${FM_TEST_SPAWN_START_WAIT_SECONDS:-8}" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
+}
+
+# OSC 7501 arm/disarm classify as `other` (ambiguous). A capped raw command
+# that exits 127 must not treat that probe as a successful start.
+# pane_shell is bash or fish: the fake sources the typed launch line in that
+# shell so capture and fallback match the destination pane.
+capped_raw_exit_127_rolls_back_with() {  # <pane-shell>
+  local pane_shell=$1 home proj wt id out rc row fakebin label
+  label=$pane_shell
+  home="$TMP_ROOT/raw-127-$pane_shell/home"
+  proj="$TMP_ROOT/raw-127-$pane_shell/project"
+  wt="$TMP_ROOT/raw-127-$pane_shell/wt"
+  id="raw-127-$pane_shell-$$"
+  fakebin="$TMP_ROOT/raw-127-$pane_shell/fakebin"
+  capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
   rc=0
-  out=$(
-    export FM_FAKE_PANE_SHELL="$pane_shell"
-    FM_SUPERVISION_ACTOR=main FM_BACKEND=tmux \
-      FM_TEST_SPAWN_START_WAIT_SECONDS=8 \
-      fm_test_run_spawn "$home" "$wt" "$fakebin" \
-      "$id" "$proj" 'no-such-fm-raw-cmd-127 --typo' --mode no-mistakes --yolo off
-  ) || rc=$?
+  out=$(run_capped_spawn "$pane_shell" "$home" "$wt" "$fakebin" \
+    "$id" "$proj" 'no-such-fm-raw-cmd-127 --typo' --mode no-mistakes --yolo off) || rc=$?
   [ "$rc" -ne 0 ] || fail "capped raw command that exited 127 in $label reported success: $out"
   assert_contains "$out" "exited with status 127" \
     "capped raw 127 in $label did not report the command exit: $out"
@@ -1113,6 +1141,150 @@ test_capped_raw_exit_127_rolls_back_in_fish() {
     || fail "fish is required to prove capped raw-launch rollback in a fish pane"
   capped_raw_exit_127_rolls_back_with fish
   pass "a capped raw launch sourced by fish writes its exit file and rolls back on 127"
+}
+
+assert_capped_launch_not_sh_wrapped() {  # <staged-file> <raw-command>
+  local staged=$1 raw=$2 body
+  [ -f "$staged" ] || fail "capped spawn wrote no staged launch file"
+  body=$(cat "$staged")
+  case "$body" in
+    *"/bin/sh -c "*) fail "capped launch wrapped the agent in /bin/sh -c: $body" ;;
+  esac
+  case "$body" in
+    *"$raw"*) ;;
+    *) fail "capped launch lost the agent line bytes: missing [$raw] in $body" ;;
+  esac
+}
+
+test_capped_claude_doorbell_quotes_in_fish() {
+  local home proj wt id out rc fakebin staged last
+  command -v fish >/dev/null 2>&1 \
+    || fail "fish is required to prove capped Claude doorbell quoting"
+  home="$TMP_ROOT/doorbell-fish/home"
+  proj="$TMP_ROOT/doorbell-fish/project"
+  wt="$TMP_ROOT/doorbell-fish/wt"
+  id="doorbell-fish-$$"
+  fakebin="$TMP_ROOT/doorbell-fish/fakebin"
+  capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${@: -1}" > "${FM_HOME}/claude.last-arg"
+i=1
+: > "${FM_HOME}/claude.argv.txt"
+for a in "$@"; do
+  printf 'ARG %s %s\n' "$i" "$a" >> "${FM_HOME}/claude.argv.txt"
+  i=$((i + 1))
+done
+exit 0
+SH
+  chmod +x "$fakebin/claude"
+  rc=0
+  out=$(run_capped_spawn fish "$home" "$wt" "$fakebin" \
+    "$id" "$proj" --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -eq 0 ] || fail "capped Claude spawn on fish failed: $out"
+  staged=$(cat "$home/staged-path" 2>/dev/null)
+  [ -f "$staged" ] || fail "capped Claude spawn on fish wrote no staged file"
+  case "$(cat "$staged")" in
+    *"/bin/sh -c "*) fail "capped Claude launch wrapped the agent in /bin/sh -c" ;;
+  esac
+  last=$(cat "$home/claude.last-arg" 2>/dev/null)
+  [ -n "$last" ] || fail "capped Claude on fish did not record argv: $(cat "$home/pane.err" 2>/dev/null)"
+  case "$last" in
+    ": Firstmate operational input waiting: read '"*"' and handle its contents as Firstmate operational input.") ;;
+    *) fail "capped Claude on fish lost doorbell quotes; argv was: $last" ;;
+  esac
+  [ "$(printf '%s' "$last" | "$ROOT/bin/fm-operational-input.sh" doorbell-kind)" = launch-brief ] \
+    || fail "capped Claude doorbell on fish is not a launch-brief: $last"
+  pass "a capped Claude launch on fish keeps doorbell quotes in argv"
+}
+
+capped_raw_quote_backslash_roundtrip_with() {  # <pane-shell>
+  local pane_shell=$1 home proj wt id out rc fakebin staged raw expected runner
+  home="$TMP_ROOT/raw-rt-$pane_shell/home"
+  proj="$TMP_ROOT/raw-rt-$pane_shell/project"
+  wt="$TMP_ROOT/raw-rt-$pane_shell/wt"
+  id="raw-rt-$pane_shell-$$"
+  fakebin="$TMP_ROOT/raw-rt-$pane_shell/fakebin"
+  raw=$'printf %s -- it\\\'s a\\\\b'
+  case "$pane_shell" in
+    fish) runner=fish ;;
+    dash) runner=dash ;;
+    *) runner=bash ;;
+  esac
+  expected=$("$runner" -c "$raw")
+  capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
+  rc=0
+  out=$(run_capped_spawn "$pane_shell" "$home" "$wt" "$fakebin" \
+    "$id" "$proj" "$raw" --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -eq 0 ] || fail "capped raw quote/backslash spawn on $pane_shell failed: $out"
+  staged=$(cat "$home/staged-path" 2>/dev/null)
+  assert_capped_launch_not_sh_wrapped "$staged" "$raw"
+  [ "$(cat "$home/pane.out" 2>/dev/null)" = "$expected" ] \
+    || fail "capped raw quote/backslash on $pane_shell did not round-trip; got [$(cat "$home/pane.out" 2>/dev/null)] want [$expected]"
+}
+
+test_capped_raw_quote_backslash_roundtrip() {
+  local pane_shell
+  command -v fish >/dev/null 2>&1 \
+    || fail "fish is required to prove capped raw quote/backslash round-trip"
+  command -v dash >/dev/null 2>&1 \
+    || fail "dash is required to prove capped raw quote/backslash round-trip"
+  for pane_shell in bash dash fish; do
+    capped_raw_quote_backslash_roundtrip_with "$pane_shell"
+  done
+  pass "a capped raw command containing \\' and \\\\ round-trips on bash, dash, and fish"
+}
+
+test_capped_raw_source_and_cmd_on_bash() {
+  local home proj wt id out rc fakebin staged src raw
+  home="$TMP_ROOT/raw-source-bash/home"
+  proj="$TMP_ROOT/raw-source-bash/project"
+  wt="$TMP_ROOT/raw-source-bash/wt"
+  id="raw-source-bash-$$"
+  fakebin="$TMP_ROOT/raw-source-bash/fakebin"
+  capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
+  src="$TMP_ROOT/raw-source-bash/activate.sh"
+  mkdir -p "$(dirname "$src")"
+  printf 'echo FROMFILE\n' > "$src"
+  raw="source '$src' && echo RAN"
+  rc=0
+  out=$(run_capped_spawn bash "$home" "$wt" "$fakebin" \
+    "$id" "$proj" "$raw" --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -eq 0 ] || fail "capped source && cmd spawn on bash failed: $out"
+  staged=$(cat "$home/staged-path" 2>/dev/null)
+  assert_capped_launch_not_sh_wrapped "$staged" "$raw"
+  [ "$(cat "$home/pane.out" 2>/dev/null)" = $'FROMFILE\nRAN' ] \
+    || fail "capped source && cmd on bash lost pane-shell parity: [$(cat "$home/pane.out" 2>/dev/null)]"
+  pass "a capped raw source && cmd runs in the bash pane"
+}
+
+test_capped_bad_git_config_fails_fast() {
+  local home proj wt id out rc fakebin t0 elapsed
+  home="$TMP_ROOT/gitcfg-fast/home"
+  proj="$TMP_ROOT/gitcfg-fast/project"
+  wt="$TMP_ROOT/gitcfg-fast/wt"
+  id="gitcfg-fast-$$"
+  fakebin="$TMP_ROOT/gitcfg-fast/fakebin"
+  capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
+  t0=$SECONDS
+  rc=0
+  out=$(
+    export FM_FAKE_PANE_GIT_CONFIG_COUNT=bad
+    FM_TEST_SPAWN_START_WAIT_SECONDS=8 \
+      run_capped_spawn bash "$home" "$wt" "$fakebin" \
+      "$id" "$proj" --mode no-mistakes --yolo off
+  ) || rc=$?
+  elapsed=$((SECONDS - t0))
+  [ "$rc" -ne 0 ] || fail "capped spawn with bad GIT_CONFIG_COUNT succeeded: $out"
+  assert_contains "$out" "exited with status" \
+    "capped bad GIT_CONFIG_COUNT did not report the helper exit: $out"
+  assert_not_contains "$out" "was not established within" \
+    "capped bad GIT_CONFIG_COUNT timed out instead of failing fast: $out"
+  [ "$elapsed" -le 6 ] \
+    || fail "capped bad GIT_CONFIG_COUNT was not fast (${elapsed}s): $out"
+  [ "$(cat "$home/launch.exit" 2>/dev/null)" = 1 ] \
+    || fail "capped bad GIT_CONFIG_COUNT did not write exit status 1: $(cat "$home/launch.exit" 2>/dev/null)"
+  pass "a capped launch with bad GIT_CONFIG_COUNT fails fast with its exit status"
 }
 
 test_spend_cap_forwards_truncation_note() {
@@ -1161,4 +1333,8 @@ test_recent_spawn_generation_skips_endpoint_probe
 test_live_workers_total_budget_counts_unread_records
 test_capped_raw_exit_127_rolls_back
 test_capped_raw_exit_127_rolls_back_in_fish
+test_capped_claude_doorbell_quotes_in_fish
+test_capped_raw_quote_backslash_roundtrip
+test_capped_raw_source_and_cmd_on_bash
+test_capped_bad_git_config_fails_fast
 test_spend_cap_forwards_truncation_note

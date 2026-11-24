@@ -1740,6 +1740,7 @@ SPAWN_ENDPOINT_CLOSED=0
 SPAWN_AWAY_ADMISSION=0
 SPAWN_START_PENDING=0
 SPAWN_STAGED_LAUNCH_FILE=
+SPAWN_CAPPED_PANE_DIALECT=
 
 # Capped away launches wait for startup only on backends whose kill-confirmed
 # path can roll a failed start back: tmux and Herdr. Main's
@@ -1751,6 +1752,128 @@ spawn_away_startup_wait_applies() {
     tmux|herdr) return 0 ;;
   esac
   return 1
+}
+
+# Pane-shell dialect for capped start/status lines. FM_TEST_PANE_SHELL is a
+# test-only override: fake pane_current_command often reports the wait-loop
+# probe (sleep) rather than the shell that sources the launch file.
+spawn_capped_pane_comm() {
+  local comm session pane pid info
+  case "$BACKEND" in
+    tmux)
+      comm=$(fm_backend_tmux_current_command "$T" 2>/dev/null || true)
+      ;;
+    herdr)
+      session=${T%%:*}
+      pane=${T#*:}
+      info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null || true)
+      pid=$(printf '%s' "$info" | jq -er \
+        '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' \
+        2>/dev/null || true)
+      if [ -n "$pid" ]; then
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      fi
+      ;;
+  esac
+  comm=${comm##*/}
+  comm=${comm#-}
+  comm=${comm%%[$' \t']*}
+  printf '%s' "$comm"
+}
+
+spawn_capped_pane_dialect() {
+  local comm
+  if [ -n "${SPAWN_CAPPED_PANE_DIALECT:-}" ]; then
+    printf '%s' "$SPAWN_CAPPED_PANE_DIALECT"
+    return
+  fi
+  case "${FM_TEST_PANE_SHELL:-}" in
+    fish) printf 'fish'; return ;;
+    bash|zsh|sh|dash|ash|ksh|mksh|tcsh|csh) printf 'posix'; return ;;
+  esac
+  comm=$(spawn_capped_pane_comm)
+  case "$comm" in
+    fish) printf 'fish' ;;
+    *) printf 'posix' ;;
+  esac
+}
+
+# Keep the uncapped OSC frame (arm / agent / disarm) byte for byte. Insert a
+# start marker after arm and a dialect-specific status capture after the agent
+# so the pane shell, not /bin/sh -c, runs the agent line. An enabled
+# launch-env allowlist already wraps that frame in /bin/sh -c, so those
+# additions stay POSIX. A typed source-line fallback writes the exit file
+# when git-hooks `return 1` from a sourced file, which does not run EXIT.
+spawn_apply_capped_launch_capture() {
+  local file_dialect head body disarm agent qstage qstart qexit
+  local trap_block start_line capture_block
+  qstage=$(shell_quote "$LAUNCH_STAGE")
+  qstart=$(shell_quote "$LAUNCH_START_FILE")
+  qexit=$(shell_quote "$LAUNCH_EXIT_FILE")
+  SPAWN_CAPPED_PANE_DIALECT=$(spawn_capped_pane_dialect)
+  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+    file_dialect=posix
+  else
+    file_dialect=$SPAWN_CAPPED_PANE_DIALECT
+  fi
+  head=${LAUNCH%%$'\n'*}
+  body=${LAUNCH#*$'\n'}
+  disarm=${body##*$'\n'}
+  agent=${body%$'\n'*}
+  start_line="echo 1 > $qstage && mv -f -- $qstage $qstart"
+  case "$file_dialect" in
+    fish)
+      trap_block="function __fm_capped_on_exit --on-event fish_exit
+functions --erase __fm_capped_on_exit
+if not test -f $qexit
+echo \$status > $qstage
+mv -f -- $qstage $qexit
+end
+end"
+      capture_block="set __fm_launch_status \$status
+functions --erase __fm_capped_on_exit
+echo \$__fm_launch_status > $qstage && mv -f -- $qstage $qexit"
+      ;;
+    *)
+      # shellcheck disable=SC2016 # $? and $1 expand in the pane, not here.
+      trap_block='__fm_capped_on_exit() {
+trap - EXIT
+'"[ -f $qexit ] && return 0"'
+'"echo \"\$1\" > $qstage && mv -f -- $qstage $qexit"'
+}
+trap '\''__fm_capped_on_exit $?'\'' EXIT'
+      capture_block='__fm_launch_status=$?
+trap - EXIT
+'"echo \"\$__fm_launch_status\" > $qstage && mv -f -- $qstage $qexit"'
+unset -f __fm_capped_on_exit 2>/dev/null || true'
+      ;;
+  esac
+  LAUNCH="${trap_block}
+${head}
+${start_line}
+${agent}
+${capture_block}
+${disarm}"
+}
+
+spawn_capped_source_line() {
+  local qfile qstage qexit dialect
+  qfile=$(shell_quote "$LAUNCH_FILE")
+  qstage=$(shell_quote "$LAUNCH_STAGE")
+  qexit=$(shell_quote "$LAUNCH_EXIT_FILE")
+  dialect=$(spawn_capped_pane_dialect)
+  case "$dialect" in
+    fish)
+      # shellcheck disable=SC2016 # $status and $__fm_s expand in the pane, not here.
+      printf '%s; set __fm_s $status; if not test -f %s; echo $__fm_s > %s; and mv -f -- %s %s; end' \
+        ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit"
+      ;;
+    *)
+      # shellcheck disable=SC2016 # $? and $__fm_s expand in the pane, not here.
+      printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }' \
+        ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit"
+      ;;
+  esac
 }
 
 spawn_cancel_pending_start() {
@@ -8004,21 +8127,8 @@ LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
 LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
 LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
 LAUNCH_START_FILE="$LAUNCH_FILE.start"
-# Capped waits need the agent status, a start marker after arm, and an
-# exit file. Those use POSIX `VAR=value` and `$?`, which fish cannot
-# parse, so they run inside `/bin/sh -c` the same way the allowlist wrap
-# below does. Arm and disarm stay pane-shell lines, so uncapped launches
-# keep main's frame byte for byte.
 if spawn_away_startup_wait_applies; then
-  spawn_launch_head=${LAUNCH%%$'\n'*}
-  spawn_launch_body=${LAUNCH#*$'\n'}
-  spawn_launch_disarm=${spawn_launch_body##*$'\n'}
-  spawn_launch_agent=${spawn_launch_body%$'\n'*}
-  spawn_launch_inner="printf '1\n' > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_START_FILE")
-$spawn_launch_agent
-__fm_launch_status=\$?
-printf '%s\n' \"\$__fm_launch_status\" > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_EXIT_FILE")"
-  LAUNCH="$spawn_launch_head"$'\n'"/bin/sh -c $(shell_quote "$spawn_launch_inner")"$'\n'"$spawn_launch_disarm"
+  spawn_apply_capped_launch_capture
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
@@ -8152,7 +8262,11 @@ else
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.
-  LAUNCH_SOURCE_TEXT=". $(shell_quote "$LAUNCH_FILE")"
+  if spawn_away_startup_wait_applies; then
+    LAUNCH_SOURCE_TEXT=$(spawn_capped_source_line)
+  else
+    LAUNCH_SOURCE_TEXT=". $(shell_quote "$LAUNCH_FILE")"
+  fi
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     # A refused source-mode launch fails the source command, and some shells exit
     # under errexit on sourcing a file spawn already reclaimed even inside ||, so
