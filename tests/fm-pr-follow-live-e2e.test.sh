@@ -2,6 +2,7 @@
 # Real, idle Pi/Pi-signed and Claude TUIs display followed-PR outcomes without
 # submitting a prompt. Only forge reads are fake; no PR or model is contacted.
 set -eu
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_live_gate default-on FM_PR_FOLLOW_LIVE_E2E tmux jq node
 TMP_ROOT=$(fm_test_tmproot fm-pr-follow-live)
@@ -113,7 +114,7 @@ for harness in pi pi-signed claude; do
   [ ! -e "$home/state/.branch-session" ] || fail "$harness opened a supervision model session"
   [ ! -s "$home/turns" ] || fail "$harness opened a primary model turn"
   if [ "$harness" != claude ]; then
-    for i in $(seq 1 40); do
+    for _ in $(seq 1 40); do
       if jq -e '[.[] | select(.customType == "fm-branch-visible-outcome")] | length == 3' "$home/entries.json" >/dev/null 2>&1; then break; fi
       sleep 0.25
     done

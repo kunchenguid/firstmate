@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Explicit PR follows through the public CLI and real outcome store, with local forge reads.
 set -eu
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-follow)
 home="$TMP_ROOT/home"
