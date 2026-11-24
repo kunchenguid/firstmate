@@ -9,11 +9,16 @@ TMP_ROOT=$(fm_test_tmproot fm-afk-spend-cap)
 fm_git_identity fmtest fmtest@example.invalid
 SPAWN_PID=
 SPAWN_RELEASE=
+FM_TEST_REAL_TMUX=$(command -v tmux || true)
+REAL_TMUX_SOCKET=
 cleanup_launch() {
   [ -z "$SPAWN_RELEASE" ] || touch "$SPAWN_RELEASE"
   if [ -n "$SPAWN_PID" ]; then
     kill "$SPAWN_PID" 2>/dev/null || true
     wait "$SPAWN_PID" 2>/dev/null || true
+  fi
+  if [ -n "${REAL_TMUX_SOCKET:-}" ] && [ -n "${FM_TEST_REAL_TMUX:-}" ]; then
+    "$FM_TEST_REAL_TMUX" -L "$REAL_TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
   fi
   fm_test_cleanup
 }
@@ -1054,10 +1059,16 @@ case "${1:-}" in
                   export GIT_CONFIG_COUNT="$FM_FAKE_PANE_GIT_CONFIG_COUNT"
                 fi
                 case "${FM_FAKE_PANE_SHELL:-bash}" in
-                  fish) fish -c "$a" ;;
-                  dash) dash -c "$a" ;;
-                  *) bash -c "$a" ;;
+                  fish) runner=fish ;;
+                  dash) runner=dash ;;
+                  zsh) runner=zsh ;;
+                  *) runner=bash ;;
                 esac
+                run_line=$a
+                if [ -n "${FM_FAKE_PANE_KEEP_TRAP:-}" ]; then
+                  run_line="trap 'echo SURVIVED > \"$FM_HOME/trap.fired\"' EXIT; $a; trap > \"$FM_HOME/trap.saved\""
+                fi
+                $runner -c "$run_line"
                 [ ! -f "$staged.exit" ] || cp "$staged.exit" "$FM_HOME/launch.exit"
               ) >"$FM_HOME/pane.out" 2>"$FM_HOME/pane.err" &
             fi
@@ -1315,6 +1326,172 @@ SH
   pass "spend-cap admission forwards the live-workers truncation note"
 }
 
+# Real tmux pane: start already in the isolated worktree so treehouse get is a
+# no-op, then run a capped Claude whose process is `sleep` (ambiguous, not
+# raw) so the wait loop keeps waiting until the exit file or the timeout.
+capped_kill_pane_rolls_back_with() {  # <pane-shell>
+  local pane_shell=$1 home proj wt id fakebin real_tmux socket shim spawn_home
+  local real_shell pane_cmd qfake qwt qshell start rc out pid i f
+  [ -n "$FM_TEST_REAL_TMUX" ] || fail "tmux is required to prove capped pane-death rollback"
+  command -v "$pane_shell" >/dev/null 2>&1 \
+    || fail "$pane_shell is required to prove capped pane-death rollback"
+  case "$pane_shell" in
+    fish) real_shell=$(command -v fish) ;;
+    *) real_shell=$(command -v bash) ;;
+  esac
+  [ -n "$real_shell" ] || fail "could not resolve $pane_shell"
+  real_tmux=$FM_TEST_REAL_TMUX
+  home="$TMP_ROOT/kill-pane-$pane_shell/home"
+  proj="$TMP_ROOT/kill-pane-$pane_shell/project"
+  wt="$TMP_ROOT/kill-pane-$pane_shell/wt"
+  id="kill-pane-$pane_shell-$$"
+  fakebin="$TMP_ROOT/kill-pane-$pane_shell/fakebin"
+  socket="fm-kill-pane-$pane_shell-$$"
+  REAL_TMUX_SOCKET=$socket
+  capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+exec sleep 60
+SH
+  chmod +x "$fakebin/claude"
+  shim="$TMP_ROOT/kill-pane-$pane_shell/shim"
+  mkdir -p "$shim"
+  cat > "$shim/tmux" <<SH
+#!/usr/bin/env bash
+exec "$real_tmux" -f /dev/null -L "$socket" "\$@"
+SH
+  chmod +x "$shim/tmux"
+  spawn_home=$home/user-home
+  mkdir -p "$spawn_home"
+  qfake=$(printf '%q' "$fakebin")
+  qwt=$(printf '%q' "$wt")
+  qshell=$(printf '%q' "$real_shell")
+  pane_cmd="export PATH=$qfake:\$PATH; cd $qwt && exec $qshell"
+  case "$pane_shell" in
+    fish) pane_cmd="$pane_cmd --no-config" ;;
+    *) pane_cmd="$pane_cmd --noprofile --norc" ;;
+  esac
+  "$real_tmux" -f /dev/null -L "$socket" new-session -d -s firstmate -n supervisor \
+    || fail "real tmux: could not create the firstmate session for $pane_shell"
+  "$real_tmux" -L "$socket" set-option -g remain-on-exit on
+  "$real_tmux" -L "$socket" set-option -t firstmate default-shell /bin/bash
+  "$real_tmux" -L "$socket" set-option -t firstmate default-command "$pane_cmd"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+    || fail "kill-pane away entry failed"
+  rc=0
+  env -u TMUX FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
+    CLAUDE_CONFIG_DIR= FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SUPERVISION_ACTOR=main \
+    FM_TEST_SPAWN_START_WAIT_SECONDS=8 \
+    PATH="$shim:$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off \
+    >"$home/launch.log" 2>&1 &
+  # shellcheck disable=SC2031 # $! is this background spawn, captured before any later command substitution.
+  SPAWN_PID=$!
+  start=
+  for i in $(seq 1 80); do
+    for f in /tmp/fm-"$id"+*/launch.*.start; do
+      if [ -f "$f" ]; then
+        start=$f
+        break
+      fi
+    done
+    [ -n "$start" ] && break
+    kill -0 "$SPAWN_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  [ -n "$start" ] || fail "capped $pane_shell pane never wrote a start marker: $(cat "$home/launch.log")"
+  pid=$("$real_tmux" -L "$socket" display-message -p -t "firstmate:fm-$id" '#{pane_pid}' 2>/dev/null || true)
+  [ -n "$pid" ] || fail "capped $pane_shell pane pid was empty after start: $(cat "$home/launch.log")"
+  kill -HUP "$pid" 2>/dev/null || true
+  wait "$SPAWN_PID" || rc=$?
+  SPAWN_PID=
+  out=$(cat "$home/launch.log")
+  "$real_tmux" -L "$socket" kill-server >/dev/null 2>&1 || true
+  REAL_TMUX_SOCKET=
+  [ "$rc" -ne 0 ] || fail "capped $pane_shell pane death was recorded as success: $out"
+  assert_not_contains "$out" "spawned $id" \
+    "capped $pane_shell pane death printed a successful spawn: $out"
+  case "$pane_shell" in
+    bash)
+      assert_contains "$out" "exited with status 129" \
+        "capped bash pane death did not map EXIT 0 to 129: $out"
+      ;;
+    fish)
+      assert_contains "$out" "was not established within" \
+        "capped fish pane death did not fall through to rollback: $out"
+      ;;
+  esac
+  if [ -e "$home/state/$id.meta" ]; then
+    grep -qx 'cleanup_recovery=launch' "$home/state/$id.meta" \
+      || fail "capped $pane_shell pane death kept a published record: $(cat "$home/state/$id.meta")"
+  fi
+}
+
+test_capped_kill_pane_rolls_back() {
+  command -v fish >/dev/null 2>&1 \
+    || fail "fish is required to prove capped pane-death rollback"
+  capped_kill_pane_rolls_back_with bash
+  capped_kill_pane_rolls_back_with fish
+  pass "a capped launch whose pane dies mid-startup rolls back on bash and fish"
+}
+
+test_capped_posix_exit_trap_survives() {
+  local pane_shell home proj wt id fakebin out rc
+  command -v zsh >/dev/null 2>&1 \
+    || fail "zsh is required to prove a pre-existing EXIT trap survives a capped launch"
+  command -v dash >/dev/null 2>&1 \
+    || fail "dash is required to prove a pre-existing EXIT trap survives a capped launch"
+  for pane_shell in bash zsh dash; do
+    home="$TMP_ROOT/keep-trap-$pane_shell/home"
+    proj="$TMP_ROOT/keep-trap-$pane_shell/project"
+    wt="$TMP_ROOT/keep-trap-$pane_shell/wt"
+    id="keep-trap-$pane_shell-$$"
+    fakebin="$TMP_ROOT/keep-trap-$pane_shell/fakebin"
+    capped_spawn_home "$home" "$proj" "$wt" "$id" "$fakebin"
+    rc=0
+    out=$(
+      export FM_FAKE_PANE_KEEP_TRAP=1
+      run_capped_spawn "$pane_shell" "$home" "$wt" "$fakebin" \
+        "$id" "$proj" 'echo keep-trap-ok' --mode no-mistakes --yolo off
+    ) || rc=$?
+    [ "$rc" -eq 0 ] || fail "capped keep-trap spawn on $pane_shell failed: $out"
+    [ "$(cat "$home/trap.fired" 2>/dev/null)" = SURVIVED ] \
+      || fail "capped launch on $pane_shell dropped the pre-existing EXIT trap: $(cat "$home/pane.err" 2>/dev/null) saved=$(cat "$home/trap.saved" 2>/dev/null)"
+  done
+  pass "a pre-existing EXIT trap survives a capped launch on bash, zsh, and dash"
+}
+
+probe_capped_herdr_dialect() {  # fail|empty-pid
+  local mode=$1
+  ROOT="$ROOT" FM_HERDR_PROCESS_INFO_MODE="$mode" bash -c '
+    set -u
+    BACKEND=herdr
+    T=fixture:w1:p2
+    SHELL=/usr/bin/fish
+    unset FM_TEST_PANE_SHELL SPAWN_CAPPED_PANE_DIALECT
+    case "${FM_HERDR_PROCESS_INFO_MODE:-}" in
+      fail) fm_backend_herdr_cli() { return 1; } ;;
+      *) fm_backend_herdr_cli() { printf "%s\n" "{\"result\":{\"process_info\":{}}}"; } ;;
+    esac
+    eval "$(sed -n "/^spawn_capped_pane_comm()/,/^# Keep the uncapped OSC frame/p" \
+      "$ROOT/bin/fm-spawn.sh" | sed "\$d")"
+    spawn_capped_pane_dialect
+  '
+}
+
+test_capped_herdr_empty_process_info_uses_shell() {
+  local got
+  got=$(probe_capped_herdr_dialect fail)
+  [ "$got" = fish ] \
+    || fail "herdr process-info failure with SHELL=/usr/bin/fish picked '$got', not fish"
+  got=$(probe_capped_herdr_dialect empty-pid)
+  [ "$got" = fish ] \
+    || fail "herdr process-info with no shell_pid and SHELL=/usr/bin/fish picked '$got', not fish"
+  pass "empty Herdr process-info with SHELL=/usr/bin/fish picks the fish dialect"
+}
+
 test_waiting_workers_require_proven_idle
 test_completed_run_unknown_activity
 test_bounded_presence_reads
@@ -1338,3 +1515,6 @@ test_capped_raw_quote_backslash_roundtrip
 test_capped_raw_source_and_cmd_on_bash
 test_capped_bad_git_config_fails_fast
 test_spend_cap_forwards_truncation_note
+test_capped_kill_pane_rolls_back
+test_capped_posix_exit_trap_survives
+test_capped_herdr_empty_process_info_uses_shell

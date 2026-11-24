@@ -1758,7 +1758,7 @@ spawn_away_startup_wait_applies() {
 # test-only override: fake pane_current_command often reports the wait-loop
 # probe (sleep) rather than the shell that sources the launch file.
 spawn_capped_pane_comm() {
-  local comm session pane pid info
+  local comm='' session pane pid info
   case "$BACKEND" in
     tmux)
       comm=$(fm_backend_tmux_current_command "$T" 2>/dev/null || true)
@@ -1792,6 +1792,9 @@ spawn_capped_pane_dialect() {
     bash|zsh|sh|dash|ash|ksh|mksh|tcsh|csh) printf 'posix'; return ;;
   esac
   comm=$(spawn_capped_pane_comm)
+  # Empty when Herdr process-info fails or omits shell_pid. Guess from SHELL so
+  # a fish pane is not treated as POSIX and then waited out for 30s.
+  [ -n "$comm" ] || comm=${SHELL##*/}
   case "$comm" in
     fish) printf 'fish' ;;
     *) printf 'posix' ;;
@@ -1805,11 +1808,12 @@ spawn_capped_pane_dialect() {
 # additions stay POSIX. A typed source-line fallback writes the exit file
 # when git-hooks `return 1` from a sourced file, which does not run EXIT.
 spawn_apply_capped_launch_capture() {
-  local file_dialect head body disarm agent qstage qstart qexit
-  local trap_block start_line capture_block
+  local file_dialect head body disarm agent qstage qstart qexit qtraps
+  local trap_block start_line capture_block restore_trap
   qstage=$(shell_quote "$LAUNCH_STAGE")
   qstart=$(shell_quote "$LAUNCH_START_FILE")
   qexit=$(shell_quote "$LAUNCH_EXIT_FILE")
+  qtraps=$(shell_quote "$LAUNCH_DIR/.launch.$SPAWN_GEN.traps")
   SPAWN_CAPPED_PANE_DIALECT=$(spawn_capped_pane_dialect)
   if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     file_dialect=posix
@@ -1821,39 +1825,51 @@ spawn_apply_capped_launch_capture() {
   disarm=${body##*$'\n'}
   agent=${body%$'\n'*}
   start_line="echo 1 > $qstage && mv -f -- $qstage $qstart"
+  trap_block=
   case "$file_dialect" in
     fish)
-      trap_block="function __fm_capped_on_exit --on-event fish_exit
-functions --erase __fm_capped_on_exit
-if not test -f $qexit
-echo \$status > $qstage
-mv -f -- $qstage $qexit
-end
-end"
+      # No fish_exit handler: exit/return in a sourced file does not leave the
+      # pane, and the typed fallback already records that status. A handler
+      # would only fire when the pane dies, and then it would write a false 0.
       capture_block="set __fm_launch_status \$status
-functions --erase __fm_capped_on_exit
 echo \$__fm_launch_status > $qstage && mv -f -- $qstage $qexit"
       ;;
     *)
-      # shellcheck disable=SC2016 # $? and $1 expand in the pane, not here.
-      trap_block='__fm_capped_on_exit() {
-trap - EXIT
-'"[ -f $qexit ] && return 0"'
-'"echo \"\$1\" > $qstage && mv -f -- $qstage $qexit"'
+      # Save every trap the pane shell already had (`trap > file`, not $(trap):
+      # zsh and dash print nothing there). Restore it after our EXIT trap, so
+      # an ssh-agent cleanup from an rc file still runs. A 0 from this trap is
+      # pane death (bash and fish both report 0 on SIGHUP / tmux kill-session
+      # before the capture line), not a successful launch, so map it to 129.
+      restore_trap="trap - EXIT; . $qtraps; rm -f $qtraps"
+      # shellcheck disable=SC2016 # $?, $1, and $s expand in the pane, not here.
+      trap_block="trap > $qtraps
+__fm_capped_on_exit() {
+$restore_trap
+[ -f $qexit ] && return 0
+s=\$1; [ \"\$s\" = 0 ] && s=129
+echo \"\$s\" > $qstage && mv -f -- $qstage $qexit
 }
-trap '\''__fm_capped_on_exit $?'\'' EXIT'
-      capture_block='__fm_launch_status=$?
-trap - EXIT
-'"echo \"\$__fm_launch_status\" > $qstage && mv -f -- $qstage $qexit"'
-unset -f __fm_capped_on_exit 2>/dev/null || true'
+trap '__fm_capped_on_exit \$?' EXIT"
+      capture_block="__fm_launch_status=\$?
+$restore_trap
+echo \"\$__fm_launch_status\" > $qstage && mv -f -- $qstage $qexit
+unset -f __fm_capped_on_exit 2>/dev/null || true"
       ;;
   esac
-  LAUNCH="${trap_block}
+  if [ -n "$trap_block" ]; then
+    LAUNCH="${trap_block}
 ${head}
 ${start_line}
 ${agent}
 ${capture_block}
 ${disarm}"
+  else
+    LAUNCH="${head}
+${start_line}
+${agent}
+${capture_block}
+${disarm}"
+  fi
 }
 
 spawn_capped_source_line() {
