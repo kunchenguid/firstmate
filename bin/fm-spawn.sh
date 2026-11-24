@@ -6277,15 +6277,16 @@ codex)
       SPAWN_CODEX_HOME=$(
         spawn_codex_store=
         spawn_codex_user_home=${HOME:-}
-        case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
-          *$'\nHOME\n'*) spawn_codex_user_home= ;;
-        esac
+        if printf '%s\n' "$LAUNCH_ENV_NAMES" | grep -Fx HOME >/dev/null 2>&1; then
+          spawn_codex_user_home=
+        fi
         eval "set -- $ORCA_LAUNCH_ENV_ARGS" || exit 1
         for spawn_env_arg; do
-          case "$spawn_env_arg" in
-            CODEX_HOME=*) spawn_codex_store=${spawn_env_arg#CODEX_HOME=} ;;
-            HOME=*) spawn_codex_user_home=${spawn_env_arg#HOME=} ;;
-          esac
+          if [ "${spawn_env_arg#CODEX_HOME=}" != "$spawn_env_arg" ]; then
+            spawn_codex_store=${spawn_env_arg#CODEX_HOME=}
+          elif [ "${spawn_env_arg#HOME=}" != "$spawn_env_arg" ]; then
+            spawn_codex_user_home=${spawn_env_arg#HOME=}
+          fi
         done
         printf '%s' "${spawn_codex_store:-${spawn_codex_user_home:+$spawn_codex_user_home/.codex}}"
       ) || exit 1
