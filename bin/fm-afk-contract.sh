@@ -134,9 +134,13 @@
 # endpoints reserve capacity, while proven-dead endpoints and proven-idle
 # accepted deliveries or waiting workers free it. A spawn_gen younger than
 # FM_SPAWN_CAP_LAUNCH_GRACE (default 120 seconds) reserves a slot without a
-# probe. Each endpoint probe is bounded by FM_AFK_CONTRACT_PROBE_SECONDS
-# (default 10 seconds); activity and current-state detail reads each use
-# FM_AFK_CONTRACT_DETAIL_SECONDS (default 5 seconds).
+# probe. The reads share one total deadline (FM_AFK_LIVE_WORKERS_TIMEOUT,
+# default 20 seconds); once it is spent, each remaining record counts as
+# spending without being read, so a slow probe cannot stall entry or a spawn
+# for 30s per record. Each endpoint probe is also bounded by
+# FM_AFK_CONTRACT_PROBE_SECONDS (default 10 seconds) or whatever budget
+# remains, whichever is smaller; activity and current-state detail reads each
+# use FM_AFK_CONTRACT_DETAIL_SECONDS (default 5 seconds) under the same cap.
 # Without --spend, entry records the count standing at that moment, so away mode
 # never narrows work already under way; it never records less than
 # FM_AFK_CONTRACT_SPEND_DEFAULT, so an idle home still enters with the ordinary
@@ -219,19 +223,37 @@ fm_afk_contract_latest_non_resolved_verb() {
   return 1
 }
 
+# True when the whole-count deadline has elapsed. Sets `left` to remaining
+# seconds when budget remains. Callers count the record as spending and
+# `continue`.
+fm_afk_contract_live_deadline_elapsed() {
+  left=$((deadline - SECONDS))
+  [ "$left" -le 0 ]
+}
+
 # Count workers still able to spend, the shared SPEND CAP owner. Recent launch
 # records and unproven backend/activity/state reads reserve capacity. The
 # backend probe deadline is bounded; idle exclusions retain the activity,
-# newest-event, DoD and current-state gates.
+# newest-event, DoD and current-state gates. All timed reads share
+# FM_AFK_LIVE_WORKERS_TIMEOUT (default 20s); remaining records after that
+# bound count as spending, the same fail-closed direction as an uncertain
+# reading.
 fm_afk_contract_live_ordinary_workers() {  # [state-dir]
   local state=${1:-$FM_AFK_CONTRACT_STATE} meta live=0 gen now id backend target
   local meta_lock endpoint_state absence status kind line verb newest_verb activity current
   local paused_verb=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   local held_verb=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  local left probe_secs detail_secs truncated=0
+  local deadline=$((SECONDS + ${FM_AFK_LIVE_WORKERS_TIMEOUT:-20}))
   now=$(date +%s)
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     [ "$(fm_meta_get "$meta" kind)" != secondmate ] || continue
+    if fm_afk_contract_live_deadline_elapsed; then
+      truncated=1
+      live=$((live + 1))
+      continue
+    fi
     # Sourcing the wake library creates state; defer it until worker metadata exists.
     FM_STATE_OVERRIDE="$state" fm_afk_contract_lock_helpers || return 1
     meta_lock=$(fm_meta_lock_path "$meta") || { live=$((live + 1)); continue; }
@@ -261,25 +283,39 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
     fi
     # A stalled backend must neither hang entry nor hold the spawn task-set
     # lock. Any timeout or failed read is unproven and remains counted.
+    if fm_afk_contract_live_deadline_elapsed; then
+      truncated=1
+      live=$((live + 1))
+      continue
+    fi
+    probe_secs=${FM_AFK_CONTRACT_PROBE_SECONDS:-10}
+    [ "$probe_secs" -le "$left" ] || probe_secs=$left
     # shellcheck disable=SC2016 # child positional parameters are intentional
-    endpoint_state=$(fm_run_timed "${FM_AFK_CONTRACT_PROBE_SECONDS:-10}" bash -c \
+    endpoint_state=$(fm_run_timed "$probe_secs" bash -c \
       '. "$1"; fm_backend_worker_state "$2" "$3"' \
       _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) \
       || endpoint_state=unreadable
     if [ "$endpoint_state" = missing ]; then
+      if fm_afk_contract_live_deadline_elapsed; then
+      truncated=1
+      live=$((live + 1))
+      continue
+    fi
+      probe_secs=${FM_AFK_CONTRACT_PROBE_SECONDS:-10}
+      [ "$probe_secs" -le "$left" ] || probe_secs=$left
       if [ "$backend" = herdr ]; then
         # shellcheck disable=SC2016
-        if ! fm_run_timed "${FM_AFK_CONTRACT_PROBE_SECONDS:-10}" bash -c \
+        if ! fm_run_timed "$probe_secs" bash -c \
           '. "$1"; fm_backend_source herdr && fm_backend_herdr_endpoint_confirmed_gone "$2"' \
           _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$target" >/dev/null 2>&1; then
           endpoint_state=unreadable
         fi
       else
         # shellcheck disable=SC2016
-        absence=$(fm_run_timed "${FM_AFK_CONTRACT_PROBE_SECONDS:-10}" bash -c \
-          '. "$1"; . "$2"; fm_control_endpoint_absence_verdict "$3" "$4"' \
+        absence=$(fm_run_timed "$probe_secs" bash -c \
+          '. "$1"; . "$2"; fm_control_endpoint_absence_verdict "$3" "$4" "$5"' \
           _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$FM_AFK_CONTRACT_DIR/fm-control-lib.sh" \
-          "$backend" "$target" 2>/dev/null) || absence=unreadable
+          "$backend" "$target" "$meta" 2>/dev/null) || absence=unreadable
         [ "${absence%%$'\t'*}" = gone ] || endpoint_state=unreadable
       fi
     fi
@@ -317,8 +353,15 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
         ;;
       *) live=$((live + 1)); continue ;;
     esac
+    if fm_afk_contract_live_deadline_elapsed; then
+      truncated=1
+      live=$((live + 1))
+      continue
+    fi
+    detail_secs=${FM_AFK_CONTRACT_DETAIL_SECONDS:-5}
+    [ "$detail_secs" -le "$left" ] || detail_secs=$left
     # shellcheck disable=SC2016 # child positional parameters are intentional
-    activity=$(fm_run_timed "${FM_AFK_CONTRACT_DETAIL_SECONDS:-5}" bash -c \
+    activity=$(fm_run_timed "$detail_secs" bash -c \
       '. "$1/fm-backend.sh"; . "$1/fm-busy-lib.sh"; fm_busy_classify_meta "$2" "$3" "$4"' \
       _ "$FM_AFK_CONTRACT_DIR" "$meta" "$id" "$state" 2>/dev/null) \
       || activity=unknown
@@ -326,7 +369,14 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
       live=$((live + 1))
       continue
     fi
-    current=$(fm_run_timed "${FM_AFK_CONTRACT_DETAIL_SECONDS:-5}" env \
+    if fm_afk_contract_live_deadline_elapsed; then
+      truncated=1
+      live=$((live + 1))
+      continue
+    fi
+    detail_secs=${FM_AFK_CONTRACT_DETAIL_SECONDS:-5}
+    [ "$detail_secs" -le "$left" ] || detail_secs=$left
+    current=$(fm_run_timed "$detail_secs" env \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_NO_FORGE=1 \
       "$FM_AFK_CONTRACT_DIR/fm-crew-state.sh" "$id" 2>/dev/null) || current=
     case "$verb:$current" in
@@ -337,6 +387,9 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
     esac
     live=$((live + 1))
   done
+  if [ "$truncated" = 1 ]; then
+    echo "live-workers truncated: remaining records counted as spending" >&2
+  fi
   printf '%s\n' "$live"
 }
 
@@ -388,12 +441,13 @@ fm_afk_contract_lock_helpers() {
 # fm_afk_contract_lock_hold [state-dir]: take the cross-subsystem lock described
 # in the header. The acquire is bounded so a wedged holder is refused instead of
 # blocking a merge or a captain return forever, and returns 1 WITHOUT the lock so
-# every caller refuses rather than proceeding unlocked.
-fm_afk_contract_lock_hold() {  # [state-dir]
+# every caller refuses rather than proceeding unlocked. A caller that defers on
+# contention instead of waiting for a merge passes its own shorter bound.
+fm_afk_contract_lock_hold() {  # [state-dir] [timeout-seconds]
   local lock rc=0 STATE timeout
   STATE=${1:-$FM_AFK_CONTRACT_STATE}
   lock=$(fm_afk_contract_lock_path "$STATE")
-  timeout=${FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT:-$_FM_AFK_CONTRACT_LOCK_TIMEOUT}
+  timeout=${2:-${FM_TEST_AFK_CONTRACT_LOCK_TIMEOUT:-$_FM_AFK_CONTRACT_LOCK_TIMEOUT}}
   fm_afk_contract_lock_helpers || {
     fm_afk_contract_log "could not load the lock primitive for $lock"
     return 1

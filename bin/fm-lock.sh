@@ -8,8 +8,17 @@
 # which is dead moments after it is written. For a Claude session that proves a
 # trusted session id the anchor is CLAUDE_PID, the model-loop process, so a
 # shared transient daemon or a front-end that outlives the session never keeps
-# a dead session's lock alive. Line 1 keeps its whole-line pid format because
-# every other reader takes the first line as the pid.
+# a dead session's lock alive. On Windows that pid is recorded tagged, and a
+# /clear re-key under the same tagged pid refreshes the sidecar as it does on
+# POSIX. Line 1 keeps its whole-line pid format because every other reader
+# takes the first line as the pid.
+#
+# Acquisition serializes through state/.lock.acquire. Both claim paths use
+# fm-wake-lib.sh's stale real-directory recovery for that lock and its .steal
+# mutex, and opt into fm_lock_acquire_wait's --refuse-unreapable mode. When
+# recovery reports an unremovable stale directory, acquisition exits 1 naming
+# the path to inspect for contents or permission problems. Live contention has no new
+# deadline. tests/fm-watcher-lock.test.sh covers recovery and refusal.
 #
 # The trusted id itself is recorded beside the lock in state/.lock-session, a
 # sidecar written only here and only under the claim lock: refreshed on every
@@ -69,7 +78,17 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-me=$(fm_session_lock_anchor_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_session_lock_anchor_pid) || {
+  if fm_win_boundary_applies; then
+    # Here the parent link does not reach the harness at all, so "not in the
+    # ancestry" would describe the wrong problem and send the reader hunting a
+    # process tree that can never contain the answer.
+    echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh; CLAUDE_PID is taken only together with CLAUDE_CODE_SESSION_ID); operate read-only until resolved" >&2
+  else
+    echo "error: cannot locate harness process in ancestry" >&2
+  fi
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -201,7 +220,7 @@ publish_lock_session_or_die() {
 confirm_own_lock() {  # <recorded-pid>
   local recorded pids waited=0
   if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
-    fm_lock_acquire_wait "$CLAIM_LOCK"
+    fm_lock_acquire_wait "$CLAIM_LOCK" --refuse-unreapable || exit 1
     CLAIM_LOCK_HELD=1
     waited=1
   fi
@@ -242,7 +261,7 @@ if [ -f "$LOCK" ] && [ ! -L "$LOCK" ]; then
     confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
   fi
-  if [ -z "$REANCHOR" ] && fm_harness_pid_alive "$old"; then
+  if [ -z "$REANCHOR" ] && fm_session_lock_pid_blocks_reclaim "$old"; then
     refuse_live_owner "$old"
   fi
 fi
@@ -254,7 +273,7 @@ if [ "$CLAIM_LOCK_HELD" -ne 1 ]; then
       echo "error: the prior session's bounded startup sweep is finishing; operate read-only until it releases the fleet lock" >&2
       exit 1
     fi
-    fm_lock_acquire_wait "$CLAIM_LOCK"
+    fm_lock_acquire_wait "$CLAIM_LOCK" --refuse-unreapable || exit 1
   fi
   CLAIM_LOCK_HELD=1
 fi
@@ -270,10 +289,10 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
   }
   # A re-anchor decided above has held the claim lock since, so line 1 is the
   # pid it recorded and needs no second verdict.
-  if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+  if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_session_lock_pid_blocks_reclaim "$old"; then
     fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
     old=$(cat "$LOCK" 2>/dev/null || true)
-    if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_harness_pid_alive "$old"; then
+    if [ -z "$REANCHOR" ] && [ "$old" != "$me" ] && fm_session_lock_pid_blocks_reclaim "$old"; then
       refuse_live_owner "$old"
     fi
   fi

@@ -9,6 +9,8 @@
 # With --forge it prints one word instead: the project's registered forge,
 # none|gerrit|forgejo|external. The forge is asked for explicitly, so the
 # default output stays the same two words for every project, bound or not.
+# With --pr it prints one word: the project's registered PR-text posture,
+# auto|manual, "auto" when the project registers none.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode,
@@ -20,7 +22,8 @@
 # run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice,
 # and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
 # bin/fm-promote.sh, which takes the forge binding from here because it is a
-# project fact rather than a task choice.
+# project fact rather than a task choice. --pr is read the same way by
+# bin/fm-spawn.sh's PR-text agreement and by bin/fm-promote.sh.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                                 -> no-mistakes off fm/  (legacy default)
@@ -30,9 +33,10 @@
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
 #   - <name> [<mode> forge=forgejo] - <desc> (added <date>)          -> <mode> <yolo>, --forge forgejo
 #   - <name> [direct-PR forge=external] - <desc> (added <date>)      -> direct-PR off, --forge external
+#   - <name> [no-mistakes pr=manual] - <desc> (added <date>)         -> no-mistakes off, --pr manual
 #   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
-#   Bracket tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
-#   are recognized by their own shape wherever they appear, and whichever token is
+#   Bracket tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
+#   pr=<value> are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
 #   ("branch=") resolves to "" for a bare "<task-id>" ship branch instead of the
 #   legacy "fm/<task-id>".
@@ -80,6 +84,21 @@
 #   advances it with content the server has never seen
 #   (docs/gerrit-forge-integration.md section 3).
 #
+# pr (orthogonal) = who writes the pull request's title and body. Absent means
+#   `auto`, today's behavior: the no-mistakes pipeline's pr step writes and
+#   refreshes them. `manual` is for a project whose PR text a person writes
+#   and a maintainer reads: the worker owns the text and the pipeline's pr step
+#   is skipped (bin/fm-dod-lib.sh owns what that changes for a worker). It is
+#   the thin registry form of no-mistakes' own keep-text option
+#   (kunchenguid/no-mistakes#1648) and maps onto it once that exists. Only a
+#   no-mistakes ship takes it, because direct-PR already leaves the text to the
+#   worker and local-only opens no PR, and only a project with no forge binding,
+#   because the manual brief carries no PR commands for another forge. A
+#   registered pr=manual on any other mode or forge, and a malformed binding (an
+#   empty or unknown value), are REFUSED in the default and --pr output forms:
+#   nothing on stdout, exit status 3, the token named. --branch-prefix and
+#   --forge do not make these checks.
+#
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
 # refusal, on the captain's decision of 2026-09-15: a Gerrit Code-Review+2 is a
 # positive attributed claim that a named human approved, read by colleagues and
@@ -94,8 +113,8 @@
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" (or
 # "fm/" under --branch-prefix) and warns to stderr, so a typo never silently
 # drops the gate. Other annotation tokens are ignored, as they always were, keyed
-# ones included: a `<key>=<value>` token whose key is neither exactly `forge` nor
-# `branch` resolves as it did before the forge existed, and in the mode slot it
+# ones included: a `<key>=<value>` token whose key is none of `forge`, `branch`, and
+# `pr` resolves as it did before the forge existed, and in the mode slot it
 # is read as an unknown mode. A key one or two edits from `forge` (such as
 # `forg=` or `Forge=`) is still ignored, with one stderr warning naming the token
 # and the forge=gerrit, forge=forgejo, and forge=external spellings. The one
@@ -109,7 +128,7 @@
 # to the forge binding, so it prints even when the forge token is malformed;
 # every path that reads the forge binding (default, --forge, and spawn's
 # forge-agreement check) still refuses.
-# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>
+# Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -120,25 +139,29 @@ REG="$DATA/projects.md"
 RAW=0
 BRANCH_PREFIX_QUERY=0
 WANT_FORGE=0
+WANT_PR=0
 case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch-prefix) BRANCH_PREFIX_QUERY=1; shift ;;
   --forge) WANT_FORGE=1; shift ;;
+  --pr) WANT_PR=1; shift ;;
 esac
-NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>}
+NAME=${1:?usage: fm-project-mode.sh [--raw|--branch-prefix|--forge|--pr] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
-  elif [ "$WANT_FORGE" -eq 1 ]; then echo none; else echo "no-mistakes off"; fi
+  elif [ "$WANT_FORGE" -eq 1 ]; then echo none
+  elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
   exit 0
 fi
 
 # awk emits one "near <token>" line per keyed token whose key is a near miss of
-# `forge`, then "posture <mode> <yolo> <branch-prefix> <forge>" (branch-prefix is
-# the raw prefix, defaulting to "fm/"; forge is `none` or the whole `forge=<value>`
-# token, so an empty value survives the split), or nothing if the project is
+# `forge`, then "posture <mode> <yolo> <forge> <pr> <branch-prefix>" (branch-prefix
+# is the raw prefix, defaulting to "fm/"; forge is `none` or the whole
+# `forge=<value>` token and pr is `auto` or the whole `pr=<value>` token, so an
+# empty value survives the split), or nothing if the project is
 # absent. Every other token beside the mode is ignored, exactly as before either
 # annotation existed.
 parsed=$(awk -v n="$NAME" '
@@ -165,15 +188,15 @@ parsed=$(awk -v n="$NAME" '
     if (substr($0, 1, plen) != prefix) next
     after = substr($0, plen + 1);
     if (after != "" && substr(after, 1, 2) != " [" && substr(after, 1, 3) != " - ") next
-    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none";
+    mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none"; pr="auto";
     if (substr(after, 1, 2) == " [") {
       s="";
       nk = split(after, rest, " ");
       for (i=1; i<=nk; i++) { s = s (s==""?"":" ") rest[i]; if (rest[i] ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      # Tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
-      # are recognized by their own shape wherever they appear, keyed tokens
+      # Tokens are order-independent: +yolo, branch=<prefix>, forge=<value>, and
+      # pr=<value> are recognized by their own shape wherever they appear, keyed tokens
       # that are neither are ignored (with a near-miss warning for the forge
       # spelling), and the first token left over is the mode.
       mode_set = 0
@@ -181,6 +204,7 @@ parsed=$(awk -v n="$NAME" '
         if (a[j]=="+yolo") { yolo="on"; continue }
         if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); continue }
         if (a[j] ~ /^forge=/) { forge = a[j]; continue }
+        if (a[j] ~ /^pr=/) { pr = a[j]; continue }
         if (a[j] ~ /^[^=]+=/) {
           key = substr(a[j], 1, index(a[j], "=") - 1);
           e = dist(key, "forge");
@@ -193,7 +217,7 @@ parsed=$(awk -v n="$NAME" '
     }
     # branch is printed LAST: an empty branch= override must survive as an
     # empty final field, which only holds when nothing follows it.
-    print "posture", mode, yolo, forge, branch; exit
+    print "posture", mode, yolo, forge, pr, branch; exit
   }
 ' "$REG")
 
@@ -201,7 +225,8 @@ if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   if [ "$BRANCH_PREFIX_QUERY" -eq 1 ]; then
     echo "fm/"
-  elif [ "$WANT_FORGE" -eq 1 ]; then echo none; else echo "no-mistakes off"; fi
+  elif [ "$WANT_FORGE" -eq 1 ]; then echo none
+  elif [ "$WANT_PR" -eq 1 ]; then echo auto; else echo "no-mistakes off"; fi
   exit 0
 fi
 
@@ -214,12 +239,13 @@ while IFS=' ' read -r kind rest; do
 done <<EOF
 $parsed
 EOF
-while IFS=' ' read -r m y f b; do
-  mode=$m; yolo=$y; rest_forge=$f; branch=$b
+while IFS=' ' read -r m y f p b; do
+  mode=$m; yolo=$y; rest_forge=$f; rest_pr=$p; branch=$b
 done <<EOF
 $posture
 EOF
 forge=${rest_forge:-none}
+pr=${rest_pr:-auto}
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off; branch=fm/ ;;
@@ -245,6 +271,32 @@ if [ "$forge" != none ] && [ "$mode" = local-only ]; then
 fi
 if [ "$WANT_FORGE" -eq 1 ]; then
   echo "$forge"
+  exit 0
+fi
+
+case "$pr" in
+  auto|pr=manual) pr=${pr#pr=} ;;
+  pr=)
+    echo "refused: empty PR-text binding \"pr=\" registered for $NAME in $REG; the only accepted value is pr=manual, or no pr token at all for the pipeline's own PR text; correct the registry entry" >&2
+    exit 3 ;;
+  *)
+    echo "refused: unknown PR-text binding \"$pr\" registered for $NAME in $REG; the only accepted value is pr=manual, or no pr token at all for the pipeline's own PR text; correct the registry entry" >&2
+    exit 3 ;;
+esac
+if [ "$pr" = manual ]; then
+  case "$mode" in
+    no-mistakes|no-mistakes-prod-only) ;;
+    *)
+      echo "refused: $NAME is registered $mode with pr=manual in $REG; only a no-mistakes ship takes it, because direct-PR already leaves the PR text to the worker and local-only opens no PR; register no-mistakes, or drop the pr token" >&2
+      exit 3 ;;
+  esac
+  if [ "$forge" != none ]; then
+    echo "refused: $NAME is registered with pr=manual and forge=$forge in $REG; pr=manual ships a project with no forge binding only; drop the pr token" >&2
+    exit 3
+  fi
+fi
+if [ "$WANT_PR" -eq 1 ]; then
+  echo "$pr"
   exit 0
 fi
 if [ "$forge" = gerrit ] && [ "$yolo" = on ]; then
