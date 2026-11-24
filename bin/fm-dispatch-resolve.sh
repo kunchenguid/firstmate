@@ -42,7 +42,9 @@
 #   configured 12-hour/10-percent dump band first; ranking.mode=reset_first
 #   lets the seat whose weekly window resets soonest go first among eligible
 #   seats of the same provider, with spendPriority deciding ties and every
-#   cross-provider comparison). An eligible but wholly
+#   cross-provider comparison). In every mode, seats identical by provider, model,
+#   effort and declared plan go by most banked resets, then soonest weekly reset,
+#   before the mode ranks (docs/configuration.md "Ranking mode"). An eligible but wholly
 #   unrankable preferred family escalates rather than authorizing another
 #   family. The model never sees quota, catalogs, approvals, preferred_provider,
 #   `why`, account labels, or credential paths.
@@ -927,6 +929,19 @@ done < <(jq -r --arg mode "$MODE" --arg step "$STEP" '
   if $mode == "preview" then empty
   elif $mode == "pipeline" then [(.pipeline_rows // [])[] | select(.steps | index($step)) | .use[] | .account] | unique[]
   else [((.rules // [])[] | .use | if type == "array" then .[] else . end), (.default // empty | if type == "array" then .[] else . end) | .account // empty] | unique[] end' "$RULES"; if [ "$PREVIEW" = true ] && [ -r "$CONFIG/accounts.json" ]; then jq -r '.accounts | keys[]' "$CONFIG/accounts.json"; fi)
+# ---- banked limit resets: read only when two accounts share a declared plan ---
+# quota-axi does not carry them. Only the identical-seat order below uses the
+# count, so the read happens only when the declared plans can make two seats
+# identical. A failed or partial read leaves the account out: never a zero.
+BANKED_RESETS='{}'
+if [ "$SQ" != true ] && jq -e '[.accounts | to_entries[] | .key as $a | .value | to_entries[] | {a: $a, p: .key, v: .value}] | group_by([.p, .v]) | any(length > 1)' <<<"$PLAN_CONFIG" >/dev/null 2>&1; then
+  banked_file=$(mktemp "${TMPDIR:-/tmp}/fm-dispatch-banked.XXXXXX")
+  read -r -a banked_cmd <<<"${FM_BANKED_RESETS_CMD:-quota-extras --resets}"
+  if [ "${#banked_cmd[@]}" -gt 0 ] && command -v "${banked_cmd[0]}" >/dev/null 2>&1 && fm_dispatch_bounded "${banked_cmd[@]}" >"$banked_file" 2>/dev/null; then
+    BANKED_RESETS=$(jq -c '[.[]? | select(.status == "ok" and (.label | type) == "string" and (.held | type) == "number" and .held >= 0 and .held == (.held | floor)) | {(.label): .held}] | add // {}' "$banked_file" 2>/dev/null) || BANKED_RESETS='{}'
+  fi
+  rm -f "$banked_file"
+fi
 # Routing off or an unregistered seat is a configuration fact, never quota exhaustion.
 if [ "$MODE" = pipeline ] || [ "$PREVIEW" = true ]; then
   unrouted=$(jq -r --argjson quotas "$ACCOUNT_QUOTAS" --arg step "$STEP" --argjson preview "$PREVIEW" '[(.pipeline_rows // [])[] | select($preview or (.steps | index($step))) | .use[] | .account | select($quotas[.] == null)] | unique | join(", ")' "$RULES")
@@ -1388,18 +1403,20 @@ FM_DR_SEAT_JQ='
         . + {surplus: $limiting.surplus, value: ($limiting.surplus * $cfg.plan_value[$c.account] / 100), band: ($band_reset != null), band_reset: $band_reset}
       end
     end;
-  # reset_first: the binding reset is the soonest reset among the applicable
-  # weekly windows (never a five-hour window). No pace forecast is involved.
+  # The soonest reset among the applicable weekly windows (never a five-hour
+  # window); null when none is known. No pace forecast is involved.
+  def weekly_reset_of($c):
+    provider_of($c) as $p | lane_of($c) as $lane |
+    (account_quota($c) | applicable($p; $lane; ($c.model // ""); ($c.quota_scope // null)) | [ .[] | (.boundedBy // [])[] ] | unique) as $ids |
+    ([account_quota($c) | provider_windows($p; $lane)[] |
+      select(.kind == "weekly" or .id == "seven_day") |
+      select(.id as $id | $ids | index($id)) |
+      (.resetsAt | if type == "string" then clean_reset(.) else null end) | select(. != null) |
+      select(try fromdateiso8601 catch null | . != null)] | sort | first // null);
+  # reset_first: the binding reset is the soonest applicable weekly reset.
   def reset_first_score($c):
     if $cfg.ranking.mode != "reset_first" or (.eligible | not) or (.unranked // false) or (.sq // false) then .
-    else . as $e | provider_of($c) as $p | lane_of($c) as $lane |
-      (account_quota($c) | applicable($p; $lane; ($c.model // ""); ($c.quota_scope // null)) | [ .[] | (.boundedBy // [])[] ] | unique) as $ids |
-      ([account_quota($c) | provider_windows($p; $lane)[] |
-        select(.kind == "weekly" or .id == "seven_day") |
-        select(.id as $id | $ids | index($id)) |
-        (.resetsAt | if type == "string" then clean_reset(.) else null end) | select(. != null) |
-        select(try fromdateiso8601 catch null | . != null)] | sort | first // null) as $weekly_reset |
-      . + {reset_first: true, binding_reset: $weekly_reset}
+    else . + {reset_first: true, binding_reset: weekly_reset_of($c)}
     end;
   def evaluate($c):
     evaluate_seat($c) | surplus_score($c) | reset_first_score($c) |
@@ -1501,16 +1518,52 @@ FM_DR_SEAT_JQ='
           (if ($ordered | length) > 1 then "; round-robin slot \($slot + 1) of \($ordered | length)" else "" end) +
           " -> \($ordered[$slot].profile.harness):\($ordered[$slot].profile.model // "default")\(if $ordered[$slot].profile.account then " @" + $ordered[$slot].profile.account else "" end)")}
      end);
+  # Identical seats: candidates with the same provider, harness, model, effort
+  # and the same DECLARED plan (config/accounts.json; the coarse quota-axi label
+  # never makes two seats identical, and an undeclared plan is never identical)
+  # offer exactly the same thing, so inside one such group the seat with the most
+  # banked resets goes first, then the one whose weekly window resets soonest;
+  # an exact tie there is left to the configured ranking. Banked counts come
+  # from $banked (account -> count); if any seat of a group has no known count,
+  # that comparison is skipped for the group, never read as zero. A seat with no
+  # known weekly reset never outranks one with a known reset. Different models,
+  # plans and providers are never compared here, and the same seat order
+  # reset_first uses is reused: the weekly reset above.
+  def identical_key:
+    if (.plan_source // "" | startswith("config")) and .profile.account != null and .provider != null
+    then [.provider, .profile.harness, (.profile.model // ""), (.profile.effort // ""), .plan] else null end;
+  def identical_pick:
+    . as $all |
+    ([$all[] | select(identical_key != null) | {a: .profile.account, key: identical_key}]
+      | group_by(.key) | map(select((map(.a) | unique | length) > 1) | .[0].key)) as $keys |
+    if ($keys | length) == 0 then {kept: $all, note: null}
+    else
+      ([$keys[] | . as $key | ($all | map(select(identical_key == $key))) as $m |
+        ([$m[] | $banked[.profile.account] // null]) as $counts |
+        (if all($counts[]; . != null) then ($counts | max) else null end) as $most |
+        ($m | if $most == null then . else map(select($banked[.profile.account] == $most)) end) as $by_bank |
+        ([$by_bank[] | weekly_reset_of(.profile) | try fromdateiso8601 catch null] | map(select(. != null)) | min) as $soonest |
+        ($by_bank | if $soonest == null then . else map(select((weekly_reset_of(.profile) | try fromdateiso8601 catch null) == $soonest)) end) as $keep |
+        {drop: [$m[] | select(. as $x | $keep | any(.profile == $x.profile) | not)], keep: $keep, most: $most, soonest: $soonest}]) as $res |
+      {kept: ($all - [$res[].drop[]]),
+       note: ([$res[] | select((.drop | length) > 0) |
+         "\(.keep | map(seat_label) | join(", ")) before \(.drop | map(seat_label) | join(", ")) (identical seats" +
+         (if .most != null then ", most banked resets \(.most)" else "" end) +
+         (if .soonest != null then ", weekly reset \(.soonest | todate)" else "" end) + ")"] as $n |
+         if ($n | length) > 0 then "identical_seats: " + ($n | join("; ")) else null end)}
+    end;
   def rank_winner:
-    (reset_first_pick) as $rf |
+    (identical_pick) as $id |
+    ($id.kept | reset_first_pick) as $rf |
     $rf.kept as $ranked |
-    (if $rf.note != null then {reset_first_note: $rf.note} else {} end) +
+    ([$id.note, $rf.note] | map(select(. != null)) | join("; ")) as $note |
+    (if $note != "" then {reset_first_note: $note} else {} end) +
     ($ranked | rank_winner_core);
 '
 # Pipeline resolution for one step's fixed row (see the header): no model, no
 # receipt, and every pool decision made by the shared seat logic above.
 fm_dispatch_pipeline_json() {  # <quota attempts> <warm-ups run> [final]
-  jq -cn --arg step "$STEP" --argjson pmap "$PMAP" --argjson account_quotas "$ACCOUNT_QUOTAS" --argjson plan_config "$PLAN_CONFIG" --argjson sq "$SQ" --argjson rr "$TIE_RR" \
+  jq -cn --arg step "$STEP" --argjson pmap "$PMAP" --argjson account_quotas "$ACCOUNT_QUOTAS" --argjson plan_config "$PLAN_CONFIG" --argjson sq "$SQ" --argjson rr "$TIE_RR" --argjson banked "$BANKED_RESETS" \
     --argjson now "$NOW_EPOCH" --argjson demand "$WEEKLY_DEMAND" --argjson final "${3:-false}" --arg delivery '' --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($rules[0]) as $cfg | ($quota[0]) as $q |
 '"$FM_DR_SEAT_JQ"'
@@ -1595,7 +1648,7 @@ if [ "$PREVIEW" != true ] && [ "$MODE" != pipeline ] && [ -n "$TASK_ID" ] \
 fi
 fm_dispatch_resolve_json() {  # <quota attempts> <warm-ups run>
   if [ "$MODE" = pipeline ]; then fm_dispatch_pipeline_json "$@"; return; fi
-  jq -n --arg project "${PROJECT:-unset}" --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" --argjson account_quotas "$ACCOUNT_QUOTAS" --argjson plan_config "$PLAN_CONFIG" --argjson quota_attempts "$1" --argjson warmups "$2" --argjson sq "$SQ" --argjson rr "$TIE_RR" \
+  jq -n --arg project "${PROJECT:-unset}" --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" --argjson account_quotas "$ACCOUNT_QUOTAS" --argjson plan_config "$PLAN_CONFIG" --argjson quota_attempts "$1" --argjson warmups "$2" --argjson sq "$SQ" --argjson rr "$TIE_RR" --argjson banked "$BANKED_RESETS" \
     --argjson final "${3:-false}" --arg jev_failed "$JEV_FAILED_REASON" --argjson force_pick "$FORCE_PICK" --arg delivery "$BRIEF_DELIVERY" \
     --argjson now "$NOW_EPOCH" --argjson guard "$FIVE_HOUR_GUARD" --argjson debits "$BURST_DEBITS" --argjson demand "$WEEKLY_DEMAND" \
     --argjson ladder_hist "$LADDER_HIST" --argjson worker_task "$WORKER_TASK" \

@@ -1191,6 +1191,66 @@ rank_quota "$TMP_ROOT/rank-c1" claude 60 50 1 2030-01-04T00:00:00Z
 rank_quota "$TMP_ROOT/rank-c2" claude 80 24 9 2030-01-05T00:00:00Z
 rank_quota "$TMP_ROOT/rank-x1" codex 90 10 20 2030-01-04T00:00:00Z
 pass 'reset_first ranks the sooner weekly reset first within a provider and keeps guards, ties and cross-provider order'
+# Identical seats: same provider, model, effort and DECLARED plan rank by most banked
+# resets, then soonest weekly reset, then the configured ranking. Banked counts come
+# from quota-extras --resets, faked here; the fixtures give claude2 the higher
+# spendPriority (9 against 1) and claude1 the sooner weekly reset (01-04 against 01-05).
+cp "$RULES" "$TMP_ROOT/pre-identical-rules"
+cp "$HOME_DIR/config/accounts.json" "$TMP_ROOT/pre-identical-accounts"
+cat > "$FAKEBIN/quota-extras" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BANKED_CALL_LOG"
+[ -r "$BANKED_FIXTURE" ] || exit 1
+cat "$BANKED_FIXTURE"
+SH
+chmod +x "$FAKEBIN/quota-extras"
+export BANKED_FIXTURE="$TMP_ROOT/banked.json" BANKED_CALL_LOG="$TMP_ROOT/banked-calls"
+: > "$BANKED_CALL_LOG"
+set_banked() { jq -cn --argjson c1 "$1" --argjson c2 "$2" '[{id:"claude",label:"claude1",provider:"claude",status:(if $c1 == null then "expired" else "ok" end)} + (if $c1 == null then {} else {held:$c1} end), {id:"claude2",label:"claude2",provider:"claude",status:(if $c2 == null then "err" else "ok" end)} + (if $c2 == null then {} else {held:$c2} end)]' > "$BANKED_FIXTURE"; }
+set_plans() { # claude1 plan, claude2 plan (empty string leaves the plan undeclared)
+  jq --arg p1 "$1" --arg p2 "$2" '.accounts.claude1.plans = (if $p1 == "" then null else {claude:$p1} end) | .accounts.claude2.plans = (if $p2 == "" then null else {claude:$p2} end) | del(.accounts[].plans | nulls)' "$TMP_ROOT/pre-identical-accounts" > "$HOME_DIR/config/accounts.json"
+}
+id_pick() { run preview --json; expect_code 0 "$code" "identical-seat preview: $out"; ID_SEAT=$(jq -r '.workers[0].pick.seat' <<< "$out"); }
+jq 'del(.ranking)' "$RULES" > "$TMP_ROOT/next"; mv "$TMP_ROOT/next" "$RULES"
+rank_quota "$TMP_ROOT/rank-c1" claude 60 50 1 2030-01-04T00:00:00Z
+rank_quota "$TMP_ROOT/rank-c2" claude 80 24 9 2030-01-05T00:00:00Z
+set_plans 'Max 20x' 'Max 20x'
+set_banked 1 3
+id_pick; assert_equals claude2 "$ID_SEAT" 'identical seats: the seat with more banked resets wins over the sooner reset'
+assert_contains "$out" 'identical_seats: ' 'the pick names the identical-seat order'
+assert_contains "$out" 'most banked resets 3' 'the note states the banked count'
+set_banked 3 1
+id_pick; assert_equals claude1 "$ID_SEAT" 'identical seats: more banked resets beats the higher spendPriority'
+set_banked 2 2
+id_pick; assert_equals claude1 "$ID_SEAT" 'identical seats: equal banked resets fall to the sooner weekly reset, over spendPriority'
+rank_quota "$TMP_ROOT/rank-c1" claude 60 50 1 2030-01-05T00:00:00Z
+id_pick; assert_equals claude2 "$ID_SEAT" 'identical seats: equal banked resets and equal weekly resets fall back to spendPriority'
+rank_quota "$TMP_ROOT/rank-c1" claude 60 50 1 2030-01-04T00:00:00Z
+set_banked null 3
+id_pick; assert_equals claude1 "$ID_SEAT" 'identical seats: an unknown banked count is never read as zero; the soonest reset decides'
+assert_not_contains "$out" 'most banked resets' 'an unknown banked count is not claimed in the note'
+rm -f "$BANKED_FIXTURE"
+id_pick; assert_equals claude1 "$ID_SEAT" 'identical seats: a failing banked source leaves the soonest weekly reset deciding'
+set_banked 0 5
+set_plans 'Max 20x' 'Ultra'
+id_pick; assert_equals claude2 "$ID_SEAT" 'different plans are not identical: spendPriority keeps its order despite banked resets'
+assert_not_contains "$out" 'identical_seats' 'different plans print no identical-seat note'
+set_plans 'Max 20x' ''
+id_pick; assert_equals claude2 "$ID_SEAT" 'an undeclared plan is never identical, whatever quota-axi labels it'
+set_plans 'Max 20x' 'Max 20x'
+jq '.ranking={mode:"reset_first"}' "$RULES" > "$TMP_ROOT/next"; mv "$TMP_ROOT/next" "$RULES"
+set_banked 0 5
+id_pick; assert_equals claude2 "$ID_SEAT" 'identical seats: banked resets also lead under reset_first'
+jq 'del(.ranking)' "$RULES" > "$TMP_ROOT/next"; mv "$TMP_ROOT/next" "$RULES"
+# codex1 (Pro 5x) and codex2 (Business) differ in plan, so the codex order is unchanged.
+jq '.rules[0].use = [{"harness":"codex","model":"gpt-5.4","effort":"high","account":"codex1","reasoning_class":5},{"harness":"codex","model":"gpt-5.4","effort":"high","account":"codex2","reasoning_class":5}] | .plan_value={codex1:100,codex2:25}' "$RULES" > "$TMP_ROOT/next"; mv "$TMP_ROOT/next" "$RULES"
+jq '.accounts.codex1.plans={codex:"Pro 5x"} | .accounts.codex2.plans={codex:"Business"}' "$HOME_DIR/config/accounts.json" > "$TMP_ROOT/next"; mv "$TMP_ROOT/next" "$HOME_DIR/config/accounts.json"
+jq -cn '[{id:"codex",label:"codex1",provider:"codex",status:"ok",held:9},{id:"codex2",label:"codex2",provider:"codex",status:"ok",held:0}]' > "$BANKED_FIXTURE"
+id_pick; assert_equals codex2 "$ID_SEAT" 'codex1 and codex2 differ in plan: banked resets never reorder them'
+cp "$TMP_ROOT/pre-identical-rules" "$RULES"
+cp "$TMP_ROOT/pre-identical-accounts" "$HOME_DIR/config/accounts.json"
+rm -f "$FAKEBIN/quota-extras" "$BANKED_FIXTURE"
+pass 'identical seats rank by banked resets, then weekly reset, then the configured ranking; differing or undeclared plans are never reordered'
 # Invalid config and hard policy checks fail before quota/transport.
 cp "$RULES" "$TMP_ROOT/rank-rules"
 for bad in 'del(.plan_value.claude1)' '.ranking.mode="bogus"' '.ranking.reset_horizon_hours=-1' '.rules[0].use[0].effort="max"' '.rules[0].use[0] |= (.model="sonnet" | .effort="max")' '.rules[0].use[0] |= (.model="fable" | .effort="xhigh")' '.rules[0].use[0] |= (.model="fable" | .effort="max")' '.rules[0].use[0] |= (.harness="pi" | .provider="anthropic" | .model="anthropic/claude-opus")'; do

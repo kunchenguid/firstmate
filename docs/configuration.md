@@ -2195,6 +2195,14 @@ Eligibility is unchanged: the weekly start gate, auth, the five-hour floor, `sea
 There is no pace forecast: a sooner seat projected to run empty before its reset still goes first, and the usage-limit move handles hitting the limit.
 Candidate lines show `binding_reset` (the weekly reset used) and start notes and pipeline reasons name `reset_first`.
 Pipeline rows use this mode within their open tier, without worker burst debits.
+
+In every ranking mode, identical seats are ordered before the mode ranks: candidates with the same provider, harness, model, effort and the same plan declared in `config/accounts.json` offer exactly the same thing.
+The quota-axi plan label never makes seats identical (it is coarse, for example `max` for every Claude Max tier), and a seat with no declared plan is never identical to another.
+Inside one identical group the seat with the most banked limit resets goes first, then the seat whose applicable weekly window resets soonest, then the configured ranking decides.
+Banked resets are not in quota-axi, so the resolver reads `quota-extras --resets` (override the command with `FM_BANKED_RESETS_CMD`; it emits `[{label, status, held}]`, `label` being the account id) once per resolution, and only when two accounts declare the same plan for a provider.
+A seat whose count is unknown (status other than `ok`, command missing or failed) is never read as zero: the banked comparison is skipped for its group and the weekly reset decides.
+Different models, different plans (for example `Max 20x` against `Ultra`, or `Pro 5x` against `Business`) and cross-provider comparisons are never reordered by this rule.
+The note `identical_seats:` on the start note and the pick reason names the order and the count used.
 `rows --json` exports `ranking`, `plan_value`, and each rule's `strict_tiers` alongside the existing schema-version-1 fields.
 Switching `ranking.mode` back to `spend_priority` restores legacy ranking without migrating receipts or state.
 
