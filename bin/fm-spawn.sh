@@ -2296,7 +2296,7 @@ spawn_refuse_if_away_spend_cap() {
   '' | *[!0-9]* | 0) return 0 ;;
   esac
   SPAWN_AWAY_ADMISSION=1
-  live=$(FM_AFK_LIVE_WORKERS_TIMEOUT="${SPAWN_SPEND_CAP_TIMEOUT:-${FM_AFK_LIVE_WORKERS_TIMEOUT:-20}}" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
   case "$live" in
   '' | *[!0-9]*)
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
@@ -2304,7 +2304,7 @@ spawn_refuse_if_away_spend_cap() {
     ;;
   esac
   if [ "$live" -ge "$cap" ]; then
-    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home or could not be proven idle within the budget; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
     exit 1
   fi
 }
@@ -2317,9 +2317,7 @@ spawn_refuse_if_away_spend_cap() {
 # existing tasks; secondmates are exempt persistent homes. Checked before any
 # endpoint, worktree, or record exists, so a refusal costs nothing to unwind;
 # rechecked after the task-set lock so two fresh spawns cannot use a stale count.
-# The locked recheck caps the live-worker count at 5s (SPAWN_SPEND_CAP_TIMEOUT)
-# so a slow state read cannot hold the lock; the pre-lock check keeps the 20s
-# default (FM_AFK_LIVE_WORKERS_TIMEOUT).
+# Both checks share FM_AFK_LIVE_WORKERS_TIMEOUT (default 20s).
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
@@ -2403,7 +2401,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
-  SPAWN_SPEND_CAP_TIMEOUT=5 spawn_refuse_if_away_spend_cap
+  spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
 fi
 if [ "$KIND" = secondmate ]; then
@@ -7996,12 +7994,12 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 fi
+LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
+LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
 # Record the agent command's status, not disarm's, and do it before any
 # env-allowlist `sh -c` wrap so the exit file is written in the same shell.
 if spawn_away_startup_wait_applies; then
-  LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
-  LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
-  LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
   LAUNCH="$LAUNCH"$'\n'"printf '%s\n' \"\$__fm_launch_status\" > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_EXIT_FILE")"
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
@@ -8078,9 +8076,6 @@ else
       exit 1
     fi
   fi
-  LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
-  LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
-  LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     # The sourcing shell already holds the open file; unlink the credentials
     # before launching the worker, including on a later command failure.

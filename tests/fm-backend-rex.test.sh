@@ -1125,4 +1125,31 @@ EOF
   pass "a capped rex spawn skips the away startup wait and succeeds like main"
 }
 
+# live-workers must pass the task meta into fm_control_endpoint_absence_verdict
+# so Rex can read rex_server. Without it a closed block stays unproven and
+# keeps filling the spend cap.
+test_proven_absent_rex_worker_does_not_count() {
+  local dir home out sid bid t count
+  dir=$(new_case spend-absent)
+  home="$dir/home"
+  mkdir -p "$home/state"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  printf 'backend=rex\nwindow=%s\nkind=ship\nrex_server=unix:///fake/rex.sock\n' "$t" \
+    >"$home/state/gone.meta"
+  fake_rex "$dir" block close -s "$sid" "$bid"
+  count=$(
+    env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+      FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" \
+      FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
+      FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_SPAWN_CAP_LAUNCH_GRACE=0 \
+      "$ROOT/bin/fm-afk-contract.sh" live-workers
+  )
+  [ "$count" = 0 ] || fail "a proven-absent rex worker still counted as spending: $count"
+  pass "a proven-absent rex worker no longer counts toward the spend cap"
+}
+
 test_rex_capped_spawn_skips_startup_wait
+test_proven_absent_rex_worker_does_not_count

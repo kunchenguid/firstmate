@@ -308,9 +308,9 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
       else
         # shellcheck disable=SC2016
         absence=$(fm_run_timed "$probe_secs" bash -c \
-          '. "$1"; . "$2"; fm_control_endpoint_absence_verdict "$3" "$4"' \
+          '. "$1"; . "$2"; fm_control_endpoint_absence_verdict "$3" "$4" "$5"' \
           _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$FM_AFK_CONTRACT_DIR/fm-control-lib.sh" \
-          "$backend" "$target" 2>/dev/null) || absence=unreadable
+          "$backend" "$target" "$meta" 2>/dev/null) || absence=unreadable
         [ "${absence%%$'\t'*}" = gone ] || endpoint_state=unreadable
       fi
     fi
