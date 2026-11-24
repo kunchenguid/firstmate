@@ -110,8 +110,19 @@ api_record_for_task() {
 }
 
 api_snapshot() {
+  local project_root
   SNAPSHOT=$(project_snapshot) \
     || api_error snapshot_failed 'Firstmate could not produce a fleet snapshot.'
+
+  # Spawn records use absolute paths; backlog records use registered names.
+  project_root=$(CDPATH='' cd -- "$PROJECTS" 2>/dev/null && pwd -P) || return 0
+  SNAPSHOT=$(printf '%s\n' "$SNAPSHOT" | jq -ce --arg root "$project_root" --argjson allowed "$PROJECTS_JSON" '
+    if (.tasks | type) == "array" then
+      .tasks |= map(.project as $path
+        | ([$allowed[] | select(($root + "/" + .) == $path)] | first) as $name
+        | if $name == null then . else .project = $name end)
+    else . end') \
+    || api_error snapshot_invalid 'Firstmate returned an invalid task snapshot.'
 }
 
 # shellcheck disable=SC2016 # This single-quoted jq program is passed as data, not evaluated by Bash.

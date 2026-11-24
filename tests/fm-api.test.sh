@@ -113,6 +113,9 @@ cat > "$SNAPSHOT" <<'DATA'
   {"id":"doneowned","project":"demo","kind":"ship","current_state":{"state":"done","detail":"finished"},"hints":{"pending_decision":false,"open_decisions":[]},"endpoint":{"status":"absent"}}
 ]}
 DATA
+jq --arg path "$(cd "$HOME_DIR/projects/demo" && pwd -P)" '(.tasks[] | select(.id == "owned001")).project = $path' \
+  "$SNAPSHOT" > "$SNAPSHOT.tmp"
+mv "$SNAPSHOT.tmp" "$SNAPSHOT"
 mkdir -p "$HOME_DIR/data/owned001"
 printf '%s\n' 'canary result' > "$HOME_DIR/data/owned001/report.md"
 
