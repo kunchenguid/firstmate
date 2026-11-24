@@ -64,6 +64,10 @@ STUB
 cat > "$BIN/fm-spawn.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_API_TEST_SPAWN_ARGS"
+if [ "${FM_API_TEST_HOLD_LOCK_CHILD:-0}" = 1 ]; then
+  sleep 30 &
+  printf '%s\n' "$!" > "$FM_API_TEST_LOCK_CHILD_PID"
+fi
 [ "${FM_API_TEST_SPAWN_FAIL:-0}" != 1 ]
 STUB
 cat > "$BIN/fm-send.sh" <<'STUB'
