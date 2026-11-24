@@ -1906,7 +1906,7 @@ ${context.command}
     if (noticeTimer) clearInterval(noticeTimer);
     noticeTimer = undefined;
     noticeStamp = "";
-    noticeSurface = ctx.mode === "tui" && Boolean(pi.registerEntryRenderer);
+    noticeSurface = ctx?.mode === "tui" && Boolean(pi.registerEntryRenderer);
     if (noticeSurface && existsSync(join(config, "pr-follow"))) {
       noticeTimer = setInterval(() => { void followNotices(startedGeneration); }, 3000);
       noticeTimer.unref();
