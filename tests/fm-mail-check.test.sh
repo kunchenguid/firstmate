@@ -229,23 +229,63 @@ test_slow_poll_times_out_and_is_reported() {
   pass "fm-mail-check: a slow poll times out into a one-line report"
 }
 
+# The effective budget is only observable by waiting one out, so each sub-case
+# uses the smallest value that still distinguishes the source it proves: 5 is
+# the floor of the valid range, and the watcher bound cuts the last one below it.
 test_budget_is_read_from_home_env() {
   local home out
   home=$(make_home budget-env)
   write_env "$home"
-  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=7' >> "$home/.env"
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=5' >> "$home/.env"
   enter_mailbox "$home" 'sleep 10'
   out="$home/out.txt"
   run_check "$home" "$out" "$CHECK"
-  assert_contains "$(cat "$out")" "within the 7s budget" "the home .env budget applies when the environment is silent"
+  assert_contains "$(cat "$out")" "within the 5s budget" "the home .env budget applies when the environment is silent"
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=6' >> "$home/.env"
   out="$home/out2.txt"
   run_check "$home" "$out" "$CHECK" FM_MAIL_CHECK_BUDGET=5
   assert_contains "$(cat "$out")" "within the 5s budget" "the environment budget wins over the .env"
-  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=25' >> "$home/.env"
   out="$home/out3.txt"
-  run_check "$home" "$out" "$CHECK" FM_CHECK_TIMEOUT=9
-  assert_contains "$(cat "$out")" "within the 6s budget" "a .env budget is still cut to fit the watcher bound"
+  run_check "$home" "$out" "$CHECK" FM_CHECK_TIMEOUT=5
+  assert_contains "$(cat "$out")" "within the 2s budget" "a .env budget is still cut to fit the watcher bound"
   pass "fm-mail-check: the budget honors the home .env with env-wins and the watcher bound"
+}
+
+test_rejected_budget_reports_and_keeps_polling() {
+  local home out
+  home=$(make_home budget-bad)
+  write_env "$home"
+  # The value this incident invites an operator to leave behind: in range, but
+  # annotated, so the .env read hands the check a string it cannot use. A
+  # refusal here would stop received mail from ever surfacing again, because
+  # the watcher discards the check's stderr and only wakes on its stdout.
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=25 # slow Gmail' >> "$home/.env"
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t20004\\n"
+printf "42\\t2026-09-05T00:00:00Z\\talice@example.com\\tHello\\n"'
+  out="$home/out.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: FM_MAIL_CHECK_BUDGET=25 # slow Gmail is not a whole number from 5 to 25" "a rejected budget names its value on the check's own stdout line"
+  assert_contains "$(cat "$out")" "polling on the 15s budget" "a rejected budget falls back to the default budget"
+  assert_contains "$(cat "$out")" "new mail: woke for 42" "the poll still runs under a rejected budget"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "a rejected budget still reports exactly one line: $(cat "$out")"
+  assert_contains "$(cat "$home/state/.wake-queue" 2>/dev/null)" "mail from alice@example.com" "the poll under a rejected budget still queues the durable mail wake"
+
+  # An out-of-range environment value is the same condition on the other input.
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t20004\\n"
+printf "43\\t2026-09-05T00:01:00Z\\tbob@example.com\\tHi\\n"'
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$CHECK" FM_MAIL_CHECK_BUDGET=30
+  assert_contains "$(cat "$out")" "FM_MAIL_CHECK_BUDGET=30 is not a whole number from 5 to 25" "an out-of-range environment budget is named too"
+  assert_contains "$(cat "$out")" "new mail: woke for 43" "the poll still runs under an out-of-range environment budget"
+
+  # Arming and disarming never use the budget, so they must stay available on a
+  # home whose budget cannot be parsed.
+  out=$(FM_HOME="$home" "$CHECK" arm 2>&1) || fail "arm must stay usable with a rejected budget: $out"
+  out=$(FM_HOME="$home" FM_MAIL_CHECK_BUDGET=30 "$CHECK" disarm 2>&1) || fail "disarm must stay usable with a rejected budget: $out"
+  assert_absent "$home/state/mail.check.sh" "disarm removes the shim on a home with a rejected budget"
+  pass "fm-mail-check: a rejected budget reports one line and keeps polling on the default"
 }
 
 test_repeated_failure_that_queued_new_mail_still_wakes() {
@@ -485,6 +525,7 @@ test_failure_is_reported_once_until_it_changes
 test_unconfigured_home_is_reported_once
 test_slow_poll_times_out_and_is_reported
 test_budget_is_read_from_home_env
+test_rejected_budget_reports_and_keeps_polling
 test_fail_closed_poll_after_wake_reports_the_failure
 test_repeated_status4_fail_closed_still_wakes
 test_repeated_status2_stays_queued_still_wakes

@@ -2682,6 +2682,7 @@ A fail-closed poll that already queued a wake, and a timeout, always print so th
 
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
 The check reads it from its environment first and otherwise from the home's `.env`, because the watcher runs it without loading that file.
+A value that is not a whole 5..25 does not refuse the poll: the check polls on the default 15s budget and names the rejected value in its own line, so a mistyped budget wakes the agent instead of silencing the mail poll.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
 ## Relay (.env)
