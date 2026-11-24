@@ -158,7 +158,7 @@ case "$COMMAND" in
       "$json_state_filter . as \$snapshot
        | [\$snapshot.backlog.records[]? | select(.structured == true and any(.body_lines[]?; startswith(\"<!-- fm-api:v1 owner=\" + \$owner + \" request=\")))
            | select(.repo as \$project | \$projects | index(\$project) != null) | {id,repo}] as \$owned
-       | [\$snapshot.tasks[]? | select(.current_state.state != \"done\" and .current_state.state != \"failed\")
+       | [\$snapshot.tasks[]? | select(.current_state.state != \"done\" and .current_state.state != \"failed\" and .current_state.state != \"cancelled\")
            | select(. as \$task | any(\$owned[]; .id == \$task.id and .repo == \$task.project))] as \$all
        | {tasks:(\$all[0:\$limit] | map(api_task)),truncated:((\$all | length) > \$limit)}" 2>/dev/null) \
       || api_error snapshot_invalid 'Firstmate returned an invalid task snapshot.'
@@ -351,7 +351,7 @@ case "$COMMAND" in
     api_record_for_task "$2"
     "$SCRIPT_DIR/fm-control.sh" "$2" exit >/dev/null 2>&1 \
       || api_error cancel_unconfirmed 'Firstmate could not verify agent exit; task and work were not discarded.' "$2"
-    RESULT=$(jq -cn --arg task_id "$2" '{task_id:$task_id,agent_stopped:true,task_state_retained:true,semantics:"verified agent exit; not a durable cancelled state"}')
+    RESULT=$(jq -cn --arg task_id "$2" '{task_id:$task_id,agent_stopped:true,task_state_retained:true,semantics:"verified agent exit; query status for the task outcome"}')
     api_emit "$RESULT"
     ;;
   *) api_error invalid_command 'Expected one of: create, status, list, steer, cancel.' ;;

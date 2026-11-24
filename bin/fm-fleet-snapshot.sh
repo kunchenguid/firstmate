@@ -808,7 +808,7 @@ task_json_lines() {
     # reads any report content:
     #   - a live activity read (run-step or busy pane) that is working/done, so a
     #     crew that resumed past a gate is not still reported as parked; and
-    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
+    #   - a terminal done/failed/cancelled state on a single-owner task, whose
     #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
     #     report POINTER, never as a reopened pending decision.
     # Secondmates are excluded from lifecycle clearing: they are persistent and
@@ -820,7 +820,8 @@ task_json_lines() {
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ] \
+           || [ "$current_state" = "cancelled" ]; }; }; then
       open_decisions_tsv=""
     fi
     open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '

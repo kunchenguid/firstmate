@@ -304,8 +304,6 @@ def tool(kind='progress',arguments=None,thread='thread',turn='turn',ident=100):
   commit_ship()
   if mode in ('verification-refusal','verification-stale'):
    subprocess.run(['git','-C',os.environ['CASE_WORKTREE'],'update-index','--assume-unchanged','tracked.txt'],check=True)
-  if mode=='publication-internal-error':
-   os.chmod('/dev/shm/firstmate-appserver/t',0o500)
  emit({'id':ident,'method':'item/tool/call','params':{'threadId':thread,'turnId':turn,'callId':str(ident),'tool':'firstmate_report','arguments':arguments or {'type':kind,'message':'delivery'}}})
 for line in sys.stdin:
  m=json.loads(line)
@@ -419,11 +417,25 @@ with tempfile.TemporaryDirectory(prefix='fm-as-') as tmp:
     (fakebin / 'codex').chmod(0o755)
     (fakebin / 'tmux').write_text('#!/bin/sh\nexit 0\n')
     (fakebin / 'tmux').chmod(0o755)
-    env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'])
-    for case in ['scout-stale','scout-success','scout-failed','scout-interrupted','scout-missing','scout-path','scout-large','scout-duplicate','scout-preexisting','working','success','failed','interrupted','result-active','success-no-result',
+    # Fail snapshot initialization even when the suite runs with DAC override.
+    (fakebin / 'git').write_text('''#!/bin/sh
+case "${CASE:-}:$*" in
+  publication-internal-error:*appserver-import-*" init --bare --quiet")
+    echo "fixture: private Git snapshot initialization failed" >&2
+    exit 79 ;;
+esac
+exec "$CASE_REAL_GIT" "$@"
+''')
+    (fakebin / 'git').chmod(0o755)
+    env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'],
+               CASE_REAL_GIT=shutil.which('git'))
+    cases = ['scout-stale','scout-success','scout-failed','scout-interrupted','scout-missing','scout-path','scout-large','scout-duplicate','scout-preexisting','working','success','failed','interrupted','result-active','success-no-result',
                  'wrong-thread','wrong-turn','sibling','unknown','bad-report','malformed','death','verification-refusal','verification-stale','publication-internal-error',
                  'decision','decision-held','decision-held-legacy','decision-large','decision-death','decision-cancel','decision-backend-death','interrupt-error','interrupt-timeout','stale',
-                 'duplicate-request','bad-json','bad-params','bad-turn','bad-response','oversized','large-report','bad-shape','unknown-tool']:
+                 'duplicate-request','bad-json','bad-params','bad-turn','bad-response','oversized','large-report','bad-shape','unknown-tool']
+    if shutil.which('tasks-axi'):
+        cases.append('managed-success')
+    for case in cases:
         home = top / case
         state = home / 's'
         state.mkdir(parents=True)
@@ -455,7 +467,7 @@ with tempfile.TemporaryDirectory(prefix='fm-as-') as tmp:
         brief = home / 'brief'
         brief.write_text('test')
         gen = subprocess.check_output(['bash',str(ROOT/'bin/fm-busy-event.sh'),'arm',str(state),'t'],text=True).strip()
-        (state/'t.meta').write_text(f'busy_gen={gen}\ncodex_transport=appserver\nworktree={work}\nkind={'scout' if case.startswith('scout-') else 'ship'}\nbranch={branch}\nharness=codex\nwindow=test:fm-t\n')
+        (state/'t.meta').write_text(f'spawn_gen=spawn-test\nbusy_gen={gen}\ncodex_transport=appserver\nworktree={work}\nkind={'scout' if case.startswith('scout-') else 'ship'}\nmode=local-only\nbranch={branch}\nharness=codex\nwindow=test:fm-t\n')
         (state/'sibling.status').write_text('PRESERVE')
         def send(text, key=''):
             args = ['bash',str(ROOT/'bin/fm-send.sh'),'t']
@@ -471,9 +483,25 @@ with tempfile.TemporaryDirectory(prefix='fm-as-') as tmp:
         def statuses():
             return log.read_text() if log.exists() else ''
         out = open(home/'output','w')
-        proc = subprocess.Popen(['python3',str(ROOT/'bin/fm-codex-appserver.py'),'run',str(state),'t',gen,str(home/'data'),str(brief),str(work)],env=dict(env,CASE=case,FM_HOME=str(home),FM_DATA_OVERRIDE=str(home/'ambient-data'),CASE_STATE=str(state),CASE_GEN=gen,CASE_WORKTREE=str(work),CASE_ROOT=str(ROOT),CASE_HOME=str(home)),stdout=out,stderr=out)
+        command = ['python3',str(ROOT/'bin/fm-codex-appserver.py'),'run',str(state),'t',gen,str(home/'data'),str(brief),str(work)]
+        adapter_env = dict(env,CASE=case,FM_HOME=str(home),FM_DATA_OVERRIDE=str(home/'ambient-data'),CASE_STATE=str(state),CASE_GEN=gen,CASE_WORKTREE=str(work),CASE_ROOT=str(ROOT),CASE_HOME=str(home))
+        if case == 'managed-success':
+            backlog = home/'data'/'backlog.md'
+            backlog.write_text('# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n')
+            subprocess.run(['tasks-axi','add','t','Managed delivery','--start','--file',str(backlog)],
+                           cwd=home,check=True,stdout=subprocess.DEVNULL)
+            command += ['', '', '--finalize']
+            adapter_env.update(FM_STATE_OVERRIDE=str(state), FM_DATA_OVERRIDE=str(home/'data'))
+        proc = subprocess.Popen(command,env=adapter_env,stdout=out,stderr=out)
         try:
-            if case == 'scout-stale':
+            if case == 'managed-success':
+                proc.wait(timeout=15)
+                assert proc.returncode == 0, (home/'output').read_text()
+                row = subprocess.check_output(['tasks-axi','show','t','--file',str(backlog)],cwd=home,text=True)
+                assert 'state: done' in row, row
+                assert 'state: done' in crew()
+                assert (state/'t.meta').exists()
+            elif case == 'scout-stale':
                 proc.wait(timeout=10)
                 assert proc.returncode != 0
                 assert 'done' not in statuses()
@@ -499,9 +527,8 @@ with tempfile.TemporaryDirectory(prefix='fm-as-') as tmp:
                 assert 'failed:' not in statuses() and 'done:' not in statuses()
             elif case == 'publication-internal-error':
                 proc.wait(timeout=10)
-                task_store_parent=Path('/dev/shm/firstmate-appserver/t')
-                if task_store_parent.exists(): os.chmod(task_store_parent,0o700)
                 assert proc.returncode != 0
+                assert 'fixture: private Git snapshot initialization failed' in (home/'output').read_text()
                 assert 'state=unknown' in busy.read_text() and 'process-failed' in busy.read_text()
                 assert 'private-git-verification-refused' not in statuses()
                 assert 'done:' not in statuses()
@@ -583,9 +610,12 @@ with tempfile.TemporaryDirectory(prefix='fm-as-') as tmp:
                     assert control('answer','ANSWER',key).returncode!=0
                     assert 'state: done' not in crew()
                 else:
-                    assert control('interrupt').returncode==0
+                    operation = 'exit' if case == 'decision-cancel' else 'interrupt'
+                    assert control(operation).returncode==0
                     proc.wait(timeout=15)
-                    assert 'turn-interrupted' in busy.read_text()
+                    assert ('turn-cancelled' if operation == 'exit' else 'turn-interrupted') in busy.read_text()
+                    if operation == 'exit':
+                        assert 'state: cancelled' in crew()
                     assert 'done' not in statuses()
                     if case.startswith('decision-held'):
                         assert 'captain-held [key=' in statuses()
@@ -642,6 +672,9 @@ with tempfile.TemporaryDirectory(prefix='fm-as-') as tmp:
                     assert real_git(repo, 'rev-parse', branch).decode().strip() == head
                     assert real_git(work, 'show', 'HEAD:tracked.txt') == b'app-server delivery\n'
                     assert real_git(work, 'status', '--porcelain').strip() == b''
+                    if case == 'success':
+                        real_git(repo, 'worktree', 'remove', str(work))
+                        assert 'state: done' in crew()
                 elif case in ('death','decision-cancel','decision-backend-death','failed','interrupted','verification-refusal','verification-stale','publication-internal-error','result-active','stale'):
                     head = real_git(private, 'rev-parse', 'HEAD').decode().strip()
                     assert head != base
@@ -668,5 +701,4 @@ with tempfile.TemporaryDirectory(prefix='fm-as-') as tmp:
             out.close()
             if not is_scout:
                 task_store_parent=Path('/dev/shm/firstmate-appserver/t')
-                if task_store_parent.exists(): os.chmod(task_store_parent,0o700)
                 shutil.rmtree(task_store_parent / gen, ignore_errors=True)

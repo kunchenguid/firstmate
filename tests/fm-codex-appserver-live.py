@@ -93,6 +93,8 @@ def stop(task):
         raise RuntimeError(result.stdout+result.stderr)
     print(result.stdout.strip(),flush=True)
     match=re.search(r'pid=(\d+) exit=0',result.stdout)
+    if result.stdout.startswith('already-stopped '):
+        match=re.search(r'app-server started pid=(\d+)',capture(task))
     assert match, result.stdout
     assert not Path('/proc/'+match[1]).exists(), 'orphan app-server'
     wait(lambda:'already-stopped' in fm('fm-control.sh',task,'exit'), 'idempotent exit')
@@ -279,7 +281,7 @@ PYSEC""".replace('PROBES',repr({name:str(path) for name,path in probes.items()})
         report=lab/'data/cancel/report.md'
         assert not report.exists()
         stop('cancel')
-        assert 'state: failed' in status('cancel') and 'done' not in log('cancel')
+        assert 'state: cancelled' in status('cancel') and 'done' not in log('cancel')
         assert not report.exists()
         (lab/'cancel-trace.txt').write_text(capture('cancel'))
         assert '"status": "interrupted"' in capture('cancel')

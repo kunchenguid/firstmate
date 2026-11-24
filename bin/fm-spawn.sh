@@ -5149,6 +5149,9 @@ fi
 if [ "$CODEX_APPSERVER" = 1 ]; then
   [ "$HARNESS" = codex ] || { echo "error: --codex-appserver requires codex" >&2; exit 1; }
   LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") FM_DATA_OVERRIDE=$(shell_quote "$DATA") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") python3 $(shell_quote "$SCRIPT_DIR/fm-codex-appserver.py") run $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN") $(shell_quote "$DATA") $(shell_quote "$BRIEF") $(shell_quote "$WT") $(shell_quote "$MODEL") $(shell_quote "$EFFORT")"
+  if [ "$KIND" = ship ] && [ "$MODE" = local-only ]; then
+    LAUNCH="$LAUNCH --finalize"
+  fi
 fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

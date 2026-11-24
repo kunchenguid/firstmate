@@ -232,7 +232,7 @@ printf '%s\n' "$ordinary" | jq -e '.accepted and .task_id == "working01"' >/dev/
 pass 'decision answers require a current key while ordinary steering remains available'
 
 cancelled=$("$API" cancel owned001)
-printf '%s\n' "$cancelled" | jq -e '.agent_stopped and .task_state_retained and (.semantics | contains("not a durable cancelled state"))' >/dev/null \
+printf '%s\n' "$cancelled" | jq -e '.agent_stopped and .task_state_retained and (.semantics | contains("query status"))' >/dev/null \
   || fail 'cancel preserves its verified-exit-only semantics'
 pass 'owned cancellation delegates without inventing terminal task state'
 
