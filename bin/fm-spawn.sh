@@ -3519,7 +3519,6 @@ fi
 AGY_EFFORT_SOURCE=
 if [ "$HARNESS" = agy ]; then
   AGY_EFFORT_SOURCE=$(agy_model_validate "$AGY_BIN" "$MODEL") || exit 1
-  [ "$RAW_LAUNCH" = 0 ] || AGY_EFFORT_SOURCE=
 fi
 # polytoken's model validation composes firstmate's model and effort axes into
 # the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
