@@ -161,6 +161,27 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
   pass "a fresh herdr spawn leases the copy and moves the pane's top-level shell into it"
 }
 
+# Presentation spaces need the launcher's exact parent workspace. Here the
+# launcher has no Herdr pane and no workspace carries the home's label, so the
+# parent is absent: the spawn must warn and use the ordinary flat layout, not
+# stop before it can read the fallback verdict.
+test_fresh_spawn_without_a_presentation_parent_falls_back_flat() {
+  local id=lease-no-parent dir out status
+  dir=$(make_lease_case "$id")
+  mkdir -p "$dir/home/config"
+  printf 'on\n' > "$dir/home/config/herdr-presentation-spaces"
+  : > "$dir/fake/session-lockable"
+  out=$(run_lease_spawn "$dir" "$id")
+  status=$?
+  expect_code 0 "$status" "a spawn without a presentation parent should fall back flat"$'\n'"$out"
+  assert_contains "$out" "presentation parent is absent or ambiguous; using the ordinary flat layout" \
+    "the spawn did not take the parent-absent fallback"
+  assert_grep "workspace create" "$dir/fake/herdr-log" "the flat fallback did not create the ordinary workspace"
+  assert_grep "herdr_workspace_id=wsnew" "$dir/home/state/$id.meta" "meta did not record the flat workspace"
+  [ ! -e "$dir/home/state/$id.herdr-presentation" ] || fail "the flat fallback left a presentation journal"
+  pass "a fresh herdr spawn without a presentation parent falls back to the flat layout"
+}
+
 test_failed_lease_refuses_without_a_record() {
   local id=lease-refused dir out status
   dir=$(make_lease_case "$id")
@@ -294,6 +315,7 @@ test_dropped_worktree_entry
 test_never_moving_worktree_entry
 
 test_fresh_spawn_leases_and_moves_the_top_level_shell
+test_fresh_spawn_without_a_presentation_parent_falls_back_flat
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
 test_rolled_back_spawn_after_launch_names_the_lease_it_keeps
