@@ -56,11 +56,11 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
 # machine a short fixed budget can reap a round before the cycle it asserts on
 # ever ran - and then every "no wake, no marker" assertion passes vacuously
 # while every "marker written" assertion fails spuriously.
-# The cycle boundary (
-# `state/.watch-cycle`) is written at the TOP of every poll, so this drops any
-# marker left by an earlier round, waits for THIS watcher to write a fresh one
-# (some poll's top), then waits for that one to advance (the next poll's top) -
-# and the whole cycle in between is what the caller's assertions describe.
+# The cycle boundary, `state/.watch-cycle`, is written at the TOP of every poll,
+# so this drops any marker left by an earlier round, waits for THIS watcher to
+# write a fresh one (some poll's top), then waits for that one to advance (the
+# next poll's top) - and the whole cycle in between is what the caller's
+# assertions describe.
 # The liveness beacon (`state/.last-watcher-beat`) is never the cycle signal: a
 # long cycle refreshes it between sweep units on purpose, so its mtime can move
 # several times inside one poll (docs/turnend-guard.md "Cycle progress keeps the
