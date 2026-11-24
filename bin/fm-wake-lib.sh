@@ -174,6 +174,21 @@ fm_path_age() {
   echo $(( now - m ))
 }
 
+# fm_watch_settings_load
+# The one settings-load boundary every watcher launch and every grace reader
+# uses: the home's config/watch.env, then config/x-mode.env so Relay's generated
+# cadence stays authoritative, under FM_CONFIG_OVERRIDE when supplied. Called
+# from a subshell, it applies a home's tuning without inheriting it into the
+# caller's own environment.
+fm_watch_settings_load() {
+  local config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
+  # shellcheck source=/dev/null
+  [ ! -f "$config/watch.env" ] || . "$config/watch.env" >/dev/null
+  # shellcheck source=/dev/null
+  [ ! -f "$config/x-mode.env" ] || . "$config/x-mode.env" >/dev/null
+  return 0
+}
+
 # fm_poll_derived_grace [poll-seconds]
 # Default guard-grace derivation: max(300, poll + 60). A watcher touches its
 # liveness beacon once per poll cycle, so a fixed 300s grace stops correctly
@@ -185,15 +200,6 @@ fm_path_age() {
 # derives the same default fm-watch.sh itself would use.
 # docs/turnend-guard.md "Guard grace and the poll cadence" is the single owner
 # of the rationale; every FM_GUARD_GRACE default should derive from this.
-fm_watch_settings_load() {
-  local config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
-  # shellcheck source=/dev/null
-  [ ! -f "$config/watch.env" ] || . "$config/watch.env" >/dev/null
-  # shellcheck source=/dev/null
-  [ ! -f "$config/x-mode.env" ] || . "$config/x-mode.env" >/dev/null
-  return 0
-}
-
 fm_poll_derived_grace() (
   local poll=${1:-} margin=60 derived
   if [ -z "$poll" ]; then
@@ -222,11 +228,11 @@ fm_watcher_stall_bound() (
 
 # fm_beacon_grace
 # The beacon-freshness grace every liveness reader judges against: an explicit
-# FM_GUARD_GRACE, else the poll-derived default above. bin/fm-guard.sh,
-# bin/fm-watch-arm.sh, bin/fm-watch.sh, and the turn-end guards all call this so
-# the warning, the replacement arm, and the watcher's own re-arm agree on what
-# "fresh" means instead of each carrying its own flat constant.
-# docs/turnend-guard.md "Guard grace and the poll cadence" owns the rationale.
+# FM_GUARD_GRACE, else the poll-derived default above. Callers must use this
+# rather than a local constant so the warning, the replacement arm, and the
+# watcher's own re-arm agree on what "fresh" means; a search for this name is
+# the reader list. docs/turnend-guard.md "Guard grace and the poll cadence"
+# owns the rationale.
 fm_beacon_grace() (
   fm_watch_settings_load
   printf '%s\n' "${FM_GUARD_GRACE:-$(fm_poll_derived_grace "${FM_POLL:-15}")}"
