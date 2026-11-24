@@ -113,9 +113,11 @@ remote_env() {
 
 # What the remote pane received, read back from the fixture's verbatim log. The
 # fixture logs one line per invocation as the joined argv, so each payload sits
-# between the pane id and the trailing session selector. The Herdr adapter sends
-# a pre-launch export as a `pane run` line and the launch command itself as the
-# unsubmitted literal `pane send-text`.
+# between the pane id and the trailing session selector. Herdr types no
+# pre-launch export as its own `pane run` line, because `pane run` returns before
+# its submit is executed and the next typed line fuses onto it; the launch
+# command is one unsubmitted `pane send-text` literal, and the export statements
+# ride its first line, which the sourcing shell executes in the pane's own shell.
 remote_pane_payload() {  # <verb>
   sed -n "s/^pane $1 [^ ]* \\(.*\\) --session [^ ]*\$/\\1/p" "$HERDR_LOG"
 }
@@ -127,8 +129,10 @@ remote_launch_command() {
   [ -n "$staged" ] && [ -f "$staged" ] || return 1
   cat "$staged"
 }
+# The pre-launch export statements, split back out of the launch's first line so
+# each one can be asserted on its own.
 remote_pane_exports() {
-  remote_pane_payload run | grep '^export '
+  remote_launch_command | sed -n '1s/; /\n/gp' | grep '^export ' || true
 }
 
 # Provision and register the remote route from the captain-facing primary.

@@ -280,6 +280,7 @@ tests/fm-spawn-compact-adviser-disable.test.sh	47269
 tests/fm-spawn-dispatch-profile.test.sh	534028
 tests/fm-spawn-external-review.test.sh	6926
 tests/fm-spawn-herdr-lease.test.sh	19025
+tests/fm-spawn-herdr-prelaunch-fusion.test.sh	10060
 tests/fm-spawn-manual-pr-text.test.sh	8446
 tests/fm-spawn-orca-worktree.test.sh	59730
 tests/fm-spawn-pool-base-freshen.test.sh	170365
