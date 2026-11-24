@@ -551,7 +551,7 @@ fm_tmux_submit_typed_state() {  # <target> <before> <text> [scroll-capacity]
 # every tmux double and recorded transcript in this repository models; only the
 # option-shaped write, which would break without the marker, takes it.
 fm_tmux_type_literal() {  # <target> <text> [chunk]
-  local target=$1 text=$2 chunk=${3:-0} i=0 n=0 err
+  local target=$1 text=$2 chunk=${3:-0} i=0 n=0 end=0 byte probe err
   # bash 3.2 expands a whole `local` line before assigning any of it, so the
   # length must be taken after `text` is bound, or `${#text}` reads the caller's
   # scope (and aborts a `set -u` caller that has no `text`).
@@ -567,16 +567,28 @@ fm_tmux_type_literal() {  # <target> <text> [chunk]
     return 0
   fi
   while [ "$i" -lt "$n" ]; do
+    end=$((i + chunk))
+    while [ "$end" -lt "$n" ]; do
+      probe=${text:end:1}
+      case "$probe" in
+        [[:print:]]) break ;;
+      esac
+      byte=$(printf '%d' "'$probe" 2>/dev/null) || break
+      byte=$(((byte % 256 + 256) % 256))
+      { [ "$byte" -ge 128 ] && [ "$byte" -le 191 ]; } || break
+      end=$((end + 1))
+    done
+    [ "$end" -gt "$n" ] && end=$n
     # A chunk boundary can fall anywhere, so the chunk itself decides: one that
     # begins with `-` would be read as a tmux flag and needs the marker.
     if [ "${text:i:1}" = - ]; then
-      err=$(tmux send-keys -t "$target" -l -- "${text:i:chunk}" 2>&1 >/dev/null) \
+      err=$(tmux send-keys -t "$target" -l -- "${text:i:end-i}" 2>&1 >/dev/null) \
         || { printf '%s' "$err"; return 1; }
     else
-      err=$(tmux send-keys -t "$target" -l "${text:i:chunk}" 2>&1 >/dev/null) \
+      err=$(tmux send-keys -t "$target" -l "${text:i:end-i}" 2>&1 >/dev/null) \
         || { printf '%s' "$err"; return 1; }
     fi
-    i=$((i + chunk))
+    i=$end
     if [ "$i" -lt "$n" ]; then sleep "${FM_WINTERMOLT_TYPE_INTERVAL:-0.05}"; fi
   done
   return 0
