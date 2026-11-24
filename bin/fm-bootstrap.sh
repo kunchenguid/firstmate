@@ -1610,27 +1610,32 @@ treehouse_pool_report() {
       if [ -n "$repo" ]; then
         identity=$(git -C "$slot" remote get-url origin 2>/dev/null) || identity=$repo
         [ -n "$identity" ] || identity=$repo
-        duplicate=0
-        seen_pair=0
-        for ((i = 0; i < ${#seen_repos[@]}; i++)); do
-          if [ "${seen_repos[$i]}" = "$identity" ]; then
-            if [ "${seen_pools[$i]}" = "$pool" ]; then
-              seen_pair=1
-            else
-              duplicate=1
+        case "$pool" in
+          */fm-secondmate/*/.treehouse/*) ;;
+          *)
+            duplicate=0
+            seen_pair=0
+            for ((i = 0; i < ${#seen_repos[@]}; i++)); do
+              if [ "${seen_repos[$i]}" = "$identity" ]; then
+                if [ "${seen_pools[$i]}" = "$pool" ]; then
+                  seen_pair=1
+                else
+                  duplicate=1
+                fi
+              fi
+            done
+            if [ "$duplicate" -eq 1 ]; then
+              if [ "$duplicate_reported" -eq 0 ]; then
+                echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $repo)"
+                duplicate_reported=1
+              fi
             fi
-          fi
-        done
-        if [ "$duplicate" -eq 1 ]; then
-          if [ "$duplicate_reported" -eq 0 ]; then
-            echo "TREEHOUSE_POOL_REPORT: duplicate-clone pool $pool (project $repo)"
-            duplicate_reported=1
-          fi
-        fi
-        if [ "$seen_pair" -eq 0 ]; then
-          seen_repos+=("$identity")
-          seen_pools+=("$pool")
-        fi
+            if [ "$seen_pair" -eq 0 ]; then
+              seen_repos+=("$identity")
+              seen_pools+=("$pool")
+            fi
+            ;;
+        esac
       fi
       if [ ! -e "${slot%/*}/.fm-slot-owner" ] && [ ! -e "$slot/.fm-slot-owner" ] \
         && [ "$owner_live" -eq 0 ] && [ "$slot_leased" != true ]; then

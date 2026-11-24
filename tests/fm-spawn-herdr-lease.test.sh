@@ -168,7 +168,7 @@ test_local_secondmate_leases_from_its_own_pool() {
   mkdir -p "$dir/parent-home/state"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
     "$dir/parent-home" > "$dir/home/.fm-secondmate-parent"
-  root=$(FM_HOME="$dir/home" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2" "$2/state"' \
+  root=$(FM_HOME="$dir/home" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2"' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$dir/home")
   [ -n "$root" ] || fail "a local secondmate spawn root was empty"
   out=$(run_lease_spawn "$dir" "$id")

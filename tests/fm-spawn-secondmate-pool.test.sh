@@ -131,7 +131,7 @@ meta_worktree() {  # <home> <id>
 
 spawn_root_for() {  # <home>
   local home=$1
-  FM_HOME="$home" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2" "$2/state"' \
+  FM_HOME="$home" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2"' \
     _ "$ROOT/bin/fm-wake-lib.sh" "$home"
 }
 
@@ -241,7 +241,45 @@ test_remote_seeded_home_keeps_the_default_pool() {
   pass "a remote-seeded home keeps the default pool and the worktree-of-project check stays intact"
 }
 
+test_relative_treehouse_root_is_ignored() {
+  local case_dir mate home_real user root
+  case_dir="$TMP_ROOT/relative-root"
+  make_main_home "$case_dir"
+  make_mate_home "$case_dir" local
+  mate="$case_dir/mate-home"
+  user="$case_dir/user-home"
+  mkdir -p "$user"
+  home_real=$(CDPATH='' cd -- "$mate" && pwd -P)
+  root=$(HOME="$user" TREEHOUSE_ROOT=. spawn_root_for "$mate")
+  [ -n "$root" ] || fail "a relative TREEHOUSE_ROOT left the spawn root empty"
+  case "$root" in
+    "$user/.treehouse/fm-secondmate/"*) ;;
+    *) fail "relative TREEHOUSE_ROOT was not ignored: $root" ;;
+  esac
+  case "$root" in
+    "$home_real"|"$home_real"/*) fail "ignored relative TREEHOUSE_ROOT still sat under the home: $root" ;;
+  esac
+  pass "a relative TREEHOUSE_ROOT is ignored in favor of \$HOME/.treehouse"
+}
+
+test_treehouse_root_under_the_home_is_refused() {
+  local case_dir mate root status
+  case_dir="$TMP_ROOT/under-home-root"
+  make_main_home "$case_dir"
+  make_mate_home "$case_dir" local
+  mate="$case_dir/mate-home"
+  mkdir -p "$mate/inside"
+  root=
+  status=0
+  root=$(TREEHOUSE_ROOT="$mate/inside" spawn_root_for "$mate") || status=$?
+  [ "$status" -ne 0 ] || fail "absolute TREEHOUSE_ROOT under the home was accepted: $root"
+  [ -z "$root" ] || fail "a refused spawn root still printed: $root"
+  pass "an absolute TREEHOUSE_ROOT under the home is refused"
+}
+
 test_local_secondmate_pool_root_is_outside_the_home
+test_relative_treehouse_root_is_ignored
+test_treehouse_root_under_the_home_is_refused
 test_local_secondmate_spawns_from_its_own_clone_pool
 test_root_home_keeps_the_default_pool
 test_remote_seeded_home_keeps_the_default_pool

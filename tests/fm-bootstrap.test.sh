@@ -1831,6 +1831,39 @@ JSON
   pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
 }
 
+test_treehouse_pool_report_skips_secondmate_duplicate_clone() {
+  local case_dir home root fakebin clone_default clone_mate origin out
+  case_dir="$TMP_ROOT/pool-report-secondmate-dup"
+  home="$case_dir/home"
+  root="$case_dir/pools"
+  clone_default="$home/projects/default-clone"
+  clone_mate="$case_dir/mate-clone"
+  origin="$case_dir/origin.git"
+  mkdir -p "$home/config" "$home/projects" \
+    "$root/default-pool" "$root/fm-secondmate/mate-id/.treehouse/mate-pool"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  git init -q "$clone_default"
+  git -C "$clone_default" -c user.email=pool-test@example.invalid -c user.name=pool-test \
+    commit -q --allow-empty -m fixture
+  git init -q --bare "$origin"
+  git -C "$clone_default" remote add origin "$origin"
+  git -C "$clone_default" push -q -u origin HEAD
+  git clone -q "$origin" "$clone_mate"
+  cat > "$root/default-pool/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$clone_default","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/fm-secondmate/mate-id/.treehouse/mate-pool/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$clone_mate","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  : > "$home/config/treehouse-pool-report"
+  out=$(PATH="$fakebin:$BASE_PATH" TREEHOUSE_ROOT="$root" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "duplicate-clone" \
+    "a secondmate pool sharing the default pool's origin was reported as a duplicate clone"
+  pass "bootstrap does not report a secondmate pool as a duplicate of the default pool"
+}
+
 test_treehouse_pool_report_needs_its_flag() {
   local case_dir home root fakebin real_jq jq_log out baseline
   case_dir="$TMP_ROOT/pool-report-flag-absent"
@@ -1925,6 +1958,7 @@ test_record_hygiene_absent_flag_is_inert
 test_record_hygiene_watcher_absent_flag_is_inert
 test_bootstrap_reporting
 test_treehouse_pool_report_is_read_only_and_classifies_pools
+test_treehouse_pool_report_skips_secondmate_duplicate_clone
 test_treehouse_pool_report_needs_its_flag
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version

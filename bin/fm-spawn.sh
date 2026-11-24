@@ -4289,7 +4289,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  SPAWN_TREEHOUSE_ROOT=$(fm_treehouse_spawn_root "$FM_HOME" "$STATE") || {
+  SPAWN_TREEHOUSE_ROOT=$(fm_treehouse_spawn_root "$FM_HOME") || {
     echo "error: could not resolve which Treehouse pool this home's clone of $PROJ_ABS uses" >&2
     exit 1
   }
