@@ -184,6 +184,8 @@ assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no p
   || fail "default-off remote spawn must not record a traceparent= line"
 ! grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
   || fail "default-off remote spawn must not export a carrier into the remote pane"
+! remote_staged_launch | grep -q 'export TRACEPARENT=' \
+  || fail "default-off remote spawn must not carry a carrier in the staged launch"
 ! grep -q '^traceparent=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   || fail "default-off remote spawn must not record a carrier on the remote host"
 [ "$(remote_launch_snapshot)" = off ] \

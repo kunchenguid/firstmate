@@ -164,6 +164,13 @@ assert_no_export_line_is_typed() { # <case-dir> <label>
     || fail "$label: the pane received $typed pre-launch export line(s) as their own command, which the next typed line fuses onto"$'\n'"$(cat "$dir/fake/run-texts")"
 }
 
+assert_no_pane_run_is_typed() { # <case-dir> <label>
+  local dir=$1 label=$2 runs
+  runs=$(grep -c '^' "$dir/fake/run-texts" || true)
+  [ "${runs:-0}" -eq 0 ] \
+    || fail "$label: the pane received $runs pre-launch run write(s), and each returns before its submit, so the launch literal can fuse onto one"$'\n'"$(cat "$dir/fake/run-texts")"
+}
+
 assert_launch_is_one_literal() { # <case-dir> <label>
   local dir=$1 label=$2 literals staged
   literals=$(grep -c '^' "$dir/fake/literal-texts" || true)
@@ -253,6 +260,7 @@ test_relaunch_launches_in_one_write() {
   status=$?
   expect_code 0 "$status" "the herdr relaunch should succeed"$'\n'"$out"
   assert_no_export_line_is_typed "$dir" "a herdr relaunch"
+  assert_no_pane_run_is_typed "$dir" "a herdr relaunch already in its recorded worktree"
   assert_launch_is_one_literal "$dir" "a herdr relaunch"
   assert_exports_ride_the_launch "$dir" "a herdr relaunch" "$id"
   pass "a Herdr relaunch types its exports only through the launch line, so nothing can fuse onto it"

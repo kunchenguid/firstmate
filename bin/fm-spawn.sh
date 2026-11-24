@@ -5577,10 +5577,15 @@ spawn_lease_herdr_slot() {
 # out of the primary checkout. The same explicit cd gives every backend one
 # launch boundary and makes a dropped or ignored cwd change a refusal.
 spawn_enter_recorded_worktree() {
+  local seen
   [ "$KIND" = secondmate ] && return 0
   # T3 starts the agent in the leased worktree its thread launch bound;
   # there is no shell endpoint to receive a cd command.
   [ "$BACKEND" = t3code ] && return 0
+  if [ "$BACKEND" = herdr ]; then
+    seen=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ] || return 0
+  fi
   spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {
     echo "error: task $ID's endpoint could not be moved into its recorded worktree '$WT'; refusing to launch outside the copy holding its work" >&2
     exit 1
