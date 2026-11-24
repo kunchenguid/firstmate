@@ -166,13 +166,12 @@ sleep 1
 styled=$(tmux capture-pane -e -p -t "$SESSION:$WIN" 2>/dev/null | tail -n "$FM_COMPOSER_CAPTURE_LINES")
 plain=$(printf '%s\n' "$styled" | fm_composer_strip_ansi)
 
-# The vendor string itself: Pi's banner row must match the declared pattern
-# whole, so a respelled banner fails here rather than at the next incident.
 banner_row=$(printf '%s\n' "$plain" | grep -m1 'Codex error' || true)
 fm_composer_normalize_trim_var banner_row
 note "pi ($VERSION): rendered banner row: $banner_row"
-printf '%s' "$banner_row" | grep -qE "$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT" \
-  || fail "pi ($VERSION): the rendered banner '$banner_row' no longer matches FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT"
+expected_banner='Error: Codex error: The usage limit has been reached'
+[ "$banner_row" = "$expected_banner" ] \
+  || fail "pi ($VERSION): the rendered banner '$banner_row' differs from the expected Pi banner"
 
 for status in working unknown idle; do
   verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$styled" '' "$(printf 'pi\t%s' "$status")")
