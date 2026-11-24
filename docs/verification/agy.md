@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.2.0` for the baseline adapter and spawn checks; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12); tracked background `run_command` (`WaitMsBeforeAsync: 5000`) and reactive wakeup were observed on `agy 1.5.15` (2026-11-24) |
+| Verified | 2026-09-10 for the baseline adapter; 2026-11-24 for background supervision |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
@@ -160,7 +160,7 @@ Session-open digest injection is implemented by `bin/fm-sessionstart-agy.sh` on 
 PreToolUse seatbelts enforce execution safety through `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
 In primary and secondmate homes, watcher commands are classified by the shared arm-command policy, `cd` commands are denied in favor of absolute paths or `cwd`, and subagent invocations (`invoke_subagent`, `define_subagent`) are denied while inspection tools (`manage_subagents`, `manage_task`) remain permitted.
 Supervision continuity uses tracked background `run_command` execution (`WaitMsBeforeAsync: 5000`) of `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park`) with reactive wakeup, backed by the fast non-blocking `Stop` hook guard `bin/fm-turnend-guard-agy.sh` delegating to `bin/fm-turnend-guard.sh --agy` under a 30s timeout.
-The background arm and its reactive wakeup were observed interactively in the `agy` TUI, not in this record's automated run: `tests/fm-agy-primary-live-e2e.test.sh` drives `agy -p` one-shot, which covers only the `Stop` turn-end guard.
+The background arm and its reactive wakeup were observed interactively in the `agy 1.5.15` TUI (2026-11-24), not in this record's baseline automated run: `tests/fm-agy-primary-live-e2e.test.sh` drives `agy -p` one-shot, which covers only the `Stop` turn-end guard.
 Session lock verification recognizes `agy` process ancestry via `bin/fm-session-lock-lib.sh`.
 
 ## What is still unproven

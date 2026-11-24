@@ -1,6 +1,6 @@
 # Antigravity CLI
 
-Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend.
+Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend; primary tracked background `run_command` supervision was verified on `agy 1.5.15` (2026-11-24).
 Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
