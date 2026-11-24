@@ -245,14 +245,30 @@ test_budget_is_read_from_home_env() {
   out="$home/out2.txt"
   run_check "$home" "$out" "$CHECK" FM_MAIL_CHECK_BUDGET=5
   assert_contains "$(cat "$out")" "within the 5s budget" "the environment budget wins over the .env"
+  # This sub-case proves the clamp alone: with the bound at 5 the default 15 and
+  # the .env's 6 both cut to the same 2, so it cannot speak for the .env path,
+  # which the two sub-cases above prove on their own.
   out="$home/out3.txt"
   run_check "$home" "$out" "$CHECK" FM_CHECK_TIMEOUT=5
-  assert_contains "$(cat "$out")" "within the 2s budget" "a .env budget is still cut to fit the watcher bound"
-  pass "fm-mail-check: the budget honors the home .env with env-wins and the watcher bound"
+  assert_contains "$(cat "$out")" "within the 2s budget" "the budget is cut to fit the watcher bound"
+
+  # A zero-padded spelling is the same whole number, so it is accepted rather
+  # than labelled a bad value. A fast poll keeps this sub-case free of waiting.
+  home=$(make_home budget-padded)
+  write_env "$home"
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=025' >> "$home/.env"
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t20005\\n"
+printf "7\\t2026-09-05T00:00:00Z\\tcarol@example.com\\tHey\\n"'
+  out="$home/out4.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: new mail: woke for 7" "a zero-padded budget inside the range still polls"
+  assert_not_contains "$(cat "$out")" "FM_MAIL_CHECK_BUDGET" "a zero-padded budget inside the range is not called a bad value"
+  pass "fm-mail-check: the budget honors the home .env with env-wins, the watcher bound, and padded spellings"
 }
 
 test_rejected_budget_reports_and_keeps_polling() {
-  local home out
+  local home out padding
   home=$(make_home budget-bad)
   write_env "$home"
   # The value this incident invites an operator to leave behind: in range, but
@@ -265,7 +281,7 @@ test_rejected_budget_reports_and_keeps_polling() {
 printf "42\\t2026-09-05T00:00:00Z\\talice@example.com\\tHello\\n"'
   out="$home/out.txt"
   run_check "$home" "$out" "$CHECK"
-  assert_contains "$(cat "$out")" "mail: FM_MAIL_CHECK_BUDGET=25 # slow Gmail is not a whole number from 5 to 25" "a rejected budget names its value on the check's own stdout line"
+  assert_contains "$(cat "$out")" "FM_MAIL_CHECK_BUDGET=25 # slow Gmail is not a whole number from 5 to 25" "a rejected budget names its value on the check's own stdout line"
   assert_contains "$(cat "$out")" "polling on the 15s budget" "a rejected budget falls back to the default budget"
   assert_contains "$(cat "$out")" "new mail: woke for 42" "the poll still runs under a rejected budget"
   [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "a rejected budget still reports exactly one line: $(cat "$out")"
@@ -279,6 +295,21 @@ printf "43\\t2026-09-05T00:01:00Z\\tbob@example.com\\tHi\\n"'
   run_check "$home" "$out" "$CHECK" FM_MAIL_CHECK_BUDGET=30
   assert_contains "$(cat "$out")" "FM_MAIL_CHECK_BUDGET=30 is not a whole number from 5 to 25" "an out-of-range environment budget is named too"
   assert_contains "$(cat "$out")" "new mail: woke for 43" "the poll still runs under an out-of-range environment budget"
+
+  # A long annotated value must not cost the poll its own finding: the line cap
+  # cuts the configuration complaint that trails it instead.
+  padding=$(printf '%*s' 200 '')
+  home=$(make_home budget-bad-long)
+  write_env "$home"
+  printf '%s\n' "FM_MAIL_CHECK_BUDGET=25 # ${padding// /x}" >> "$home/.env"
+  enter_mailbox "$home" \
+    'printf "fm-mail poll error: connection refused\\n" >&2
+exit 1'
+  out="$home/out.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: fm-mail poll error: connection refused" "the poll's own finding survives a long rejected budget"
+  assert_contains "$(cat "$out")" " [truncated]" "the capped line cuts the trailing configuration complaint"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "a long rejected budget still reports exactly one line: $(cat "$out")"
 
   # Arming and disarming never use the budget, so they must stay available on a
   # home whose budget cannot be parsed.

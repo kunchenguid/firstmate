@@ -110,12 +110,17 @@ esac
 BUDGET_RAW=${FM_MAIL_CHECK_BUDGET:-}
 [ -n "$BUDGET_RAW" ] || BUDGET_RAW=$(fmx_env_get FM_MAIL_CHECK_BUDGET "$FM_HOME/.env")
 BUDGET_SECS=${BUDGET_RAW:-15}
+# A padded spelling is the number it names, so leading zeros go before the
+# value is judged by it.
+case "$BUDGET_SECS" in
+  0?*) BUDGET_SECS=${BUDGET_SECS#"${BUDGET_SECS%%[!0]*}"} ;;
+esac
 # Fall back rather than refuse. A refusal exits before the poll with a stderr
 # diagnostic the watcher discards, so one mistyped value would stop received
 # mail from ever surfacing again, and would also refuse `arm` and `disarm` on
 # that home. The rejected value is carried into the check's own line instead.
-# Three or more characters cannot be a valid budget, so the arithmetic
-# comparisons below never see a number too large for them.
+# Three or more digits cannot be a valid budget, so the arithmetic comparisons
+# below never see a number too large for them.
 BUDGET_BAD=
 case "$BUDGET_SECS" in
   ''|*[!0-9]*|0|???*) BUDGET_BAD=1 ;;
@@ -241,9 +246,10 @@ action_check() {
   fi
   # A rejected budget is a real condition of this poll, so it travels on the
   # same line the record dedupes rather than on the stderr the watcher drops.
+  # It trails the poll's own finding, which the line cap must never cut for it.
   if [ -n "$BUDGET_NOTE" ]; then
     if [ -n "$line" ]; then
-      line="$BUDGET_NOTE; $line"
+      line="$line; $BUDGET_NOTE"
     else
       line=$BUDGET_NOTE
     fi
