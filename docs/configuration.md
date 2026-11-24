@@ -1137,6 +1137,16 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Aborted-run turn-end absorb (config/turnend-abort-absorb)
+
+The optional local, gitignored `config/turnend-abort-absorb` presence flag opts this home into a default-off further form of positive work evidence for a bare turn-end.
+After a worker deliberately aborts a no-mistakes run and keeps working, current state keeps reading the aborted run until a fresh run starts, so every routine turn-end of that worker surfaces.
+With the flag present, a turn-end is absorbed when the task's current-state read is a run-step failure naming a run that is terminal in the no-mistakes run store with an explicit abort record, and its busy-state record reads exactly `state=busy` with a timestamp newer than that run's last update.
+The abort record is a `cancelled` status, or a `failed` status carrying the daemon's user-abort error, read from structured run-store fields and never from status-line prose.
+A run that failed for any other reason still surfaces, and with the flag absent behavior is unchanged.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+`bin/fm-classify-lib.sh`'s `crew_aborted_run_superseded_by_busy` owns the exact evidence and its refusal cases.
+
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
 The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off further form of wait evidence in the watcher's wedge timer.

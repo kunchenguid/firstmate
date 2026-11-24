@@ -650,6 +650,67 @@ test_signal_crew_provably_working_classifier() {
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
 
+abort_absorb_case() {  # <name> <run-status> <run-error> <busy-state> <busy-ts> <flag:on|off> [crew-state-line]
+  local dir state wt
+  dir=$(make_case "$1"); state="$dir/state"; wt="$dir/wt"
+  mkdir -p "$wt" "$dir/nm" "$dir/config"
+  python3 -I -c '
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1] + "/state.sqlite")
+db.execute("CREATE TABLE runs (id TEXT PRIMARY KEY, status TEXT, error TEXT, updated_at INTEGER)")
+db.execute("INSERT INTO runs VALUES (?, ?, ?, ?)", ("01ABORT", sys.argv[2], sys.argv[3], 1000))
+db.commit()
+' "$dir/nm" "$2" "$3"
+  printf 'worktree=%s\nkind=ship\n' "$wt" > "$state/abort.meta"
+  printf 'gen1\n' > "$state/abort.busy-gen"
+  printf 'v1 gen=gen1 seq=1 state=%s source=claude-hook event=prompt ts=%s\n' "$4" "$5" > "$state/abort.busy-state"
+  [ "$6" = on ] && : > "$dir/config/turnend-abort-absorb"
+  export NM_HOME="$dir/nm" STATE="$state" CONFIG="$dir/config"
+  export FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE_abort="${7:-state: failed · source: run-step · run failed · run: 01ABORT}"
+}
+
+abort_absorb_cleanup() {
+  unset NM_HOME STATE CONFIG FM_FAKE_CREW_STATE_abort
+}
+
+test_aborted_run_superseded_by_busy_verdict() {
+  abort_absorb_case abort-off cancelled 'cancelled: aborted by user' busy 2000 off
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag off: an aborted run's turn-end was absorbed"
+  abort_absorb_case abort-on cancelled 'cancelled: aborted by user' busy 2000 on
+  signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: aborted run with a newer busy verdict was not absorbed"
+  abort_absorb_case abort-failed-status failed 'cancelled: aborted by user' busy 2000 on
+  signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: failed run carrying the user-abort error was not absorbed"
+  abort_absorb_case abort-older cancelled 'cancelled: aborted by user' busy 900 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a busy verdict older than the abort was absorbed"
+  abort_absorb_case abort-equal cancelled 'cancelled: aborted by user' busy 1000 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a busy verdict at the abort instant was absorbed"
+  abort_absorb_case abort-idle cancelled 'cancelled: aborted by user' idle 2000 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: an idle verdict was absorbed"
+  abort_absorb_case abort-unknown cancelled 'cancelled: aborted by user' unknown 2000 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: an unknown verdict was absorbed"
+  abort_absorb_case abort-genuine failed 'step review failed' busy 2000 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a genuinely failed run was absorbed"
+  abort_absorb_case abort-stale-gen cancelled 'cancelled: aborted by user' busy 2000 on
+  printf 'other\n' > "$STATE/abort.busy-gen"
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a busy record from another incarnation was absorbed"
+  abort_absorb_case abort-no-run-id cancelled 'cancelled: aborted by user' busy 2000 on \
+    'state: failed · source: run-step · run failed'
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a verdict naming no run was absorbed"
+  abort_absorb_cleanup
+  pass "an aborted run is superseded by a newer busy verdict only under the opt-in flag"
+}
+
 test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   local dir fakebin state line
   dir=$(make_case secondmate-signal-classify); fakebin="$dir/fakebin"; state="$dir/state"
@@ -3471,6 +3532,7 @@ fm_test_run \
   test_empty_write_prune_from_the_environment_widens_the_probe \
   test_worktree_write_probe_is_wall_clock_bounded \
   test_signal_crew_provably_working_classifier \
+  test_aborted_run_superseded_by_busy_verdict \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
   test_provably_working_signal_absorbed \
   test_turn_ended_provably_working_absorbed \
