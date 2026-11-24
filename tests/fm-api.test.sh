@@ -146,6 +146,21 @@ printf '%s\n' "$duplicate" | jq -e '.reused and (.created == false) and .outcome
   || fail 'duplicate create does not spawn a second worker'
 pass 'same request id is idempotent and never launches twice'
 
+LOCK_CREATE=$(jq -cn '{request_id:"lock-create-0001",project:"demo",title:"lock canary",instruction:"Check create lock lifetime."}')
+printf '%s' "$LOCK_CREATE" | env FM_API_TEST_TASK_ID=locktask001 FM_API_TEST_HOLD_LOCK_CHILD=1 \
+    FM_API_TEST_LOCK_CHILD_PID="$TMP_ROOT/create-lock-child.pid" "$API" create >/dev/null
+lock_child=$(cat "$TMP_ROOT/create-lock-child.pid")
+LOCK_CREATE_SECOND=$(jq -cn '{request_id:"lock-create-0002",project:"demo",title:"second lock canary",instruction:"Check lock release."}')
+if lock_second=$(printf '%s' "$LOCK_CREATE_SECOND" | env FM_API_TEST_TASK_ID=locktask002 "$API" create 2>/dev/null); then
+  kill "$lock_child" 2>/dev/null || true
+else
+  kill "$lock_child" 2>/dev/null || true
+  fail 'detached backend inherited and held the API create lock'
+fi
+printf '%s\n' "$lock_second" | jq -e '.created and .task_id == "locktask002"' >/dev/null \
+  || fail 'a completed create leaves the lock available for another request'
+pass 'detached backend cannot retain the serialized create lock'
+
 DUPLICATE_SNAPSHOT=$(jq -c --arg duplicate_id dupe0001 '
   .backlog.records += [
     (.backlog.records[] | select(.id == "created001") | . + {id:$duplicate_id})

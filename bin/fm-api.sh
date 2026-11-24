@@ -295,6 +295,8 @@ case "$COMMAND" in
     mv -- "$DATA/$TASK_ID/brief.tmp" "$DATA/$TASK_ID/brief.md" \
       || api_error create_uncertain 'Task was queued, but the generated brief could not be published; do not create a replacement task.' "$TASK_ID"
     SPAWN_ARGS=("$TASK_ID" "$PROJECT_PATH" --mode "$MODE" --yolo off --branch-prefix "$BRANCH_PREFIX" --harness codex --effort low --codex-appserver)
+    # The detached backend must not inherit the create lock through tmux.
+    exec {CREATE_LOCK_FD}>&-
     if ! "$SCRIPT_DIR/fm-spawn.sh" "${SPAWN_ARGS[@]}" >/dev/null 2>&1; then
       api_error create_uncertain 'Task was queued and briefed, but Firstmate could not confirm a worker launch; do not create a replacement task.' "$TASK_ID"
     fi
