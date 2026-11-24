@@ -1475,7 +1475,9 @@ fm_recovery_resurface_admit() {  # <marker>
   FM_RECOVERY_RESURFACE_VERDICT=wake
   FM_RECOVERY_RESURFACE_COUNT=0
   budget=${FM_RECOVERY_RESURFACE_BUDGET:-3}
-  case "$budget" in ''|*[!0-9]*|0) budget=3 ;; esac
+  case "$budget" in ''|*[!0-9]*) budget=3 ;; esac
+  budget=$((10#$budget))
+  [ "$budget" -gt 0 ] || budget=3
   path=$(fm_recovery_resurface_count_path "$marker")
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 0

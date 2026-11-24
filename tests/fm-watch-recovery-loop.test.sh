@@ -407,7 +407,33 @@ test_unacknowledged_recovery_rewakes_are_bounded() {
   pass "unacknowledged recovery re-wakes stop after the bound with one notice, keep the episode durable, and reset on acknowledgement"
 }
 
+# T5: a budget that reads as zero, such as 00, is documented to fall back to
+# the default 3, so it must not turn the first recovery wake into the notice.
+test_zero_padded_zero_budget_uses_the_default_bound() {
+  local dir state lines cycle rc
+  dir=$(make_case recovery-rewake-zero-budget)
+  state="$dir/state"
+  mkdir -p "$dir/home/data"
+  printf 'pending:downtime:zero.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  append_wake "$state" check seed "check: seed work the drain must present" \
+    || fail "fixture: could not queue the seed wake"
+
+  for cycle in 1 2 3; do
+    lines=$(FM_RECOVERY_RESURFACE_BUDGET=00 run_rewake_cycle "$dir" 20); rc=$?
+    [ "$rc" -eq 0 ] && [ "$lines" = 'check: rearm-resurface' ] \
+      || fail "with budget 00, failed-drain cycle $cycle must resurface plainly: rc=$rc lines=$lines"
+  done
+  lines=$(FM_RECOVERY_RESURFACE_BUDGET=00 run_rewake_cycle "$dir" 20); rc=$?
+  case "$lines" in
+    'check: rearm-resurface paused - 3 consecutive '*) ;;
+    *) fail "with budget 00, the fourth cycle must be the default bound's notice: rc=$rc lines=$lines" ;;
+  esac
+  pass "a budget of 00 falls back to the default bound of 3"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_resurfaces_a_row_appended_during_startup
 test_unacknowledged_recovery_rewakes_are_bounded
+test_zero_padded_zero_budget_uses_the_default_bound
 test_unacknowledged_recovery_is_announced_once_per_generation
