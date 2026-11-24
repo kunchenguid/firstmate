@@ -38,7 +38,8 @@
 # The poll must finish inside the watcher's per-check bound
 # (FM_CHECK_TIMEOUT, default 30, read from this check's own environment
 # because the watcher runs it as a direct child). The internal budget
-# FM_MAIL_CHECK_BUDGET (default 15, valid 5..25) is cut down to whatever fits
+# FM_MAIL_CHECK_BUDGET (default 15, valid 5..25; read from the environment, else
+# from <FM_HOME>/.env, because the watcher shim does not load the .env) is cut down to whatever fits
 # inside that bound before the poll starts. A poll that does not finish is a
 # real condition, so the budget is enforced rather than assumed: a timed-out
 # poll reports one line naming the budget instead of leaving the check silent.
@@ -65,6 +66,8 @@ MAX_LINE=240
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-env-lib.sh
+. "$SCRIPT_DIR/fm-env-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -98,7 +101,12 @@ case "$CHECK_TIMEOUT" in
   ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;;
 esac
 
-BUDGET_SECS=${FM_MAIL_CHECK_BUDGET:-15}
+# The watcher runs this check through state/mail.check.sh without the home's
+# .env, so the budget is filled from $FM_HOME/.env when the environment does not
+# set it (env wins, the same fmx_env_get convention fm-mail.sh uses).
+BUDGET_SECS=${FM_MAIL_CHECK_BUDGET:-}
+[ -n "$BUDGET_SECS" ] || BUDGET_SECS=$(fmx_env_get FM_MAIL_CHECK_BUDGET "$FM_HOME/.env")
+BUDGET_SECS=${BUDGET_SECS:-15}
 case "$BUDGET_SECS" in
   ''|*[!0-9]*|0)
     printf 'fm-mail-check: FM_MAIL_CHECK_BUDGET must be a whole number from 5 to 25\n' >&2

@@ -2681,6 +2681,7 @@ Same-line silence is only for a proven no-op: a successful poll with no new mail
 A fail-closed poll that already queued a wake, and a timeout, always print so the watcher wakes to drain it.
 
 `FM_MAIL_CHECK_BUDGET` (default 15, valid 5..25) bounds one standing poll and is cut down to fit `FM_CHECK_TIMEOUT`.
+The check reads it from its environment first and otherwise from the home's `.env`, because the watcher runs it without loading that file.
 `bin/fm-mail-check.sh disarm` removes the standing check.
 
 ## Relay (.env)
