@@ -47,6 +47,10 @@ if [ -z "$DIGEST" ] || ! command -v jq >/dev/null 2>&1; then
   exit 0
 fi
 
+# state/.turnend-blocks is home-scoped, not session-keyed, so an exhausted
+# repair budget would otherwise carry into this fresh session and silence the
+# Stop hook's bounded nag. Only a first session start (startup/new) clears it;
+# every other source keeps the in-progress budget.
 case "$SOURCE" in
   ''|startup|new) rm -f "$STATE/.turnend-blocks" 2>/dev/null || true ;;
 esac

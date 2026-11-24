@@ -565,6 +565,7 @@ Because synchronous Stop-hook parking keeps the interactive session in a working
 - It passes through non-normal termination reasons (`terminationReason` other than `NO_TOOL_CALL`) with `{}` so hook-triggered continuations never loop.
 - It checks session-lock ownership via `bin/fm-session-lock-lib.sh` so a read-only session owned by another live session passes through with `{}`.
 - Otherwise it delegates directly to `bin/fm-turnend-guard.sh --agy`, returning `{}` when supervision is healthy or not needed and a bounded 3-block repair nag (`{"decision":"continue","reason":"..."}`) when supervision is missing.
+  That block count is home-scoped, so `bin/fm-sessionstart-agy.sh` clears `state/.turnend-blocks` on a fresh `SessionStart` (`startup` or `new`): a new session never inherits a predecessor's exhausted budget, and the 3-block bound restarts per session.
 
 ### Adapter failures in the pull guard
 
