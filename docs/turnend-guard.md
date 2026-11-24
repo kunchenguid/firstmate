@@ -261,6 +261,9 @@ Those sweeps therefore refresh the beacon between units.
 `fm_watch_beacon_progress` in `bin/fm-wake-lib.sh` is the entry point, and it acts only when a live watcher exported `FM_WATCH_BEACON_PATH`, so the same library code under a one-shot command or a test invents no liveness evidence.
 Every loop and shared boundary in a cycle that shells out per unit calls it: `bin/fm-pending-reply-lib.sh`'s per-record loop, `bin/fm-classify-lib.sh`'s shared per-crew classification, the watcher's per-signal, per-window, per-status, per-check, per-secondmate, and per-captain-call boundaries, its shared pane-capture helper, the per-task Rex and Herdr display syncs, and every branch of the terminal wait before it blocks.
 
+Two boundaries run inside one of the watcher's own command substitutions - the signal scan (`scan_signals`) and the pause classification in the per-window loop (`pause_state_class`) - so they cannot write the beacon themselves; a subshell's write would not prove the parent process is running.
+They report to the same progress marker, and `watcher_wait_child_progress` turns each report into a beacon refresh while the parent waits on that work; `watcher_waited` is what runs those reads as a waited background process instead of a plain `$(...)`.
+
 What this guarantees and what it does not:
 
 - A live watcher that is making progress keeps its beacon inside the grace, whatever the cycle's total length, so no reader calls it blind and an arm attaches to it instead of refusing or replacing it.
@@ -268,7 +271,7 @@ What this guarantees and what it does not:
 - A single unit of work that blocks longer than the grace still reads as stale, because progress refresh happens between units; the per-unit bounds (a check's `FM_CHECK_TIMEOUT`, a sweep's own timeouts) are what keep that residual inside the grace.
 
 The beacon stays a watcher-owned signal: only the watcher process itself directly refreshes the liveness beacon (`$BEAT`).
-Child subprocesses (such as Rex and Herdr display sweeps) update a separate progress marker (`$FM_WATCH_PROGRESS_PATH`, `state/.last-watcher-progress`), and the watcher process propagates those updates to the beacon only while it is actively progressing.
+Everything else that runs inside it - a child subprocess such as a Rex or Herdr display sweep, or one of its own command-substitution subshells - updates a separate progress marker (`$FM_WATCH_PROGRESS_PATH`, `state/.last-watcher-progress`) instead; the watcher identifies itself by comparing `FM_WATCHER_PID` with `BASHPID` and the subshell depth, and it propagates marker updates to the beacon only while it is actively progressing.
 A frozen watcher process (such as one stopped by `SIGSTOP`) cannot execute its progress loop, so its beacon ages and guards promptly detect the down watcher even if a child process continues running.
 The refresh throttle reads `$SECONDS`, a bash builtin, so it costs no fork inside the hot loops.
 
@@ -661,6 +664,7 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 `tests/fm-watch-beacon-progress.test.sh` covers the beacon's liveness contract over real processes:
 
 - A progress refresh that keeps the beacon fresh from inside a cycle's sweeps, throttles tight loops on a fixed interval, and reaches the shared per-crew classification boundary.
+- A long signal scan keeping a running watcher's beacon fresh through `watcher_wait_child_progress`, while the same scan under a frozen parent refreshes nothing.
 - That refresh staying inert outside a watcher, so no library invents liveness evidence, and a child sweep reaching only the separate progress marker.
 - A watcher frozen with `SIGSTOP` during a real Rex display sweep still aging its beacon and tripping the guard while that child keeps working.
 - The shared derived grace, its 300-second floor, and an explicit `FM_GUARD_GRACE` winning over it.

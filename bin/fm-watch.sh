@@ -3453,11 +3453,14 @@ fm_capture_output_cleanup() {
 
 # watcher_waited: <command...> into WATCHER_CAPTURE with its exit status. The
 # command runs as a waited background process group rather than inside $(...),
-# so a stop is not held for a blocked read (watcher_stop_signals): pane reads
-# (watcher_capture) and the event wait that spans a whole POLL
-# (event_wait_or_sleep) both run here. The group is recorded like a check's, so
-# watcher_cleanup stops one still in flight. Its own setup failures return 2,
-# which the event wait reads as an unusable event path (sleep the budget).
+# so a stop is not held for a blocked read (watcher_stop_signals) and
+# watcher_wait_child_progress can relay the progress marker the child running it
+# updates into a beacon refresh. Pane reads (watcher_capture), the event wait that spans
+# a whole POLL (event_wait_or_sleep), and the per-signal and pause-classification
+# reads that shell out per record all run here. The group is recorded like a
+# check's, so watcher_cleanup stops one still in flight. Its own setup failures
+# return 2, which the event wait reads as an unusable event path (sleep the
+# budget).
 watcher_waited() {  # <command...>
   local rc pgid
   fm_capture_output_cleanup
@@ -3817,9 +3820,10 @@ BEAT="$STATE/.last-watcher-beat"
 # long cycle (below). A test or observer that wants to count completed poll
 # cycles waits on this, never on the beacon.
 CYCLE_MARK="$STATE/.watch-cycle"
-# Child sweep progress marker: child subprocesses update this rather than BEAT
-# directly, so a frozen watcher parent (e.g. SIGSTOP) stops refreshing the
-# beacon regardless of child activity.
+# Child sweep progress marker: child processes and command-substitution
+# subshells update this rather than BEAT directly, and the parent relays it
+# through watcher_wait_child_progress, so a frozen watcher parent (e.g. SIGSTOP)
+# stops refreshing the beacon regardless of descendant activity.
 PROGRESS_MARKER="$STATE/.last-watcher-progress"
 # Sweeps inside a cycle refresh this same beacon between units
 # (fm_watch_beacon_progress); exporting it is what tells those libraries a live
