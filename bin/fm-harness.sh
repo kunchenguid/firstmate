@@ -315,7 +315,7 @@ harness_process_verdict() {  # <pid>
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
   local pid=${1:-$$} verdict
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

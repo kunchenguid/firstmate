@@ -97,6 +97,11 @@ test_supervision_host_protocol_on_every_arm_owner() {
   assert_not_contains "$hosted" 'fm-watch-arm.sh` call' "grok with the file must re-arm the supervision host, not the plain arm"
   assert_contains "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok --repair-line)" \
     'bin/fm-supervision-host.sh park as its own Grok tracked background task' "grok's repair line must name the host"
+  hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness agy)
+  assert_contains "$hosted" 'exec bin/fm-supervision-host.sh park`' "agy with the file must arm the supervision host"
+  assert_not_contains "$hosted" 'fm-watch-arm.sh`' "agy with the file must re-arm the supervision host, not the plain arm"
+  assert_contains "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness agy --repair-line)" \
+    'bin/fm-supervision-host.sh park as its own Antigravity tracked background run_command' "agy's repair line must name the host"
   hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex)
   assert_contains "$hosted" 'FM_CODEX_WATCH_CHECKPOINT_AWAY' "codex must learn that an away checkpoint holds longer"
   assert_contains "$hosted" 'checkpoint: no actionable wake within' "codex must learn how the park boundary arrives"
@@ -255,13 +260,15 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 
   out=$("$RENDER" --harness agy)
   assert_contains "$out" "primary harness: agy" "agy heading missing"
-  assert_contains "$out" "Mode: Antigravity Stop-hook-owned supervision." "agy mode line missing"
-  assert_contains "$out" "bin/fm-turnend-guard-agy.sh" "agy block lost the Stop-hook park script name"
+  assert_contains "$out" "Mode: Antigravity background-notify supervision." "agy mode line missing"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "agy block lost the background arm command"
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "bin/fm-turnend-guard-agy.sh" "agy ordinary-wake line lost the Stop-hook park script name"
-  assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "agy ordinary-wake line must not call the manual arm"
+  assert_contains "$ordinary" "re-arm" "agy ordinary-wake line does not tell the model to re-arm"
+  assert_contains "$ordinary" "Antigravity tracked background run_command" "agy ordinary-wake line lost tracked background ownership"
+  assert_contains "$ordinary" "bin/fm-watch-arm.sh" "agy ordinary-wake line lost the background arm command"
   out=$("$RENDER" --harness agy --repair-line)
-  assert_contains "$out" "Stop-hook park" "agy recovery line lost its Stop-hook park guidance"
+  assert_contains "$out" "Antigravity tracked background run_command" "agy recovery line lost its tracked background repair"
+  assert_contains "$out" "bin/fm-watch-arm.sh" "agy recovery line lost the arm command"
 
   out=$("$RENDER" --harness grok)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
