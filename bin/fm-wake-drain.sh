@@ -91,6 +91,9 @@ rotate_scratch_locked() {
   done
 }
 
+# Main reclaims stale grants. A branch drain uses the grant just published for
+# its turn, and its sandbox may not be able to inspect the host's PID via ps.
+# Reclaiming from that actor would delete its own snapshot before it can drain.
 reclaim_stale_branch_grant_locked() {
   [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ] || return 0
   if ! fm_wake_branch_grant_live "$ELIGIBLE_ROWS_FILE" "$ELIGIBLE_OWNER_FILE"; then
@@ -483,9 +486,15 @@ print_open_decisions_section() {
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
+    # State the folded key on EVERY entry, "default" included. This section's
+    # own hint asks the operator to pass that key to fm-send, and the note is
+    # unedited worker prose that may itself carry a "[key=...]" token the key
+    # grammar reads as prose rather than a stated key. Suppressing the key for
+    # "default" left exactly one bracket token visible on such a line - the one
+    # that is NOT the key - so the listing read as naming a key it had not
+    # folded, and the advised command then refused. An entry must always carry
+    # the token that closes it.
+    line="$task [key=$key] $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.
@@ -515,6 +524,7 @@ EOF
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+  printf 'OPEN DECISIONS: <key> is the [key=...] printed before the verb; a token inside a note is prose, not a key.\n' || return 1
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records
@@ -534,8 +544,7 @@ print_record_divergence_section() {
   local diverged task origin key title line shown=0 omitted=0 bound
   local output='' used=0 bytes item_bytes=220 global_bytes=2000
 
-  # A non-positive bound is not a bound (bin/fm-timeout-lib.sh), so a bad
-  # override falls back to the default rather than disabling the deadline.
+  # Apply bin/fm-timeout-lib.sh's bound contract, defaulting a bad override.
   bound=${FM_DIVERGENCE_TIMEOUT:-20}
   case "$bound" in ''|*[!0-9]*|0) bound=20 ;; esac
 
@@ -845,7 +854,7 @@ else
 fi
 DRAIN_LOCK_HELD=true
 rotate_scratch_locked
-reclaim_stale_branch_grant_locked || exit 1
+[ "$ACTOR" = branch ] || reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != main ] || retire_unconsumable_rows_locked
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
 

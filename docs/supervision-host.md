@@ -67,12 +67,12 @@ The host's header owns the output contract they read.
 
 | Primary | Arm owner | A handed-back wake reaches main as |
 |---|---|---|
-| Claude | the Stop auto-arm, `bin/fm-claude-stop-autoarm.sh`, inside its single-flight generation | the hook's exit-2 rewake (`Stop hook feedback`) |
+| Claude | the [Stop/StopFailure auto-arm](watcher-continuity.md#claude-stop-hook), `bin/fm-claude-stop-autoarm.sh`, inside its single-flight generation | the hook's exit-2 rewake (`Stop hook feedback`) |
 | Cursor | the `stop` hook park, `bin/fm-turnend-guard-cursor.sh` | the park's `watcher` follow-up |
 | OpenCode | the TUI plugin, `.opencode/plugins/fm-primary-watch-arm.js`, which restarts its own successor after each close | a `watcher` prompt through `ctx.session.prompt` |
 | omp | the watch extension, `.omp/extensions/fm-primary-omp-watch.ts`, which restarts its own successor after each close | the extension's `watcher` follow-up |
 | Grok | the model's tracked background call, rendered as `bin/fm-supervision-host.sh park` at session start | the background task's completion notification |
-| Codex | the foreground checkpoint, `bin/fm-watch-checkpoint.sh`, in the watcher's place | the checkpoint's own output |
+| Codex | the foreground checkpoint, `bin/fm-watch-checkpoint.sh`, or the native Stop park on a home that [opts in](configuration.md#codex-native-stop-park-configcodex-stop-park) | checkpoint output, or the native thread queue; see [the Codex protocol](supervision-protocols/codex.md) |
 | Antigravity (`agy`) | the Stop-hook park, `bin/fm-turnend-guard-agy.sh` | the park's `watcher` follow-up |
 
 Hook, plugin, extension, and checkpoint owners pass their harness as the primary pin.
@@ -159,7 +159,7 @@ A captain message typed while an engine turn is already running reaches the engi
 A captain prompt whose hook write fails is not mirrored, so the engine may judge the next attended wake without it; Claude and Cursor have no later source for it.
 
 Claude and Cursor have writers, proven against the real harness to record the session's dialog from its first captain prompt, so only they run the attended posture.
-Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
+Codex has no verified dialog-mirror writer yet, including on its native Stop-park path, so attended host handling remains pass-through.
 Grok and OpenCode have no writer, because their session takes the fleet lock during its first turn, so that turn's captain prompt could never be recorded.
 omp has no verified writer, because no omp was available to prove one against.
 
@@ -247,16 +247,17 @@ The helper's header owns the records, retry interval, process cleanup, and trans
 
 The first delivery remains the Stop hook's exit-2 feedback.
 A later retry does not depend on that hook or on another Stop firing.
-The detached owner writes a durable operational-input record and submits its watcher doorbell through the existing tmux submit primitive.
-It uses only the inherited pane, proves that pane's process contains the pinned session owner, and requires an idle agent with an empty composer.
+The detached owner writes a durable operational-input record and submits its watcher doorbell through the backend's existing submit primitive: the tmux pane the session inherited as `TMUX_PANE`, else the herdr pane the environment itself names through `HERDR_ENV`, `HERDR_SESSION`, and `HERDR_PANE_ID`.
+On herdr that identity comes only from the injected environment, so a remote home's `fm-remote` session hands its scripts the same path and remote homes need no extra plumbing.
+It uses only the inherited pane, proves the pinned session owner lives in that pane's foreground process tree, and requires an idle agent with an empty composer.
+On herdr the pane's registered agent and any registered session binding must also identify `claude`, and idle must hold in both the native agent state and the rendered footer, because a live Claude turn can leave the native status reading idle.
 Busy, unreadable, foreign, and partially typed panes defer delivery without changing the queued check.
 The default retry interval is five minutes, and successful submission still does not acknowledge the hand-back.
 
-Automatic retries currently reach Claude only through that verified tmux pane.
-A primary outside tmux, an unavailable pane, or a blocked composer keeps its watcher and queued work but needs another normal turn or a human message.
+Automatic retries currently reach Claude only through that verified tmux or herdr pane.
+A primary outside both, an unavailable pane, or a blocked composer keeps its watcher and queued work but needs another normal turn or a human message.
 A failed watcher restart or a terminated retry owner is not a guarantee of continued supervision.
-The portable tests prove the process hand-off and transport guards, not a real Claude session accepting the retried input.
-No new live-harness verification is claimed.
+[verification/supervision.md](verification/supervision.md#supervision-host) owns the dated live results and verification entry points for both transports.
 All other primaries and the host-off Stop path retain their existing behavior.
 
 ## Failure direction
@@ -265,7 +266,8 @@ With acknowledged hand-back disabled, every path that cannot finish a wake the e
 Before handing it back, the host stops its successor cycle, and whenever a successor generation was recorded (confirmed or not), it explicitly republishes downtime for that generation.
 That publication is required even when the successor already exited, because no watcher cleanup remains to make the close deliverable to the arm owner.
 If that publication fails, the hand-back adds a `supervision-host: watcher downtime could not be restored` line and the host exits nonzero.
-On Claude, a Stop hook whose rewake is refused while the recovery marker is still `pending:handling` and no watcher is live commits the auto-arm failure notice once per failure episode (`failed-suppressed` after that) and still exits 2, so the hand-back reaches main; every other refused rewake stays silent as before.
+On Claude, a Stop hook whose rewake is refused while the recovery marker is still `pending:handling` or `announced:handling` and no watcher is live preserves the host's actionable output on any resulting rewake.
+The [Claude failure progression](turnend-guard.md#failure-progression-and-block-budget) owns its notice, retry, and attended-alarm decisions; every other refused rewake stays silent as before.
 So the owner's next arm starts from the same state as without the host, and the wake stays durable in the queue.
 
 ### Paths that hand the wake back
@@ -306,6 +308,7 @@ So it never stops the owner's host or watcher or releases its leases.
 
 The host's owner retries it.
 Grok's model and Codex's checkpoint see it as a failed cycle and start the next one.
+The native Codex park reports the failure through its queue delivery and bounded retry owner.
 Before it arms, the next host does two things:
 
 - It stops, by recorded identity, whatever its predecessor left running, including the engine descendants a killed turn recorded.
@@ -344,9 +347,14 @@ When it declines such a turn, that close reaches main ahead of the boundary line
 The default path depends on main receiving that continuation.
 Acknowledged hand-back protects the boundary when the continuation is lost.
 
-### Codex checkpoint bound
+### Codex native park and checkpoint bound
 
-Codex has no asynchronous wake, so its checkpoint's own bound is the park.
+On the opted-in native Codex Stop-hook path, `FM_CODEX_MODEL_FREE_PARK=1` keeps the same watcher alive across quiet boundaries.
+The host records `quiet-boundary` in its log and resets the boundary clock without creating a downtime generation or waking the model.
+Native thread-queue delivery wakes the model only for an actionable close; user input remains immediately available.
+Engine turns retain their own timeout, and the park's next-turn failure guard remains active.
+
+On the foreground checkpoint, the checkpoint's own bound is the park.
 The checkpoint passes it as the boundary and reports the boundary as its ordinary quiet line (`checkpoint: no actionable wake within <n>s`).
 
 | Posture | Checkpoint bound |
@@ -391,6 +399,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 
 - `--safe-mode` loads none of the home's hooks, `CLAUDE.md`, skills, plugins, or MCP servers.
   So the engine can never fire the home's own Stop or SessionStart hooks.
+  A home's own rules reach the engine only through the optional `config/branch-prompt-include.md` ([configuration](configuration.md#home-branch-prompt-include-configbranch-prompt-includemd)).
 - `--bare` is unusable because it never reads claude.ai OAuth.
 - From inside the engine's shell the primary is not in the harness ancestry, so the engine can never act as the session-lock owner.
 
@@ -459,6 +468,7 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-afk-return.test.sh` | The return's drain-owned read-cursor advance through the away window on a host home, and none on Pi. |
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-supervision-host-attended-live-e2e.test.sh` | Opt-in credentialed guard for repeated attended main-only hand-backs to an idle Claude primary, the successor's own close, a close that turns main-only at its turn, and a stand-in remote listener; accepts a pre-fix ref for a negative control. |
+| `tests/fm-supervision-host-herdr-live-e2e.test.sh` | Opt-in credentialed guard that a real Claude primary in an isolated herdr session loses its hand-back continuation, receives the detached retry through the inherited pane, drains, and acknowledges, with one watcher retained. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
 
 [verification/supervision.md](verification/supervision.md#supervision-host) records the dated live results.

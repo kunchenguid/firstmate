@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real restored-shell E2E for home-local session-start Herdr projection cleanup.
 # Every CLI operation is routed through one guarded named non-default lab, and
-# lab teardown verifies that the default fleet session is byte-identical.
+# lab teardown verifies that the configured fleet session is byte-identical.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -140,7 +140,7 @@ FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
 lab pane get "$(printf '%s' "$ANCHOR" | jq -r '.result.root_pane.pane_id')" >/dev/null \
   || fail 'anchor pane was touched by cleanup'
 STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
-pass 'real named lab cleanup is idempotent and leaves the default fleet session to the teardown tripwire'
-printf 'evidence: herdr=%s protocol=%s default-session-tripwire=armed\n' \
+pass 'real named lab cleanup is idempotent and leaves the configured fleet session to the teardown tripwire'
+printf 'evidence: herdr=%s protocol=%s fleet-session-tripwire=armed\n' \
   "$(printf '%s' "$STATUS" | jq -r '.client.version')" \
   "$(printf '%s' "$STATUS" | jq -r '.server.protocol')"

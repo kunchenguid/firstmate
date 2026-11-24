@@ -109,7 +109,7 @@ prime_and_ack() {
   state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedge-cap-$(basename "$dir" | sed -e 's/^wedge-cap-//' )"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -133,7 +133,7 @@ poll_wedge_round() {
   state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedge-cap-$(basename "$dir" | sed -e 's/^wedge-cap-//' )"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   # shellcheck disable=SC2086
@@ -165,7 +165,7 @@ poll_capped_wedge_round() {  # <dir> <max> <extra-env> <exit|absorb>
   state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedge-cap-$(basename "$dir" | sed -e 's/^wedge-cap-//' )"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   # shellcheck disable=SC2086
@@ -225,7 +225,7 @@ hold_capped_polls() {  # <dir> <max> <stale-secs> <timer-age-secs> <cycles> [ext
   state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"
   window="test:fm-wedge-cap-$(basename "$dir" | sed -e 's/^wedge-cap-//' )"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   echo $(( $(date +%s) - timer_age )) > "$state/.stale-since-$key"
   : > "$out"
   # shellcheck disable=SC2086
@@ -265,7 +265,7 @@ test_wedge_cap_disabled_by_default() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-disabled.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-disabled.status"
   sig=$(seen_sig "$state/wedge-cap-disabled.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-disabled_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "wedged default-config pane")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -318,7 +318,7 @@ test_wedge_cap_fires_permanently_wedged_at_threshold() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-fires.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-fires.status"
   sig=$(seen_sig "$state/wedge-cap-fires.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-fires_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -353,7 +353,7 @@ test_wedge_cap_silences_subsequent_polls_for_same_hash() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-silenced.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-silenced.status"
   pane_hash=$(hash_text "idle wedged content")
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
@@ -411,7 +411,7 @@ test_wedge_cap_window_marker_silences_hash_churning_busy_pane() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-churning.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-churning.status"
   sig=$(seen_sig "$state/wedge-cap-churning.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-churning_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "churning wedged pane initial content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -505,7 +505,7 @@ test_wedge_cap_expires_after_horizon() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-horizon.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-horizon.status"
   sig=$(seen_sig "$state/wedge-cap-horizon.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-horizon_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -615,7 +615,7 @@ test_wedge_cap_operator_can_rm_marker() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-operator-rm.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-operator-rm.status"
   sig=$(seen_sig "$state/wedge-cap-operator-rm.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-operator-rm_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -664,7 +664,7 @@ test_wedge_cap_validates_invalid_overrides() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-validate.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-validate.status"
   sig=$(seen_sig "$state/wedge-cap-validate.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-validate_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -724,7 +724,7 @@ test_wedge_cap_reads_an_unreadable_counter_as_a_fresh_one() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-counter-unreadable.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-counter-unreadable.status"
   sig=$(seen_sig "$state/wedge-cap-counter-unreadable.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-counter-unreadable_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -757,7 +757,7 @@ test_wedge_cap_rollback_writes_sentinel_on_marker_failure() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-rollback.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-rollback.status"
   sig=$(seen_sig "$state/wedge-cap-rollback.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-rollback_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '2\n' > "$state/.count-$key"
@@ -875,7 +875,7 @@ test_wedge_cap_unwritable_escalation_count_fails_safe() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-counter-fail.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-counter-fail.status"
   sig=$(seen_sig "$state/wedge-cap-counter-fail.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-counter-fail_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -948,7 +948,7 @@ test_wedge_cap_sentinel_probe_keeps_its_cadence() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-sentinel-cadence.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-sentinel-cadence.status"
   sig=$(seen_sig "$state/wedge-cap-sentinel-cadence.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-sentinel-cadence_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1019,7 +1019,7 @@ test_wedge_cap_unwritable_counter_reset_fails_safe() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-reset-fail.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-reset-fail.status"
   sig=$(seen_sig "$state/wedge-cap-reset-fail.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-reset-fail_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '2\n' > "$state/.count-$key"
@@ -1114,7 +1114,7 @@ test_wedge_cap_releases_after_genuine_recovery() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-recovery.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-recovery.status"
   sig=$(seen_sig "$state/wedge-cap-recovery.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-recovery_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1185,7 +1185,7 @@ test_wedge_cap_publishes_one_terminal_wake_under_persistent_marker_failure() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-dup-terminal.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-dup-terminal.status"
   sig=$(seen_sig "$state/wedge-cap-dup-terminal.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-dup-terminal_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1244,7 +1244,7 @@ test_wedge_cap_releases_after_declared_wait() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-declared-wait.meta"
   printf 'working: still wedged\n' > "$statusf"
   mark_status_seen "$state" "$statusf"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1332,7 +1332,7 @@ test_wedge_cap_reports_gone_endpoint_while_capped() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-gone-endpoint.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-gone-endpoint.status"
   sig=$(seen_sig "$state/wedge-cap-gone-endpoint.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-gone-endpoint_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1393,7 +1393,7 @@ test_wedge_cap_new_episode_publishes_its_own_terminal_wake() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-new-episode.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-new-episode.status"
   sig=$(seen_sig "$state/wedge-cap-new-episode.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-new-episode_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1462,7 +1462,7 @@ test_wedge_cap_probe_keeps_its_cadence_while_capped() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-probe-cadence.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-probe-cadence.status"
   sig=$(seen_sig "$state/wedge-cap-probe-cadence.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-probe-cadence_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1510,7 +1510,7 @@ test_wedge_cap_unwritable_terminal_marker_does_not_flood() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-unwritable-marker.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-unwritable-marker.status"
   sig=$(seen_sig "$state/wedge-cap-unwritable-marker.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-unwritable-marker_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1570,7 +1570,7 @@ test_wedge_cap_off_ignores_leftover_markers() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-off-leftover.meta"
   printf 'working: still wedged\n' > "$state/wedge-cap-off-leftover.status"
   sig=$(seen_sig "$state/wedge-cap-off-leftover.status"); printf '%s' "$sig" > "$state/.seen-wedge-cap-off-leftover_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
@@ -1653,7 +1653,7 @@ drive_first_sight_release() {  # <route>
       ;;
     *) fail "unknown first-sight release route: $route" ;;
   esac
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-release-$route.meta"
   printf 'wedged render the cap fires on' > "$capture_file"
   mark_status_seen "$state" "$statusf"
@@ -1758,7 +1758,7 @@ test_wedge_cap_releases_after_nonterminal_stale_episode() {
   printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-nonterminal-reset.meta"
   printf 'working: still wedged\n' > "$statusf"
   mark_status_seen "$state" "$statusf"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -1855,7 +1855,7 @@ test_wedge_cap_reports_gone_endpoint_on_terminal_override_route() {
   # population: the classification the overriding crew state has to beat.
   printf 'done: implementation complete, ready to validate\n' > "$statusf"
   mark_status_seen "$state" "$statusf"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
+  key=$(watch_window_key "$window")
   pane_hash=$(hash_text "idle wedged content")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
