@@ -2297,15 +2297,11 @@ spawn_refuse_if_away_spend_cap() {
   esac
   SPAWN_AWAY_ADMISSION=1
   live_err=$(mktemp) || live_err=
-  if [ -n "$live_err" ]; then
-    live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>"$live_err" || true)
-    if grep -qxF 'live-workers truncated: remaining records counted as spending' "$live_err"; then
-      echo "live-workers truncated: remaining records counted as spending" >&2
-    fi
-    rm -f "$live_err"
-  else
-    live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>"${live_err:-/dev/null}" || true)
+  if [ -n "$live_err" ] && grep -qxF 'live-workers truncated: remaining records counted as spending' "$live_err"; then
+    echo "live-workers truncated: remaining records counted as spending" >&2
   fi
+  [ -z "$live_err" ] || rm -f "$live_err"
   case "$live" in
   '' | *[!0-9]*)
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
@@ -7879,7 +7875,7 @@ else
 fi
 LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") arm --task $(shell_quote "$ID") --harness $(shell_quote "$HARNESS") --backend $(shell_quote "$BACKEND") --kind $(shell_quote "$KIND") --state $(shell_quote "$STATE_REAL") --config $(shell_quote "$CONFIG") --target $(shell_quote "$T") --agent-bin $(shell_quote "$OSC7501_AGENT_BIN") >/dev/null || true
 $LAUNCH
-__fm_launch_status=\$?; $(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
+$(shell_quote "$FM_ROOT/bin/fm-osc7501.sh") disarm --state $(shell_quote "$STATE_REAL") >/dev/null 2>/dev/null || true"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
@@ -8008,14 +8004,21 @@ LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
 LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
 LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
 LAUNCH_START_FILE="$LAUNCH_FILE.start"
-# Record the agent command's status, not disarm's, and do it before any
-# env-allowlist `sh -c` wrap so the exit file is written in the same shell.
-# A start marker after arm lets the capped wait tell OSC 7501's `other`
-# children from the raw command itself.
+# Capped waits need the agent status, a start marker after arm, and an
+# exit file. Those use POSIX `VAR=value` and `$?`, which fish cannot
+# parse, so they run inside `/bin/sh -c` the same way the allowlist wrap
+# below does. Arm and disarm stay pane-shell lines, so uncapped launches
+# keep main's frame byte for byte.
 if spawn_away_startup_wait_applies; then
-  spawn_launch_rest=${LAUNCH#*$'\n'}
-  LAUNCH="${LAUNCH%%$'\n'*}"$'\n'"printf '1\n' > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_START_FILE")"$'\n'"$spawn_launch_rest"
-  LAUNCH="$LAUNCH"$'\n'"printf '%s\n' \"\$__fm_launch_status\" > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_EXIT_FILE")"
+  spawn_launch_head=${LAUNCH%%$'\n'*}
+  spawn_launch_body=${LAUNCH#*$'\n'}
+  spawn_launch_disarm=${spawn_launch_body##*$'\n'}
+  spawn_launch_agent=${spawn_launch_body%$'\n'*}
+  spawn_launch_inner="printf '1\n' > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_START_FILE")
+$spawn_launch_agent
+__fm_launch_status=\$?
+printf '%s\n' \"\$__fm_launch_status\" > $(shell_quote "$LAUNCH_STAGE") && mv -f -- $(shell_quote "$LAUNCH_STAGE") $(shell_quote "$LAUNCH_EXIT_FILE")"
+  LAUNCH="$spawn_launch_head"$'\n'"/bin/sh -c $(shell_quote "$spawn_launch_inner")"$'\n'"$spawn_launch_disarm"
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
@@ -8293,8 +8296,10 @@ if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
 fi
 
 if [ "$SPAWN_START_PENDING" = 1 ]; then
-  spawn_start_wait=${FM_SPAWN_START_WAIT_SECONDS:-30}
+  # FM_TEST_SPAWN_START_WAIT_SECONDS is a test-only hook, not a user setting.
+  spawn_start_wait=${FM_TEST_SPAWN_START_WAIT_SECONDS:-30}
   spawn_start_deadline=$((SECONDS + spawn_start_wait))
+  spawn_start_state=unreadable
   while :; do
     if [ -f "$LAUNCH_EXIT_FILE" ]; then
       spawn_start_exit=$(cat "$LAUNCH_EXIT_FILE")
@@ -8304,9 +8309,18 @@ if [ "$SPAWN_START_PENDING" = 1 ]; then
       fi
       break
     fi
+    spawn_start_probe=$((spawn_start_deadline - SECONDS))
+    if [ "$spawn_start_probe" -le 0 ]; then
+      echo "error: task $ID's startup was not established within ${spawn_start_wait}s (endpoint: $spawn_start_state)" >&2
+      exit 1
+    fi
+    # Herdr's idle-shell proof can spend up to 10 polls; 2s timed out
+    # healthy raw workers on a loaded host. Cap at 5s or whatever
+    # remains of the startup wait.
+    [ "$spawn_start_probe" -le 5 ] || spawn_start_probe=5
     # Single quotes defer positional argument expansion to the child bash.
     # shellcheck disable=SC2016
-    spawn_start_state=$(fm_run_timed 2 bash -c \
+    spawn_start_state=$(fm_run_timed "$spawn_start_probe" bash -c \
       '. "$1"; fm_backend_worker_state "$2" "$3"' _ \
       "$SCRIPT_DIR/fm-backend.sh" "$BACKEND" "$T" 2>/dev/null) || spawn_start_state=unreadable
     case "$spawn_start_state" in
@@ -8321,10 +8335,6 @@ if [ "$SPAWN_START_PENDING" = 1 ]; then
         fi
         ;;
     esac
-    if [ "$SECONDS" -ge "$spawn_start_deadline" ]; then
-      echo "error: task $ID's startup was not established within ${spawn_start_wait}s (endpoint: $spawn_start_state)" >&2
-      exit 1
-    fi
     sleep 0.1
   done
   SPAWN_START_PENDING=0

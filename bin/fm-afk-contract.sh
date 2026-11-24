@@ -223,6 +223,14 @@ fm_afk_contract_latest_non_resolved_verb() {
   return 1
 }
 
+# True when the whole-count deadline has elapsed. Sets `left` to remaining
+# seconds when budget remains. Callers count the record as spending and
+# `continue`.
+fm_afk_contract_live_deadline_elapsed() {
+  left=$((deadline - SECONDS))
+  [ "$left" -le 0 ]
+}
+
 # Count workers still able to spend, the shared SPEND CAP owner. Recent launch
 # records and unproven backend/activity/state reads reserve capacity. The
 # backend probe deadline is bounded; idle exclusions retain the activity,
@@ -241,8 +249,7 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] || continue
     [ "$(fm_meta_get "$meta" kind)" != secondmate ] || continue
-    left=$((deadline - SECONDS))
-    if [ "$left" -le 0 ]; then
+    if fm_afk_contract_live_deadline_elapsed; then
       truncated=1
       live=$((live + 1))
       continue
@@ -276,8 +283,7 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
     fi
     # A stalled backend must neither hang entry nor hold the spawn task-set
     # lock. Any timeout or failed read is unproven and remains counted.
-    left=$((deadline - SECONDS))
-    if [ "$left" -le 0 ]; then
+    if fm_afk_contract_live_deadline_elapsed; then
       truncated=1
       live=$((live + 1))
       continue
@@ -290,12 +296,11 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
       _ "$FM_AFK_CONTRACT_DIR/fm-backend.sh" "$backend" "$target" 2>/dev/null) \
       || endpoint_state=unreadable
     if [ "$endpoint_state" = missing ]; then
-      left=$((deadline - SECONDS))
-      if [ "$left" -le 0 ]; then
-        truncated=1
-        live=$((live + 1))
-        continue
-      fi
+      if fm_afk_contract_live_deadline_elapsed; then
+      truncated=1
+      live=$((live + 1))
+      continue
+    fi
       probe_secs=${FM_AFK_CONTRACT_PROBE_SECONDS:-10}
       [ "$probe_secs" -le "$left" ] || probe_secs=$left
       if [ "$backend" = herdr ]; then
@@ -348,8 +353,7 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
         ;;
       *) live=$((live + 1)); continue ;;
     esac
-    left=$((deadline - SECONDS))
-    if [ "$left" -le 0 ]; then
+    if fm_afk_contract_live_deadline_elapsed; then
       truncated=1
       live=$((live + 1))
       continue
@@ -365,8 +369,7 @@ fm_afk_contract_live_ordinary_workers() {  # [state-dir]
       live=$((live + 1))
       continue
     fi
-    left=$((deadline - SECONDS))
-    if [ "$left" -le 0 ]; then
+    if fm_afk_contract_live_deadline_elapsed; then
       truncated=1
       live=$((live + 1))
       continue

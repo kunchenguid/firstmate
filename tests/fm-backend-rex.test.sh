@@ -1109,7 +1109,7 @@ EOF
       FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
-      FM_SPAWN_START_WAIT_SECONDS=2 FM_SUPERVISION_ACTOR=main \
+      FM_TEST_SPAWN_START_WAIT_SECONDS=2 FM_SUPERVISION_ACTOR=main \
       FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" \
       FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
       FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \

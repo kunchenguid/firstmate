@@ -102,7 +102,7 @@ SH
     FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
       FM_PROJECTS_OVERRIDE="$home/projects" FM_BACKEND=tmux FM_SUPERVISION_ACTOR=main \
-      FM_SPAWN_NO_GUARD=1 FM_SPAWN_START_WAIT_SECONDS="$start_wait" TMUX=fake,1,0 FM_RESERVATION_ID="$id" \
+      FM_SPAWN_NO_GUARD=1 FM_TEST_SPAWN_START_WAIT_SECONDS="$start_wait" TMUX=fake,1,0 FM_RESERVATION_ID="$id" \
       FM_RESERVATION_WT="$dir/wt" PATH="$home/fakebin:$PATH" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$dir/project" "${args[@]}" > "$home/launch.log" 2>&1 &
     SPAWN_PID=$!
@@ -997,13 +997,15 @@ SH
 
 # OSC 7501 arm/disarm classify as `other` (ambiguous). A capped raw command
 # that exits 127 must not treat that probe as a successful start.
-test_capped_raw_exit_127_rolls_back() {
-  local home proj wt id out rc row fakebin
-  home="$TMP_ROOT/raw-127/home"
-  proj="$TMP_ROOT/raw-127/project"
-  wt="$TMP_ROOT/raw-127/wt"
-  id="raw-127-$$"
-  fakebin="$TMP_ROOT/raw-127/fakebin"
+# pane_shell is bash (executes the staged file) or fish (sources it).
+capped_raw_exit_127_rolls_back_with() {  # <pane-shell>
+  local pane_shell=$1 home proj wt id out rc row fakebin label
+  label=$pane_shell
+  home="$TMP_ROOT/raw-127-$pane_shell/home"
+  proj="$TMP_ROOT/raw-127-$pane_shell/project"
+  wt="$TMP_ROOT/raw-127-$pane_shell/wt"
+  id="raw-127-$pane_shell-$$"
+  fakebin="$TMP_ROOT/raw-127-$pane_shell/fakebin"
   fm_test_spawn_home "$home" claude
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fm_test_spawn_brief "$home" "$id"
@@ -1049,7 +1051,15 @@ case "${1:-}" in
             staged=${a#". '"}
             staged=${staged%"'"}
             if [ -f "$staged" ]; then
-              (sleep 0.5; bash "$staged") >/dev/null 2>&1 &
+              (
+                sleep 0.5
+                if [ "${FM_FAKE_PANE_SHELL:-bash}" = fish ]; then
+                  fish -c "source '$staged'"
+                else
+                  bash "$staged"
+                fi
+                [ ! -f "$staged.exit" ] || cp "$staged.exit" "$FM_HOME/launch.exit"
+              ) >/dev/null 2>&1 &
             fi
             ;;
         esac
@@ -1066,27 +1076,43 @@ SH
   if command -v tasks-axi >/dev/null 2>&1; then
     printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
       > "$home/data/backlog.md"
-    tasks-axi add "$id" "capped raw 127 fixture" --kind ship \
+    tasks-axi add "$id" "capped raw 127 $label fixture" --kind ship \
       --file "$home/data/backlog.md" >/dev/null \
-      || fail "could not seed the capped raw-127 backlog row"
+      || fail "could not seed the capped raw-127 $label backlog row"
   fi
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
-    || fail "capped raw-127 away entry failed"
+    || fail "capped raw-127 $label away entry failed"
   rc=0
   out=$(
-    FM_SUPERVISION_ACTOR=main FM_BACKEND=tmux FM_SPAWN_START_WAIT_SECONDS=8 \
+    export FM_FAKE_PANE_SHELL="$pane_shell"
+    FM_SUPERVISION_ACTOR=main FM_BACKEND=tmux \
+      FM_TEST_SPAWN_START_WAIT_SECONDS=8 \
       fm_test_run_spawn "$home" "$wt" "$fakebin" \
       "$id" "$proj" 'no-such-fm-raw-cmd-127 --typo' --mode no-mistakes --yolo off
   ) || rc=$?
-  [ "$rc" -ne 0 ] || fail "capped raw command that exited 127 reported success: $out"
-  assert_contains "$out" "exited with status 127" "capped raw 127 did not report the command exit: $out"
-  [ ! -e "$home/state/$id.meta" ] || fail "capped raw 127 kept its task record"
+  [ "$rc" -ne 0 ] || fail "capped raw command that exited 127 in $label reported success: $out"
+  assert_contains "$out" "exited with status 127" \
+    "capped raw 127 in $label did not report the command exit: $out"
+  [ "$(cat "$home/launch.exit" 2>/dev/null)" = 127 ] \
+    || fail "capped raw 127 in $label did not write exit file 127: $(cat "$home/launch.exit" 2>/dev/null)"
+  [ ! -e "$home/state/$id.meta" ] || fail "capped raw 127 in $label kept its task record"
   if command -v tasks-axi >/dev/null 2>&1; then
     row=$(tasks-axi show "$id" --file "$home/data/backlog.md" 2>/dev/null |
       sed -n 's/^  state: *//p' | head -1)
-    [ "$row" = queued ] || fail "capped raw 127 left backlog at ${row:-missing}"
+    [ "$row" = queued ] || fail "capped raw 127 in $label left backlog at ${row:-missing}"
   fi
+}
+
+test_capped_raw_exit_127_rolls_back() {
+  capped_raw_exit_127_rolls_back_with bash
   pass "a capped raw launch that exits 127 rolls back its record and queued backlog row"
+}
+
+test_capped_raw_exit_127_rolls_back_in_fish() {
+  command -v fish >/dev/null 2>&1 \
+    || fail "fish is required to prove capped raw-launch rollback in a fish pane"
+  capped_raw_exit_127_rolls_back_with fish
+  pass "a capped raw launch sourced by fish writes its exit file and rolls back on 127"
 }
 
 test_spend_cap_forwards_truncation_note() {
@@ -1134,4 +1160,5 @@ test_other_delivery_modes_and_scout
 test_recent_spawn_generation_skips_endpoint_probe
 test_live_workers_total_budget_counts_unread_records
 test_capped_raw_exit_127_rolls_back
+test_capped_raw_exit_127_rolls_back_in_fish
 test_spend_cap_forwards_truncation_note
