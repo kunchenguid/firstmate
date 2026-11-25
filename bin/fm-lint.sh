@@ -93,7 +93,7 @@
 # cannot apply the address-space limit at all) each root runs under the same
 # wall deadline and grace plus a resident-memory ceiling instead
 # (FM_LINT_ROOT_RSS_KIB, default 6291456 = 6 GiB summed over the root's
-# process group, polled through ps every half second). A root over that
+# process group, polled through ps every 50 milliseconds). A root over that
 # ceiling is killed and classified memory, exactly like a CI memory death.
 # A local run without bin/fm-timeout-lib.sh refuses rather than lint
 # unbounded.
@@ -431,7 +431,7 @@ fi
 # parent reports limit-unavailable instead of running uncapped. Under the
 # resident kind it runs the tool beside a monitor that sums resident memory
 # over this process group (the bounded runner made this process its leader)
-# every half second; over the limit it kills the group's other members,
+# every 50 milliseconds; over the limit it kills the group's other members,
 # records the observed peak, and exits 98, which the parent classifies as
 # memory. Either kind wraps the tool in /usr/bin/time for the per-root
 # peak-RSS record when it is available.
@@ -476,12 +476,14 @@ if [ "${1:-}" = "--internal-root" ]; then
         my $child = fork;
         exit 127 unless defined $child;
         if (!$child) { exec @ARGV; exit 127 }
-        my ($group, $peak, $tick) = (getpgrp(), 0, 0);
+        my ($group, $peak) = (getpgrp(), 0);
         while (1) {
           my $done = waitpid $child, WNOHANG;
           exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $child;
           exit 127 if $done == -1;
-          if ($tick++ % 10 == 9) {
+          # Sample immediately and on every poll: macOS may compress an
+          # idle allocation before a delayed half-second sample sees it.
+          {
             my ($total, @members) = (0);
             my $ps = open(my $rows, "-|", "ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "rss=");
             if ($ps) {
