@@ -266,7 +266,7 @@ PRESU_WS=$(workspace_of_pane "$PRESU_PANE")
 [ "$PRESU_WS" != "$WS_PRIMARY" ] \
   || fail "a projected worker must get its own disposable workspace, not be collapsed into its parent"
 case "$(label_of_workspace "$PRESU_WS")" in
-  "└ "*" · p:"*) : ;;
+  "└ presU") : ;;
   *) fail "presU's workspace is not a presentation projection: '$(label_of_workspace "$PRESU_WS")'" ;;
 esac
 PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
