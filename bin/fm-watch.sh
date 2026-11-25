@@ -344,14 +344,9 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
-# transitively above) is the single owner of the max(300, poll+60)
-# derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
-# This recomputes the library default above now that the real configured
-# POLL is known.
+# Beacon checkpoint cadence and grace rationale: docs/turnend-guard.md
+# "Guard grace and the poll cadence". Recompute the library default now that
+# the configured POLL is known.
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
 # Hard bound on a live holder's beacon age. Under it a re-arm refuses and asks
 # for inspection (the grace above); at or past it the re-arm evicts the holder
@@ -360,6 +355,21 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 # fm_watcher_stall_bound (bin/fm-wake-lib.sh) owns the derivation, shared with
 # the arm that follows this watcher.
 WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
+# Rate-limit mid-cycle progress writes without forking for the clock.
+WATCHER_CHECKPOINT_SECS=${FM_WATCHER_CHECKPOINT_SECS:-30}
+case "$WATCHER_CHECKPOINT_SECS" in ''|*[!0-9]*) WATCHER_CHECKPOINT_SECS=30 ;; esac
+WATCHER_BEAT_AT=$SECONDS
+watcher_beat_touch() {
+  touch "$STATE/.last-watcher-beat"
+  WATCHER_BEAT_AT=$SECONDS
+}
+# Called synchronously at step boundaries: a stuck step cannot refresh liveness.
+# Short cycles keep their cycle-top-only beacon writes. A command substitution
+# may touch without updating the parent's clock, causing one harmless extra touch.
+watcher_checkpoint() {
+  [ $((SECONDS - WATCHER_BEAT_AT)) -ge "$WATCHER_CHECKPOINT_SECS" ] || return 0
+  watcher_beat_touch
+}
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -1063,6 +1073,7 @@ secondmate_wake_stall_tick() {
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] || continue
+    watcher_checkpoint
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ -z "$remote_host" ] || continue
     task=${meta##*/}
@@ -1176,6 +1187,7 @@ secondmate_liveness_tick() {
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
     [ "$kind" = secondmate ] || continue
+    watcher_checkpoint
     id=${meta##*/}
     id=${id%.meta}
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
@@ -4110,7 +4122,7 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  watcher_beat_touch
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -4146,7 +4158,8 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
-  fm_pending_reply_tick "$STATE" || true
+  fm_pending_reply_tick "$STATE" watcher_checkpoint || true
+  watcher_checkpoint
 
   open_decision_reminder_tick || {
     echo 'watcher: open-decision reminder check failed' >&2
@@ -4159,6 +4172,7 @@ while :; do
   # is also what unsticks that mate's foreign wake queue. The tick's single
   # wake exits the cycle like every other wake, so its marker is stamped before
   # any relaunch and the restarted watcher will not re-probe early.
+  watcher_checkpoint
   secondmate_liveness_tick || {
     echo "watcher: secondmate liveness check failed" >&2
     exit 1
@@ -4167,6 +4181,7 @@ while :; do
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
   # the parent without consuming or rewriting the receiving home's record.
+  watcher_checkpoint
   secondmate_wake_stall_tick || {
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
@@ -4178,6 +4193,7 @@ while :; do
   # whose owner is gone. It is a no-op with nothing registered.
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
+    watcher_checkpoint
   fi
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
@@ -4200,6 +4216,7 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+  watcher_checkpoint
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -4222,6 +4239,7 @@ while :; do
       [ -z "$FM_CHECK_CUT" ] || fm_wake_append check pr-register "check: pr-register: $FM_CHECK_CUT" || exit 1
     fi
     for c in "$STATE"/*.check.sh; do
+      watcher_checkpoint
       [ -e "$c" ] || continue
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -4572,6 +4590,7 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    watcher_checkpoint
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -4926,5 +4945,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr, rex),
   # else the blind poll sleep. See event_wait_or_sleep.
+  watcher_checkpoint
   event_wait_or_sleep
 done
