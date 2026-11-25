@@ -971,6 +971,10 @@ test_watcher_reports_a_lost_runner_as_unrecoverable() {
   fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "endpoint_task_id=t1" \
     "kind=ship" "harness=grok" "spawn_gen=gen-A" "mode=local-only" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project"
+  tasks-axi add t1 "Run the monitor" --kind ship --repo sample \
+    --file "$dir/owning-data/backlog.md" >/dev/null || fail "could not create the teardown work item"
+  tasks-axi start t1 --file "$dir/owning-data/backlog.md" >/dev/null \
+    || fail "could not mark the teardown work item in flight"
   FM_ROOT_OVERRIDE="$ROOT" case_command "$dir" "$ROOT/bin/fm-teardown.sh" t1 --force > "$dir/teardown.out" 2>&1 \
     || fail "lost completion blocked teardown: $(cat "$dir/teardown.out")"
   [ ! -e "$dir/state/t1.inbox" ] && [ ! -e "$dir/state/t1.meta" ] || fail "teardown did not remove the lost job's task records"
