@@ -106,6 +106,9 @@
 #   for those accounts. With no tier declared, behavior is unchanged.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields.
 #
+# claude3 eligibility always follows the launch rule in fm-dispatch-receipt-lib.sh,
+#   independent of the matched row's orchestration wording or any captain pick.
+#   Task kind comes from --task metadata, else the brief's scaffold markers.
 # worker_banned_accounts (top-level, optional): account IDs, such as claude3,
 #   that no worker, scout or no-mistakes pipeline candidate may seat, whatever
 #   row matched. A listed seat is ineligible and holds no tier; only a
@@ -668,10 +671,12 @@ LAT_MS=null
 # persistent supervisor brief fm-brief.sh --secondmate writes, which opens with
 # this line). Ship and scout briefs, previews and every pipeline step are
 # workers, so the ban never depends on which row Jev matched.
-WORKER_TASK=true
+TASK_KIND=ship
 if [ "$MODE" = worker ] && [ -n "$BRIEF" ]; then
-  case "$(head -n 1 "$BRIEF")" in 'You are a persistent second mate managed by'*) WORKER_TASK=false ;; esac
+  TASK_KIND=$(fm_dr_task_kind "$BRIEF" "$TASK_ID")
 fi
+WORKER_TASK=true
+[ "$TASK_KIND" != secondmate ] || WORKER_TASK=false
 # Pipeline mode resolves a fixed row, so nothing below reaches the socket.
 if [ "$MODE" = worker ]; then
   SECTIONS=$(task_sections)
@@ -1069,7 +1074,7 @@ fi
 # completeness, reserve and seat-tier holds, and the spend-priority argmax. It
 # expects $cfg and $q bound, and the --argjson values both programs pass.
 # shellcheck disable=SC2016  # a jq program, expanded by jq and not the shell
-FM_DR_SEAT_JQ='
+FM_DR_SEAT_JQ="$FM_DR_CLAUDE3_JQ"'
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   # worker_banned_accounts: no worker, scout or no-mistakes pipeline candidate
   # seats a banned account, whatever row matched. Only a secondmate charter
@@ -1596,7 +1601,7 @@ fm_dispatch_pipeline_json() {  # <quota attempts> <warm-ups run> [final]
     elif ($weekly | type) == "string" then clean_reset($weekly)
     else $emptied end;
   ([($cfg.pipeline_rows // [])[] | select(.steps | index($step))] | first) as $row |
-  ($row.use | map(. as $c | evaluate($c) | apply_weekly_floor | . + plan_for($c; provider_of($c))) | worker_ban(true) | weekly_guard | map(. + {out_reason: .reason}) | seat_tier_hold(true)) as $cands |
+  ($row.use | map(. as $c | evaluate($c) | apply_weekly_floor | . + plan_for($c; provider_of($c))) | claude3_ban("pipeline"; $row.label) | worker_ban(true) | weekly_guard | map(. + {out_reason: .reason}) | seat_tier_hold(true)) as $cands |
   def seat_view: {seat: .profile.account, pool: .profile.pool, tier: .profile.seat_tier, eligible: (.eligible // false), reason: .reason,
     remaining: (.pct // null), spendPriority: (.spendPriority // null), surplus: (.surplus // null), value: (.value // null), band: (.band // false), runway: (.runway // null)};
   ([$cands[] | select(.incomplete)]) as $incomplete |
@@ -1651,7 +1656,7 @@ fm_dispatch_resolve_json() {  # <quota attempts> <warm-ups run>
   jq -n --arg project "${PROJECT:-unset}" --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" --argjson account_quotas "$ACCOUNT_QUOTAS" --argjson plan_config "$PLAN_CONFIG" --argjson quota_attempts "$1" --argjson warmups "$2" --argjson sq "$SQ" --argjson rr "$TIE_RR" --argjson banked "$BANKED_RESETS" \
     --argjson final "${3:-false}" --arg jev_failed "$JEV_FAILED_REASON" --argjson force_pick "$FORCE_PICK" --arg delivery "$BRIEF_DELIVERY" \
     --argjson now "$NOW_EPOCH" --argjson guard "$FIVE_HOUR_GUARD" --argjson debits "$BURST_DEBITS" --argjson demand "$WEEKLY_DEMAND" \
-    --argjson ladder_hist "$LADDER_HIST" --argjson worker_task "$WORKER_TASK" \
+    --argjson ladder_hist "$LADDER_HIST" --argjson worker_task "$WORKER_TASK" --arg task_kind "$TASK_KIND" \
     --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ$FM_DL_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
 '"$FM_DR_SEAT_JQ"'
@@ -1724,7 +1729,7 @@ fm_dispatch_resolve_json() {  # <quota attempts> <warm-ups run>
       ([row_use($id)[] | . as $c | (provider_of($c)) as $p |
         (if $rf == "below" then {profile: $c, provider: $p, eligible: false, reason: "row floor \(rule_at($id).floor.scope) below \(rule_at($id).floor.min_percent)%"}
          elif fable_gated($c) then {profile: $c, provider: $p, eligible: false, reason: fable_gate_reason($c)}
-         else evaluate($c) end) + plan_for($c; $p)] | weekly_guard | claude3_floor(row_use($id)) | reserve_tier | seat_tier_hold(rule_at($id).strict_tiers == true) | skip_unreadable | pace_guard(rule_at($id).seat_pacing)) as $cs |
+         else evaluate($c) end) + plan_for($c; $p)] | claude3_ban($task_kind; rule_at($id).label) | weekly_guard | claude3_floor(row_use($id)) | reserve_tier | seat_tier_hold(rule_at($id).strict_tiers == true) | skip_unreadable | pace_guard(rule_at($id).seat_pacing)) as $cs |
       ([$cs[] | select(.eligible and ((.unranked // false) | not) and ((.incomplete // false) | not)) | .profile.reasoning_class | select(type == "number")] | max // null) as $strongest |
       {id: $id, order: $order, when: (if $id == "default" then $none_criterion else rule_at($id).when end),
        approval: (rule_at($id).approval // null), row_floor: $rf,
@@ -1837,7 +1842,7 @@ fm_dispatch_resolve_json() {  # <quota attempts> <warm-ups run>
   def hold_and_skip:
     reserve_tier | seat_tier_hold(if $ambiguous then any($union_ids[]; rule_at(.).strict_tiers == true) else $rule.strict_tiers == true end)
     | if ($sel.rule_floor_incomplete // false) or ($ambiguous and any($union_floors[]; .state == "unmeasured")) then . else skip_unreadable end;
-  ($unbanned_m | worker_ban($worker_task) | claude3_floor($decision_use) | weekly_guard) as $weekly_safe |
+  ($unbanned_m | claude3_ban($task_kind; $ladder_row.meta.label) | worker_ban($worker_task) | claude3_floor($decision_use) | weekly_guard) as $weekly_safe |
   ($weekly_safe | five_hour_guard | hold_and_skip) as $guarded |
   (if any($guarded[]; .five_hour_guard // false) and (any($guarded[]; .eligible and ((.unranked // false) | not)) | not)
    then [$weekly_safe | hold_and_skip | .[] |

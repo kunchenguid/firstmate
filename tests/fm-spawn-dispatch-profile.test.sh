@@ -2575,6 +2575,102 @@ test_dispatch_receipt_compares_a_secondmate_by_its_claude_store() {
   pass "dispatch receipt gate matches a secondmate by its Claude store, refuses another account's store, and keeps workers literal"
 }
 
+# Keep claude3 first in both rows, as in the supervisor/board configuration.
+# Put the board row FIRST to prove admission uses its label, not rule_12.
+enable_claude3_profiles() {
+  mkdir -p "$CASE_DIR/claude1" "$CASE_DIR/claude2" "$CASE_DIR/claude3"
+  jq -n --arg dir "$CASE_DIR" '{crossAccount:{enabled:true},accounts:
+    (["claude1","claude2","claude3"] | map({key:.,value:{claude:($dir + "/" + .)}}) | from_entries)}' \
+    > "$HOME_DIR/config/accounts.json"
+  jq -n '
+    def seats: ["claude3","claude1","claude2"] | map({harness:"claude",model:"sonnet",effort:"high",account:.,seat_tier:(if . == "claude3" then 1 else 2 end),reasoning_class:3});
+    {claude3_policy:{worker_rows:"lavish-board-owners-only"},rules:[
+      {label:"Lavish page owner",when:"Host the page",use:seats},
+      {label:"Orchestration (firstmate and secondmates)",when:"Supervise work",use:seats}],
+     default:{harness:"claude",model:"sonnet",effort:"high",account:"claude1",reasoning_class:3}}' \
+    > "$HOME_DIR/config/crew-dispatch.json"
+}
+
+test_claude3_launch_kind_guard() {
+  local rec role id out status sm row
+  local args=()
+  rec=$(make_spawn_case claude3-guard claude)
+  read_case_record "$rec"
+  enable_claude3_profiles
+  for role in ship scout no-mistakes board-ship; do
+    id="claude3-$role"
+    fm_test_spawn_brief "$HOME_DIR" "$id"
+    row=rule_2
+    if [ "$role" = board-ship ]; then
+      printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.' >> "$HOME_DIR/data/$id/brief.md"
+      row=rule_1
+    else
+      # Produce a genuine claude3 receipt via a supervisor charter, then launch
+      # it with WORKER flags. The gate must trust launch kind, not brief prose.
+      printf '%s\n' 'You are a persistent second mate managed by the main firstmate.' \
+        '# Task' "## Captain's intent" 'Exercise the reserved-account launch guard.' \
+        '## Firstmate spec' 'Keep the implementation worker off the reserved account.' > "$HOME_DIR/data/$id/brief.md"
+    fi
+    fm_test_dispatch_choose "$HOME_DIR" "$id" "$HOME_DIR/data/$id/brief.md" "$row" claude sonnet high claude3 \
+      || fail "could not route the claude3 guard fixture"
+    args=(--mode direct-PR --yolo off)
+    case "$role" in scout) args=(--scout) ;; no-mistakes) args=(--mode no-mistakes --yolo off) ;; esac
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      "$id" "$PROJ_DIR" "${args[@]}" --harness claude --model sonnet --effort high --account claude3)
+    status=$?
+    expect_code 1 "$status" "claude3 must refuse $role despite a genuine matching receipt: $out"
+    assert_contains "$out" 'account claude3 is reserved by the claude3 launch rule' 'refusal names account and rule'
+    assert_contains "$out" 'Lavish page owner' 'refusal names the only board-owner row'
+    assert_absent "$HOME_DIR/state/$id.meta" 'refused worker has no metadata'
+    [ ! -s "$LAUNCH_LOG" ] || fail 'refused worker sent a launch'
+    [ -z "$(find "$HOME_DIR/state/dispatch-receipt" -name '*.spent')" ] || fail 'refusal consumed a receipt'
+  done
+
+  id=claude3-board-scout
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.' >> "$HOME_DIR/data/$id/brief.md"
+  fm_test_dispatch_choose "$HOME_DIR" "$id" "$HOME_DIR/data/$id/brief.md" rule_1 claude sonnet high claude3 \
+    || fail 'could not route board scout'
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --scout --harness claude --model sonnet --effort high --account claude3)
+  expect_code 0 "$?" "Lavish board-owner scout must still launch: $out"
+  assert_contains "$out" "spawned $id harness=claude kind=scout" 'board scout launched'
+  assert_grep 'account=claude3' "$HOME_DIR/state/$id.meta" 'board scout uses the reserved account'
+  assert_contains "$(<"$LAUNCH_LOG")" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude3'" 'board scout uses the reserved store'
+
+  id=claude3-secondmate
+  rec=$(make_spawn_case claude3-secondmate claude)
+  read_case_record "$rec"
+  enable_claude3_profiles
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  printf '%s\n' 'You are a persistent second mate managed by the main firstmate.' > "$sm/data/charter.md"
+  fm_test_dispatch_choose "$HOME_DIR" "$id" "$sm/data/charter.md" rule_2 claude sonnet high claude3 \
+    || fail 'could not route secondmate'
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude3" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$sm" --secondmate --harness claude --model sonnet --effort high)
+  expect_code 0 "$?" "persistent secondmate must still launch on claude3: $out"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate" 'secondmate launched'
+  assert_contains "$(<"$LAUNCH_LOG")" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude3'" 'secondmate uses the reserved store'
+  pass 'claude3 launch rule refuses ships, non-board scouts and no-mistakes; allows only board scouts and persistent secondmates'
+}
+
+test_claude3_home_store_guard_without_table() {
+  local rec id out
+  id=claude3-inherited
+  rec=$(make_spawn_case claude3-inherited claude "$id")
+  read_case_record "$rec"
+  enable_claude3_profiles
+  rm "$HOME_DIR/config/crew-dispatch.json"
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude3" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude)
+  expect_code 1 "$?" "an inherited claude3 store cannot bypass the guard without a table: $out"
+  assert_contains "$out" 'account claude3 is reserved by the claude3 launch rule' 'inherited store refusal names account and rule'
+  assert_absent "$HOME_DIR/state/$id.meta" 'inherited reserved store wrote no worker'
+  [ ! -s "$LAUNCH_LOG" ] || fail 'inherited reserved store launched a worker'
+  pass 'claude3 launch rule precedes the no-table exemption and covers inherited stores'
+}
+
 test_dispatch_receipt_raw_command_needs_a_captain_override() {
   local rec id out status
   id=receipt-raw-z28
@@ -3372,5 +3468,7 @@ test_failed_start_refunds_the_receipt_only_before_launch
 test_dispatch_receipt_admits_scout_and_secondmate_from_the_table
 test_dispatch_receipt_compares_a_secondmate_by_its_claude_store
 test_dispatch_receipt_raw_command_needs_a_captain_override
+test_claude3_launch_kind_guard
+test_claude3_home_store_guard_without_table
 
 echo "# all fm-spawn-dispatch-profile tests passed"

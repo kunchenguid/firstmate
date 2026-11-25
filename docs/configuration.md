@@ -1972,7 +1972,7 @@ This section is the single owner of the canonical schema and its per-field seman
   "preferred_provider": "<optional quota-axi provider family to spend first>",
   "shared_quota": false,
   "seat_tiers_by_delivery": { "<delivery mode>": { "<registry account id>": 1 } },
-  "claude3_policy": { "worker_rows": "later seat tier only", "weekly_floor_percent": 25, "note": "<optional>" },
+  "claude3_policy": { "worker_rows": "lavish-board-owners-only", "weekly_floor_percent": 25, "note": "<optional>" },
   "worker_banned_accounts": ["claude3"],
   "ladder_policy": { "counts": "capability_failures", "tie_band_points": 2, "beyond_ceiling": "escalate", "jev_never_escalates": true, "fable_projects": ["<optional repo allowlist>", "firstmate"], "note": "<optional>" },
   "ladder_rungs": [ { "rung": 1, "name": "<label>", "claude": [ { "harness": "claude", "model": "<model>", "effort": "<effort>" } ], "codex": [], "zai": [], "claude_written": [] } ],
@@ -2021,8 +2021,19 @@ An absent `account` keeps the home seat only in a home without `config/accounts.
 
 **Supervisor reserve and provider bans**
 
-- The claude3 account stays the supervisor reserve: firstmate and secondmate rows use it freely, while ordinary worker rules and the default may seat it only as a LATER seat tier behind the tiered claude1 and claude2 seats. `claude3_policy.worker_rows` must read `"later seat tier only"` and `weekly_floor_percent` (default 25, range 0-100) stops worker starts once claude3's weekly window falls below the floor - a row that seats claude3 first (tier 1, the firstmate-orchestration pattern) skips that worker floor. An unknown `claude3_policy` key or a first-tier claude3 seat in an ordinary row is a configuration error.
-- Top-level `worker_banned_accounts` is a non-empty array of account IDs (`["claude3"]` in the example table) that worker tasks may never seat, whatever row Jev matched. Every ship or scout brief, every default-row decision and every no-mistakes pipeline step drops candidates on a listed account: they read `account <id> is banned for worker tasks (worker_banned_accounts)`, are ineligible, and hold no seat tier, so the next tier takes over exactly as for a `never_providers` ban. The ban sits on the candidates, not on the row choice, so the firstmate-orchestration row (which seats claude3 first) cannot hand claude3 to an ordinary worker brief. Only a secondmate charter (a brief whose first line opens `You are a persistent second mate managed by`) is exempt. A value that is not a non-empty array of lowercase account IDs is a configuration error. A captain pick is a deliberate human choice and is not filtered.
+- The claude3 account is reserved for firstmate, persistent secondmates (`kind=secondmate`), and Lavish board-owner scouts (`kind=scout` whose receipt matches the rule labelled exactly `Lavish page owner`).
+  The primary firstmate is not launched through `fm-spawn`; every other ship, non-board scout, no-mistakes run, and relaunch on claude3 is refused by the launch gate, even with a captain pick, no routing table, or an unchanged recorded profile.
+  Orchestration wording or a matched orchestration row cannot grant supervisor identity: only secondmates may take its claude3 profile.
+  Board scouts need a fresh receipt on every launch, validated against the current row's hash and stable label, not its array index or the brief's prose.
+  The resolver excludes forbidden claude3 candidates before ranking, including ambiguous matches, pipeline steps, and captain-pick options.
+  It reads current task kind from `--task` metadata (so promotion overrides old scout text), otherwise from the scaffold's exact scout contract or secondmate charter opening; unmarked briefs are ships.
+  `claude3_policy.worker_rows` is descriptive (`"lavish-board-owners-only"`), not an off switch; existing seat-order validation and optional `weekly_floor_percent` (0-100) still apply to permitted profiles.
+- Top-level `worker_banned_accounts` is a non-empty array of account IDs (`["claude3"]` in the example table) that worker tasks may never seat, whatever row Jev matched.
+  Every ship or scout brief, every default-row decision and every no-mistakes pipeline step drops candidates on a listed account: they read `account <id> is banned for worker tasks (worker_banned_accounts)`, are ineligible, and hold no seat tier, so the next tier takes over exactly as for a `never_providers` ban.
+  The ban sits on the candidates, not on the row choice.
+  Only a persistent secondmate is exempt, using the same task-kind inputs described above.
+  A value that is not a non-empty array of lowercase account IDs is a configuration error.
+  A captain pick can override this optional ban, but not the claude3 launch rule above.
 - A rule `never_providers` is a non-empty array of provider IDs that rule's work may never run on, such as `["zai"]` on front-end design. A rule that lists a profile of a provider it bans is a configuration error, and when an ambiguous union pulls profiles of a banned provider in from another rule, those candidates read `provider <id> is banned for this work (never_providers)` and are never chosen.
 - A rule `never_models` is the same ban for model IDs, such as `["fable"]` on security and planning: a rule that lists a profile of a model its own `never_models` bans is a configuration error, and a blended ban reads `model <id> is banned for this work (never_models)`. In an ambiguous union the candidates come from the most probable (anchor) row alone, while every blended row's `never_providers` and `never_models` bans apply to that pool, so a security anchor never offers a Fable seat blended in from another row.
 - `ladder_policy.fable_projects` is an optional repo allowlist for Fable seats. Absent (captain decision 2026-11-11, option B) it restricts nothing and Fable may start and escalate on every repo; declared, a Fable seat outside a listed project reads `fable is reserved for projects in ladder_policy.fable_projects; project <name> is not one of them` and is never chosen. An empty array is a configuration error.
@@ -2667,6 +2678,7 @@ This section is the operator contract; `bin/fm-dispatch-receipt-lib.sh`'s header
 
 The normal path is the [dispatch broker](#typed-dispatch-resolution-jevd-socket), which resolves and launches in one invocation without hand-composing profile flags.
 `tests/fm-dispatch.test.sh` verifies broker composition and refusal behavior through executable stubs; `tests/fm-dispatch-resolve.test.sh` verifies resolution and the receipt gate.
+`tests/fm-spawn-dispatch-profile.test.sh`, `tests/fm-control-relaunch.test.sh`, and `tests/fm-dispatch-six-accounts.test.sh` cover the claude3 launch rule and resolver eligibility.
 
 **Producers**
 
@@ -2683,14 +2695,15 @@ A captain receipt is admitted only when it names an answered pick request whose 
 - A local Claude secondmate cannot name an account, so it matches a receipt's account only when `config/accounts.json` gives that account the Claude store the secondmate will run on.
 - A receipt that names a task admits only that task, and each launch consumes its receipt.
 - A raw launch command cannot be matched to a table profile and is refused while routing rows exist.
-- A relaunch or a secondmate respawn that keeps the task's recorded profile makes no new routing decision and needs no receipt.
+- A relaunch or a secondmate respawn that keeps the task's recorded profile makes no new routing decision and needs no receipt, subject to the [claude3 launch rule](#crew-dispatch-profiles-configcrew-dispatchjson).
 
 Every refusal names the missing or mismatching receipt field and the command that produces a receipt, and leaves nothing created.
 
 **No off switch**
 
 The gate has no flag or config file that disables it.
-A home with no routing rows has no table to route from, so its launches are not gated; that holds whether the table is absent or carries notes only, and a table that is present but malformed refuses every launch.
+A home with no routing rows has no table to route from, so its launches need no receipt; that holds whether the table is absent or carries notes only, and a table that is present but malformed refuses every launch.
+The [claude3 launch rule](#crew-dispatch-profiles-configcrew-dispatchjson) applies before every receipt exemption.
 
 **What the gate prevents, and what it only records**
 

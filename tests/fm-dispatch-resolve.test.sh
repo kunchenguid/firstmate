@@ -1450,4 +1450,28 @@ cp "$TMP_ROOT/quota-before-store" "$QUOTA"
 rm "$HOME_DIR/config/accounts.json"
 if [ -e "$TMP_ROOT/accounts-before-store" ]; then mv "$TMP_ROOT/accounts-before-store" "$HOME_DIR/config/accounts.json"; fi
 pass 'the gate matches a second mate to a receipt account only through that account'"'"'s Claude store'
+# A verified captain override cannot turn the reserved account into a worker
+# seat, and refusal must not spend the answer or mint a receipt.
+jq -n --arg dir "$TMP_ROOT" '{crossAccount:{enabled:true},accounts:
+  (["claude1","claude2","claude3"] | map({key:.,value:{claude:($dir + "/guard-" + .)}}) | from_entries)}' \
+  > "$HOME_DIR/config/accounts.json"
+jq -n '{shared_quota:true,rules:[{label:"Orchestration (firstmate and secondmates)",when:"Supervise",use:
+  (["claude3","claude1","claude2"] | map({harness:"claude",model:"sonnet",account:.,seat_tier:(if . == "claude3" then 1 else 2 end),reasoning_class:1}))}],
+  default:{harness:"claude",model:"sonnet",account:"claude1",reasoning_class:1}}' > "$RULES"
+printf '# Task\nImplement the release change.\n' > "$HOME_DIR/data/guard-pick.md"
+write_response rule_1 0.95 '{"rule_1":0.95,"default":0.05}'
+run "$HOME_DIR/data/guard-pick.md" --task guard-pick --captain-pick
+expect_code 0 "$code" "the captain can inspect the guarded candidates: $out"
+code_a=$(pick_code)
+req="$HOME_DIR/state/dispatch-pick/$code_a.json"
+n=$(jq -r '.options[] | select(.profile.account == "claude3") | .n' "$req")
+assert_equals false "$(jq -r '.options[] | select(.profile.account == "claude3") | .eligible' "$req")" 'captain-pick evidence marks claude3 forbidden'
+before=$(latest)
+captain_mirror "route $code_a $n override"
+run pick "$code_a"
+expect_code 3 "$code" "even an explicit captain override cannot select claude3 for a ship: $out"
+assert_contains "$out" 'account claude3 is reserved by the claude3 launch rule' 'captain-pick refusal names the hard rule'
+assert_equals "$before" "$(latest)" 'forbidden captain pick creates no receipt'
+assert_absent "$req.answered" 'forbidden captain pick does not consume its answer'
+pass 'captain overrides cannot bypass the claude3 launch rule'
 echo '# all fm-dispatch-resolve tests passed'

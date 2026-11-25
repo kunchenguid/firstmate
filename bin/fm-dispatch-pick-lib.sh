@@ -240,10 +240,14 @@ fm_dp_cmd_pick() {
     if $row == null then "gone" elif $row.sha256 != $o.row.sha256 then "changed"
     elif any($row.profiles[]; key == ($o.profile | key)) | not then "outside" else "member" end' <<<"$rows")
   [ "$verdict" = member ] || fm_dp_refuse "row $(jq -r .row.id <<<"$option") of option $n is $verdict in config/crew-dispatch.json; route again"
-  fm_dp_mark_used "$used" || fm_dp_refuse "the captain entry $ref already admitted another pick; every pick needs its own answer"
-  fm_dr_record_intake || fm_dp_refuse "quota intake failed; stop and report"
   task=$(jq -r '.task // ""' "$file")
   profile=$(jq -c '.profile' <<<"$option")
+  # A captain pick can override optional eligibility, not the launch rule.
+  local row_label
+  row_label=$(jq -r --arg id "$(jq -r .row.id <<<"$option")" '.[] | select(.id == $id) | .label // "unlabelled"' <<<"$rows")
+  fm_dr_claude3_guard "$(jq -r '.account // ""' <<<"$profile")" "$(fm_dr_task_kind "$brief" "$task")" "$row_label"
+  fm_dp_mark_used "$used" || fm_dp_refuse "the captain entry $ref already admitted another pick; every pick needs its own answer"
+  fm_dr_record_intake || fm_dp_refuse "quota intake failed; stop and report"
   row=$(jq -c '{id: .row.id, sha256: .row.sha256}' <<<"$option")
   cands=$(jq -c --argjson o "$option" --arg intake "$FM_DR_INTAKE_RECORD" '[.options[] | select(.row.id == $o.row.id) |
     .profile + {reasoning_class, catalog: "unknown (the resolver does not read harness catalogs; fm-spawn validates the model at launch)",

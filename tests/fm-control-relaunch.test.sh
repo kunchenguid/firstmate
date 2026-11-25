@@ -1355,6 +1355,47 @@ test_same_profile_relaunch_needs_no_dispatch_receipt() {
   pass "fm-control relaunch: keeping the recorded profile needs no dispatch receipt"
 }
 
+test_claude3_same_profile_worker_relaunch_is_refused() {
+  local home_kind table dir id out rc meta
+  for home_kind in primary secondmate; do
+    for table in absent present; do
+      id="claude3-$home_kind-$table"
+      dir=$(new_case "$id" "$id")
+      add_ship_task "$dir" "$id" claude
+      mkdir -p "$dir/home/config" "$dir/claude3"
+      if [ "$home_kind" = secondmate ]; then
+        printf 'isolated-secondmate\n' > "$dir/home/.fm-secondmate-home"
+      fi
+      jq -n --arg store "$dir/claude3" '{crossAccount:{enabled:true},accounts:{claude3:{claude:$store}}}' \
+        > "$dir/home/config/accounts.json"
+      [ "$table" = absent ] || enable_routing_table "$dir"
+      meta="$dir/home/state/$id.meta"
+      printf 'account=claude3\nclaude_config_dir=%s/claude3\n' "$dir" >> "$meta"
+      cp "$meta" "$dir/meta.before"
+      cp "$dir/home/data/$id/brief.md" "$dir/brief.before"
+      out=$(run_control "$dir" "$id" relaunch --note 'same reserved profile'); rc=$?
+      expect_code 1 "$rc" "claude3 ship relaunch must refuse in $home_kind home, table $table: $out"
+      assert_contains "$out" 'account claude3 is reserved by the claude3 launch rule' 'relaunch refusal names account and rule'
+      assert_contains "$out" 'running agent was left untouched' 'refusal must precede stopping the worker'
+      [ "$(<"$dir/fake/command")" = claude ] || fail 'reserved worker was stopped'
+      [ ! -s "$dir/fake/literal" ] || fail 'reserved worker received a replacement launch'
+      assert_absent "$dir/home/state/$id.control-relaunch" 'reserved worker relaunch created a journal'
+      cmp -s "$meta" "$dir/meta.before" || fail 'reserved worker relaunch changed metadata'
+      cmp -s "$dir/home/data/$id/brief.md" "$dir/brief.before" || fail 'reserved worker relaunch changed brief'
+
+      # Reach fm-spawn directly after modelling an exited agent as well; its
+      # own same-profile/no-table gates must enforce the identical policy.
+      printf bash > "$dir/fake/command"
+      out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+      expect_code 1 "$rc" "direct claude3 ship respawn must also refuse: $out"
+      assert_contains "$out" 'account claude3 is reserved by the claude3 launch rule' 'spawn relaunch shares the account guard'
+      [ ! -s "$dir/fake/literal" ] || fail 'direct reserved respawn sent a launch'
+      cmp -s "$meta" "$dir/meta.before" || fail 'direct reserved respawn changed metadata'
+    done
+  done
+  pass 'claude3 ship relaunch is refused before stopping in primary and secondmate homes, with or without routing rows'
+}
+
 test_relaunch_onto_an_unverified_harness_is_refused() {
   local dir out rc
   dir=$(new_case badharness rl8)
@@ -3701,6 +3742,7 @@ test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_a_new_profile_needs_a_dispatch_receipt
 test_same_profile_relaunch_needs_no_dispatch_receipt
+test_claude3_same_profile_worker_relaunch_is_refused
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm

@@ -1535,7 +1535,7 @@ spawn_remote_secondmate() {
   # no receipt producer; the host-local launch is then admitted on the strength
   # of this one (contract: bin/fm-dispatch-receipt-lib.sh). Previewed before
   # anything is transferred, consumed just before the launch is delegated.
-  DISPATCH_GATE_ARGS=(--task "$id" --brief "$DATA/$id/brief.md" --harness "$harness" --recorded-meta "$meta")
+  DISPATCH_GATE_ARGS=(--task "$id" --brief "$DATA/$id/brief.md" --harness "$harness" --kind secondmate --recorded-meta "$meta")
   [ "$model" = - ] || DISPATCH_GATE_ARGS+=(--model "$model")
   [ "$effort" = - ] || DISPATCH_GATE_ARGS+=(--effort "$effort")
   if ! spawn_dispatch_receipt_gate; then
@@ -5054,10 +5054,13 @@ fi
 # no new routing decision and needs no receipt. A remote second mate passes
 # this same gate in its parent home, inside spawn_remote_secondmate, and its
 # host-local fm-spawn is admitted here on the strength of that.
-DISPATCH_GATE_ARGS=(--task "$ID" --brief "${SOURCE_BRIEF:-$BRIEF}" --harness "$HARNESS")
+DISPATCH_GATE_ARGS=(--task "$ID" --brief "${SOURCE_BRIEF:-$BRIEF}" --harness "$HARNESS" --kind "$KIND")
 [ -z "$DISPATCH_REQ_MODEL" ] || DISPATCH_GATE_ARGS+=(--model "$DISPATCH_REQ_MODEL")
 [ -z "$DISPATCH_REQ_EFFORT" ] || DISPATCH_GATE_ARGS+=(--effort "$DISPATCH_REQ_EFFORT")
-[ -z "$ACCOUNT_ARG" ] || DISPATCH_GATE_ARGS+=(--account "$ACCOUNT_ARG")
+DISPATCH_GATE_ACCOUNT=$ACCOUNT_ARG
+# The reserve guard also covers a pin or inherited home store on claude3.
+[ -n "$DISPATCH_GATE_ACCOUNT" ] || [ "$SPAWN_SEAT" != claude3 ] || DISPATCH_GATE_ACCOUNT=claude3
+[ -z "$DISPATCH_GATE_ACCOUNT" ] || DISPATCH_GATE_ARGS+=(--account "$DISPATCH_GATE_ACCOUNT")
 [ "$RAW_LAUNCH" -eq 0 ] || DISPATCH_GATE_ARGS+=(--raw)
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = claude ]; then
   DISPATCH_GATE_ARGS+=(--secondmate-claude-store "$SPAWN_CLAUDE_STORE")

@@ -149,7 +149,13 @@ fi
 [ -z "$A" ] || PROFILE_ARGS+=(--account "$A")
 # No recorded-meta exemption here: even same-profile recovery/promotion must
 # validate the newly resolved receipt. The launch owner still consumes its own.
-"$SCRIPT_DIR/fm-dispatch-resolve.sh" gate --task "$ID" --brief "$BRIEF" "${PROFILE_ARGS[@]}"
+KIND=ship
+if [ "$VERB" = new ]; then
+  [[ " ${ARGS[*]} " != *' --scout '* ]] || KIND=scout
+else
+  KIND=$(meta_value kind)
+fi
+"$SCRIPT_DIR/fm-dispatch-resolve.sh" gate --task "$ID" --brief "$BRIEF" --kind "$KIND" "${PROFILE_ARGS[@]}"
 case "$VERB" in
   new) exec "$SCRIPT_DIR/fm-spawn.sh" "$ID" "$PROJECT" "${ARGS[@]}" "${PROFILE_ARGS[@]}" ;;
   relaunch) exec "$SCRIPT_DIR/fm-control.sh" "$ID" relaunch "${ARGS[@]}" "${PROFILE_ARGS[@]}" ;;

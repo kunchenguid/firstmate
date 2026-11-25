@@ -50,7 +50,12 @@
 #   rationale   why this candidate (the resolver's note, or the rationale file)
 #   override    null; legacy override receipts are refused
 #
-# The gate (fm_dr_cmd_gate) admits a launch only when:
+# The unconditional claude3 launch rule in docs/configuration.md ("Supervisor
+# reserve and provider bans") precedes every exemption below.
+# Gate kind is --kind ship|scout|secondmate (default ship); --recorded-meta kind
+# overrides it on relaunch. No task prose is consulted by launch admission.
+#
+# The gate (fm_dr_cmd_gate) otherwise admits a launch only when:
 #   - this home has no routing rows (no rules and no default): there is no
 #     table to route from, so nothing is demanded; or
 #   - it is the host-local launch of a remote second mate that the parent home's
@@ -126,6 +131,28 @@ fm_dr_override_log() { printf '%s\n' "$DATA/dispatch-overrides.jsonl"; }
 fm_dr_die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 fm_dr_refuse() { printf 'dispatch receipt gate: refusing - %s\n' "$1"; exit 3; }
 
+# Shared by launch admission and candidate eligibility, not quota ranking.
+# shellcheck disable=SC2016 # jq program text, not shell expansion
+FM_DR_CLAUDE3_JQ='
+  def claude3_allowed($kind; $row_label):
+    $kind == "secondmate" or ($kind == "scout" and $row_label == "Lavish page owner");
+  def claude3_reason($kind; $row_label):
+    "account claude3 is reserved by the claude3 launch rule for kind=secondmate or kind=scout with matched rule label Lavish page owner; got kind=\($kind), rule \($row_label // "unlabelled")";
+  def claude3_ban($kind; $row_label):
+    map(if .profile.account == "claude3" and (claude3_allowed($kind; $row_label) | not)
+      then del(.incomplete, .windows_missing, .unranked) +
+        {eligible: false, banned: true, reason: claude3_reason($kind; $row_label)}
+      else . end);
+'
+fm_dr_claude3_guard() {  # <account> <kind> [matched row label]
+  [ "$1" = claude3 ] || return 0
+  local reason
+  reason=$(jq -nr --arg kind "$2" --arg row_label "${3:-unlabelled}" "$FM_DR_CLAUDE3_JQ"'
+    if claude3_allowed($kind; $row_label) then empty else claude3_reason($kind; $row_label) end') \
+    || fm_dr_refuse 'account claude3 launch rule could not be checked'
+  [ -z "$reason" ] || fm_dr_refuse "$reason"
+}
+
 fm_dr_max_age() {
   local v=${FM_DISPATCH_RECEIPT_MAX_AGE:-$FM_DR_MAX_AGE_CAP}
   case "$v" in '' | *[!0-9]*) v=$FM_DR_MAX_AGE_CAP ;; esac
@@ -179,6 +206,21 @@ fm_dr_meta_get() {  # <meta-file> <key>: last value wins, as fm_meta_get reads i
   printf '%s' "$value"
 }
 
+# Resolver/pick intake kind: current metadata wins over retained scout text on
+# promotion. Without a record, only exact scaffold markers grant an exception.
+# Launch admission instead takes kind directly from its launch owner.
+fm_dr_task_kind() {  # <brief> [task id]
+  local brief=$1 task=${2:-} kind=ship
+  if [[ "$task" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && [[ "$task" != *..* ]] && [ -f "$STATE/$task.meta" ]; then
+    kind=$(fm_dr_meta_get "$STATE/$task.meta" kind)
+  elif [[ "$(head -n 1 "$brief")" = 'You are a persistent second mate managed by'* ]]; then
+    kind=secondmate
+  elif grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$brief"; then
+    kind=scout
+  fi
+  printf '%s' "${kind:-ship}"
+}
+
 fm_dr_profile_json() {  # <harness> <model> <effort> <account> [provider]
   jq -cn --arg h "$1" --arg m "$(fm_dr_axis "$2")" --arg e "$(fm_dr_axis "$3")" --arg a "$4" --arg p "${5:-}" \
     '{harness: $h, model: $m, effort: $e, account: $a, provider: $p}'
@@ -202,12 +244,12 @@ FM_DR_ROW_JQ="$FM_DL_JQ"'
   def axis: if . == null or . == "default" then "" else . end;
   def norm: {harness: .harness, model: (.model | axis), effort: (.effort | axis), account: (.account // ""), provider: (.provider // "")};
   def row_entry($id; $sha; $when; $approval; $use; $meta):
-    {id: $id, sha256: $sha, when: $when, approval: $approval,
+    {id: $id, sha256: $sha, label: ($meta.label // null), when: $when, approval: $approval,
      profiles: ((if ($use | type) == "array" then $use else [$use] end) | map(norm)),
      ladder_profiles: (dl_all($cfg[0]; $use; $meta) | map(norm))};
 '
 
-# The table's rows as [{id, sha256, when, approval, profiles}]. An absent file
+# The table's rows as [{id, sha256, label, when, approval, profiles}]. An absent file
 # and a file with neither rules nor default both yield []. rc 1 with FM_DR_ERR
 # set when the file exists but is unreadable or malformed.
 fm_dr_table_rows() {
@@ -559,12 +601,12 @@ fm_dr_account_owns_claude_store() {
 
 fm_dr_cmd_gate() {
   local brief='' task='' harness='' model='' effort='' account='' raw=0 consume=0 meta='' consume_token=''
-  local resolved_model='' resolved_effort='' resolved_set=0 secondmate_store='' arg
+  local resolved_model='' resolved_effort='' resolved_set=0 secondmate_store='' kind=ship arg
   while [ $# -gt 0 ]; do
     arg=$1
     shift
     case "$arg" in
-      --brief | --task | --harness | --model | --effort | --account | --recorded-meta | --resolved-model | --resolved-effort | --consume-token | --secondmate-claude-store)
+      --brief | --task | --harness | --model | --effort | --account | --kind | --recorded-meta | --resolved-model | --resolved-effort | --consume-token | --secondmate-claude-store)
         [ $# -gt 0 ] || fm_dr_die "$arg needs a value" ;;
     esac
     case "$arg" in
@@ -577,6 +619,7 @@ fm_dr_cmd_gate() {
       --model) model=$1; shift ;;
       --effort) effort=$1; shift ;;
       --account) account=$1; shift ;;
+      --kind) kind=$1; shift ;;
       --recorded-meta) meta=$1; shift ;;
       --resolved-model) resolved_model=$1; resolved_set=1; shift ;;
       --resolved-effort) resolved_effort=$1; resolved_set=1; shift ;;
@@ -593,18 +636,31 @@ fm_dr_cmd_gate() {
   resolved_model=$(fm_dr_axis "$resolved_model")
   resolved_effort=$(fm_dr_axis "$resolved_effort")
   command -v jq >/dev/null 2>&1 || fm_dr_refuse "jq is not installed, so the dispatch table cannot be read"
+  # Recorded kind wins on relaunch; changing flags cannot turn a ship into a
+  # board scout or supervisor. Legacy records without kind remain ships.
+  if [ -n "$meta" ] && [ -f "$meta" ]; then
+    kind=$(fm_dr_meta_get "$meta" kind)
+    [ -n "$kind" ] || kind=ship
+  fi
+  case "$kind" in ship|scout|secondmate) ;; *) fm_dr_die "unknown launch kind: $kind" ;; esac
+  local board_receipt_required=0
+  if [ "$account" = claude3 ] && [ "$kind" != secondmate ]; then
+    [ "$kind" = scout ] || fm_dr_claude3_guard "$account" "$kind"
+    board_receipt_required=1
+  fi
 
   local rows
   rows=$(fm_dr_table_rows) \
     || fm_dr_refuse "config/crew-dispatch.json is not a readable, well-formed rules file ($FM_DR_ERR); correct it rather than launching around it"
   if [ "$(jq 'length' <<<"$rows")" -eq 0 ]; then
+    fm_dr_claude3_guard "$account" "$kind"
     printf 'dispatch receipt gate: PASS - this home has no routing rows in config/crew-dispatch.json, so there is no table to route from\n'
     return 0
   fi
 
   # The host-local launch of a remote second mate its parent home already admitted.
   local remote_home=${STATE%/state/parent-route}
-  if [ -n "$task_id" ] && [ "${FM_DISPATCH_PARENT_ADMITTED:-}" = "$task_id" ] && [ "$raw" -eq 0 ] \
+  if [ "$board_receipt_required" -eq 0 ] && [ -n "$task_id" ] && [ "${FM_DISPATCH_PARENT_ADMITTED:-}" = "$task_id" ] && [ "$raw" -eq 0 ] \
     && [ "$remote_home" != "$STATE" ] && [ -n "$brief" ] && [ "$brief" -ef "$remote_home/data/charter.md" ] \
     && [ "$(cat "$remote_home/.fm-secondmate-home" 2>/dev/null)" = "$task_id" ]; then
     printf 'dispatch receipt gate: PASS - %s was admitted by the gate in its parent home; this host-local launch of a remote second mate needs no receipt of its own\n' "$task_id"
@@ -612,7 +668,7 @@ fm_dr_cmd_gate() {
   fi
 
   # A launch that keeps the task's recorded profile changes no routing decision.
-  if [ -n "$meta" ] && [ -f "$meta" ]; then
+  if [ "$board_receipt_required" -eq 0 ] && [ -n "$meta" ] && [ -f "$meta" ]; then
     local rec_account
     rec_account=$(fm_dr_meta_get "$meta" account)
     case "$rec_account" in ordinary | /*) rec_account='' ;; esac
@@ -634,6 +690,7 @@ fm_dr_cmd_gate() {
   hint=$(fm_dr_producer_hint)
   launch=$(fm_dr_profile_json "$harness" "$model" "$effort" "$account")
   if ! receipt=$(fm_dr_newest_for_brief "$brief_sha"); then
+    fm_dr_claude3_guard "$account" "$kind"
     local other
     other=$(fm_dr_list | tail -n 1)
     [ -z "$other" ] || other=$(jq -r '.brief.path // "an unreadable receipt"' "$other" 2>/dev/null)
@@ -690,6 +747,12 @@ fm_dr_cmd_gate() {
       *) fm_dr_refuse "receipt $name carries profile $(fm_dr_profile_text "$(jq -c '.profile' "$receipt")"), which is not a candidate of row.id '$row_id' in the current config/crew-dispatch.json; a profile outside the matched row is refused: $hint" ;;
     esac
   fi
+
+  # Derive the stable label from the CURRENT hash-checked row, never from
+  # receipt-supplied text, its positional rule number, or the brief.
+  local row_label
+  row_label=$(jq -r --arg id "$row_id" '.[] | select(.id == $id) | .label // "unlabelled"' <<<"$rows")
+  fm_dr_claude3_guard "$account" "$kind" "$row_label"
 
   # A second mate's account is the one that owns the Claude store it runs on.
   local receipt_account store_note=''

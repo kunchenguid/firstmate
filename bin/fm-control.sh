@@ -1598,7 +1598,12 @@ do_relaunch() {
     dispatch_gate_account=$(fm_meta_get "$META" account) || dispatch_gate_account=
     case "$dispatch_gate_account" in ordinary|/*) dispatch_gate_account= ;; esac
   fi
-  dispatch_gate_args=(--task "$ID" --brief "$dispatch_gate_brief" --harness "$TARGET_HARNESS" --recorded-meta "$META")
+  # A legacy/unpinned worker can inherit the reserved store without account=.
+  if [ -z "$dispatch_gate_account" ] && [ "$KIND" != secondmate ] && [ "$TARGET_HARNESS" = claude ] \
+    && [ "$(fm_account_seat_for_store "$CONFIG/accounts.json" claude "${relaunch_claude_store:-$HOME/.claude}" claude)" = claude3 ]; then
+    dispatch_gate_account=claude3
+  fi
+  dispatch_gate_args=(--task "$ID" --brief "$dispatch_gate_brief" --harness "$TARGET_HARNESS" --kind "$KIND" --recorded-meta "$META")
   [ "$TARGET_MODEL" = default ] || dispatch_gate_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || dispatch_gate_args+=(--effort "$TARGET_EFFORT")
   [ -z "$dispatch_gate_account" ] || dispatch_gate_args+=(--account "$dispatch_gate_account")

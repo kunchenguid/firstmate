@@ -14,6 +14,7 @@ cat > "$TMP/bin/fm-dispatch-resolve.sh" <<'SH'
 set -eu
 if [ "$1" = gate ]; then
   printf 'gate\n' >> "$BROKER_LOG"
+  jq -cn --args '$ARGS.positional' -- "$@" > "$BROKER_LOG.gate"
   exit "$GATE_RC"
 fi
 jq -cn --args '$ARGS.positional' -- "$@" >> "$BROKER_LOG"
@@ -138,12 +139,14 @@ run_broker new task '/projects/project with spaces' --mode direct-PR --yolo off 
 assert_rc 0
 last_args | jq -e '. == ["task","/projects/project with spaces","--mode","direct-PR","--yolo","off","--backend","tmux","--harness","claude","--model","opus","--effort","high","--account","seat"]' >/dev/null || fail 'spawn arguments changed'
 [ "$(grep -E '^(intake|receipt|gate|spawn)$' "$BROKER_LOG" | tr '\n' ' ')" = 'intake receipt gate spawn ' ] || fail 'resolve/intake/gate/launch ordering'
+jq -e 'index("--kind") as $i | $i != null and .[$i + 1] == "ship"' "$BROKER_LOG.gate" >/dev/null || fail 'new ship gate lost launch kind'
 pass 'new composes resolver-owned intake, receipt, gate and guarded spawn'
 
 reset_case
 run_broker new task /projects/project --scout --merge-review
 assert_rc 0
 last_args | jq -e 'index("--scout") != null and index("--merge-review") != null' >/dev/null || fail 'explicit review marker was not forwarded'
+jq -e 'index("--kind") as $i | $i != null and .[$i + 1] == "scout"' "$BROKER_LOG.gate" >/dev/null || fail 'new scout gate lost launch kind'
 [ "$(grep -E '^(intake|receipt|gate|spawn)$' "$BROKER_LOG" | tr '\n' ' ')" = 'intake receipt gate spawn ' ] || fail 'review bypassed quota intake/receipt/gate'
 reset_case
 export GATE_RC=3
@@ -215,6 +218,7 @@ run_broker promote task --mode direct-PR --yolo off
 assert_rc 0
 [ "$(grep -E '^(promote|intake|receipt|gate|send|control)$' "$BROKER_LOG" | tr '\n' ' ')" = 'promote intake receipt gate send ' ] || fail 'unchanged promotion ordering'
 last_args | jq -e '. == ["fm-task","--after-done","promote","ship instructions with spaces"]' >/dev/null || fail 'promotion instructions not sent'
+jq -e 'index("--kind") as $i | $i != null and .[$i + 1] == "ship"' "$BROKER_LOG.gate" >/dev/null || fail 'same-profile promotion gate must use the new ship kind'
 pass 'same-profile promotion routes ship contract and sends through guarded send'
 
 reset_case

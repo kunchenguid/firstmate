@@ -1117,23 +1117,24 @@ write_response rule_1 0.95 '{"rule_1":0.95,"rule_2":0.02,"rule_3":0.01,"rule_4":
 run "$BRIEF" --task six
 assert_contains "$(chosen)" "--account 'claude2'" "security spends the higher-priority seat inside the open tier: $out"
 assert_contains "$out" 'seat_tier held' 'later tiers stay held while tier 1 has room'
-# With every earlier pool out, claude3 starts above its floor but stops below it.
+# A permitted supervisor still observes the existing row floor and tier logic.
+printf '%s\n' 'You are a persistent second mate managed by the main firstmate.' > "$HOME_DIR/data/floor-charter.md"
 set_quota claude1 claude 0 1 exhausted_now
 set_quota claude2 claude 0 2 exhausted_now
 set_quota codex1 codex 0 1 exhausted_now
 set_quota claude3 claude 30 4
-run "$BRIEF" --task six
-assert_contains "$(chosen)" "--account 'claude3'" "claude3 opens when the earlier pools are out: $out"
+run "$HOME_DIR/data/floor-charter.md" --task six-floor
+assert_contains "$(chosen)" "--account 'claude3'" "claude3 opens for a secondmate when the earlier pools are out: $out"
 set_quota claude3 claude 20 4
-run "$BRIEF" --task six
+run "$HOME_DIR/data/floor-charter.md" --task six-floor
 assert_contains "$out" 'claude3 weekly floor: 20% left, stops at 25%' "a claude3 start below the floor is stopped: $out"
 assert_not_contains "$(chosen)" "claude3" 'the stopped claude3 seat is never the pick'
 # A rule that seats claude3 first (the firstmate pattern) skips the worker floor.
 reset_quota
 set_quota claude3 claude 10 4
 write_response rule_7 0.95 '{"rule_1":0.0,"rule_2":0.0,"rule_3":0.0,"rule_4":0.0,"rule_5":0.0,"rule_6":0.0,"rule_7":0.95,"default":0.05}'
-run "$BRIEF" --task six
-assert_contains "$(chosen)" "--account 'claude3'" "a tier-1 claude3 seat ignores the worker floor: $out"
+run "$HOME_DIR/data/floor-charter.md" --task six-floor
+assert_contains "$(chosen)" "--account 'claude3'" "a tier-1 claude3 supervisor seat ignores the worker floor: $out"
 # Blends take candidates from the most probable row and bans from every blended row.
 # The resolver validates a full probability map, so every blend completes the rest at 0.
 blend() { write_response "$1" 0.55 "$(jq -cn --argjson over "$2" '[["rule_1",0],["rule_2",0],["rule_3",0],["rule_4",0],["rule_5",0],["rule_6",0],["rule_7",0],["default",0]] | reduce .[] as [$k, $v] ($over; .[$k] = ($over[$k] // $v))')"; reset_quota; }
@@ -1235,9 +1236,51 @@ for bad in '[]' '"claude3"' '[3]' '["Claude 3"]'; do
   expect_code 2 "$code" "worker_banned_accounts $bad is a configuration error"
   assert_contains "$out" 'worker_banned_accounts must be a non-empty array of account IDs' "worker_banned_accounts $bad error is actionable: $out"
 done
+# The hard guard is independent of the optional ban and descriptive policy.
+# Reproduce an orchestration-biased ship answer at p=0.61 with claude3 first.
+jq '.worker_banned_accounts = ["glm"]
+  | .claude3_policy.worker_rows = "lavish-board-owners-only"
+  | .rules[6].label = "Orchestration (firstmate and secondmates)"
+  | .rules[6].min_confidence = 0.7
+  | .rules[6].use |= map(.model = "sonnet" | .effort = "high")
+  | .rules[0] = {label:"Lavish page owner",when:"Host a board",use:.rules[6].use}' "$TMP_ROOT/rules-ban" > "$RULES"
+printf '# Task\n## Captain%s intent\nWatch deploys and serialize the production promotion runs.\n## Firstmate spec\nImplement the release change and deliver a PR.\n' "'" > "$HOME_DIR/data/orchestration-worker.md"
+write_response rule_7 0.61 '{"rule_1":0,"rule_2":0,"rule_3":0,"rule_4":0.34,"rule_5":0,"rule_6":0,"rule_7":0.61,"default":0.05}'
+run "$HOME_DIR/data/orchestration-worker.md" --task six-ambiguous-ship
+expect_code 0 "$code" "the orchestration-biased worker still resolves: $out"
+assert_contains "$out" 'ambiguous union >= 0.25' 'the 0.61 case reaches ambiguous selection'
+assert_not_contains "$(chosen)" 'claude3' 'ambiguous ship picks a valid non-claude3 seat'
+assert_contains "$(chosen)" "--account 'claude" 'ambiguous ship uses another Claude seat'
+assert_contains "$out" 'account claude3 is reserved by the claude3 launch rule' 'hard ban is visible without a configured claude3 ban'
+run "$HOME_DIR/data/scout-brief.md" --task six-ambiguous-scout
+expect_code 0 "$code" "non-board scout still resolves: $out"
+assert_not_contains "$(chosen)" 'claude3' 'orchestration-biased scout picks a non-claude3 seat'
+
+# A stable board label, not its index or the brief wording, grants the exception.
+write_response rule_1 0.95 '{"rule_1":0.95,"rule_2":0,"rule_3":0,"rule_4":0,"rule_5":0,"rule_6":0,"rule_7":0,"default":0.05}'
+run "$HOME_DIR/data/scout-brief.md" --task six-board
+expect_code 0 "$code" "board-owner scout resolves: $out"
+assert_contains "$(chosen)" "--account 'claude3'" 'board-owner scout keeps claude3 at rule_1'
+run "$HOME_DIR/data/orchestration-worker.md" --task six-board-ship
+assert_not_contains "$(chosen)" 'claude3' 'a ship cannot take the board exception'
+printf 'kind=ship\n' > "$HOME_DIR/state/six-promoted.meta"
+run "$HOME_DIR/data/scout-brief.md" --task six-promoted
+assert_not_contains "$(chosen)" 'claude3' 'promoted ship metadata overrides its old scout marker'
+write_response rule_7 0.95 '{"rule_1":0,"rule_2":0,"rule_3":0,"rule_4":0,"rule_5":0,"rule_6":0,"rule_7":0.95,"default":0.05}'
+run "$HOME_DIR/data/charter-brief.md" --task six-hard-sm
+expect_code 0 "$code" "secondmate still resolves through orchestration: $out"
+assert_contains "$(chosen)" "--account 'claude3'" 'persistent secondmate keeps claude3'
+pipe review
+expect_code 0 "$code" "pipeline resolves without a configured claude3 ban: $pout $perr"
+assert_equals claude1 "$(pfield .seat)" 'no-mistakes pipeline cannot seat claude3'
+assert_contains "$(pfield '[.candidates[] | select(.seat == "claude3") | .reason] | first')" 'claude3 launch rule' 'pipeline names the hard rule'
+jq '.shared_quota = true' "$RULES" > "$TMP_ROOT/rules-guard-shared"
+cp "$TMP_ROOT/rules-guard-shared" "$RULES"
+run "$HOME_DIR/data/orchestration-worker.md" --task six-shared-guard
+assert_not_contains "$(chosen)" 'claude3' 'shared-quota opt-out cannot bypass claude3 eligibility'
 cp "$TMP_ROOT/rules-original" "$RULES"
 reset_quota
-pass 'S12: worker_banned_accounts keeps claude3 off every worker, scout, default and pipeline seat while a secondmate charter keeps it'
+pass 'S12: optional worker bans and the hard claude3 kind guard cover ambiguous ships, non-board scouts, promotions and pipelines; board scouts and secondmates retain claude3'
 
 # ---- S11: lane 3 resolver - the escalation ladder with per-task capability history ----
 # A task starts on its rule's own use list (k=0) and runs rung start+k of its
