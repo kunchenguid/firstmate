@@ -9,7 +9,7 @@ This document is the maintainer-architecture owner for the package manifest, ena
 The first extension binding is one complete vertical capability, not a general plugin system.
 It lets a trusted package maintained outside Firstmate provide a long-polling process-event adapter while Firstmate core keeps source ownership, process supervision, durable capture, announcement, handling, and retirement.
 The capability is explicitly enabled per home, independently installed per host, and permanently inert when the binding registry is absent.
-It follows the project's vision by keeping consent explicit, commands flat and inspectable, mechanics deterministic, evidence non-authoritative, and the feature independent of every worker harness and session provider.
+It keeps consent explicit, commands flat and inspectable, mechanics deterministic, evidence non-authoritative, and the feature independent of every worker harness and session provider.
 
 This version does not define lifecycle sinks, delivery providers, runtime backends, worker-launch grants, before or after hooks, instruction injection, project discovery, extension-selected destinations, task mutation, merges, decisions, force, discard, cleanup, or credential installation.
 Adding another capability requires a separately reviewed contract rather than interpreting an unknown manifest field or operation optimistically.
