@@ -2905,6 +2905,24 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
+# Drop the per-home Treehouse pool root for a secondmate whose home is already
+# gone. The path must be the one fm_treehouse_spawn_root printed: an absolute
+# directory sitting directly under an fm-secondmate/ parent. Child task slots
+# are returned before this runs; this only removes that leftover root.
+remove_secondmate_treehouse_pool() {  # <pool-root>
+  local pool=$1 parent
+  [ -n "$pool" ] || return 0
+  case "$pool" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  [ -d "$pool" ] && [ ! -L "$pool" ] || return 0
+  parent=$(dirname "$pool")
+  [ "$(basename "$parent")" = fm-secondmate ] || return 0
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 0
+  rm -rf -- "$pool"
+}
+
 safe_rm_rf_child_worktree() {
   local target=$1 project=$2
   validate_child_worktree_for_removal "$target" "$project" >/dev/null || return 1
@@ -2977,11 +2995,12 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup pool_root
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  pool_root=$(fm_treehouse_spawn_root "$abs_home_path") || pool_root=
   # A T3 secondmate's home carries the environment its spawn wrote there.
   # Remove it after home validation and before returning its pooled Git index.
   if [ "$backend" = t3code ]; then
@@ -3012,10 +3031,12 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       return 1
     }
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    remove_secondmate_treehouse_pool "$pool_root"
     return 0
   fi
   if safe_rm_rf "$abs_home_path" "$label"; then
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    remove_secondmate_treehouse_pool "$pool_root"
     return 0
   fi
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
