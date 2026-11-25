@@ -46,6 +46,12 @@ def private_git_delivery_check():
             helper = PrivateGit(work, private_parent / "gen-1", "task-ship", "task", "gen-1")
             assert os.stat(private_parent).st_dev != os.stat(repo).st_dev
             assert real_git(work, "branch", "--show-current").decode().strip() == "task-ship"
+            try:
+                helper.publish(private_parent)
+            except PrivateGitVerificationError as exc:
+                assert str(exc) == "task-private branch has no ship commit"
+            else:
+                raise AssertionError("published a task without a ship commit")
             (work / "tracked.txt").write_text("task change\n")
             real_git(work, "add", "tracked.txt")
             real_git(work, "commit", "--quiet", "-m", "task delivery")
@@ -300,7 +306,7 @@ def emit(x):
 def event(method, params):emit({'method':method,'params':params})
 def terminal(status):event('turn/completed',{'threadId':'thread','turn':{'id':'turn','status':status}})
 def tool(kind='progress',arguments=None,thread='thread',turn='turn',ident=100):
- if kind=='result':
+ if kind=='result' and mode!='no-ship-commit':
   commit_ship()
   if mode in ('verification-refusal','verification-stale'):
    subprocess.run(['git','-C',os.environ['CASE_WORKTREE'],'update-index','--assume-unchanged','tracked.txt'],check=True)
@@ -346,7 +352,7 @@ for line in sys.stdin:
    if mode=='scout-path':arguments['path']='../sibling/report.md'
    if mode=='scout-large':arguments['report']='x'*262145
    tool(arguments=arguments)
-  elif mode in ('verification-refusal','verification-stale','publication-internal-error'):
+  elif mode in ('verification-refusal','no-ship-commit','verification-stale','publication-internal-error'):
    tool('result')
   elif mode=='success-no-result':terminal('completed')
   elif mode=='working':tool()
@@ -430,7 +436,7 @@ exec "$CASE_REAL_GIT" "$@"
     env = dict(os.environ, PATH=str(fakebin)+':'+os.environ['PATH'],
                CASE_REAL_GIT=shutil.which('git'))
     cases = ['scout-stale','scout-success','scout-failed','scout-interrupted','scout-missing','scout-path','scout-large','scout-duplicate','scout-preexisting','working','success','failed','interrupted','result-active','success-no-result',
-                 'wrong-thread','wrong-turn','sibling','unknown','bad-report','malformed','death','verification-refusal','verification-stale','publication-internal-error',
+                 'wrong-thread','wrong-turn','sibling','unknown','bad-report','malformed','death','verification-refusal','no-ship-commit','verification-stale','publication-internal-error',
                  'decision','decision-held','decision-held-legacy','decision-large','decision-death','decision-cancel','decision-backend-death','interrupt-error','interrupt-timeout','stale',
                  'duplicate-request','bad-json','bad-params','bad-turn','bad-response','oversized','large-report','bad-shape','unknown-tool']
     if shutil.which('tasks-axi'):
@@ -507,11 +513,19 @@ exec "$CASE_REAL_GIT" "$@"
                 assert 'done' not in statuses()
                 assert not (home/'data'/'t'/'report.md').exists()
                 (state/'t.busy-gen').write_text(gen+'\n')
-            elif case == 'verification-refusal':
+            elif case in ('verification-refusal', 'no-ship-commit'):
                 proc.wait(timeout=10)
                 assert proc.returncode == 0, (home/'output').read_text()
                 assert 'supervisor verification refused private Git publication [private-git-verification-refused]' in statuses(), statuses()+'\n'+busy.read_text()+'\n'+(home/'output').read_text()
-                assert 'state: failed' in crew()
+                failure = crew()
+                assert 'state: failed' in failure
+                assert 'supervisor verification refused private Git publication [private-git-verification-refused]' in failure, failure
+                if case == 'no-ship-commit':
+                    assert 'task-private branch has no ship commit' in failure, failure
+                    assert real_git(repo, 'rev-parse', branch).decode().strip() == base
+                else:
+                    assert 'task-private index contains assume-unchanged or skip-worktree entries' in statuses()
+                    assert 'task-private index' not in failure, failure
                 assert 'event=turn-failed' in busy.read_text()
                 assert 'state=idle' in busy.read_text()
                 assert 'unknown' not in busy.read_text() and 'process-failed' not in busy.read_text()

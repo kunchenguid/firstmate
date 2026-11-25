@@ -276,7 +276,23 @@ if [ "$(meta_value codex_transport)" = appserver ]; then
       fi
       emit working codex-appserver "verified active turn"
       ;;
-    'idle codex-appserver turn-failed '*|'idle codex-appserver turn-interrupted '*)
+    'idle codex-appserver turn-failed '*)
+      # The supervisor journals its failure before marking the turn idle.
+      LOG_LINE=$(status_current_line "$LOG" "$KIND")
+      if [ "$(status_line_verb "$LOG_LINE")" = failed ]; then
+        publication_failure='supervisor verification refused private Git publication [private-git-verification-refused]'
+        case "$(status_line_note "$LOG_LINE")" in
+          "$publication_failure: task-private branch has no ship commit")
+            emit failed codex-appserver "$publication_failure: task-private branch has no ship commit"
+            ;;
+          "$publication_failure"|"$publication_failure: "*)
+            emit failed codex-appserver "$publication_failure"
+            ;;
+        esac
+      fi
+      emit failed codex-appserver "turn failed or interrupted"
+      ;;
+    'idle codex-appserver turn-interrupted '*)
       emit failed codex-appserver "turn failed or interrupted"
       ;;
     'idle codex-appserver turn-cancelled '*)

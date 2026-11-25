@@ -298,11 +298,12 @@ class Adapter:
                 if self.private_git is not None:
                     try:
                         oid = self.private_git.publish(self.private_root.parent)
-                    except PrivateGitVerificationError:
+                    except PrivateGitVerificationError as error:
                         self.result = None
                         self.terminal = "failed"
+                        # Verification errors carry fixed diagnostics without Git output.
                         self.report("failed: supervisor verification refused private Git publication "
-                                    "[private-git-verification-refused]")
+                                    "[private-git-verification-refused]: " + str(error))
                         self.record_terminal("turn-failed")
                         self.stopping = True
                         return
