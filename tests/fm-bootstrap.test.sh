@@ -623,18 +623,19 @@ test_treehouse_min_version() {
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
       outdated)
-        expect="OUTDATED: treehouse (installed: $installed; requires 3.0.0; upgrade: treehouse update)"
+        expect="OUTDATED: treehouse (installed: $installed; requires 3.0.1; upgrade: treehouse update)"
         [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
     esac
   done <<'ROWS'
-minimum treehouse version is accepted^treehouse version v3.0.0 (fake)^empty^
+minimum treehouse version is accepted^treehouse version v3.0.1 (fake)^empty^
 newer treehouse patch is accepted^treehouse version v3.1.8 (fake)^empty^
 newer treehouse major is accepted^treehouse version v4.0.0 (fake)^empty^
 older treehouse major reports an upgrade^treehouse version v2.3.0 (fake)^outdated^2.3.0
 older treehouse just below the floor reports an upgrade^treehouse version v2.9.9 (fake)^outdated^2.9.9
+treehouse 3.0.0 reports an upgrade^treehouse version v3.0.0 (fake)^outdated^3.0.0
 unparseable treehouse version reports an upgrade^treehouse development build^outdated^unparseable
 ROWS
-  pass "bootstrap separates a treehouse below 3.0.0 from one at or above its version floor"
+  pass "bootstrap separates a treehouse below 3.0.1 from one at or above its version floor"
 }
 
 test_gh_axi_min_version() {
