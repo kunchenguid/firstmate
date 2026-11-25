@@ -5,7 +5,11 @@
 # the ones a wrong guess would make dangerous:
 #   1. agy publishes no harness-identity marker of its own (a live 1.2.0 TUI
 #      carries no AGY_* variable; AGENT=1 there is inherited launcher state),
-#      so detection is ancestry alone on the anchored process name `agy`.
+#      so detection is ancestry alone on the anchored process name `agy`, or
+#      the names `antigravity` / `exe` (its real file name under a mise
+#      install, and its Linux sandbox init) only when argv[0] carries agy CLI
+#      evidence, so the Antigravity IDE, also named `antigravity`, is never
+#      claimed.
 #   2. The anchored match must never claim unrelated commands containing the
 #      fragment, and a structural agy ancestor now outranks a retained or
 #      inherited CLAUDECODE - tests/fm-harness-precedence.test.sh owns the
@@ -93,36 +97,126 @@ SH
   pass "fm-harness.sh: ancestry detects a natively-named agy command"
 }
 
+# A mise install ships the binary as .../antigravity-cli/<ver>/antigravity with
+# `agy` a symlink to it, so Linux can name the process `antigravity`; agy's
+# Linux command sandbox re-executes its jail init through /proc/self/exe, so
+# that process is named `exe` while argv[0] is still the antigravity binary.
+# These are real processes under an install path containing a space, because
+# the flattened ps args line splits such a path before its CLI evidence and
+# only the structured argv[0] keeps it.
+agy_spaced_install() {  # <case-dir> -> install dir with a space in its path
+  local dir="$1/home/John Doe/.local/share/mise/installs/antigravity-cli/1.5.6"
+  mkdir -p "$dir"
+  cp "$(command -v bash)" "$dir/antigravity"
+  cp "$(command -v bash)" "$dir/exe"
+  printf '%s\n' "$dir"
+}
+
+agy_harness_under() {  # <argv0> <executable> -> fm-harness.sh verdict
+  # shellcheck disable=SC2016 # The child shell expands $1 and $r at runtime.
+  local inner='r=$("$1"); printf "%s" "$r"'
+  ( exec -a "$1" "$2" -c "$inner" _ "$HARNESS" )
+}
+
+test_agy_ancestry_detects_the_antigravity_binary_and_sandbox_init() {
+  local dir out
+  dir=$(agy_spaced_install "$TMP_ROOT/anc-antigravity")
+  out=$(agy_harness_under "$dir/antigravity" "$dir/antigravity")
+  [ "$out" = agy ] \
+    || fail "comm=antigravity under a spaced install path must be detected as agy, got '$out'"
+
+  out=$(agy_harness_under "$dir/antigravity" "$dir/exe")
+  [ "$out" = agy ] \
+    || fail "a sandbox init (comm=exe, argv0=.../antigravity) under a spaced install path must be detected as agy, got '$out'"
+
+  out=$(agy_harness_under /usr/local/bin/agy "$dir/antigravity")
+  [ "$out" = agy ] \
+    || fail "comm=antigravity with an argv[0] named agy outside an antigravity-cli tree must be detected as agy, got '$out'"
+  pass "fm-harness.sh: ancestry detects the antigravity binary and its sandbox init under a spaced path"
+}
+
+# The stub ps answers only comm and args, never ppid, so the walk examines one
+# process and the verdict cannot come from the suite's real ancestry. It also
+# writes that pid's NUL-separated cmdline under a fake proc root, so the argv[0]
+# fm-harness.sh reads is the one each case names.
+agy_harness_for() {  # <comm> <argv0> [<args-line>] -> fm-harness.sh verdict
+  FAKE_PS_COMM=$1 FAKE_ARGV0=$2 FAKE_PS_ARGS=${3:-$2} FAKE_PROC="$AGY_FAKE_PROC" \
+    FM_PROC_ROOT_OVERRIDE="$AGY_FAKE_PROC" PATH="$AGY_FAKE_PS_BIN:$PATH" "$HARNESS"
+}
+
 test_agy_ancestry_rejects_unrelated_mentions() {
-  local fakebin out
-  fakebin=$(fm_fakebin "$TMP_ROOT/anc-negatives")
-  cat > "$fakebin/ps" <<'SH'
+  local out
+  AGY_FAKE_PS_BIN=$(fm_fakebin "$TMP_ROOT/anc-negatives")
+  AGY_FAKE_PROC="$TMP_ROOT/anc-negatives-proc"
+  mkdir -p "$AGY_FAKE_PROC"
+  cat > "$AGY_FAKE_PS_BIN/ps" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
+  *"comm="*)
+    pid=${!#}
+    mkdir -p "$FAKE_PROC/$pid"
+    printf '%s\0' "${FAKE_ARGV0:?}" > "$FAKE_PROC/$pid/cmdline"
+    printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
   *"args="*) printf '%s\n' "${FAKE_PS_ARGS:?}"; exit 0 ;;
 esac
 exit 1
 SH
-  chmod +x "$fakebin/ps"
+  chmod +x "$AGY_FAKE_PS_BIN/ps"
 
-  out=$(FAKE_PS_COMM=magyk FAKE_PS_ARGS='magyk --serve' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for antigravity '/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity')
+  [ "$out" = agy ] \
+    || fail "the fixture must reach the agy rule: comm=antigravity under antigravity-cli must detect agy, got '$out'"
+  out=$(agy_harness_for exe agy)
+  [ "$out" = agy ] \
+    || fail "the fixture must reach the agy rule: comm=exe with argv[0] agy must detect agy, got '$out'"
+
+  out=$(agy_harness_for magyk magyk)
   [ "$out" != agy ] \
     || fail "an unrelated magyk command must not detect agy, got '$out'"
 
-  out=$(FAKE_PS_COMM=bash FAKE_PS_ARGS='bash -c "echo agy --help"' \
-    PATH="$fakebin:$PATH" "$HARNESS")
+  out=$(agy_harness_for bash bash 'bash -c "echo agy --help"')
   [ "$out" != agy ] \
-    || fail "a later shell argument naming agy must not detect agy, got '$out'"
+    || fail "a shell whose later arguments name agy must not detect agy, got '$out'"
+
+  out=$(agy_harness_for antigravityd antigravityd)
+  [ "$out" != agy ] \
+    || fail "an unrelated antigravityd command must not detect agy, got '$out'"
+
+  out=$(agy_harness_for exe /usr/lib/sandbox/exe)
+  [ "$out" != agy ] \
+    || fail "an unrelated exe process must not detect agy, got '$out'"
+
+  out=$(agy_harness_for exe /opt/magyk/antigravity-tools/exe)
+  [ "$out" != agy ] \
+    || fail "an exe whose argv[0] only contains agy fragments must not detect agy, got '$out'"
+
+  out=$(agy_harness_for antigravity /usr/share/antigravity/antigravity)
+  [ "$out" != agy ] \
+    || fail "the Antigravity IDE at /usr/share/antigravity/antigravity must not detect agy, got '$out'"
+
+  out=$(agy_harness_for antigravity /usr/bin/antigravity)
+  [ "$out" != agy ] \
+    || fail "the Antigravity IDE at /usr/bin/antigravity must not detect agy, got '$out'"
   pass "fm-harness.sh: ancestry rejects unrelated agy mentions"
 }
 
 test_agy_claims_no_inherited_launcher_marker() {
-  local fakebin out
+  local neutralbin fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  # Stub ps to a neutral shell so this case does not read the real ancestry,
+  # which is agy itself when the suite runs inside an agy session.
+  neutralbin=$(fm_fakebin "$TMP_ROOT/anc-neutral")
+  cat > "$neutralbin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$neutralbin/ps"
+  out=$(AGENT=1 PATH="$neutralbin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -208,11 +302,82 @@ test_agy_tmux_names_the_native_binary_an_agent() {
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
   got=$(fm_agent_process_classify_name agy)
   [ "$got" = agent ] || fail "tmux liveness must read the agy binary as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravity)
+  [ "$got" = other ] || fail "a bare antigravity name with no argv[0] must not read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravity /home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity)
+  [ "$got" = agent ] || fail "the agy CLI started as antigravity must read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name exe /home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity)
+  [ "$got" = agent ] || fail "agy's sandbox init must read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name '' /home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity)
+  [ "$got" = agent ] || fail "an argv[0]-only agy CLI path must read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name '' /usr/share/antigravity/antigravity)
+  [ "$got" = other ] || fail "an argv[0]-only Antigravity IDE path must not read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name '' /usr/bin/antigravity)
+  [ "$got" = other ] || fail "an argv[0]-only /usr/bin/antigravity must not read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravity /usr/share/antigravity/antigravity)
+  [ "$got" = other ] || fail "the Antigravity IDE at /usr/share/antigravity must not read as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravity /usr/bin/antigravity)
+  [ "$got" = other ] || fail "the Antigravity IDE at /usr/bin/antigravity must not read as an agent, got '$got'"
   got=$(fm_agent_process_classify_name magyk)
   [ "$got" = other ] || fail "tmux liveness must not read magyk as an agent, got '$got'"
+  got=$(fm_agent_process_classify_name antigravityd)
+  [ "$got" = other ] || fail "tmux liveness must not read antigravityd as an agent, got '$got'"
   got=$(fm_agent_process_classify_name bash)
   [ "$got" = shell ] || fail "tmux liveness must still read bash as a shell, got '$got'"
-  pass "bin/fm-agent-process-lib.sh: agy is an agent, fragments are not"
+  pass "bin/fm-agent-process-lib.sh: agy and the agy CLI's antigravity/exe are agents, the IDE and fragments are not"
+}
+
+# The session lock walks the same ancestry with its own matcher, so a primary
+# running as the antigravity binary or its sandbox init must find its harness.
+test_agy_session_lock_ancestry_recognizes_antigravity() {
+  local bin=/home/u/.local/share/mise/installs/antigravity-cli/1.5.6/antigravity
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-session-lock-lib.sh"
+    fm_harness_process_matches agy agy \
+      || fail "session-lock ancestry must match comm=agy"
+    fm_harness_process_matches antigravity "$bin" \
+      || fail "session-lock ancestry must match comm=antigravity"
+    fm_harness_process_matches exe "$bin --sandbox-init" \
+      || fail "session-lock ancestry must match a sandbox init (comm=exe, argv0=.../antigravity)"
+    ! fm_harness_process_matches exe '/usr/lib/sandbox/exe --child' \
+      || fail "session-lock ancestry must not match an unrelated exe"
+    ! fm_harness_process_matches antigravityd 'antigravityd --serve' \
+      || fail "session-lock ancestry must not match antigravityd"
+    ! fm_harness_process_matches magyk 'magyk --serve' \
+      || fail "session-lock ancestry must not match magyk"
+    ! fm_harness_process_matches antigravity '/usr/share/antigravity/antigravity --type=ptyHost' \
+      || fail "session-lock ancestry must not match the Antigravity IDE under /usr/share/antigravity"
+    ! fm_harness_process_matches antigravity /usr/bin/antigravity \
+      || fail "session-lock ancestry must not match the Antigravity IDE at /usr/bin/antigravity"
+    ! fm_harness_process_matches node '/usr/share/antigravity-cli/x/tool.js' \
+      || fail "session-lock ancestry must not claim any comm under an antigravity-cli directory"
+  ) || exit 1
+  pass "fm-session-lock-lib.sh: ancestry recognizes the agy CLI and its sandbox init, never the IDE"
+}
+
+# The session lock reads each live pid itself, so the agy CLI under an install
+# path with a space must still prove its identity from the structured argv[0].
+test_agy_session_lock_reads_argv0_under_a_spaced_path() {
+  local dir pid args
+  dir=$(agy_spaced_install "$TMP_ROOT/lock-spaced")
+  for exe in antigravity exe; do
+    ( exec -a "$dir/antigravity" "$dir/$exe" -c 'sleep 30; :' ) &
+    pid=$!
+    sleep 0.3
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    case "${args%% *}" in
+      */antigravity-cli/*) kill "$pid" 2>/dev/null; fail "fixture args no longer split before the CLI evidence: '$args'" ;;
+    esac
+    (
+      # shellcheck source=/dev/null
+      . "$ROOT/bin/fm-session-lock-lib.sh"
+      fm_harness_pid_alive "$pid"
+    ) || { kill "$pid" 2>/dev/null; fail "session lock must recognize comm=$exe under a spaced agy install path"; }
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
+  pass "fm-session-lock-lib.sh: agy under a spaced install path is a live harness"
 }
 
 # Canned `pane process-info` bodies for the herdr fixtures. The shared
@@ -915,6 +1080,7 @@ test_agy_spawn_arms_no_busy_wiring() {
 }
 
 test_agy_ancestry_detects_the_native_command_name
+test_agy_ancestry_detects_the_antigravity_binary_and_sandbox_init
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones
@@ -922,6 +1088,8 @@ test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped
 test_agy_classify_reports_unknown_when_the_marker_scrolls_out
 test_agy_tmux_names_the_native_binary_an_agent
+test_agy_session_lock_ancestry_recognizes_antigravity
+test_agy_session_lock_reads_argv0_under_a_spaced_path
 test_herdr_done_with_live_registry_stays_live
 test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live
 test_herdr_shell_first_with_live_registry_stays_live
