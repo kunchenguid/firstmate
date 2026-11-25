@@ -442,11 +442,12 @@ The file is local to each home and is not inherited by secondmate homes.
 
 ## Worker conversation compaction (config/worker-compaction)
 
-Claude task workers can opt into a 300,000-token automatic compaction window and a bounded task-card replay after compaction.
+Claude task workers can opt into a 300,000-token automatic compaction window.
 The home-local `config/worker-compaction` defaults to `off`; `half` selects a stable task-id cohort and `all` selects every Claude task worker.
 The flag is read at spawn or relaunch, not retroactively by running sessions.
-Secondmates, raw launch commands, other harnesses, and primary sessions are unchanged.
-Worker briefs ask for durable task notes independently of rollout enrollment.
+Secondmates remain outside the window rollout.
+Every managed Claude worker and secondmate launch initializes missing saved planning notes and installs bounded startup, resume, and post-compaction read-back independently of rollout enrollment, including Lavish page hosts and their fresh-session resume path.
+Raw launch commands, other harnesses, and primary sessions are unchanged.
 `bin/fm-worker-compact.sh --help` owns rollout mechanics, notes location, and task-card limits; [runtime verification](verification/runtime-backends.md#claude-worker-compaction-window) records the installed-version proof.
 
 ## Warm-cache compaction (config/warm-compact)

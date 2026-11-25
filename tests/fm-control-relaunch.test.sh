@@ -23,6 +23,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/fixtures.sh
 . "$ROOT/tests/fixtures.sh"
+# shellcheck source=tests/worker-card-helpers.sh
+. "$ROOT/tests/worker-card-helpers.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -409,7 +411,22 @@ PY
   grep -qx exit "$dir/fake/literal" || fail "the previous agent should have been exited"
   assert_grep "cd -- '$dir/wt'" "$dir/fake/keys" "the replacement launch must enter the recorded worktree"
   assert_grep "Firstmate operational input waiting: read" "$dir/fake/literal" "the replacement should have been launched"
+  assert_worker_card "$dir/home/state/rl1.claude-settings.json" "$dir/home/data/rl1/notes.md" 'Claude worker relaunch'
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_page_host_resume_restores_saved_planning_state() {
+  local dir out rc
+  dir=$(new_case page-card pagecard)
+  add_ship_task "$dir" pagecard claude
+  printf 'Board revision 4; keep live chat and four critics.\n' > "$dir/home/data/pagecard/page-notes.md"
+  printf '%s\n' "$dir/home/data/pagecard/page-notes.md" > "$dir/home/state/pagecard.page-host-parked"
+  # Reuse the hermetic endpoint environment but enter through the public page interface.
+  out=$(CONTROL="$ROOT/bin/fm-page-host.sh" run_control "$dir" resume pagecard); rc=$?
+  expect_code 0 "$rc" "page-host resume should relaunch through the saved notes: $out"
+  [ ! -e "$dir/home/state/pagecard.page-host-parked" ] || fail 'resume retained parked pointer'
+  assert_contains "$(cat "$dir/home/data/pagecard/brief.md")" 'Board revision 4' 'page resume lost page notes'
+  assert_worker_card "$dir/home/state/pagecard.claude-settings.json" "$dir/home/data/pagecard/notes.md" 'Claude Lavish page-host resume'
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -2662,6 +2679,7 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter() {
     || fail "a secondmate's standing charter must never be rewritten by a relaunch"
   assert_present "$dir/smhome/state/c1.meta" "child records must survive the relaunch"
   assert_present "$dir/smhome/state/c2.meta" "child records must survive the relaunch"
+  assert_worker_card "$home/state/sm1.claude-settings.json" "$dir/smhome/data/notes.md" 'Claude secondmate relaunch'
   pass "fm-control relaunch: a secondmate's child work is accounted for and its charter is left alone"
 }
 
@@ -3654,6 +3672,7 @@ test_relaunch_off_opencode_removes_tracked_wiring
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_page_host_resume_restores_saved_planning_state
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

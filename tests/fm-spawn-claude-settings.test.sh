@@ -15,6 +15,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/worker-card-helpers.sh
+. "$ROOT/tests/worker-card-helpers.sh"
 
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (JSON validation)"; exit 0; }
 
@@ -127,6 +129,9 @@ ok = any("fm-wait-pretool-check.sh" in c and sys.argv[2] + ".wait-flags" in c fo
 sys.exit(0 if ok else 1)
 PY
 
+assert_contains "$(cat "$CREW/home/data/$CREW_ID/notes.md")" 'Exercise the generated claude settings file.' 'launch did not save the initial goal'
+assert_worker_card "$CREW_SETTINGS" "$CREW/home/data/$CREW_ID/notes.md" 'Claude spawn (rollout off)'
+
 # --- 2. secondmate launch: policy keys and parent-home busy hooks ------------
 SM="$TMP_ROOT/sm"
 new_home "$SM/home"
@@ -150,6 +155,8 @@ RESULT=$(settings_check "$SM_SETTINGS" yes)
 ! grep -F 'turn-ended' "$SM_SETTINGS" >/dev/null \
   || fail "a secondmate's hooks must not touch the parent's turn-ended marker: $(cat "$SM_SETTINGS")"
 
+assert_worker_card "$SM_SETTINGS" "$SM_HOME/data/notes.md" 'Claude secondmate launch'
+
 # --- 3. config/claude-permission-mode=auto: no bypass acceptance -------------
 AUTO="$TMP_ROOT/auto"
 new_home "$AUTO/home"
@@ -166,14 +173,22 @@ AUTO_SETTINGS="$AUTO/home/state/$AUTO_ID.claude-settings.json"
 RESULT=$(settings_check "$AUTO_SETTINGS" yes no)
 [ "$RESULT" = ok ] || fail "auto-mode settings file rejected: $RESULT"
 
-# Rollout stays off by default and never changes secondmate settings.
+# Lavish hosts are ordinary task workers at launch; page-host.sh owns only park/resume.
+PAGE_ID=settings-page
+mkdir -p "$AUTO/home/data/$PAGE_ID"
+printf '# Task\nHost the Lavish planning page, retain live chat and four critics.\n' > "$AUTO/home/data/$PAGE_ID/brief.md"
+run_spawn "$AUTO/home" "$AUTO_FAKE" "$AUTO/wt" "$PAGE_ID" "$AUTO/project" --scout
+assert_worker_card "$AUTO/home/state/$PAGE_ID.claude-settings.json" "$AUTO/home/data/$PAGE_ID/notes.md" 'Claude Lavish page-host launch'
+
+# Rollout stays off by default and never changes the secondmate window.
 jq -e 'has("autoCompactWindow") | not' "$CREW_SETTINGS" >/dev/null || fail "rollout is not default-off"
 printf 'all\n' > "$AUTO/home/config/worker-compaction"
 run_spawn "$AUTO/home" "$AUTO_FAKE" "$AUTO/wt" "$AUTO_ID" "$AUTO/project" --mode no-mistakes --yolo off
-jq -e '.autoCompactWindow == 300000 and .hooks.SessionStart[0].matcher == "compact" and (.hooks.Stop | length > 0)' "$AUTO_SETTINGS" >/dev/null || fail "enabled worker lacks compact window/hook or lost Stop hook"
+jq -e '.autoCompactWindow == 300000 and .hooks.SessionStart[0].matcher == "startup|resume|compact" and (.hooks.Stop | length > 0)' "$AUTO_SETTINGS" >/dev/null || fail "enabled worker lacks compact window/hook or lost Stop hook"
 printf 'all\n' > "$SM/home/config/worker-compaction"
 run_spawn "$SM/home" "$SM_FAKE" "$SM_HOME" "$SM_ID" "$SM_HOME" --secondmate
 jq -e 'has("autoCompactWindow") | not' "$SM_SETTINGS" >/dev/null || fail "secondmate joined worker rollout"
+assert_contains "$(cat "$SM_HOME/data/notes.md")" 'decision: Claude secondmate launch preserve current revision' 'relaunch overwrote saved secondmate state'
 
 # Exercise the generated hook command itself, including quoted paths and limits.
 CARD_BRIEF="$AUTO/home/data/$AUTO_ID/launch-brief.md"
@@ -188,7 +203,7 @@ assert_contains "$CARD" 'Ship tested change.' "done rule missing"
 assert_contains "$CARD" 'last status proof' "status missing"
 assert_contains "$CARD" 'decision: preserve the goal' "notes missing"
 assert_contains "$CARD" "$AUTO/home/state/$AUTO_ID.inbox" "inbox path missing"
-[ -z "$(printf '{"source":"startup"}' | bash -c "$HOOK")" ] || fail "noncompact hook emitted a card"
+[ -z "$(printf '{"source":"clear"}' | bash -c "$HOOK")" ] || fail "unrelated hook emitted a card"
 python3 - "$AUTO/home/data/$AUTO_ID/notes.md" <<'PY'
 import sys
 with open(sys.argv[1], 'w') as f: f.write('é' * 15000)
@@ -201,6 +216,21 @@ PY
 expect_code 0 "$?" "card exceeded 10000 characters"
 rm "$AUTO/home/data/$AUTO_ID/notes.md" "$AUTO/home/state/$AUTO_ID.status"
 printf '{"source":"compact"}' | bash -c "$HOOK" >/dev/null || fail "missing notes/status broke hook"
+
+# Refuse unsafe note destinations, retain saved state and support quoted paths.
+SAFE_NOTES="$AUTO/home/data/$AUTO_ID/notes 'quoted'.md"
+printf 'saved decision survives repeated settings generation\n' > "$SAFE_NOTES"
+for _ in 1 2; do
+  bash "$ROOT/bin/fm-worker-compact.sh" --settings "$AUTO/home/config" "$AUTO/home/state" "$AUTO_ID" "$CARD_BRIEF" "$CREW_SETTINGS" task "$SAFE_NOTES" > "$AUTO/quoted-settings"
+done
+HOOK=$(jq -r '.hooks.SessionStart[-1].hooks[0].command' "$AUTO/quoted-settings")
+assert_contains "$(printf '{"source":"compact"}' | bash -c "$HOOK")" 'saved decision survives repeated settings generation' 'quoted notes path or saved state lost'
+ln -s "$SAFE_NOTES" "$AUTO/unsafe-notes"
+if bash "$ROOT/bin/fm-worker-compact.sh" --settings "$AUTO/home/config" "$AUTO/home/state" "$AUTO_ID" "$CARD_BRIEF" "$CREW_SETTINGS" task "$AUTO/unsafe-notes" >/dev/null 2>&1; then
+  fail 'symlink planning notes accepted'
+fi
+assert_contains "$(cat "$SAFE_NOTES")" 'saved decision survives repeated settings generation' 'unsafe notes target was changed'
+pass 'saved planning state is preserved, quoted paths replay, symlink destinations refuse'
 
 # Stable half-cohort selection, with both cohorts represented and hooks retained.
 printf 'half\n' > "$AUTO/home/config/worker-compaction"

@@ -7965,12 +7965,14 @@ case "$HARNESS" in
       printf '{"feedbackDrafts":"off"%s%s%s%s}\n' \
         "$claude_attribution_json" "$claude_bypass_json" "$claude_status_json" "$claude_hooks_json" \
         > "$STATE_REAL/$ID.claude-settings.json"
-      if [ "$CLAUDE_TASK_WORKER" -eq 1 ]; then
-        # Default-off rollout; the helper owns cohort selection and task-card limits.
-        claude_compact_settings=$(bash "$SCRIPT_DIR/fm-worker-compact.sh" --settings \
-          "$CONFIG" "$STATE_REAL" "$ID" "$BRIEF_REAL" "$STATE_REAL/$ID.claude-settings.json") || exit 1
-        printf '%s\n' "$claude_compact_settings" > "$STATE_REAL/$ID.claude-settings.json"
-      fi
+      # Saved state is unconditional; the helper separately owns the unchanged
+      # default-off task-worker window rollout. A secondmate writes in its own home.
+      claude_notes="$(dirname "$BRIEF_REAL")/notes.md"
+      [ "$KIND" != secondmate ] || claude_notes="$WT/data/notes.md"
+      claude_compact_settings=$(bash "$SCRIPT_DIR/fm-worker-compact.sh" --settings \
+        "$CONFIG" "$STATE_REAL" "$ID" "$BRIEF_REAL" "$STATE_REAL/$ID.claude-settings.json" \
+        "$KIND" "$claude_notes") || exit 1
+      printf '%s\n' "$claude_compact_settings" > "$STATE_REAL/$ID.claude-settings.json"
       # A task worker excludes the user, project and local settings layers, so
       # carry their tool guards (PreToolUse/PostToolUse hooks and deny rules)
       # into this source; a malformed layer refuses rather than dropping guards.
