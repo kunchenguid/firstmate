@@ -649,7 +649,8 @@ exec "$CASE_REAL_GIT" "$@"
                     else:
                         assert 'resolved [key=' in statuses()
             elif case in ('working','result-active','stale'):
-                wait(lambda:'turn-started' in busy.read_text(),'active')
+                wait(lambda:'turn-started' in busy.read_text() or proc.poll() is not None,'active '+case)
+                assert 'turn-started' in busy.read_text(), (home/'output').read_text()
                 if case=='stale':
                     subprocess.check_call(['bash',str(ROOT/'bin/fm-busy-event.sh'),'arm',str(state),'t'],stdout=subprocess.DEVNULL)
                     proc.wait(timeout=15)
@@ -694,6 +695,8 @@ exec "$CASE_REAL_GIT" "$@"
                 assert (work/'.git').read_bytes() == original_pointer
                 if published:
                     head = real_git(work, 'rev-parse', 'HEAD').decode().strip()
+                    assert json.loads((state/'t.delivery.json').read_text()) == {
+                        'generation': gen, 'branch': branch, 'commit': head}
                     assert head != base
                     assert real_git(repo, 'rev-parse', branch).decode().strip() == head
                     assert real_git(work, 'show', 'HEAD:tracked.txt') == b'app-server delivery\n'

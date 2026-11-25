@@ -307,6 +307,10 @@ class Adapter:
                         self.record_terminal("turn-failed")
                         self.stopping = True
                         return
+                    try:
+                        self.record_delivery(oid)
+                    except OSError as error:
+                        print(f"Could not retain structured Git delivery: {error}", file=sys.stderr)
                     self.result += " (task commit " + oid[:12] + ")"
                 self.report("done: " + self.result)
             elif status != "completed":
@@ -317,6 +321,19 @@ class Adapter:
             self.record_terminal(event)
         elif method == "item/agentMessage/delta":
             print(p.get("delta", ""), end="", flush=True)
+
+    def record_delivery(self, oid):
+        target = self.state / (self.task + ".delivery.json")
+        temporary = target.with_name("." + target.name + "." + secrets.token_hex(8))
+        with self.bound():
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump({"generation": self.gen, "branch": self.private_git.ref.removeprefix("refs/heads/"),
+                               "commit": oid}, stream)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def publish_scout_report(self, report):
         data = self.data

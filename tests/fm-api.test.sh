@@ -108,13 +108,16 @@ cat > "$SNAPSHOT" <<'DATA'
   {"id":"foreign001","structured":true,"state":"in_flight","repo":"demo","title":"other session","body_lines":["<!-- fm-api:v1 owner=owner_b request=seed00002 digest=seed -->"]},
   {"id":"working01","structured":true,"state":"in_flight","repo":"demo","title":"working task","body_lines":["<!-- fm-api:v1 owner=owner_a request=seed00005 digest=seed -->"]},
   {"id":"mismatch01","structured":true,"state":"in_flight","repo":"demo","title":"mismatched project","body_lines":["<!-- fm-api:v1 owner=owner_a request=seed00004 digest=seed -->"]},
-  {"id":"doneowned","structured":true,"state":"done","repo":"demo","title":"completed","body_lines":["<!-- fm-api:v1 owner=owner_a request=seed00003 digest=seed -->"]}
+  {"id":"doneowned","structured":true,"state":"done","repo":"demo","title":"completed","body_lines":["<!-- fm-api:v1 owner=owner_a request=seed00003 digest=seed -->"]},
+  {"id":"failedowned","structured":true,"state":"in_flight","repo":"demo","title":"failed","body_lines":["<!-- fm-api:v1 owner=owner_a request=failed0001 digest=seed -->"]},
+  {"id":"archived","structured":true,"state":"done","repo":"demo","title":"archived","body_lines":["<!-- fm-api:v1 owner=owner_a request=archive001 digest=seed -->"]}
 ]},"tasks":[
   {"id":"owned001","project":"demo","kind":"ship","current_state":{"state":"parked","detail":"choose A or B"},"hints":{"pending_decision":true,"open_decisions":[{"key":"choice","verb":"needs-decision","summary":"Choose A or B"}]},"endpoint":{"status":"alive"}},
   {"id":"foreign001","project":"demo","kind":"ship","current_state":{"state":"working","detail":"private work"},"hints":{"pending_decision":false,"open_decisions":[]},"endpoint":{"status":"alive"}},
   {"id":"working01","project":"demo","kind":"ship","current_state":{"state":"working","detail":"continue safe work"},"hints":{"pending_decision":false,"open_decisions":[]},"endpoint":{"status":"alive"}},
   {"id":"mismatch01","project":"unregistered","kind":"ship","current_state":{"state":"working","detail":"wrong project"},"hints":{"pending_decision":false,"open_decisions":[]},"endpoint":{"status":"alive"}},
-  {"id":"doneowned","project":"demo","kind":"ship","current_state":{"state":"done","detail":"finished"},"hints":{"pending_decision":false,"open_decisions":[]},"endpoint":{"status":"absent"}}
+  {"id":"doneowned","project":"demo","kind":"ship","branch":"demo/doneowned","current_state":{"state":"done","detail":"finished"},"hints":{"pending_decision":false,"open_decisions":[]},"endpoint":{"status":"absent"}},
+  {"id":"failedowned","project":"demo","kind":"ship","current_state":{"state":"failed","detail":"no delivery"}}
 ]}
 DATA
 jq --arg path "$(cd "$HOME_DIR/projects/demo" && pwd -P)" '(.tasks[] | select(.id == "owned001")).project = $path' \
@@ -205,8 +208,28 @@ status=$("$API" status owned001)
 printf '%s\n' "$status" | jq -e '.task_id == "owned001" and .state == "needs-user" and .needs_user and .open_decisions[0].key == "choice" and .result == "canary result\n"' >/dev/null \
   || fail 'status exposes only the owned task decision and bounded result'
 listed=$("$API" list)
-printf '%s\n' "$listed" | jq -e '[.tasks[].task_id] | sort == ["owned001","working01"]' >/dev/null \
-  || fail 'list filters foreign and terminal tasks'
+printf '%s\n' "$listed" | jq -e '([.tasks[].task_id] | sort ==
+  ["archived","created001","doneowned","failedowned","locktask001","locktask002","owned001","working01"])
+  and any(.tasks[]; .task_id == "failedowned" and .state == "failed")
+  and any(.tasks[]; .task_id == "archived" and .state == "complete")' >/dev/null \
+  || fail "list includes owned terminal and backlog-only tasks while hiding foreign tasks: $listed"
+mkdir -p "$HOME_DIR/state"
+printf '%s\n' 'generation1' > "$HOME_DIR/state/doneowned.busy-gen"
+printf '%s\n' 'busy_gen=generation1' > "$HOME_DIR/state/doneowned.meta"
+printf '%s\n' '{"generation":"generation1","branch":"demo/doneowned","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
+  > "$HOME_DIR/state/doneowned.delivery.json"
+"$API" status doneowned | jq -e '.result == null and .delivery == {
+  branch:"demo/doneowned",commit:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' >/dev/null \
+  || fail 'status exposes a structured delivery alongside its report field'
+printf '%s\n' 'generation2' > "$HOME_DIR/state/doneowned.busy-gen"
+"$API" status doneowned | jq -e 'has("delivery") | not' >/dev/null \
+  || fail 'status must hide delivery from a stale generation'
+cp "$SNAPSHOT" "$SNAPSHOT_VALID"
+jq '(.tasks[] | select(.id == "owned001") | .current_state.detail) = ("🧪" * 4200)' \
+  "$SNAPSHOT_VALID" > "$SNAPSHOT"
+"$API" list | jq -e '.truncated and (.tasks | length > 0 and all(.task_id != "owned001"))' >/dev/null \
+  || fail 'list truncates before exceeding the UTF-8 output budget'
+mv "$SNAPSHOT_VALID" "$SNAPSHOT"
 pass 'status and list are scoped to the configured caller owner'
 
 if rejected=$("$API" status foreign001 2>/dev/null); then fail 'status must hide a task owned by another session'; fi

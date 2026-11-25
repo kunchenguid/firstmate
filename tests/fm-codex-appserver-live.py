@@ -289,6 +289,10 @@ PYSEC""".replace('PROBES',repr({name:str(path) for name,path in probes.items()})
         print('ok - live scout interruption suppresses its submitted report and reaps app-server',flush=True)
     if plan.selected('api-roundtrip', scenarios):
         assert api('list')['tasks']==[]
+        ambient_tmp = lab/'worker-tmp'
+        ambient_tmp.mkdir()
+        env['TMPDIR'] = str(ambient_tmp)
+        tmp_probe = shlex.quote(str(ambient_tmp/'sandbox-probe'))
         request={
             'request_id':'api-roundtrip-'+str(os.getpid()),
             'project':'canary',
@@ -298,7 +302,9 @@ PYSEC""".replace('PROBES',repr({name:str(path) for name,path in probes.items()})
                 'firstmate_report progress with CANARY_FILE_CREATED. Call firstmate_report needs-decision '
                 'with the question "Operator check: reply GREEN" and wait for the answer. After it resumes, '
                 'call firstmate_report progress with CANARY_RESUMED_SAME_TASK, write answer.txt with exactly '
-                'the answer followed by one newline, stage both files, and create one local commit. Then call '
+                'the answer followed by one newline. Run `test "$TMPDIR" = ' + shlex.quote(str(ambient_tmp)) +
+                ' && ! touch ' + tmp_probe + '` and stop if it fails. Stage both files and create one local '
+                'commit with the trailer Co-authored-by: Codex <noreply@openai.com>. Then call '
                 'firstmate_report result with the message FIRSTMATE_CANARY_COMPLETED GREEN. Do not push, '
                 'merge, create a PR, or access FirstMate state.'
             ),
@@ -339,6 +345,12 @@ PYSEC""".replace('PROBES',repr({name:str(path) for name,path in probes.items()})
         task_meta=metadata(task)
         branch=task_meta['branch']
         assert branch
+        commit=run('git','rev-parse',branch,cwd=project)
+        assert complete['delivery']=={'branch':branch,'commit':commit}
+        assert [(row['task_id'],row['state']) for row in api('list')['tasks']]==[(task,'complete')]
+        assert not (ambient_tmp/'sandbox-probe').exists()
+        assert 'Co-authored-by:' not in run('git','log','-1','--format=%B',commit,cwd=project)
+        assert run('git','log','-1','--format=%an <%ae>',commit,cwd=project)=='Canary <canary@example.invalid>'
         file_readback=run('git','show',branch+':canary.txt',cwd=project)
         answer_readback=run('git','show',branch+':answer.txt',cwd=project)
         assert file_readback=='FIRSTMATE_FILE_OK'

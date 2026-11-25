@@ -19,6 +19,7 @@ export FM_HOME="${FM_HOME:-$FM_ROOT}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 MAX_REQUEST_BYTES=65536
 MAX_OUTPUT_BYTES=16384
 MAX_REPORT_BYTES=12000
@@ -136,7 +137,10 @@ json_state_filter='def api_task:
      needs_user:($t.hints.pending_decision // false),
      open_decisions:($t.hints.open_decisions // []),
      project:($t.project // null),kind:($t.kind // null),
-     endpoint_status:($t.endpoint.status // "unknown")};'
+     endpoint_status:($t.endpoint.status // "unknown")};
+def api_backlog_task:
+  {task_id:.id,state:(if .state == "in_flight" then "working" elif .state == "done" then "complete" else "queued" end),
+   summary:.title,needs_user:false,open_decisions:[],project:.repo,kind:null,endpoint_status:"unknown"};'
 
 project_snapshot() {
   "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null
@@ -154,13 +158,24 @@ case "$COMMAND" in
     api_owner
     api_projects
     api_snapshot
-    RESULT=$(printf '%s\n' "$SNAPSHOT" | jq -ce --arg owner "$OWNER" --argjson projects "$PROJECTS_JSON" --argjson limit 50 \
+    RESULT=$(printf '%s\n' "$SNAPSHOT" | jq -ce --arg owner "$OWNER" --argjson projects "$PROJECTS_JSON" --argjson limit 50 --argjson maxbytes "$MAX_OUTPUT_BYTES" \
       "$json_state_filter . as \$snapshot
-       | [\$snapshot.backlog.records[]? | select(.structured == true and any(.body_lines[]?; startswith(\"<!-- fm-api:v1 owner=\" + \$owner + \" request=\")))
-           | select(.repo as \$project | \$projects | index(\$project) != null) | {id,repo}] as \$owned
-       | [\$snapshot.tasks[]? | select(.current_state.state != \"done\" and .current_state.state != \"failed\" and .current_state.state != \"cancelled\")
-           | select(. as \$task | any(\$owned[]; .id == \$task.id and .repo == \$task.project))] as \$all
-       | {tasks:(\$all[0:\$limit] | map(api_task)),truncated:((\$all | length) > \$limit)}" 2>/dev/null) \
+       | [\$snapshot.backlog.records[]? | select(.structured == true)] | group_by(.id)
+       | map(select(length == 1) | .[0]
+           | select(any(.body_lines[]?; startswith(\"<!-- fm-api:v1 owner=\" + \$owner + \" request=\")))
+           | select(.repo as \$project | \$projects | index(\$project) != null))
+       | sort_by(.order)
+       | map(. as \$record | [\$snapshot.tasks[]? | select(.id == \$record.id)]
+           | if length == 0 then \$record | api_backlog_task
+             elif length == 1 and .[0].project == \$record.repo then .[0] | api_task
+             else empty end)
+       | . as \$all
+       | reduce \$all[0:\$limit][] as \$task
+           ({tasks:[],truncated:false}; if .truncated then .
+            else (.tasks += [\$task]
+                  | if (tojson | utf8bytelength) > \$maxbytes then .tasks |= .[0:-1] | .truncated = true else . end)
+            end)
+       | .truncated = (.truncated or ((\$all | length) > \$limit))" 2>/dev/null) \
       || api_error snapshot_invalid 'Firstmate returned an invalid task snapshot.'
     api_emit "$RESULT"
     ;;
@@ -185,11 +200,24 @@ case "$COMMAND" in
       TASK_RESULT=$(printf '%s\n' "$TASK" | jq -c --argjson result "$RESULT" "$json_state_filter api_task + {result:\$result}") \
         || api_error snapshot_invalid 'Firstmate returned an invalid task record.' "$2"
     else
-      TASK_RESULT=$(printf '%s\n' "$RECORD" | jq -c --argjson result "$RESULT" '
-        {task_id:.id,state:(if .state == "in_flight" then "working" elif .state == "done" then "complete" else "queued" end),
-         summary:.title,needs_user:false,open_decisions:[],project:.repo,kind:null,
-         endpoint_status:"unknown",result:$result}') \
+      TASK_RESULT=$(printf '%s\n' "$RECORD" | jq -c --argjson result "$RESULT" "$json_state_filter api_backlog_task + {result:\$result}") \
         || api_error snapshot_invalid 'Firstmate returned an invalid backlog record.' "$2"
+    fi
+    DELIVERY="$STATE/$2.delivery.json"
+    META="$STATE/$2.meta"
+    if [ -f "$DELIVERY" ] && [ ! -L "$DELIVERY" ] && [ -f "$META" ] && [ ! -L "$META" ] \
+        && [ -f "$STATE/$2.busy-gen" ] && [ ! -L "$STATE/$2.busy-gen" ]; then
+      GENERATION=$(cat -- "$STATE/$2.busy-gen")
+      BRANCH=$(printf '%s\n' "$TASK" | jq -r '.branch // empty')
+      if [ -n "$GENERATION" ] && [ -n "$BRANCH" ] && grep -Fxq -- "busy_gen=$GENERATION" "$META"; then
+        RECEIPT=$(head -c 4097 -- "$DELIVERY" | jq -sc 'if length == 1 then .[0] | objects else empty end' 2>/dev/null) || RECEIPT=
+        TASK_RESULT=$(printf '%s\n' "$TASK_RESULT" | jq -c --arg gen "$GENERATION" --arg branch "$BRANCH" --argjson delivery "${RECEIPT:-null}" '
+          if .state == "complete" and .kind == "ship"
+             and ($delivery | .generation == $gen and .branch == $branch
+                  and (.commit | strings | test("^([0-9a-f]{40}|[0-9a-f]{64})$")))
+          then . + {delivery:($delivery | {branch,commit})}
+          else . end') || api_error unsafe_result 'Could not read the verified delivery.' "$2"
+      fi
     fi
     [ -n "$TASK_RESULT" ] || api_error snapshot_invalid 'Firstmate returned an empty task result.' "$2"
     api_emit "$TASK_RESULT"
