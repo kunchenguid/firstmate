@@ -2459,6 +2459,7 @@ ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
 RAW_CODEX_HOME=
+RAW_CODEX_HOME_SET=0
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -3233,7 +3234,7 @@ case "$ARG3" in
   HARNESS=""
   for word in $LAUNCH; do
     case "$word" in
-    CODEX_HOME=*) RAW_CODEX_HOME=${word#CODEX_HOME=} ;;
+    CODEX_HOME=*) RAW_CODEX_HOME=${word#CODEX_HOME=} RAW_CODEX_HOME_SET=1 ;;
     [A-Za-z_]*=*) continue ;;
     *)
       HARNESS=$(basename "$word")
@@ -6292,7 +6293,13 @@ codex)
       ) || exit 1
     fi
     # Leading raw assignments take precedence over the inherited launch store.
-    [ -z "$RAW_CODEX_HOME" ] || SPAWN_CODEX_HOME=$RAW_CODEX_HOME
+    if [ "$RAW_CODEX_HOME_SET" -eq 1 ]; then
+      [ -n "$RAW_CODEX_HOME" ] || {
+        echo 'error: raw CODEX_HOME= must name an absolute Codex home' >&2
+        exit 1
+      }
+      SPAWN_CODEX_HOME=$RAW_CODEX_HOME
+    fi
     case "$SPAWN_CODEX_HOME" in
       /*) ;;
       *) echo "error: CODEX_HOME or HOME must resolve to an absolute Codex home" >&2; exit 1 ;;
