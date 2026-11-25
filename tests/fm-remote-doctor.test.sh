@@ -1099,6 +1099,30 @@ assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the started server was n
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux path invoked launchctl"
 pass "a non-darwin host skips launch agents and starts its herdr server directly"
 
+# --- an installed but incompatible tasks-axi is OUTDATED, an absent one MISSING ---
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/tasks-axi"
+doctor
+expect_code 1 "$DOCTOR_RC" "an absent tasks-axi was reported ready"
+assert_contains "$DOCTOR_OUT" 'required tasks-axi=MISSING' "an absent tasks-axi was not reported MISSING"
+assert_not_contains "$DOCTOR_OUT" 'tasks-axi=OUTDATED' "an absent tasks-axi was reported OUTDATED"
+
+new_case Linux with-herdr no-gui
+cat > "$CASE_BIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '0.0.1\n' ;;
+esac
+SH
+chmod +x "$CASE_BIN/tasks-axi"
+doctor
+expect_code 1 "$DOCTOR_RC" "an incompatible tasks-axi was reported ready"
+assert_contains "$DOCTOR_OUT" 'required tasks-axi=OUTDATED (incompatible)' "an installed incompatible tasks-axi was not reported OUTDATED"
+assert_not_contains "$DOCTOR_OUT" 'tasks-axi=MISSING' "an installed incompatible tasks-axi was reported MISSING"
+assert_contains "$DOCTOR_OUT" 'required tools do not resolve on the remote runtime PATH: tasks-axi' "an OUTDATED tasks-axi did not still fail readiness"
+pass "the remote doctor separates an absent tasks-axi (MISSING) from an installed incompatible one (OUTDATED)"
+
 new_case Linux with-herdr no-gui
 rm -f "$CASE_BIN/claude"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$CASE_BIN/omp"
@@ -1180,6 +1204,18 @@ assert_contains "$DOCTOR_OUT" 'fix remote-job-worker=applied:' "--fix did not re
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker=ok:' "the refreshed worker was not confirmed ready"
 assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
   "doctor did not probe tools through the refreshed worker"
+# The worker's probe result keeps OUTDATED as a required-tool gap rather than rejecting it as invalid.
+cat > "$CASE_BIN/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '0.0.1\n' ;;
+esac
+SH
+doctor
+expect_code 1 "$DOCTOR_RC" "an OUTDATED tasks-axi probed through the worker was reported ready"
+assert_contains "$DOCTOR_OUT" 'required tasks-axi=OUTDATED (incompatible)' "the worker probe lost the OUTDATED status"
+assert_contains "$DOCTOR_OUT" 'check remote-job-probe=ok: the remote job worker completed the required-tool probe' \
+  "the worker probe rejected an OUTDATED result as invalid"
 DOCTOR_WORKER_PID=$(cat "$CASE_HOME/.firstmate/remote-job/worker.pid")
 kill -TERM "$DOCTOR_WORKER_PID"
 for _ in $(seq 1 100); do
