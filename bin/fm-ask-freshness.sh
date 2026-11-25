@@ -7,7 +7,9 @@
 #        fm-ask-freshness.sh -h | --help
 #
 # Reads every markdown table in <report.md> (a header row, a `|---|` separator
-# row, then body rows) and checks each table whose header has the timestamp
+# row, then body rows) outside fenced code blocks, where an opening fence
+# follows CommonMark (at most 3 spaces of indent, then 3+ backticks with no
+# backtick after them, or 3+ tildes), and checks each table whose header has the timestamp
 # column, matched case-insensitively with surrounding backticks or emphasis
 # ignored. A table's body runs to the next blank line or to whatever starts a
 # new markdown block there (an ATX heading, a fence, a thematic break, a
