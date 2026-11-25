@@ -61,10 +61,8 @@ import {
 } from "./lib/fm-calm-working-ship.ts";
 import {
   CALM_WORKING_SPACESHIP_WIDGET_KEY,
-  type CalmCrewMarker,
   createCalmWorkingSpaceshipAnimation,
   createCalmWorkingSpaceshipWidget,
-  readCalmCrewMarkers,
   type CalmWorkingSpaceshipAnimation,
 } from "./lib/fm-calm-working-spaceship.ts";
 import {
@@ -149,10 +147,6 @@ export default function (pi: ExtensionAPI) {
 
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
-  // Backend-agnostic crew-marker source for the idle spaceship banner: a cheap read
-  // of the home's own state records, not a per-frame shell-out to Herdr. Herdr is
-  // only the colour *language* (see the module's setCrew/readCalmCrewMarkers).
-  const crewMarkersSource = (): CalmCrewMarker[] => readCalmCrewMarkers(resolve(fmHome, "state"));
   const calmPreferencePath = resolve(configDirectory, "calm");
   // The selectable working-presentation variant, resolved from the same home and
   // FM_CONFIG_OVERRIDE rules as config/calm and re-read wherever that preference is
@@ -258,7 +252,7 @@ export default function (pi: ExtensionAPI) {
     }
     ui.setWidget(CALM_WORKING_SPACESHIP_WIDGET_KEY, (tui) => {
       spaceshipWidgetDisposed = false;
-      const widget = createCalmWorkingSpaceshipWidget(tui, animation, crewMarkersSource);
+      const widget = createCalmWorkingSpaceshipWidget(tui, animation);
       const dispose = widget.dispose;
       widget.dispose = () => {
         spaceshipWidgetDisposed = true;

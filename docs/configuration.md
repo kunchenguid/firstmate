@@ -184,7 +184,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 ### Working-presentation variant (config/calm-ship)
 
 The optional gitignored `config/calm-ship` file selects Calm's animated working-presentation variant, resolved from the same effective Firstmate home and `FM_CONFIG_OVERRIDE` rules as `config/calm`.
-The only recognized value is `spaceship`, written with or without one trailing newline; an absent, unreadable, or unrecognized value keeps the default boat.
+The only recognized value is `spaceship`, matched after trimming surrounding whitespace (so a trailing newline, or an editor's added padding, is accepted); an absent, unreadable, or unrecognized value keeps the default boat.
 The extension reads this file at load and re-reads it on every `session_start` and `/calm` toggle, so a mid-session change takes effect at the next of those points rather than mid-run.
 This file is local to each Firstmate home and is not part of secondmate inherited configuration.
 

@@ -3979,7 +3979,7 @@ test_working_spaceship_modes_and_selection() {
   printf '%s\n' spaceship >"$fixture/home/config/calm-ship"
 
   out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -4001,12 +4001,8 @@ const {
   CALM_WORKING_SPACESHIP_WORKING_PHASES_PER_TICK,
   CALM_WORKING_SPACESHIP_TICKS_PER_MOVE,
   CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES,
-  CALM_WORKING_SPACESHIP_CREW_MARKER_GAP,
-  CALM_WORKING_SPACESHIP_CREW_DRIFT_TICKS_PER_MOVE,
   createCalmWorkingSpaceshipAnimation,
   createCalmWorkingSpaceshipWidget,
-  classifyCrewMarkerState,
-  readCalmCrewMarkers,
 } = spaceship;
 const boatModule = await import(
   `${pathToFileURL(`${process.cwd()}/lib/fm-calm-working-ship.ts`).href}?boat=${Date.now()}`
@@ -4142,154 +4138,6 @@ check(
   check(starRow.includes("*"), "idle hull row rendered no star glyphs");
   check(starRow.includes("."), "idle hull row rendered no dot glyphs");
   check(!starRow.includes("-"), "idle hull row rendered warp streak glyphs");
-}
-
-// --- Idle crew markers: one per crew, spread right, drifting right, basic-ANSI colors ---
-{
-  const animation = createCalmWorkingSpaceshipAnimation();
-  animation.render(44);
-  animation.setCrew([
-    { state: "working" },
-    { state: "blocked" },
-    { state: "done" },
-    { state: "idle" },
-  ]);
-  const frame = animation.render(44);
-  const bareTop = strip(frame[0]);
-  const wideCount = (bareTop.match(/>/g) || []).length;
-  check(wideCount === 4, `expected 4 crew markers on a wide row, saw ${wideCount}`);
-  check(bareTop.indexOf(">") > 20, `crew markers are not on the right side: first at ${bareTop.indexOf(">")}`);
-  check(bareTop.indexOf(">") === 34, `marker band is not right-aligned to the expected start: ${bareTop.indexOf(">")}`);
-  check(CALM_WORKING_SPACESHIP_CREW_MARKER_GAP >= 1, "crew marker gap is not spread out");
-
-  // Basic-ANSI color mapping in order: working green(32), blocked red(31),
-  // done blue(34), idle default(39) - no truecolour or theme lookup.
-  const colors = [...frame[0].matchAll(/\x1b\[(\d+)m>/g)].map((m) => m[1]);
-  check(
-    JSON.stringify(colors) === JSON.stringify(["32", "31", "34", "39"]),
-    `crew marker colors wrong: ${JSON.stringify(colors)} (expected green,red,blue,default)`,
-  );
-
-  // The marker band drifts right on its own clock, distinct from the saucer's sweep:
-  // one column every CREW_DRIFT_TICKS_PER_MOVE ticks, wrapping across the full width.
-  // After one drift step each marker has advanced one column; with these four
-  // (34,37,40,43) and the saucer at column 1 (covering 1..3) none is hidden, so all
-  // four survive and the wrapped marker lands at column 0.
-  check(
-    CALM_WORKING_SPACESHIP_CREW_DRIFT_TICKS_PER_MOVE !== CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE,
-    "crew drift cadence is not distinct from the saucer's idle sweep",
-  );
-  const drift = createCalmWorkingSpaceshipAnimation();
-  drift.render(44);
-  drift.setCrew([{ state: "working" }, { state: "blocked" }, { state: "done" }, { state: "idle" }]);
-  const beforeColumns = [...strip(drift.render(44)[0]).matchAll(/>/g)].map((m) => m.index);
-  check(
-    JSON.stringify(beforeColumns) === JSON.stringify([34, 37, 40, 43]),
-    `markers did not start right-aligned: ${JSON.stringify(beforeColumns)}`,
-  );
-  for (let step = 0; step < CALM_WORKING_SPACESHIP_CREW_DRIFT_TICKS_PER_MOVE; step += 1) drift.tick();
-  const afterColumns = [...strip(drift.render(44)[0]).matchAll(/>/g)].map((m) => m.index);
-  check(
-    JSON.stringify(afterColumns) === JSON.stringify([0, 35, 38, 41]),
-    `markers did not drift one column right, wrapping the rightmost to the left: ${JSON.stringify(afterColumns)}`,
-  );
-
-  // The band keeps flowing right across many sweeps and never collapses or overlaps.
-  const driftTrack = createCalmWorkingSpaceshipAnimation();
-  driftTrack.render(44);
-  driftTrack.setCrew([{ state: "working" }, { state: "blocked" }, { state: "done" }, { state: "idle" }]);
-  let driftedColumns = beforeColumns;
-  for (let move = 1; move <= 30; move += 1) {
-    for (let step = 0; step < CALM_WORKING_SPACESHIP_CREW_DRIFT_TICKS_PER_MOVE; step += 1) driftTrack.tick();
-    const cols = [...strip(driftTrack.render(44)[0]).matchAll(/>/g)].map((m) => m.index);
-    check(cols.every((c) => c >= 0 && c < 44), `a marker left the row: ${JSON.stringify(cols)}`);
-    check(new Set(cols).size === cols.length, `markers overlapped: ${JSON.stringify(cols)}`);
-    driftedColumns = cols;
-  }
-  check(driftedColumns.length > 0, "the marker band disappeared after many sweeps");
-
-  // The saucer always renders in front of any marker it overlaps: wherever the saucer
-  // sits in a frame, its span is the saucer glyph, never a `>`.
-  const pass = createCalmWorkingSpaceshipAnimation();
-  pass.render(44);
-  pass.setCrew([{ state: "blocked" }, { state: "working" }, { state: "done" }, { state: "idle" }]);
-  for (let step = 0; step < 120 * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE; step += 1) {
-    pass.tick();
-    if (step % CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE !== 0) continue;
-    const row = strip(pass.render(44)[0]);
-    const saucerAt = row.indexOf(SAUCER_IDLE);
-    check(
-      row.slice(saucerAt, saucerAt + SAUCER_IDLE.length) === SAUCER_IDLE,
-      "saucer span rendered a marker or dot instead of the saucer",
-    );
-    check(
-      !row.slice(saucerAt, saucerAt + SAUCER_IDLE.length).includes(">"),
-      "saucer rendered a `>` inside its own span",
-    );
-    check((row.match(/>/g) || []).length > 0, "crew markers vanished while the saucer swept");
-  }
-
-  // Markers appear only in the idle two-row pose, never in the working warp row.
-  const working = createCalmWorkingSpaceshipAnimation();
-  working.setWorking(true);
-  working.setCrew([{ state: "working" }, { state: "blocked" }]);
-  check(!strip(working.render(44)[0]).includes(">"), "working warp row rendered idle crew markers");
-
-  // Narrow-width reflow: fewer than the full marker set renders, dropping from the left.
-  const narrow = createCalmWorkingSpaceshipAnimation();
-  narrow.render(8);
-  narrow.setCrew([{ state: "working" }, { state: "blocked" }, { state: "done" }, { state: "idle" }]);
-  const narrowCount = (strip(narrow.render(8)[0]).match(/>/g) || []).length;
-  check(narrowCount < 4 && narrowCount >= 1, `narrow row did not drop markers: ${narrowCount}`);
-
-  // An empty crew list draws no markers.
-  const empty = createCalmWorkingSpaceshipAnimation();
-  empty.render(44);
-  empty.setCrew([]);
-  check(!strip(empty.render(44)[0]).includes(">"), "empty crew list still drew markers");
-}
-
-// --- Crew-state reader: cheap reads of the home's own state records -----------------
-{
-  const stateDir = `${process.cwd()}/crew-state`;
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(`${stateDir}/alpha.meta`, "");
-  writeFileSync(`${stateDir}/alpha.status`, "working: doing work\n");
-  writeFileSync(`${stateDir}/bravo.meta`, "");
-  writeFileSync(`${stateDir}/bravo.status`, "needs-decision [key=x]: waiting\n");
-  // A concluded scout report whose prose happens to mention "ready" and "PR" is still
-  // not active, so it must not stay on the banner.
-  writeFileSync(`${stateDir}/charlie.meta`, "kind=scout\n");
-  writeFileSync(`${stateDir}/charlie.status`, "done: report delivered ... 85%-ready ... no PR, no code changes\n");
-  writeFileSync(`${stateDir}/delta.meta`, "");
-  writeFileSync(`${stateDir}/delta.status`, "paused: held\n");
-  writeFileSync(`${stateDir}/echo.meta`, "");
-  writeFileSync(`${stateDir}/echo.status`, "done: ready in branch fm/demo\n");
-  // A ship with a ready deliverable awaiting review is not active either: it is done,
-  // not working, so it drops off under the active-only rule.
-  writeFileSync(`${stateDir}/foxtrot.meta`, "kind=ship\n");
-  writeFileSync(`${stateDir}/foxtrot.status`, "done: ready in branch fm/foxtrot\n");
-  const markers = readCalmCrewMarkers(stateDir);
-  check(classifyCrewMarkerState(stateDir, "alpha") === "working", "alpha should be working");
-  check(classifyCrewMarkerState(stateDir, "bravo") === "blocked", "bravo should be blocked");
-  check(classifyCrewMarkerState(stateDir, "charlie") === "done", "charlie should be done");
-  check(classifyCrewMarkerState(stateDir, "delta") === "idle", "delta should be idle");
-  check(classifyCrewMarkerState(stateDir, "echo") === "done", "echo should be done (awaiting review)");
-  check(classifyCrewMarkerState(stateDir, "foxtrot") === "done", "foxtrot should be done (awaiting review)");
-  // Active-only filter: only the working and needs-decision crews are shown. A
-  // concluded report (charlie), a paused crew (delta), and done-awaiting-review ships
-  // (echo, foxtrot) are not active, so they drop off the banner.
-  check(markers.length === 2, `expected 2 active markers, saw ${markers.length}`);
-  const markerStates = markers.map((m) => m.state).sort().join(",");
-  check(
-    markerStates === "blocked,working",
-    `unexpected active-marker states: ${markerStates}`,
-  );
-  check(classifyCrewMarkerState(stateDir, "missing") === "idle", "a missing crew should classify idle");
-  check(
-    JSON.stringify(readCalmCrewMarkers(`${process.cwd()}/no-such-dir`)) === "[]",
-    "a missing state dir should yield no markers",
-  );
 }
 
 // --- Working: single-row compact warp sprite, faster twinkle, streaks stream left --
