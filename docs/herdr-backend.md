@@ -42,6 +42,8 @@ Prerequisites:
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 - `python3` only for optional protocol-16 presentation-space ordering, native event subscription, and opt-in [project groups](#project-groups) agent-view transport.
+- On native Windows (Git for Windows, no WSL), Herdr's `[terminal] default_shell` set to Git Bash, such as `C:/Program Files/Git/bin/bash.exe`.
+  Herdr otherwise opens PowerShell, which cannot run the spawn's POSIX commands, so the spawn refuses before launching a worker.
 
 Herdr is Apache-2.0 licensed.
 Releases before 0.8.0 were dual-licensed AGPL-3.0-or-later or commercial.
@@ -378,6 +380,7 @@ An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
 That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.
 A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
+On native Windows, where Git Bash's `noacl` `/tmp` cannot carry mode bits, the namespace must instead sit directly in a `usertemp` `/tmp`, the account's own `%TEMP%`.
 
 A same-identity version 2 binding may replace one exact agent-free restart husk in place.
 A husk is a restored same-labeled tab with a missing pane or no registered agent, as [Restart and liveness behavior](#restart-and-liveness-behavior) describes.
@@ -991,6 +994,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
 - Supervisor transport support is separate from task-spawn support; see [away-mode supervisor configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
+- On native Windows, Herdr reports no foreground folder, so a fresh spawn confirms its pane's folder with a one-line shell probe before any worker starts, and relaunch, which never types into a pane that may hold a live agent, refuses instead.
 
 ## Regression entry points
 
