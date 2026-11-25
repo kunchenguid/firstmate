@@ -40,11 +40,12 @@ SH
   chmod +x "$1/uname"
 }
 
-# fake_curl <fakebin> <exit-status>: write a body to -o on success, and refuse a
-# call that does not carry -f, so a download that would happily save an HTTP error
-# page fails this fixture instead of looking finished.
+# fake_curl <fakebin> [http-error]: model the two curl behaviours that matter
+# here. A response body is written to -o in both modes, because a transfer can
+# fail after part of the body has arrived; -f is what turns an HTTP error into a
+# non-zero exit, so without it the caller sees success and keeps the error page.
 fake_curl() {
-  local fakebin=$1 status=$2
+  local fakebin=$1 mode=${2:-ok}
   cat > "$fakebin/curl" <<SH
 #!/usr/bin/env bash
 out=
@@ -56,9 +57,13 @@ while [ \$# -gt 0 ]; do
     *) shift ;;
   esac
 done
-[ "\$fatal" -eq 1 ] || { printf 'curl fixture: -f is required\n' >&2; exit 3; }
-[ "$status" -eq 0 ] || exit "$status"
-printf '%s' cached-bytes > "\$out"
+if [ "$mode" = http-error ]; then
+  [ -n "\$out" ] && printf '%s' '<html>404 Not Found</html>' > "\$out"
+  [ "\$fatal" -eq 1 ] && exit 22
+  exit 0
+fi
+[ -n "\$out" ] && printf '%s' cached-bytes > "\$out"
+exit 0
 SH
   chmod +x "$fakebin/curl"
 }
@@ -119,6 +124,25 @@ TXT
   [ "$out" = "$expected" ] ||
     fail "spoken text changed"$'\n'"--- expected ---"$'\n'"$expected"$'\n'"--- got ---"$'\n'"$out"
   pass "print-text: markup, typography and abbreviations become one sentence per line"
+}
+
+test_abbreviations_expand_every_occurrence() {
+  local input=$TMP_ROOT/abbreviations.md out expected
+  cat > "$input" <<'MD'
+x w/o w/o y. A vs. vs. B. Use e.g.e.g. done. Repeat etc. etc. and approx.approx. end.
+MD
+  IFS= read -r -d '' expected <<'TXT' || true
+x without without y.
+A versus versus B.
+Use for example,for example, done.
+Repeat et cetera, et cetera, and approximatelyapproximately end.
+TXT
+  expected=${expected%$'\n'}
+  out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
+    fail "print-text failed: $out"
+  [ "$out" = "$expected" ] ||
+    fail "repeated and adjacent abbreviations must all expand"$'\n'"--- expected ---"$'\n'"$expected"$'\n'"--- got ---"$'\n'"$out"
+  pass "abbreviations: repeated and adjacent forms all expand"
 }
 
 test_render_reports_the_mp3_size_and_indexes_it() {
@@ -182,7 +206,7 @@ test_setup_on_macos_does_not_require_libstdcxx() {
   printf '%s' model > "$kokoro/kokoro-v1.0.onnx"
   printf '%s' voices > "$kokoro/voices-v1.0.bin"
   fake_darwin "$fakebin"
-  fake_curl "$fakebin" 0
+  fake_curl "$fakebin"
 
   out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
     "$SPEAK" --setup) || fail "--setup failed on a Darwin host: $out"
@@ -202,7 +226,7 @@ test_setup_repairs_a_venv_that_cannot_import() {
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$kokoro/venv/bin/python"
   chmod +x "$kokoro/venv/bin/python"
   fake_venv_builder "$fakebin"
-  fake_curl "$fakebin" 0
+  fake_curl "$fakebin"
 
   out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
     "$SPEAK" --setup) || fail "--setup did not repair the venv: $out"
@@ -216,15 +240,20 @@ test_setup_repairs_a_venv_that_cannot_import() {
 }
 
 test_setup_leaves_no_cache_file_after_a_failed_download() {
-  local root fakebin kokoro out rc
+  local root fakebin kokoro input outdir out rc
   root=$TMP_ROOT/setup-download
   kokoro=$root/kokoro
+  input=$root/report.md
+  outdir=$root/out
   fakebin=$(fm_fakebin "$root")
   mkdir -p "$kokoro/venv/bin"
   printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = -c ] || exit 1' 'exit 0' \
     > "$kokoro/venv/bin/python"
   chmod +x "$kokoro/venv/bin/python"
-  fake_curl "$fakebin" 22
+  printf '%s' voices > "$kokoro/voices-v1.0.bin"
+  printf '%s\n' 'One sentence here.' > "$input"
+  fake_darwin "$fakebin"
+  fake_curl "$fakebin" http-error
 
   out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
     "$SPEAK" --setup 2>&1)
@@ -233,10 +262,25 @@ test_setup_leaves_no_cache_file_after_a_failed_download() {
   assert_contains "$out" "could not download" \
     "a failed download must name what could not be fetched"
   [ ! -e "$kokoro/kokoro-v1.0.onnx" ] ||
-    fail "a failed download left a cache file that the next run would treat as present"
-  [ "$(ls -A "$kokoro" | tr '\n' ' ')" = "venv " ] ||
+    fail "a failed download left a cache file holding the error body, which the next run would treat as present"
+  [ "$(ls -A "$kokoro" | tr '\n' ' ')" = "venv voices-v1.0.bin " ] ||
     fail "a failed download left temporary files behind: $(ls -A "$kokoro" | tr '\n' ' ')"
-  pass "setup: a failed download leaves no cache file behind"
+
+  # The damaged model must not read as present to a render either.
+  command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1 || {
+    pass "setup: a failed download leaves no cache file and a render refuses it (skipped render: ffmpeg and ffprobe are not on PATH)"
+    return 0
+  }
+  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    "$SPEAK" "$input" --out "$outdir" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "a render must refuse a cache whose model never downloaded"
+  assert_contains "$out" "prepare it once with: bin/fm-speak.sh --setup" \
+    "a cache damaged by a failed download must be reported as the one --setup line"
+  assert_not_contains "$out" "Traceback" \
+    "a damaged cache must not surface a python traceback"
+  [ ! -d "$outdir" ] || fail "the render wrote output from a cache that never finished downloading"
+  pass "setup: a failed download leaves no cache file and a render refuses it"
 }
 
 test_render_refuses_a_cache_that_cannot_import() {
@@ -271,6 +315,7 @@ test_render_refuses_a_cache_that_cannot_import() {
 
 fm_test_run \
   test_print_text_reads_prose_not_markup \
+  test_abbreviations_expand_every_occurrence \
   test_render_reports_the_mp3_size_and_indexes_it \
   test_setup_on_macos_does_not_require_libstdcxx \
   test_setup_repairs_a_venv_that_cannot_import \

@@ -448,6 +448,9 @@ esac
 case $max_minutes in
   ''|*[!0-9]*) die "--max-minutes needs a whole number of minutes (got: $max_minutes)" ;;
 esac
+# Read as decimal: an all-digit value may still carry a leading zero, which the
+# arithmetic expansion would otherwise treat as octal.
+max_minutes=$((10#$max_minutes))
 [ "$max_minutes" -ge 1 ] || die "--max-minutes needs at least 1 minute"
 max_seconds=$((max_minutes * 60))
 
@@ -640,17 +643,70 @@ sed -E \
   -e 's/[[:space:]]+([.,;:!?])/\1/g' \
   "$text" >"$workdir/inline.txt" || die "could not normalise the input text"
 
-sed -E \
-  -e 's/(^|[^[:alnum:]_])e\.g\./\1for example,/g' \
-  -e 's/(^|[^[:alnum:]_])i\.e\./\1that is,/g' \
-  -e 's/(^|[^[:alnum:]_])etc\./\1et cetera,/g' \
-  -e 's/(^|[^[:alnum:]_])approx\./\1approximately/g' \
-  -e 's/(^|[^[:alnum:]_])vs\.?([[:space:]])/\1versus\2/g' \
-  -e 's/(^|[^[:alnum:]_])w\/o([^[:alnum:]_]|$)/\1without\2/g' \
-  -e 's/(^|[^[:alnum:]_])w\//\1with /g' \
-  -e 's/[[:space:]]*&[[:space:]]*/ and /g' \
-  -e 's/%/ percent/g' \
-  "$workdir/inline.txt" >"$workdir/abbrev.txt" || die "could not expand abbreviations"
+# Abbreviation pass. The scan steps over the expansion, never over the boundary
+# character before it, so repeated or adjacent forms all expand: `w/o w/o` and
+# `e.g.e.g.` become two spoken forms, not one.
+awk '
+  function word_char(c) {
+    return c != "" && c ~ /^[[:alnum:]_]$/
+  }
+  function expand(head) {
+    if (substr(head, 1, 4) == "e.g.") { consumed = 4; return "for example," }
+    if (substr(head, 1, 4) == "i.e.") { consumed = 4; return "that is," }
+    if (substr(head, 1, 4) == "etc.") { consumed = 4; return "et cetera," }
+    if (substr(head, 1, 7) == "approx.") { consumed = 7; return "approximately" }
+    if (substr(head, 1, 3) == "vs." && substr(head, 4, 1) ~ /[[:space:]]/) {
+      consumed = 3
+      return "versus"
+    }
+    if (substr(head, 1, 2) == "vs" && substr(head, 3, 1) ~ /[[:space:]]/) {
+      consumed = 2
+      return "versus"
+    }
+    if (substr(head, 1, 3) == "w/o" && !word_char(substr(head, 4, 1))) {
+      consumed = 3
+      return "without"
+    }
+    if (substr(head, 1, 2) == "w/") { consumed = 2; return "with " }
+    return ""
+  }
+  {
+    line = $0
+    n = length(line)
+    start = 1
+    i = 1
+    while (i <= n) {
+      c = substr(line, i, 1)
+      expansion = ""
+      if (c == "&") {
+        end = i - 1
+        while (end >= start && substr(line, end, 1) ~ /[[:space:]]/) end--
+        if (end >= start) printf "%s", substr(line, start, end - start + 1)
+        printf " and "
+        i++
+        while (i <= n && substr(line, i, 1) ~ /[[:space:]]/) i++
+        start = i
+        continue
+      }
+      if (c == "%") {
+        expansion = " percent"
+        consumed = 1
+      } else if (index("eiavw", c) > 0 && (i == 1 || !word_char(substr(line, i - 1, 1)))) {
+        expansion = expand(substr(line, i, 7))
+      }
+      if (expansion != "") {
+        if (i > start) printf "%s", substr(line, start, i - start)
+        printf "%s", expansion
+        i += consumed
+        start = i
+        continue
+      }
+      i++
+    }
+    if (start <= n) printf "%s", substr(line, start, n - start + 1)
+    printf "\n"
+  }
+' "$workdir/inline.txt" >"$workdir/abbrev.txt" || die "could not expand abbreviations"
 
 # Transliterate to ASCII: accented names and emoji must not reach the phonemiser
 # raw. iconv drops what it cannot transliterate, which is exactly the intent.
