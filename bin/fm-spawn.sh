@@ -186,7 +186,8 @@
 #   A clean projected create and an exact resume both hold the one
 #   session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through the projected layout
-#   mutation. On contention a create makes one bounded attempt and falls back
+#   mutation, releasing it before worktree allocation, remaining spawn setup,
+#   and agent launch. On contention a create makes one bounded attempt and falls back
 #   to the ordinary flat layout before any projection mutation. A resume refuses
 #   by default on the same contention (it does not degrade flat; a concurrent
 #   resume is a hard failure). Pass --herdr-resume-lock-wait to opt that
@@ -5289,6 +5290,9 @@ else
         fi
       fi
     fi
+    if [ "$HERDR_PROJECTED" -eq 1 ]; then
+      spawn_herdr_presentation_order_lock_release
+    fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
@@ -6217,12 +6221,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
-fi
-# The presentation-order lock protects only the projected layout mutation. The
-# remaining spawn setup, including worktree base refresh and pane setup, must
-# not extend that session-wide critical section.
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-  spawn_herdr_presentation_order_lock_release
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != t3code ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" "$PROJ_ABS" "$MODE" || exit 1

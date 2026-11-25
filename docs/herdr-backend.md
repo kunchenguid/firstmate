@@ -376,7 +376,7 @@ An aborted spawn returns the lease only when Herdr confirms the task pane gone a
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
-The presentation lock covers the projected layout mutation only and is released before the remaining spawn setup and agent launch.
+The presentation lock covers the projected layout mutation only and is released before worktree allocation, the remaining spawn setup, and agent launch.
 That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.
 A namespace at this account's name that another account owns, or that is not mode 700, is still refused and is never adopted, chowned, or removed.
 
