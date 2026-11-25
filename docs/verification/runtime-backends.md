@@ -955,6 +955,30 @@ Live validation ran 2026-10-01 on Grok 1.0.46 (2765805b9442) [stable], with foll
 The same run's `FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` proved the real idle grok 1.0.46 composer `empty` through tmux and checked that the cursorless re-read was not `pending`.
 The portable owner of the shape is `test_matrix_grok_144_approval_titled_bottom_border` in `tests/fm-composer-lib.test.sh`, which pins the `Grok 4.7 (high)` approval title's idle `empty` on tmux (with the cursor on either the content row or bottom border), herdr, and cmux/orca capability profiles, and typed `pending` on tmux and herdr only.
 It also pins idle `empty` for `Grok 4.6` at all four efforts (`low`, `medium`, `high`, `xhigh`) on tmux only, `unknown` for the tested malformed titles on tmux, rejection of light, heavy, double, and ASCII approval-title boxes on tmux, herdr, and cmux/orca profiles, and Grok 1.0.5's three-column overhang still proving `empty` for a title without the suffix on tmux.
+
+Grok 1.0.77 (50ca579fa996), verified 2026-11-12 on Rex at 80x24, keeps this aligned approval title for `grok-4.7`, `grok-4.6`, and `grok-4.5`, but titles `grok-4.7-build-fast` with a two-word model name: `╰── … ── Grok 4.7 Fast (medium) · always-approve ─╯`.
+The space in `4.7 Fast` failed the typed-title model check, so that idle composer read `unknown` and `exit` and `relaunch` refused it (#8388).
+The accepted delta is that one ` Fast` word after the model version, and only on the ` · always-approve` title; a second word, another word, and the `Fast` title at Grok 1.0.5's overhang stay `unknown`.
+The live check launched `grok --always-approve --model grok-4.7-build-fast --reasoning-effort medium` in a scratch Rex block and read it through `fm_backend_rex_composer_state` from `bin/backends/rex.sh`, with the cursor (row 19) and cursorless.
+Before the change, idle, after one turn, and after a Ctrl+C interrupt each read `unknown`, and a typed draft read `pending-unproven`.
+After the change the same states read:
+
+```text
+idle: cursor_y=19 state=empty cursorless=empty
+after Ctrl+C: cursor_y=19 state=empty cursorless=empty
+typed `draft text not sent`: cursor_y=19 state=pending cursorless=pending
+cleared with Ctrl+U: cursor_y=19 state=empty cursorless=empty
+```
+
+`test_matrix_grok_1077_fast_model_title` in `tests/fm-composer-lib.test.sh` feeds the real styled Rex captures in `tests/fixtures/rex-grok-1.0.77/` through the classifier and pins idle `empty`, typed `pending`, and the unobserved titles `unknown`.
+The live guard launches only the default model, so it does not exercise the `Fast` title; its 1.0.77 result is:
+
+```text
+$ FM_REX_COMPOSER_LIVE=1 bash tests/fm-backend-rex-composer-live-e2e.test.sh
+ok - grok (grok 1.0.77 (50ca579fa996)): real idle composer classifies empty on rex
+ok - grok (grok 1.0.77 (50ca579fa996)): the same idle screen read cursorless is not pending (verdict: empty)
+```
+
 After a Grok upgrade, rerun that live guard and refresh both this record and the 1.0.5 note above: each accepted width is pinned to an observed release, the 1.0.5 overhang has never been live-verified, and neither the approval wording nor either width carries a guarantee across a release.
 
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
@@ -3432,6 +3456,21 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 ### Process identity and markers
 
 `ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
+The bun global package (`bun install -g @oh-my-pi/pi-coding-agent`) installs `~/.bun/bin/omp` as a symlink to `dist/cli.js` with a `#!/usr/bin/env bun` shebang, so its process is named `bun` and only its arguments (`bun <path>/omp`) name omp.
+`bin/fm-omp-process-lib.sh` owns both shapes: the exact name `omp`, or `bun` whose argument right after bun is a script named exactly `omp`, including an install path that contains spaces.
+`ompd`, `comp`, and another script followed by an `omp` argument never match.
+`tests/fm-omp-harness.test.sh` and `tests/fm-session-lock-ancestry.test.sh` pin these shapes with real processes; the former also drives `bin/fm-harness.sh` and `bin/fm-lock.sh` from a bun-run script.
+
+The token-free guard refreshes the installed-omp evidence and spends no model tokens: it starts omp in JSON-RPC mode with no prompt, and a loaded extension runs `bin/fm-harness.sh` and `bin/fm-lock.sh` from inside that process; the guard passes only when the saved lock names that process's pid.
+
+```text
+FM_OMP_IDENTITY_LIVE=1 bash tests/fm-omp-primary-live-e2e.test.sh
+ok - omp omp/18.12.3 (bun-package): detected as omp and acquired the session lock with no model tokens
+```
+
+Run on 2026-11-10 against omp 18.12.3, the bun package at `~/.bun/bin/omp`, on macOS 26 arm64.
+Before the change the same install detected as `unknown` and the lock refused with `cannot locate harness process in ancestry`.
+The portable cases ran on macOS only; the Linux procps shape (`comm` is the exec name `bun`) is covered by the fake-ps cases in `tests/fm-session-lock-ancestry.test.sh`, not by a Linux run.
 omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
 `FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
 

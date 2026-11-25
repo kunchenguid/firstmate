@@ -49,7 +49,9 @@
 # refresh_remote_refs has updated those refs from each remote when the local ones
 # do not show the work, OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
-# GitHub reports a PR head that contains the current local work, or its content is
+# the forge (GitHub, Forgejo, or - only when config/park-on-review or
+# config/auto-land opts this home in - a GitLab merge request) reports a PR head
+# that contains the current local work, or its content is
 # already present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
 # on a remote yet the change is fully in main. A task whose meta records
@@ -1672,12 +1674,25 @@ pr_number_from_target() {
   printf '%s' "$n"
 }
 
+# GitLab serves a merge request's head as refs/merge-requests/<n>/head; GitHub
+# and Forgejo serve a pull request's as refs/pull/<n>/head.
 ensure_commit_object() {
-  local target=$1 commit=$2 n
+  local target=$1 commit=$2 n ref
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
-  n=$(pr_number_from_target "$target") || return 1
+  case "$target" in
+    *"/-/merge_requests/"*)
+      n=${target##*/-/merge_requests/}
+      n=${n%%[!0-9]*}
+      [ -n "$n" ] || return 1
+      ref="refs/merge-requests/$n/head"
+      ;;
+    *)
+      n=$(pr_number_from_target "$target") || return 1
+      ref="refs/pull/$n/head"
+      ;;
+  esac
   git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "$ref" >/dev/null 2>&1 || return 1
   git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
@@ -1718,10 +1733,20 @@ EOF
 # Is the worktree's PR merged for local work contained in that PR? Resolves the
 # PR from the recorded pr= URL first, then from the branch name, and asks the
 # forge for both the PR state and head: a recorded Forgejo URL is read through
-# tea (fm_pr_forgejo_read_record), and everything else through GitHub. Returns
+# tea (fm_pr_forgejo_read_record), a recorded GitLab merge request through glab
+# (fm_pr_gitlab_read_record, whose head is the MR's own head rather than the
+# squash or merge-train commit main received) when gitlab_mr_landing_opted_in,
+# and everything else through GitHub. Returns
 # non-zero when the PR is not merged, the current work is not contained in the
 # PR head, no PR is found, or any forge read error occurs - the caller then
 # falls back to the content check.
+# The GitLab merged-MR read is opt-in with the park-on-review flags
+# (bin/fm-park.sh, docs/configuration.md "Park on review"); without either a
+# GitLab MR goes through the GitHub read like any other target.
+gitlab_mr_landing_opted_in() {
+  [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
+}
+
 pr_is_merged() {
   local branch=$1 target view state remainder head resolved_url current landed=0
   if [ -n "$PR_URL" ]; then
@@ -1732,6 +1757,12 @@ pr_is_merged() {
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
     fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+    head=$FM_PR_RECORD_HEAD
+    fm_pr_head_valid "$head" || return 1
+    resolved_url=$FM_PR_URL
+  elif gitlab_mr_landing_opted_in && fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
+    fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
     [ "$FM_PR_RECORD_MERGED" = true ] || return 1
     head=$FM_PR_RECORD_HEAD
     fm_pr_head_valid "$head" || return 1
@@ -2874,6 +2905,24 @@ safe_rm_rf() {
   rm -rf -- "$target"
 }
 
+# Drop the per-home Treehouse pool root for a secondmate whose home is already
+# gone. The path must be the one fm_treehouse_spawn_root printed: an absolute
+# directory sitting directly under an fm-secondmate/ parent. Child task slots
+# are returned before this runs; this only removes that leftover root.
+remove_secondmate_treehouse_pool() {  # <pool-root>
+  local pool=$1 parent
+  [ -n "$pool" ] || return 0
+  case "$pool" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  [ -d "$pool" ] && [ ! -L "$pool" ] || return 0
+  parent=$(dirname "$pool")
+  [ "$(basename "$parent")" = fm-secondmate ] || return 0
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 0
+  rm -rf -- "$pool"
+}
+
 safe_rm_rf_child_worktree() {
   local target=$1 project=$2
   validate_child_worktree_for_removal "$target" "$project" >/dev/null || return 1
@@ -2946,11 +2995,12 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup pool_root
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
   [ -n "$abs_home_path" ] || return 0
+  pool_root=$(fm_treehouse_spawn_root "$abs_home_path") || pool_root=
   # A T3 secondmate's home carries the environment its spawn wrote there.
   # Remove it after home validation and before returning its pooled Git index.
   if [ "$backend" = t3code ]; then
@@ -2981,10 +3031,12 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       return 1
     }
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    remove_secondmate_treehouse_pool "$pool_root"
     return 0
   fi
   if safe_rm_rf "$abs_home_path" "$label"; then
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
+    remove_secondmate_treehouse_pool "$pool_root"
     return 0
   fi
   restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
@@ -4188,6 +4240,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" "$STATE/$ID.pr-register-refused" \
+  "$STATE/$ID.review-park" "$STATE/.review-park-closed-$ID" \
   "$STATE/$ID.pr-register-timed-out" \
   "$STATE/.$ID.branch-outcome-index" \
   "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"

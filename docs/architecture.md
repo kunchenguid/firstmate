@@ -263,6 +263,10 @@ Text for a worker to read and commands that drive a worker's process are separat
 ### Task status archives
 
 When [status archival is enabled](configuration.md#task-status-archive-configstatus-archive), teardown preserves the complete status stream in `data/<task>/status.log`, using a separate `status.<N>.log` for reused IDs without overwriting earlier histories.
+When [record hygiene is enabled](configuration.md#record-hygiene-report-configrecord-hygiene), session-start bootstrap and the watcher heartbeat report home-local record inconsistencies: status logs without metadata older than 24 hours, in-flight rows without metadata, metadata without a tab, and duplicate `pr=` references across records.
+Only the mutating, locked session-start bootstrap archives orphan status logs older than 24 hours to `data/<id>/status.log`; a detect-only bootstrap and the heartbeat do not archive them.
+The scan is limited to the current home's records and is a report, not a general cleanup sweep.
+The shared report implementation is [`fm-record-hygiene-lib.sh`](../bin/fm-record-hygiene-lib.sh).
 Forced secondmate retirement stores descendant logs under the surviving parent's `data/<secondmate>/children/<child>/` tree.
 These archives are cold evidence: presentation, wake classification, and fleet snapshots consume live `state/` records and never read archived logs.
 Ordinary child teardown uses its own home's configuration; retiring a whole home still removes older archives stored inside that home.
@@ -336,9 +340,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for session-provider-only backends, while Orca creates its own worktrees for `backend=orca`.
-The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
+The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation, pool choice, and fresh-base refusal rules, including spawns from linked and secondmate homes.
 A home can opt in to starting a local-only ship or a scout from the primary checkout's default branch instead of origin's tip ([`configuration.md`](configuration.md#spawn-base-from-the-primary-checkout-configspawn-base-primary-checkout)).
-Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
+Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, [`tests/fm-spawn-secondmate-pool.test.sh`](../tests/fm-spawn-secondmate-pool.test.sh) for a secondmate home's own pool, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.

@@ -154,6 +154,11 @@
 #                          fm-pr-check.sh scan could not record, or whose
 #                          merge watch it could not arm in time; the line
 #                          names the task, the PR, and the refusal or timeout
+#   check: record hygiene: <lines>
+#                          with config/record-hygiene present, the heartbeat's
+#                          background record-hygiene scan found a new set of
+#                          RECORD_HYGIENE findings (fm-record-hygiene-lib.sh);
+#                          an unchanged set does not wake again
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -222,6 +227,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PR_DEGRADED_WATCH_ENABLED=0
 [ ! -e "$CONFIG/pr-degraded-watch" ] || PR_DEGRADED_WATCH_ENABLED=1
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 # Hold this state directory open for the main loop's teardown check: a
 # directory recreated at the same path is then a different directory, and the
@@ -249,6 +255,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-record-hygiene-lib.sh
+. "$SCRIPT_DIR/fm-record-hygiene-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
 # the per-cycle reconcile itself runs as a separate process.
 # shellcheck source=bin/fm-procevent-lib.sh
@@ -2530,6 +2538,12 @@ handle_paused_stale() {  # <window> <task> <hash>
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  # A lane parked on review stopped its agent on purpose; bin/fm-park.sh's tick
+  # watches its PR and owns every wake for it.
+  if [ -f "$STATE/$task.review-park" ]; then
+    triage_log "absorbed stale (parked on review, watched by fm-park.sh tick): $win"
+    return 0
+  fi
   pause_age=$(status_pause_age "$last" "$age" "$now")
   if status_is_paused "$last" && status_pause_is_overdue "$last" "$pause_age" "$now"; then
     detail="paused, wait overdue"
@@ -4306,9 +4320,21 @@ EOF
             triage_log "published merge outcome for $id but could not retire its authority record"
             exit 1
           fi
+          # Persist before retiring the poll; start only after releasing its control lock.
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --queue >/dev/null 2>&1 || {
+              triage_log "could not queue merged-lane cleanup for $id"
+              exit 1
+            }
           retire_merged_pr_poll "$id"
           pr_poll_control_release || exit 1
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+            "$SCRIPT_DIR/fm-park.sh" land "$id" --if-eligible --detach >/dev/null 2>&1 || true
           touch "$STATE/.last-check"
+          # A merged lane eligible for merge-time cleanup, also one
+          # bin/fm-pr-merge.sh already recorded, is torn down by a detached
+          # bin/fm-park.sh land that only starts here, so this iteration never
+          # waits on a teardown; the tick reports its outcome.
           if [ "$FM_MERGE_OUTCOME_ALREADY_RECORDED" = true ]; then
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
@@ -4392,6 +4418,17 @@ EOF
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
+      touch "$STATE/.last-check"
+      wake "$reason"
+    fi
+    # Parked-on-review lanes, close detection, opt-in automatic parking, and
+    # the outcomes of detached park, relaunch, and cleanup actions
+    # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
+    # wake before printing it, so the watcher only rings).
+    park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
+    if [ -n "$park_out" ]; then
+      reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
       touch "$STATE/.last-check"
       wake "$reason"
     fi
@@ -4786,6 +4823,29 @@ EOF
     fi
   done < <(recorded_windows)
 
+  # Collect a completed hygiene scan before launching another one. The report
+  # child keeps endpoint/backlog reads out of the polling path. Only a home
+  # with config/record-hygiene present scans; read the flag once per cycle so
+  # collection and launch agree.
+  hygiene_enabled=0
+  [ -e "$CONFIG/record-hygiene" ] && hygiene_enabled=1
+  hygiene_result="$STATE/.record-hygiene-result"
+  hygiene_running="$STATE/.record-hygiene-running"
+  if [ "$hygiene_enabled" = 1 ] && [ -f "$hygiene_result" ]; then
+    hygiene_report=$(cat "$hygiene_result")
+    if [ -n "$hygiene_report" ]; then
+      if ! cmp -s <(printf '%s\n' "$hygiene_report") "$STATE/.record-hygiene-last"; then
+        hygiene_reason="check: record hygiene: $hygiene_report"
+        fm_wake_append check record-hygiene "$hygiene_reason" || exit 1
+        printf '%s\n' "$hygiene_report" > "$STATE/.record-hygiene-last"
+        wake "$hygiene_reason"
+      fi
+    else
+      rm -f "$STATE/.record-hygiene-last"
+    fi
+    rm -f "$hygiene_result" "$hygiene_running"
+  fi
+
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive
   # no-change heartbeat (idle fleet) up to HEARTBEAT_MAX, and resets on any
@@ -4795,6 +4855,45 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    if [ "$hygiene_enabled" = 1 ] && [ -e "$hygiene_running" ]; then
+      hygiene_owner=$(cat "$hygiene_running" 2>/dev/null || true)
+      IFS=$'\t' read -r hygiene_pid hygiene_started <<< "$hygiene_owner"
+      hygiene_live_start=''
+      case "$hygiene_pid" in ''|*[!0-9]*) ;; *)
+        kill -0 "$hygiene_pid" 2>/dev/null && hygiene_live_start=$(ps -o lstart= -p "$hygiene_pid" 2>/dev/null | sed 's/^[[:space:]]*//') ;;
+      esac
+      hygiene_age=$(age_of "$hygiene_running")
+      report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
+      case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac
+      if [ -z "$hygiene_live_start" ] || [ "$hygiene_live_start" != "$hygiene_started" ] || [ "$hygiene_age" -gt $(( report_timeout * 3 )) ]; then
+        rm -f "$hygiene_running"
+      fi
+    fi
+    if [ "$hygiene_enabled" = 1 ] && [ ! -e "$hygiene_running" ] && [ ! -e "$hygiene_result" ]; then
+      (
+        report_timeout=${FM_RECORD_HYGIENE_TIMEOUT:-60}
+        case "$report_timeout" in ''|*[!0-9]*|0) report_timeout=60 ;; esac
+        FM_BOOTSTRAP_DETECT_ONLY=1 record_hygiene_report > "$hygiene_result.tmp" &
+        report_pid=$!
+        (
+          sleep "$report_timeout"
+          : > "$hygiene_result.timeout"
+          kill "$report_pid" 2>/dev/null || true
+        ) &
+        watchdog_pid=$!
+        wait "$report_pid" || true
+        kill "$watchdog_pid" 2>/dev/null || true
+        wait "$watchdog_pid" 2>/dev/null || true
+        if [ -e "$hygiene_result.timeout" ]; then
+          printf 'RECORD_HYGIENE: report timed out after %ss\n' "$report_timeout" > "$hygiene_result.tmp"
+          rm -f "$hygiene_result.timeout"
+        fi
+        mv -f "$hygiene_result.tmp" "$hygiene_result"
+      ) >/dev/null 2>&1 &
+      hygiene_worker=$!
+      hygiene_started=$(ps -o lstart= -p "$hygiene_worker" 2>/dev/null | sed 's/^[[:space:]]*//')
+      printf '%s\t%s\n' "$hygiene_worker" "$hygiene_started" > "$hygiene_running"
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,

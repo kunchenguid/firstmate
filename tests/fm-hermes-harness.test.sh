@@ -33,6 +33,7 @@ done
 for args in 'node /tmp/server.js /opt/hermes-agent/ui-tui/dist/entry.js' 'python3 -c tui_gateway.entry' 'node -e hermes' 'hermes-helper'; do
   ! fm_hermes_process_matches "$args" || fail "false identity: $args"
 done
+! fm_hermes_process_matches '' || fail 'empty args matched under set -u'
 # Use a real interpreter process so kernel-name loss and argv loss are
 # independent regressions, not expectations encoded into a fake harness.
 mkdir -p "$TMP_ROOT/process/tui_gateway"
