@@ -26,8 +26,13 @@
 #           ~NNNNNN suffix rather than replacing an earlier capture.
 #           Readable CSSOM rules supplement captured markup at their owning
 #           stylesheet positions; adopted sheets follow document sheets.
-#           Unreadable linked sheets remain linked, and their hrefs are
-#           recorded in metadata as inaccessible_stylesheets.
+#           Sheets reported as disabled by the capture browser stay inactive.
+#           Without editing the live page or changing authored media attributes,
+#           capture clears disabled inline styles and marks disabled stylesheet
+#           links with `disabled` in the snapshot. Selectors such as `:empty`
+#           and `[disabled]` can therefore match differently in the snapshot.
+#           Non-disabled linked sheets with unreadable rules fall back to the
+#           sanitized link; see inaccessible_stylesheets in SNAPSHOT RECORD.
 #           Output lines: snapshot, url, viewport, enhancers, session-url,
 #           source-id, armed (or still-listening), then the resolve route lines.
 # path      Print the newest snapshot captured for exactly <url>; exit 1 when
@@ -67,7 +72,8 @@
 # SNAPSHOT RECORD. The sidecar uses schema fm-lavish-url.v1 and records the
 # requested url and host, viewport and viewport_size, captured_at, enhancers,
 # title, reported_url, canonical snapshot path, source_id, and
-# inaccessible_stylesheets (hrefs whose CSSOM rules could not be read).
+# inaccessible_stylesheets (hrefs of non-disabled sheets whose CSSOM rules
+# could not be read).
 # The requested URL owns routing; reported_url is captured page evidence only.
 #
 # Environment: FM_HOME selects the home (FM_STATE_OVERRIDE, FM_DATA_OVERRIDE,
@@ -252,19 +258,28 @@ PYCLAIM
   browser_ok "let the page settle" eval "async () => { if (document.readyState !== 'complete') { await new Promise((resolve) => { addEventListener('load', resolve, { once: true }); setTimeout(resolve, 15000); }); } await new Promise((resolve) => setTimeout(resolve, $settle)); return document.readyState; }" >/dev/null
   browser eval --full "() => {
     const styles = [], inaccessible = [];
-    for (const node of document.querySelectorAll('[data-fm-captured-sheet]')) node.removeAttribute('data-fm-captured-sheet');
+    const root = document.documentElement;
+    const snapshot = document.implementation.createHTMLDocument().importNode(root, true);
+    const copies = snapshot.querySelectorAll('style, link');
+    const owners = new Map(Array.from(root.querySelectorAll('style, link'), (node, i) => [node, copies[i]]));
+    snapshot.removeAttribute('data-fm-captured-sheet');
+    for (const node of snapshot.querySelectorAll('[data-fm-captured-sheet]')) node.removeAttribute('data-fm-captured-sheet');
     for (const sheet of [...document.styleSheets, ...document.adoptedStyleSheets]) {
-      if (sheet.disabled) continue;
+      const owner = owners.get(sheet.ownerNode);
+      if (sheet.disabled) {
+        if (owner?.localName === 'style') owner.textContent = '';
+        if (owner?.localName === 'link') owner.setAttribute('disabled', '');
+        continue;
+      }
       try {
         let css = Array.from(sheet.cssRules, rule => rule.cssText).join('\n');
         const media = sheet.media && sheet.media.mediaText;
         if (media) css = '@media ' + media + ' {' + css + '}';
-        const owner = sheet.ownerNode;
         if (owner) owner.setAttribute('data-fm-captured-sheet', String(styles.length));
         styles.push({ css, baseURI: sheet.href || document.baseURI, owner: owner ? styles.length : null });
       } catch (_) { if (sheet.href) inaccessible.push(sheet.href); }
     }
-    return { url: location.href, baseURI: document.baseURI, title: document.title, html: document.documentElement.outerHTML, styles, inaccessible_stylesheets: inaccessible };
+    return { url: location.href, baseURI: document.baseURI, title: document.title, html: snapshot.outerHTML, styles, inaccessible_stylesheets: inaccessible };
   }" \
     > "$tmp/eval.txt" 2>&1 || die "capture browser failed to read the page: $(head -5 "$tmp/eval.txt")"
   python3 "$HELPER" decode-eval "$tmp/eval.txt" > "$tmp/capture.json" \

@@ -68,18 +68,45 @@ case "${1-}" in
     host=$(python3 -c 'import sys; from urllib.parse import urlsplit; print(urlsplit(sys.argv[1]).hostname)' "$url")
     if [ -f "$home/pages/$host.html.json" ]; then
       node - "$url" "$home/pages/$host.html" "$3" <<'JSCAPTURE'
-const fs = require("fs"), vm = require("vm");
+const fs = require("fs"), vm = require("vm"), assert = require("assert");
 const [url, page, expression] = process.argv.slice(2);
 const fixture = JSON.parse(fs.readFileSync(page + ".json", "utf8"));
-let markup = fs.readFileSync(page, "utf8");
-const sheets = fixture.styles.map(s => ({ownerNode: s.owner ? {setAttribute(key, value) { markup = markup.replace(s.owner, s.owner.replace(">", ` ${key}="${value}">`)); }} : null, href: s.baseURI, cssRules: [{cssText: s.css}], media: {mediaText: s.media || ""}, disabled: !!s.disabled}));
-const adopted = sheets.pop();
-for (const href of fixture.inaccessible_stylesheets) {
-  sheets.push({href, get cssRules() { throw new Error("SecurityError"); }});
+const markup = fs.readFileSync(page, "utf8");
+function fixtureRoot(html) {
+  const tags = /<style\b[^>]*>[\s\S]*?<\/style>|<(?:html|link)\b[^>]*>/g;
+  const nodes = Array.from(html.matchAll(tags), ([element]) => {
+    const [, localName, opening, textContent] = /^<(html|style|link)\b([^>]*)>([\s\S]*)$/.exec(element);
+    const attrs = new Map(Array.from(opening.matchAll(/\s+([\w-]+)="([^"]*)"/g), ([, name, value]) => [name, value]));
+    return {
+      localName, opening: `<${localName}${opening}>`, textContent: textContent.replace(/<\/style>$/, ""),
+      getAttribute: key => attrs.get(key) ?? null,
+      setAttribute: (key, value) => attrs.set(key, value),
+      removeAttribute: key => attrs.delete(key),
+      get outerHTML() {
+        const attributes = Array.from(attrs, ([key, value]) => ` ${key}="${value}"`).join("");
+        return `<${localName}${attributes}>` + (localName === "style" ? this.textContent + "</style>" : "");
+      }
+    };
+  });
+  const [root, ...descendants] = nodes;
+  return {
+    removeAttribute: root.removeAttribute,
+    querySelectorAll: selector => selector === "style, link" ? descendants : descendants.filter(n => n.getAttribute("data-fm-captured-sheet") !== null),
+    get outerHTML() { let i = 0; return html.replace(tags, () => nodes[i++].outerHTML); }
+  };
 }
-const document = {baseURI: url, title: "Fixture page", querySelectorAll: () => [], documentElement: {get outerHTML() { return markup; }},
-  styleSheets: sheets, adoptedStyleSheets: [adopted]};
+const root = fixtureRoot(markup);
+const owners = root.querySelectorAll("style, link");
+const sheets = fixture.styles.map(s => ({ownerNode: owners.find(node => node.opening === s.owner), href: s.baseURI,
+  get cssRules() { if (s.inaccessible) throw new Error("SecurityError"); return [{cssText: s.css}]; },
+  media: {mediaText: s.media || ""}, disabled: !!s.disabled}));
+const document = {baseURI: url, title: "Fixture page", querySelectorAll: root.querySelectorAll, documentElement: root,
+  implementation: {createHTMLDocument: () => ({importNode: node => fixtureRoot(node.outerHTML)})},
+  styleSheets: sheets.filter(s => s.ownerNode), adoptedStyleSheets: sheets.filter(s => !s.ownerNode)};
 const result = vm.runInNewContext("(" + expression + ")()", {document, location: {href: url}});
+assert.deepStrictEqual(owners.filter(n => n.getAttribute("id")?.startsWith("disabled-")).map(n => n.getAttribute("media")),
+  ["screen", "screen"], "capture changed the live media attributes");
+assert.strictEqual(root.outerHTML, markup, "capture changed the live DOM");
 console.log("result: " + JSON.stringify(JSON.stringify(result)));
 JSCAPTURE
       exit
@@ -505,9 +532,9 @@ test_overlapping_captures_keep_pages_and_names_distinct() {
 test_cssom_and_reserved_markup() {
   local home out snap
   home=$(make_home cssom)
-  printf '<html><head><style>.removed{display:none}.dynamic{color:black}</style><style id="empty-sheet">.removed-empty{display:none}</style><style id="unreadable-sheet">.fallback{color:green}</style><link rel="stylesheet" href="https://external.test/sheet.css"></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
+  printf '<html data-fm-captured-sheet="0"><head><link rel="stylesheet" href="https://external.test/sheet.css"><style>.removed{display:none}.dynamic{color:black}</style><style id="empty-sheet">.removed-empty{display:none}</style><style id="unreadable-sheet" data-fm-captured-sheet="0">.fallback{color:green}</style><style id="disabled-inline" media="screen">.disabled{color:green}</style><link id="disabled-link" rel="stylesheet" media="screen" href="https://external.test/disabled.css"></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
   cat > "$home/pages/css.test.html.json" <<'JSON'
-{"styles":[{"css":".disabled{color:green}","disabled":true},{"owner":"<style>","css":".dynamic{color:red;background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"owner":"<style id=\"empty-sheet\">","css":""},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"}],"inaccessible_stylesheets":["https://external.test/sheet.css"]}
+{"styles":[{"owner":"<style id=\"disabled-inline\" media=\"screen\">","css":".disabled{color:green}","disabled":true},{"owner":"<link id=\"disabled-link\" rel=\"stylesheet\" media=\"screen\" href=\"https://external.test/disabled.css\">","baseURI":"https://external.test/disabled.css","disabled":true,"inaccessible":true},{"owner":"<style>","css":".dynamic{color:red;background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"owner":"<style id=\"empty-sheet\">","css":""},{"owner":"<link rel=\"stylesheet\" href=\"https://external.test/sheet.css\">","baseURI":"https://external.test/sheet.css","inaccessible":true},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"},{"css":".disabled-adopted{color:green}","disabled":true}]}
 JSON
   out=$(lu "$home" snapshot https://css.test/ 2>&1) || fail "$out"
   snap=$(field "$out" snapshot)
@@ -520,13 +547,21 @@ class Output(HTMLParser):
         self.ids = []
         self.styles = []
         self.cascade = []
+        self.disabled_owners = {}
         self.in_style = False
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if "id" in attrs: self.ids.append(attrs["id"])
         assert attrs.get("name") != "fmLavishUrl"
         assert tag != "img"
-        if tag == "link" and attrs.get("href") == "https://external.test/sheet.css": self.cascade.append("external-blue")
+        if tag == "link" and "stylesheet" in attrs.get("rel", "").split():
+            if attrs.get("href") == "https://external.test/sheet.css" and "disabled" not in attrs:
+                self.cascade.append("external-blue")
+        if attrs.get("id") == "disabled-inline":
+            self.disabled_owners["inline"] = (tag, attrs.get("media"))
+        if attrs.get("id") == "disabled-link":
+            self.disabled_owners["link"] = (tag, attrs.get("media"))
+            assert "disabled" in attrs
         self.in_style = tag == "style"
     def handle_endtag(self, tag):
         if tag == "style": self.in_style = False
@@ -536,13 +571,14 @@ class Output(HTMLParser):
             if ".dynamic{color:red" in data: self.cascade.append("copied-red")
 p = Output()
 p.feed(open(sys.argv[1]).read())
-assert p.cascade == ["copied-red", "external-blue"], p.cascade
+assert p.cascade == ["external-blue", "copied-red"], p.cascade
 assert "fm-lavish-url-panel" not in p.ids
 assert "fmLavishUrl" not in p.ids
 assert "fm-lavish-url-outline" not in p.ids
 assert any("url(https://css.test/assets/img.png)" in css for css in p.styles)
 assert any(".adopted{color:red}" in css for css in p.styles)
 assert any("@media (width < 600px)" in css for css in p.styles)
+assert p.disabled_owners == {"inline": ("style", "screen"), "link": ("link", "screen")}, p.disabled_owners
 assert not any(".disabled" in css for css in p.styles)
 assert not any(".removed" in css or ".dynamic{color:black}" in css for css in p.styles)
 assert any(".fallback{color:green}" in css for css in p.styles)
@@ -582,7 +618,7 @@ assert.strictEqual(queued.length, 3);
 assert(queued.every(args => args[1].data.url === "https://css.test/"));
 JS
   then fail "runtime controls did not install and queue feedback"; fi
-  pass "CSSOM styles are rewritten safely and reserved page markup is stripped"
+  pass "CSSOM styles are rewritten safely, disabled sheets stay inactive, and reserved markup is stripped"
 }
 
 
