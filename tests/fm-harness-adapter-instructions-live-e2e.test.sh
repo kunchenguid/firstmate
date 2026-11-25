@@ -96,6 +96,7 @@ pass "local model $MODEL selected every operation scenario and all nine harness 
 
 CHECKED=0
 MISSING=
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-cursor-lib.sh"
 resolve_native_binary() {
   local harness=$1 candidate

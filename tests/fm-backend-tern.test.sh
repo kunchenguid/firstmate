@@ -255,6 +255,7 @@ count_calls() { grep -cF -- "$2" "$1/log" || true; }
 # --- target parsing ------------------------------------------------------------
 
 test_parse_target_keeps_full_64_bit_ids() {
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/backends/tern.sh"
     fm_backend_tern_parse_target "$TARGET" || exit 1
     [ "$FM_BACKEND_TERN_SESSION_ID" = "$SID" ] || { echo "session mismatch: $FM_BACKEND_TERN_SESSION_ID" >&2; exit 1; }
@@ -266,6 +267,7 @@ test_parse_target_keeps_full_64_bit_ids() {
 test_parse_target_rejects_malformed_targets() {
   local bad
   for bad in '' 'nocolon' ':7' '7:' '7:8:9' 'a:7' '7:b' '-7:8' '7:+8' '7: 8' 'Default:4' '7:@focused'; do
+    # shellcheck source=/dev/null
     ( . "$ROOT/bin/backends/tern.sh"; fm_backend_tern_parse_target "$bad" ) 2>/dev/null \
       && fail "parse_target should refuse '$bad' (only digits:digits names a block; titles and selectors are never used)"
   done

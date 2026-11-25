@@ -3,7 +3,7 @@
 set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-dod-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-dod-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-merge-local)
@@ -170,8 +170,9 @@ test_done_recording_preserves_caller_locks() {
   for caller in ledger teardown; do
     make_case "locked-$caller"
     (
+      # shellcheck disable=SC2034 # Read by the sourced wake library.
       local FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state"
-      # shellcheck source=bin/fm-wake-lib.sh
+      # shellcheck source=/dev/null
       . "$ROOT/bin/fm-wake-lib.sh"
       local lock control='' owner
       lock=$(fm_meta_lock_path "$META") || exit 1

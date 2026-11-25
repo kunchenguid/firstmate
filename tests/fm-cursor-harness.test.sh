@@ -27,9 +27,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# shellcheck source=bin/fm-cursor-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-cursor-lib.sh"
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
@@ -339,7 +339,8 @@ test_resolve_binary_prefers_stable_path() {
 test_tmux_classifies_cursor_pane_without_inferring_dead() {
   local tree bin
   tree="$TMP_ROOT/tree5"; bin=$(make_cursor_tree "$tree")
-  # shellcheck source=bin/backends/tmux.sh
+  # shellcheck source=/dev/null
+  # shellcheck disable=SC2034 # Read by the sourced tmux adapter.
   ( FM_BACKEND_LIB_DIR="$ROOT/bin"; . "$ROOT/bin/backends/tmux.sh"
     [ "$(fm_agent_process_classify_name node "$bin/cursor-agent")" = agent ] \
       || fail "a cursor pane reported as node must classify agent"

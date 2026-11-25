@@ -24,7 +24,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_live_gate default-on FM_WORKER_ACCOUNT_LIVE_E2E jq perl
-# shellcheck source=bin/fm-worker-account-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-worker-account-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-worker-account-live)

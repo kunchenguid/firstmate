@@ -15,9 +15,9 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
-# shellcheck source=bin/fm-remote-job-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
 PF="$ROOT/bin/fm-public-followup.sh"
@@ -1334,6 +1334,7 @@ SH
 
   # New fields and the open-loop gate must not create work in a disabled home.
   # shellcheck disable=SC1091
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-public-followup-lib.sh"
   fm_pf_has_open_loops "$home/state" \
     && fail "a relay-disabled home must not grow an open-loop registry"

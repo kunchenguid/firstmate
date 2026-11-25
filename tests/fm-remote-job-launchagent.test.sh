@@ -157,7 +157,7 @@ export FM_TEST_REMOVING="$TMP_ROOT/launchagent.removing"
 export FM_TEST_PLIST="$ACCOUNT_HOME/Library/LaunchAgents/dev.firstmate.remote-job.plist"
 export FM_TEST_SWEEP_GATE="$SWEEP_GATE"
 export FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Darwin
-# shellcheck source=bin/fm-remote-job-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
 stop_pid() {

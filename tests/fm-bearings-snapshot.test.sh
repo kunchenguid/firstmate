@@ -9,10 +9,10 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-secondmate-registry-lib.sh
+# shellcheck source=/dev/null
 # shellcheck disable=SC1091
 . "$ROOT/bin/fm-secondmate-registry-lib.sh"
-# shellcheck source=bin/fm-tasks-axi-lib.sh
+# shellcheck source=/dev/null
 # shellcheck disable=SC1091
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
 

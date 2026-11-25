@@ -211,6 +211,7 @@ test_session_honors_override() {
 # --- target parsing, key normalization ---------------------------------------
 
 test_parse_target() {
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/backends/zellij.sh"
     fm_backend_zellij_parse_target "firstmate:5" || exit 1
     [ "$FM_BACKEND_ZELLIJ_SESSION" = firstmate ] || { echo "session mismatch: $FM_BACKEND_ZELLIJ_SESSION" >&2; exit 1; }
@@ -220,6 +221,7 @@ test_parse_target() {
 }
 
 test_normalize_key() {
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/backends/zellij.sh"
     [ "$(fm_backend_zellij_normalize_key Enter)" = Enter ] || { echo "Enter failed" >&2; exit 1; }
     [ "$(fm_backend_zellij_normalize_key Escape)" = Esc ] || { echo "Escape failed" >&2; exit 1; }

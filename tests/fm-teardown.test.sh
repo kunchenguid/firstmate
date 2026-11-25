@@ -6420,6 +6420,7 @@ test_status_archive_missing_status_noop() {
   printf 'neighbor\tidentity\t0\t0\n' > "$case_dir/state/.status-presentation-cursor"
   cp "$case_dir/state/.status-presentation-cursor" "$case_dir/cursor.before"
   # A regression must fail within a bound, not wait forever on our live lock.
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-timeout-lib.sh"
   rc=0
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \

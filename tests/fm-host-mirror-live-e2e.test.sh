@@ -20,7 +20,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-tmux-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-tmux-lib.sh"
 
 fm_live_gate opt-in FM_HOST_MIRROR_LIVE_E2E jq tmux
@@ -91,6 +91,7 @@ LOCKED_EXEC='printf "%s\n" "$$" > state/.lock; exec "$@"'
 # Claude-scoped busy read and the shared composer classifier to agree on idle.
 claude_ready_state() {  # <socket> <target> -> diagnostic state; success when ready
   local socket=$1 target=$2 busy composer
+  # shellcheck disable=SC2329 # Runtime override called by the sourced pane readers.
   tmux() { command tmux -L "$socket" "$@"; }
   busy=$(fm_pane_busy_state "$target" claude)
   composer=$(fm_tmux_composer_state "$target")

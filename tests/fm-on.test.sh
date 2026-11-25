@@ -17,8 +17,9 @@ cleanup() {
     pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
     # Stop the detached Linux supervisor's whole process group and wait for its
     # cleanup before removing the fixture tree.
-    # shellcheck source=bin/fm-remote-job-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-remote-job-lib.sh"
+    # shellcheck disable=SC2034 # Read by the sourced remote-job library.
     FM_REMOTE_JOB_STATE="$TMP_ROOT/remote-jobs"
     fm_remote_job_stop_worker_tree "$pid" 2>/dev/null || true
   fi

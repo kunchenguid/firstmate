@@ -16,6 +16,14 @@
 # paths attempt --external-sources with the selected dataflow mode.
 # Tests stop source analysis at imported production modules because CI analyzes
 # every production shell separately as a canonical, source-aware root.
+# The test source-boundary check enforces that boundary on every run: a
+# tests/*.sh source that ShellCheck would follow into bin/ - a
+# `# shellcheck source=` directive naming bin/, or an undirected `.`/`source`
+# of literal `bin/...` or `./bin/...` paths (unquoted or quoted), or
+# `$VAR/bin/...`, `${VAR}/bin/...`, or `$(dirname ...)/bin/...` -
+# fails by file and line until it is cut with `# shellcheck source=/dev/null`.
+# ShellCheck inlines every followed source site again, so one such edge can
+# multiply a test root past any memory bound.
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
@@ -42,11 +50,13 @@
 #     `gh`). That local pass drops --external-sources and excludes SC1091,
 #     SC2034, SC2153, and SC2329. A branch with zero matching changed files
 #     skips ShellCheck and prints a "no changed lint targets" note, then
-#     still runs the backend-purity check and validates workflows.
+#     still runs the backend-purity and test source-boundary checks and
+#     validates workflows.
 # Explicit paths always bypass this file-set selection and lint exactly the
 # given paths, matching the same config, without the workflow YAML check.
 # Explicit core bin/ and bin/backends/ scripts still receive the
-# backend-purity check. The backend-purity check rejects direct Beads CLI
+# backend-purity check, and explicit tests/*.sh roots the test
+# source-boundary check. The backend-purity check rejects direct Beads CLI
 # invocations in the core bin/ and bin/backends/ scripts so every configured
 # backlog backend follows the same tasks-axi lifecycle path.
 #
@@ -60,10 +70,11 @@
 # canonical set are complete, disjoint, and byte-weight balanced; --list-files
 # exposes their actual roots. --changed --partition splits only the changed
 # roots the same way, and an empty partition is a successful no-op for
-# ShellCheck while still running workflow lint and backend-purity checks.
+# ShellCheck while still running workflow lint, backend-purity, and test
+# source-boundary checks.
 # Partition mode does not accept --fast or explicit paths. Each partition also
-# runs workflow lint and backend-purity checks, keeping either invocation
-# independently useful.
+# runs workflow lint, backend-purity, and test source-boundary checks,
+# keeping either invocation independently useful.
 #
 # With FM_LINT_REQUIRE_BOUNDS=1, which CI sets, every per-root ShellCheck
 # process runs under an enforced envelope: a wall deadline
@@ -79,8 +90,13 @@
 # BEFORE any root starts; when either check fails the run refuses with a
 # named error, so a required-bounds run never lints uncapped. Without
 # FM_LINT_REQUIRE_BOUNDS (a local developer lint, where hosts like macOS
-# cannot apply the address-space limit at all) each root still runs in its
-# own ShellCheck process with identical diagnostics, just unbounded.
+# cannot apply the address-space limit at all) each root runs under the same
+# wall deadline and grace plus a resident-memory ceiling instead
+# (FM_LINT_ROOT_RSS_KIB, default 6291456 = 6 GiB summed over the root's
+# process group, polled through ps every half second). A root over that
+# ceiling is killed and classified memory, exactly like a CI memory death.
+# A local run without bin/fm-timeout-lib.sh refuses rather than lint
+# unbounded.
 #
 # If a source-following root exits with a memory failure, it is retried once
 # without --external-sources under the same memory limit and only the time
@@ -101,9 +117,9 @@
 # .tsv suffix); otherwise it lives only in the
 # run's scratch dir. Reason values are ok, findings, memory-fallback,
 # timeout, memory, signal:<sig>, limit-unavailable, or error:<rc>.
-# Memory requires process-level evidence (a GHC exhaustion status or runtime
-# error on stderr), not an echoed source excerpt or an OOM phrase in a
-# filename. In partition mode begin/end
+# Memory requires process-level evidence (a GHC exhaustion status, a runtime
+# error on stderr, or the local resident-memory kill), not an echoed source
+# excerpt or an OOM phrase in a filename. In partition mode begin/end
 # lines also stream to stderr, and an abnormal root end is always reported
 # there.
 #
@@ -135,8 +151,8 @@ ROOT="$(cd "$SELF_DIR/.." && pwd -P)"
 cd "$ROOT" || exit 1
 
 # The sibling timeout library supplies the shared group-kill watchdog that
-# bounds each root when FM_LINT_REQUIRE_BOUNDS=1 requires it; without the
-# library a required-bounds run refuses in preflight rather than lint uncapped.
+# bounds each root; without the library a run refuses in preflight rather than
+# lint unbounded.
 if [ -r "$SELF_DIR/fm-timeout-lib.sh" ]; then
   # shellcheck source=bin/fm-timeout-lib.sh
   . "$SELF_DIR/fm-timeout-lib.sh"
@@ -199,7 +215,8 @@ fm_lint_max_root_rss() {  # <rss-kib> <rss-kib>
 # Map a root's exit status onto the reported reason vocabulary without
 # pretending every signal or nonzero exit is a memory kill: only process-level
 # memory-failure evidence earns the memory reason - GHC's heap-exhaustion
-# status 251, or a complete runtime memory-error line on the root's stderr -
+# status 251, the local resident-memory monitor's kill status 98, or a
+# complete runtime memory-error line on the root's stderr -
 # and that evidence is checked before a generic findings or signal reason.
 # Diagnostics and their echoed source excerpts are on stdout and never count,
 # and each stderr form is matched whole to its line end, so a root path that
@@ -209,7 +226,7 @@ fm_lint_classify_root() {  # <rc> <root-stderr-file>
   case "$rc" in
     0) printf 'ok\n'; return 0 ;;
     97) printf 'limit-unavailable\n'; return 0 ;;
-    251) printf 'memory\n'; return 0 ;;
+    98|251) printf 'memory\n'; return 0 ;;
   esac
   if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ] && [ "$rc" = 124 ]; then
     printf 'timeout\n'; return 0
@@ -246,32 +263,25 @@ fm_lint_classify_root() {  # <rc> <root-stderr-file>
 }
 
 # Run one ShellCheck invocation under the given deadline and the per-root
-# address-space limit, returning its exit status in FM_LINT_LAST_RC.
+# memory limit, returning its exit status in FM_LINT_LAST_RC.
 fm_lint_exec_root() {  # <path> <stdout-file> <stderr-file> <rss-file> <seconds> <args...>
   local path=$1 root_out=$2 root_err=$3 rss_file=$4 seconds=$5 invocation_rc=0
   shift 5
-  if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ]; then
-    # The watchdog runs in a process group of its own (the same setpgrp hop the
-    # workers use), so the owner's TERM-then-KILL group sweep cannot kill it
-    # before it has forwarded the signal to the root's own group. If the worker
-    # dies before its trap can signal the watchdog, the watchdog's parent-death
-    # check still starts the same terminate-then-kill escalation; the worker
-    # names itself as that owner before the launch, so a worker that dies while
-    # the watchdog is still starting is detected too.
-    ( FM_EXEC_TIMED_OWNER_PID=$$ exec "${FM_LINT_PERL_BIN:-perl}" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
-        "${BASH:-bash}" "$SELF" --internal-timed \
-        "$seconds" "$FM_LINT_INTERNAL_GRACE" \
-        "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "$FM_LINT_INTERNAL_MEMORY_KIB" \
-        "$FM_LINT_SHELLCHECK" "$@" -- "$path" ) > "$root_out" 2> "$root_err" &
-    FM_LINT_WORKER_RUN_PID=$!
-    wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
-    FM_LINT_WORKER_RUN_PID=
-  else
-    "$FM_LINT_SHELLCHECK" "$@" -- "$path" > "$root_out" 2> "$root_err" &
-    FM_LINT_WORKER_RUN_PID=$!
-    wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
-    FM_LINT_WORKER_RUN_PID=
-  fi
+  # The watchdog runs in a process group of its own (the same setpgrp hop the
+  # workers use), so the owner's TERM-then-KILL group sweep cannot kill it
+  # before it has forwarded the signal to the root's own group. If the worker
+  # dies before its trap can signal the watchdog, the watchdog's parent-death
+  # check still starts the same terminate-then-kill escalation; the worker
+  # names itself as that owner before the launch, so a worker that dies while
+  # the watchdog is still starting is detected too.
+  ( FM_EXEC_TIMED_OWNER_PID=$$ exec "${FM_LINT_PERL_BIN:-perl}" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
+      "${BASH:-bash}" "$SELF" --internal-timed \
+      "$seconds" "$FM_LINT_INTERNAL_GRACE" \
+      "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "$FM_LINT_INTERNAL_MEMORY_KIND" "$FM_LINT_INTERNAL_MEMORY_KIB" \
+      "$FM_LINT_SHELLCHECK" "$@" -- "$path" ) > "$root_out" 2> "$root_err" &
+  FM_LINT_WORKER_RUN_PID=$!
+  wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
+  FM_LINT_WORKER_RUN_PID=
   FM_LINT_LAST_RC=$invocation_rc
 }
 
@@ -415,20 +425,26 @@ if [ "${1:-}" = "--internal-worker" ]; then
   exit $?
 fi
 
-# Private per-root payload mode used only by the bounded runner above: apply
-# the per-process address-space limit (a positive KiB count), then exec
-# /usr/bin/time for the per-root peak-RSS record when it is available, else the
-# tool itself. A limit the host cannot apply exits 97 so the parent reports
-# limit-unavailable instead of running uncapped.
+# Private per-root payload mode used only by the bounded runner above. Under
+# the address-space kind it applies that per-process limit (a positive KiB
+# count) and execs the tool; a limit the host cannot apply exits 97 so the
+# parent reports limit-unavailable instead of running uncapped. Under the
+# resident kind it runs the tool beside a monitor that sums resident memory
+# over this process group (the bounded runner made this process its leader)
+# every half second; over the limit it kills the group's other members,
+# records the observed peak, and exits 98, which the parent classifies as
+# memory. Either kind wraps the tool in /usr/bin/time for the per-root
+# peak-RSS record when it is available.
 if [ "${1:-}" = "--internal-root" ]; then
   [ "${FM_LINT_INTERNAL:-}" = 1 ] || {
     printf 'fm-lint.sh: --internal-root is private to the lint owner.\n' >&2
     exit 2
   }
-  [ "$#" -ge 4 ] || exit 2
+  [ "$#" -ge 5 ] || exit 2
   internal_rss_file=$2
-  internal_memory_kib=$3
-  shift 3
+  internal_memory_kind=$3
+  internal_memory_kib=$4
+  shift 4
   case "$internal_memory_kib" in
     ''|0*|*[!0-9]*)
       printf 'fm-lint.sh: --internal-root memory limit must be a positive KiB count, got %s\n' \
@@ -436,18 +452,66 @@ if [ "${1:-}" = "--internal-root" ]; then
       exit 2
       ;;
   esac
-  ulimit -v "$internal_memory_kib" 2>/dev/null || {
-    printf 'fm-lint.sh: per-root memory limit %s KiB is not enforceable on this host\n' \
-      "$internal_memory_kib" >&2
-    exit 97
-  }
+  internal_command=("$@")
   if [ -x /usr/bin/time ]; then
     if [ "$(uname)" = Darwin ]; then
-      exec /usr/bin/time -l -o "$internal_rss_file" "$@"
+      internal_command=(/usr/bin/time -l -o "$internal_rss_file" "$@")
+    else
+      internal_command=(/usr/bin/time -f 'max_rss_kib=%M' -o "$internal_rss_file" "$@")
     fi
-    exec /usr/bin/time -f 'max_rss_kib=%M' -o "$internal_rss_file" "$@"
   fi
-  exec "$@"
+  case "$internal_memory_kind" in
+    address-space)
+      ulimit -v "$internal_memory_kib" 2>/dev/null || {
+        printf 'fm-lint.sh: per-root memory limit %s KiB is not enforceable on this host\n' \
+          "$internal_memory_kib" >&2
+        exit 97
+      }
+      exec "${internal_command[@]}"
+      ;;
+    resident)
+      # shellcheck disable=SC2016 # Perl, not the shell, expands its variables.
+      exec "${FM_LINT_PERL_BIN:-perl}" -MPOSIX=WNOHANG -MTime::HiRes=sleep -e '
+        my ($rss_file, $limit) = (shift, shift);
+        my $child = fork;
+        exit 127 unless defined $child;
+        if (!$child) { exec @ARGV; exit 127 }
+        my ($group, $peak, $tick) = (getpgrp(), 0, 0);
+        while (1) {
+          my $done = waitpid $child, WNOHANG;
+          exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $child;
+          exit 127 if $done == -1;
+          if ($tick++ % 10 == 9) {
+            my ($total, @members) = (0);
+            my $ps = open(my $rows, "-|", "ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "rss=");
+            if ($ps) {
+              while (my $row = <$rows>) {
+                my ($pid, $pgid, $rss) = split " ", $row;
+                next unless defined $rss && $pgid == $group && $pid != $$ && $pid != $ps;
+                $total += $rss;
+                push @members, $pid;
+              }
+              close $rows;
+            }
+            $peak = $total if $total > $peak;
+            if ($total > $limit) {
+              kill "KILL", @members;
+              waitpid $child, 0;
+              if (open my $record, ">", $rss_file) { print $record "max_rss_kib=$peak\n"; close $record }
+              print STDERR "fm-lint.sh: resident memory $total KiB exceeded the per-root limit of $limit KiB\n";
+              exit 98;
+            }
+          }
+          sleep 0.05;
+        }
+      ' -- "$internal_rss_file" "$internal_memory_kib" "${internal_command[@]}"
+      ;;
+    *)
+      printf 'fm-lint.sh: --internal-root memory kind must be address-space or resident, got %s\n' \
+        "$internal_memory_kind" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 # Private bounded-run mode used only by the per-root runner above: the caller
@@ -714,6 +778,132 @@ fm_lint_run_backend_purity() {
       }
     }
   ' "${purity_roots[@]}")
+  [ -z "$findings" ] || {
+    printf '%s\n' "$findings" >&2
+    return 1
+  }
+}
+
+# Test roots stop source analysis at bin/: ShellCheck inlines every followed
+# source site again, so a test that follows a production module re-analyzes
+# that module's whole graph and can exhaust any per-root memory bound. This
+# lexical check recognizes source directives and literal or variable-prefixed
+# source operands as described in the header. Quoted source operands remain
+# visible, but quoted command payloads, comments, and heredoc bodies do not:
+# ShellCheck does not follow sources embedded in those payloads. See
+# test_rejects_test_sources_into_production_modules in tests/fm-lint.test.sh
+# for the executable boundary cases.
+fm_lint_run_test_source_boundary() {
+  local findings path canonical
+  local -a boundary_roots
+  boundary_roots=()
+  if [ "$EXPLICIT_PATHS" -eq 0 ]; then
+    for path in tests/*.sh; do
+      [ -f "$path" ] && boundary_roots+=("$path")
+    done
+  else
+    for path in "${ROOTS[@]}"; do
+      [ -f "$path" ] || continue
+      # shellcheck disable=SC2016 # Perl, not the shell, expands $ARGV.
+      canonical=$("$PERL_BIN" -MCwd=realpath -e '
+        my $resolved = realpath($ARGV[0]);
+        exit 1 unless defined $resolved;
+        print $resolved;
+      ' "$path" 2>/dev/null) || continue
+      case "$canonical" in
+        "$ROOT"/tests/*.sh)
+          case "${canonical#"$ROOT"/tests/}" in
+            */*) ;;
+            *) boundary_roots+=("$path") ;;
+          esac
+          ;;
+      esac
+    done
+  fi
+  [ "${#boundary_roots[@]}" -gt 0 ] || return 0
+  # shellcheck disable=SC2016 # Perl, not the shell, expands its variables.
+  findings=$("$PERL_BIN" -e '
+    my $q = "\x27";
+    my $bin = qr~(?:\.\.?/)*bin/~;
+    my $prefix = qr~(?:\$[A-Za-z_]\w*|\$\{[A-Za-z_]\w*\}|\$\(dirname [^)]*\))"?/$bin~;
+    my $sourcing = qr~(?:^|[;&|({!`\s])(?:\.|source)\s+["$q]?(?:$prefix|(?:\./)?bin/)([^"$q\s;)]*)~;
+    my ($mode, $keep_quote, @heredocs);
+    sub code_of {
+      my ($rest, $out, $prev) = (shift, "", "");
+      while (length $rest) {
+        if ($mode eq "S") {
+          unless ($rest =~ s/^([^$q]*)$q//) { return $out . ($keep_quote ? $rest : "") }
+          $out .= $1 if $keep_quote;
+          ($mode, $prev) = ("N", $q); $out .= $q; next;
+        }
+        if ($mode eq "A") {
+          unless ($rest =~ s/^((?:[^\\$q]|\\.)*)$q//s) { return $out . ($keep_quote ? $rest : "") }
+          $out .= $1 if $keep_quote;
+          ($mode, $prev) = ("N", $q); $out .= $q; next;
+        }
+        if ($mode eq "D") {
+          unless ($rest =~ s/^((?:[^\\"]|\\.)*)"//s) { return $out . ($keep_quote ? $rest : "") }
+          $out .= $1 if $keep_quote;
+          $out .= "\""; ($mode, $prev) = ("N", "\""); next;
+        }
+        return $out . $rest unless $rest =~ /(\\.|[$q"#]|<<<|<<)/s;
+        my ($before, $token) = ($`, $1);
+        $rest = $'"'"';
+        if (length $before) { $out .= $before; $prev = substr($before, -1) }
+        if ($token eq $q || $token eq "\"") {
+          $keep_quote = $out =~ /(?:^|[;&|({!`\s])(?:\.|source)\s+[^;&|]*$/;
+          $mode = $token eq "\"" ? "D" : $prev eq "\$" ? "A" : "S";
+          $out .= $token; $prev = $token; next;
+        }
+        if ($token eq "#") {
+          return $out if $prev eq "" || $prev =~ /[\s;&|()]/;
+          $out .= $token; $prev = $token; next;
+        }
+        if ($token eq "<<" && $rest =~ s/^(-?)\s*("([A-Za-z_]\w*)"|$q([A-Za-z_]\w*)$q|\\?([A-Za-z_]\w*))//) {
+          push @heredocs, [$3 // $4 // $5, $1 eq "-"];
+          $out .= "<<$1$2"; $prev = "x"; next;
+        }
+        $out .= $token; $prev = substr($token, -1);
+      }
+      return $out;
+    }
+    for my $file (@ARGV) {
+      open my $fh, "<", $file or next;
+      ($mode, @heredocs) = ("N");
+      my ($directive, $body) = ("", 0);
+      while (my $line = <$fh>) {
+        chomp $line;
+        if ($body) {
+          my $probe = $line;
+          $probe =~ s/^\t+// if $heredocs[0][1];
+          if ($probe eq $heredocs[0][0]) { shift @heredocs; $body = @heredocs ? 1 : 0 }
+          next;
+        }
+        my $start = $mode;
+        my $code = code_of($line);
+        $body = 1 if @heredocs;
+        if ($start eq "N" && $line =~ /^\s*#/) {
+          if ($line =~ /^\s*#\s*shellcheck\s/ && $line =~ /\ssource=(\S+)/) {
+            $directive = $1;
+            print "$file:$.: test source directive names production module $directive; use # shellcheck source=/dev/null\n"
+              if $directive =~ /^$bin/;
+          }
+          next;
+        }
+        if ($code !~ /\S/) { $directive = "" if $start eq "N"; next }
+        my $governed = $directive;
+        $directive = "";
+        next if $governed ne "";
+        while ($code =~ /$sourcing/g) {
+          print "$file:$.: test source follows production module bin/$1; mark it # shellcheck source=/dev/null\n";
+        }
+      }
+      close $fh;
+    }
+  ' "${boundary_roots[@]}") || {
+    printf 'fm-lint.sh: the test source-boundary check could not run.\n' >&2
+    return 2
+  }
   [ -z "$findings" ] || {
     printf '%s\n' "$findings" >&2
     return 1
@@ -1114,11 +1304,12 @@ if [ -n "$TELEMETRY" ]; then
   }
 fi
 
-# Per-root bounded-execution envelope. Under FM_LINT_REQUIRE_BOUNDS=1 the
-# watchdog is probed and the host's acceptance of ulimit -v is checked before
-# any root starts; failed checks refuse with a named error. A required-bounds run
-# never lints uncapped. Without it each root still runs alone in its own
-# ShellCheck process, unbounded, for local developer lint.
+# Per-root bounded-execution envelope. Every root runs under a wall deadline
+# and a memory ceiling. Under FM_LINT_REQUIRE_BOUNDS=1 the ceiling is the
+# address-space limit below: the watchdog is probed and the host's acceptance
+# of ulimit -v is checked before any root starts, and failed checks refuse
+# with a named error, so a required-bounds run never lints uncapped. Otherwise
+# the ceiling is the resident limit below, which macOS can enforce too.
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
 ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
 # 12 GiB of virtual address space per analysis process. ulimit -v caps
@@ -1137,10 +1328,17 @@ ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
 # above about 3 GiB resident are reduction candidates,
 # bin/fm-pending-reply-lib.sh first (its separate dedup fix is PR 5753).
 ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-12582912}
+# 6 GiB resident per root for local lint, summed over the root's process
+# group: two workers then stay near 12 GiB, short of the compression and swap
+# that stalled a 16 GiB host when two roots each grew past 8 GiB. Roots that
+# need more, such as the heaviest production roots, take the same no-source
+# retry they take in CI.
+ROOT_RSS_KIB=${FM_LINT_ROOT_RSS_KIB:-6291456}
 for bound_pair in \
   "FM_LINT_ROOT_SECONDS=$ROOT_SECONDS" \
   "FM_LINT_ROOT_GRACE=$ROOT_GRACE" \
-  "FM_LINT_ROOT_MEMORY_KIB=$ROOT_MEMORY_KIB"; do
+  "FM_LINT_ROOT_MEMORY_KIB=$ROOT_MEMORY_KIB" \
+  "FM_LINT_ROOT_RSS_KIB=$ROOT_RSS_KIB"; do
   case "${bound_pair#*=}" in
     ''|0*|*[!0-9]*)
       printf 'fm-lint.sh: %s must be a positive integer, got %s.\n' \
@@ -1151,7 +1349,11 @@ for bound_pair in \
 done
 
 BOUND_MECH=none
+MEMORY_KIND=resident
+MEMORY_LIMIT_KIB=$ROOT_RSS_KIB
 if [ "$ROOT_COUNT" -gt 0 ] && [ "${FM_LINT_REQUIRE_BOUNDS:-0}" = 1 ]; then
+  MEMORY_KIND=address-space
+  MEMORY_LIMIT_KIB=$ROOT_MEMORY_KIB
   bounds_problems=()
   if declare -F fm_exec_timed >/dev/null 2>&1; then
     # perl is mandatory above, so fm_exec_timed always takes its perl watchdog.
@@ -1187,6 +1389,13 @@ if [ "$ROOT_COUNT" -gt 0 ] && [ "${FM_LINT_REQUIRE_BOUNDS:-0}" = 1 ]; then
     printf 'fm-lint.sh: refusing to lint uncapped under FM_LINT_REQUIRE_BOUNDS=1.\n' >&2
     exit 2
   fi
+elif [ "$ROOT_COUNT" -eq 0 ]; then
+  :
+elif declare -F fm_exec_timed >/dev/null 2>&1; then
+  BOUND_MECH=perl
+else
+  printf 'fm-lint.sh: bin/fm-timeout-lib.sh is missing beside fm-lint.sh, so no watchdog can bound a root; refusing to lint unbounded.\n' >&2
+  exit 2
 fi
 
 PROGRESS=0
@@ -1236,12 +1445,14 @@ if [ "$BOUND_MECH" != none ]; then
   bounds_applied=1
   root_deadline_meta=$ROOT_SECONDS
   root_grace_meta=$ROOT_GRACE
-  root_memory_meta=$ROOT_MEMORY_KIB
+  root_memory_meta=$MEMORY_LIMIT_KIB
+  root_memory_kind_meta=$MEMORY_KIND
 else
   bounds_applied=0
   root_deadline_meta=unbounded
   root_grace_meta=unbounded
   root_memory_meta=unbounded
+  root_memory_kind_meta=unbounded
 fi
 {
   printf 'format\t%s\n' 'fm-lint-roots-v1'
@@ -1256,6 +1467,7 @@ fi
   printf 'meta\t%s\t%s\n' 'root_deadline_seconds' "$root_deadline_meta"
   printf 'meta\t%s\t%s\n' 'root_kill_grace_seconds' "$root_grace_meta"
   printf 'meta\t%s\t%s\n' 'root_memory_limit_kib' "$root_memory_meta"
+  printf 'meta\t%s\t%s\n' 'root_memory_limit_kind' "$root_memory_kind_meta"
   printf 'meta\t%s\t%s\n' 'timing_mechanism' "$BOUND_MECH"
 } >> "$ROOTS_LOG"
 
@@ -1336,7 +1548,8 @@ fm_lint_run_worker() {  # <worker-index>
     FM_LINT_INTERNAL_FOLLOW_SOURCES="$FOLLOW_SOURCES"
     FM_LINT_INTERNAL_EXCLUDE="$EXCLUDE_CODES"
     FM_LINT_INTERNAL_BOUNDED="$BOUND_MECH"
-    FM_LINT_INTERNAL_MEMORY_KIB="$ROOT_MEMORY_KIB"
+    FM_LINT_INTERNAL_MEMORY_KIND="$MEMORY_KIND"
+    FM_LINT_INTERNAL_MEMORY_KIB="$MEMORY_LIMIT_KIB"
     FM_LINT_INTERNAL_ROOT_SECS="$ROOT_SECONDS"
     FM_LINT_INTERNAL_GRACE="$ROOT_GRACE"
     FM_LINT_INTERNAL_ROOTS_LOG="$ROOTS_LOG"
@@ -1440,6 +1653,11 @@ purity_rc=0
 fm_lint_run_backend_purity || purity_rc=$?
 if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
   overall_rc=$purity_rc
+fi
+boundary_rc=0
+fm_lint_run_test_source_boundary || boundary_rc=$?
+if [ "$overall_rc" -eq 0 ] && [ "$boundary_rc" -ne 0 ]; then
+  overall_rc=$boundary_rc
 fi
 
 if [ "$overall_rc" -eq 0 ]; then
@@ -1545,6 +1763,7 @@ EOF
     printf 'root_deadline_seconds\t%s\n' "$root_deadline_meta"
     printf 'root_kill_grace_seconds\t%s\n' "$root_grace_meta"
     printf 'root_memory_limit_kib\t%s\n' "$root_memory_meta"
+    printf 'root_memory_limit_kind\t%s\n' "$root_memory_kind_meta"
     printf 'root_timing_mechanism\t%s\n' "$BOUND_MECH"
     printf 'root_count\t%s\n' "$ROOT_COUNT"
     printf 'direct_lines\t%s\n' "$direct_lines"

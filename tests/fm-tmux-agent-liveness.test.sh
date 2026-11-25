@@ -374,7 +374,7 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # process is genuinely Cursor, and the cursor-anchored source must be asserted
 # blind so the case cannot go quietly vacuous.
 
-# shellcheck source=bin/fm-tmux-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-tmux-lib.sh"
 
 ln -s "$STANDIN_BIN" "$LAB/bin/cursor-agent"

@@ -26,15 +26,15 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { printf 'not ok - %s: %s (evidence %s)\n' "$VERSION" "$1" "$LAB" >&2; exit 1; }
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 # Observe the real first-run offer on a fresh uncredentialed profile. This
 # sends no model prompt and never touches the configured live-check profile.
-# shellcheck source=bin/fm-hermes-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-hermes-lib.sh"
-# shellcheck source=bin/fm-composer-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 CONSENT_ROOT="$LAB/consent-root"
 mkdir -p "$CONSENT_ROOT/profiles/consent"

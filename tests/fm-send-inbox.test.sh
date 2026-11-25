@@ -414,6 +414,7 @@ test_delivery_lock_serializes_enqueue() {
   dir=$(setup_case delivery-lock)
   err="$dir/send.err"
   waiting="$dir/delivery-lock-waiting"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-task-inbox-lib.sh"
   lock=$(fm_task_inbox_delivery_lock_path "$dir/home/state" t1)
   fm_task_inbox_lock_acquire "$lock" || fail "could not acquire the inbox delivery lock"

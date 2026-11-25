@@ -8,7 +8,7 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"

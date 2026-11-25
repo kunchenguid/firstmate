@@ -24,7 +24,7 @@ set -u
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
-# shellcheck source=bin/fm-gemini-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-gemini-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"

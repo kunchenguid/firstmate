@@ -180,6 +180,7 @@ for harness in codex claude; do
   pass "$harness keeps the setting while reporting incomplete recovery"
 done
 
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 primary="$TMP_ROOT/primary/config"
 local_config="$TMP_ROOT/local/config"

@@ -37,11 +37,11 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { printf 'not ok - %s: %s\n' "$VERSION" "$1" >&2; exit 1; }
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
-# shellcheck source=bin/fm-composer-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 H="$LAB/home"
 WT="$LAB/wt"

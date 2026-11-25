@@ -135,7 +135,7 @@ test_flag_on_records_a_pr_merge_once() {
   mkdir -p "$HOME_DIR/state"
   printf 'done: PR %s checks green\n' "$pr_url" > "$HOME_DIR/state/$TASK.status"
   (
-    # shellcheck source=bin/fm-merge-outcome-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-merge-outcome-lib.sh"
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" fm_merge_outcome_report "$HOME_DIR" "$HOME_DIR/state" "$TASK" "$pr_url" self \
       || fail "the merge outcome was not recorded"

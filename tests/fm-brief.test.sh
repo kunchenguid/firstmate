@@ -1402,7 +1402,7 @@ test_base_branch_is_rendered_and_bounded() {
   local home out rc brief base meta_base
   home="$TMP_ROOT/base-branch-home"
   mkdir -p "$home/data"
-  # shellcheck source=bin/fm-dod-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-dod-lib.sh"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-dp-b1 some-proj --mode direct-PR --base-branch feature/hub >/dev/null 2>&1 \

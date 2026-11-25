@@ -8,7 +8,7 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }

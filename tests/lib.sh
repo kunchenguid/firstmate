@@ -612,7 +612,7 @@ fm_tmux_isolation_gate() {
   local base socket probe rc why='' seconds=${FM_TMUX_ISOLATION_PROBE_SECONDS:-5}
   local -a bases=("$@")
   case $seconds in '' | *[!0-9]* | 0) seconds=5 ;; esac
-  # shellcheck source=bin/fm-timeout-lib.sh
+  # shellcheck source=/dev/null
   declare -F fm_run_timed >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/../bin/fm-timeout-lib.sh"
   if [ "${#bases[@]}" -eq 0 ]; then
     bases=(/tmp)

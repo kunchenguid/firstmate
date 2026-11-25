@@ -415,7 +415,10 @@ fm_lint_bounds_supported() {
 # when perl itself reports that the allocation was refused, forwarding perl's
 # own error and exiting with GHC's heap-exhaustion status 251, as ShellCheck
 # does when its runtime is refused memory; an allocation that succeeds falls
-# through like any other root.
+# through like any other root. A *resident-hog* root holds 256 MiB resident
+# (its pid on FM_TEST_HOG_PID) for FM_TEST_HOG_SECS, and a *source-hog* root
+# does the same only when asked to follow sources, so the local resident
+# ceiling and its no-source retry can be driven apart.
 # Anything else records its path on FM_TEST_STUB_LOG and exits cleanly.
 fm_lint_stub_reactive_shellcheck() {
   local fakebin=$1
@@ -443,6 +446,20 @@ case "$target" in
         *"Out of memory"*) exit 251 ;;
       esac
       exit "$alloc_rc"
+    fi
+    ;;
+  *resident-hog*|*source-hog*)
+    follow=no
+    for arg in "$@"; do
+      [ "$arg" != --external-sources ] || follow=yes
+    done
+    case "$target" in
+      *resident-hog*) follow=yes ;;
+    esac
+    if [ "$follow" = yes ]; then
+      perl -e 'my $s = "x" x (256 * 1048576);
+        if (open my $f, ">", $ENV{FM_TEST_HOG_PID} || "/dev/null") { print $f "$$\n"; close $f }
+        sleep($ENV{FM_TEST_HOG_SECS} || 300)'
     fi
     ;;
   *oom-exit1*)
@@ -862,6 +879,7 @@ test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
   mkdir -p "$test_root/bin/backends" "$test_root/tests" "$test_root/.github/workflows"
   lint="$test_root/bin/fm-lint.sh"
   cp "$LINT" "$lint"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$test_root/bin/"
   cp "$ROOT/bin/fm-lint-workflows.sh" "$test_root/bin/"
   cp "$ROOT"/.github/workflows/* "$test_root/.github/workflows/"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$test_root/bin/backends/noop.sh"
@@ -1401,6 +1419,7 @@ test_rejects_direct_beads_cli_invocations() {
   mkdir -p "$tmp/repo/bin/backends" "$tmp/repo/tests"
   lint_copy="$tmp/repo/bin/fm-lint.sh"
   cp "$LINT" "$lint_copy"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "${lint_copy%/*}/"
   cat > "$tmp/repo/bin/fm-lint-workflows.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1453,6 +1472,7 @@ test_rejects_direct_beads_cli_in_explicit_core_path() {
   lint_copy="$tmp/repo/bin/fm-lint.sh"
   target="$tmp/repo/bin/direct-beads.sh"
   cp "$LINT" "$lint_copy"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "${lint_copy%/*}/"
   printf '#!/usr/bin/env bash\nbd close fm-example\n' > "$target"
   chmod +x "$lint_copy"
   fm_lint_stub_shellcheck "$fakebin" "$log"
@@ -1743,15 +1763,16 @@ test_root_memory_limit_reports_a_named_death() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$hoarder"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$ok"
 
-  # Control: with no memory limit the same allocator succeeds, so a memory
-  # death below can only come from the enforced cap.
+  # Control: with no address-space limit (local lint's default resident
+  # ceiling is far above the allocation) the same allocator succeeds, so a
+  # memory death below can only come from the enforced cap.
   rc=0
   out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 \
     FM_TEST_STUB_LOG="$stub_log" \
     "$LINT" --telemetry "$tmp/control.tsv" "$ok" "$hoarder" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "the allocator failed without any memory limit"$'\n'"$out"
-  grep -q $'^meta\tbounds_enforced\t0$' "$tmp/control.roots.tsv" \
-    || fail "the control run was not unbounded"
+  grep -q $'^meta\troot_memory_limit_kind\tresident$' "$tmp/control.roots.tsv" \
+    || fail "the control run applied an address-space limit"
   awk -F '\t' '$1 == "end" && $3 ~ /hoarder\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$tmp/control.roots.tsv" || fail "the uncapped allocator root did not complete ok"
 
@@ -1838,9 +1859,9 @@ SH
         "the bounded fallback did not enforce bounds"
       case "$rss_kib" in ''|*[!0-9]*) fail "the fallback attempts lost per-root RSS reporting: $rss_kib" ;; esac
     else
-      assert_grep $'meta\tbounds_enforced\t0' "$tmp/pass.$mode.roots.tsv" \
-        "the unbounded fallback unexpectedly enforced bounds"
-      [ "$rss_kib" = unavailable ] || fail "the unbounded fallback unexpectedly reported RSS: $rss_kib"
+      assert_grep $'meta\troot_memory_limit_kind\tresident' "$tmp/pass.$mode.roots.tsv" \
+        "the local fallback did not run under the resident ceiling"
+      case "$rss_kib" in ''|*[!0-9]*) fail "the local fallback lost per-root RSS reporting: $rss_kib" ;; esac
     fi
   done
 
@@ -2033,6 +2054,176 @@ SH
   pass "OOM words in a source excerpt or a root path never classify a root as memory"
 }
 
+test_local_lint_bounds_resident_memory_and_deadline() {
+  local tmp fakebin stub_log roots_log out rc hog source_hog blocker ok lone_dir hog_pid_file hog_pid
+  local sentinel_pid
+  tmp=$(fm_test_tmproot fm-lint-local-bounds)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_reactive_shellcheck "$fakebin"
+  stub_log="$tmp/stub.log"
+  hog="$tmp/resident-hog.sh"
+  source_hog="$tmp/source-hog.sh"
+  blocker="$tmp/blocker.sh"
+  ok="$tmp/ok.sh"
+  hog_pid_file="$tmp/hog.pid"
+  for root in "$hog" "$source_hog" "$blocker" "$ok"; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$root"
+  done
+
+  # Control: under the default 6 GiB resident ceiling the 256 MiB root
+  # finishes, so the kill below can only come from the lowered ceiling.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_TEST_HOG_SECS=1 \
+    "$LINT" --telemetry "$tmp/control.tsv" "$hog" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a 256 MiB root failed under the default resident ceiling"$'\n'"$out"
+  awk -F '\t' '$1 == "end" && $3 ~ /resident-hog\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$tmp/control.roots.tsv" || fail "the control root did not complete ok"
+
+  # Over a 64 MiB resident ceiling the root, and its no-source retry, are
+  # killed by name and classified memory; an unrelated process survives.
+  sleep 300 &
+  sentinel_pid=$!
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_ROOT_RSS_KIB=65536 \
+    FM_TEST_STUB_LOG="$stub_log" FM_TEST_HOG_PID="$hog_pid_file" \
+    "$LINT" --telemetry "$tmp/capped.tsv" "$ok" "$hog" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a root over the local resident ceiling unexpectedly passed"
+  assert_contains "$out" "resident-hog.sh" "the over-ceiling root was not named"
+  assert_contains "$out" "reason=memory rc=98" "the resident kill was not classified as memory"
+  assert_contains "$out" "exceeded the per-root limit of 65536 KiB" "the resident kill did not explain itself"
+  kill -0 "$sentinel_pid" 2>/dev/null \
+    || fail "the resident-memory kill took an unrelated sentinel process with it"
+  kill -KILL "$sentinel_pid" 2>/dev/null || true
+  wait "$sentinel_pid" 2>/dev/null || true
+  [ -s "$hog_pid_file" ] || fail "the over-ceiling root never recorded its allocator pid"
+  hog_pid=$(cat "$hog_pid_file")
+  if kill -0 "$hog_pid" 2>/dev/null; then
+    fail "the over-ceiling root's allocator survived the resident-memory kill"
+  fi
+  roots_log="$tmp/capped.roots.tsv"
+  awk -F '\t' '$1 == "end" && $3 ~ /resident-hog\.sh$/ && $10 == "memory" && $11 > 65536 { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar did not record the killed root's memory reason and peak"
+  awk -F '\t' '$1 == "end" && $3 ~ /ok\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+    "$roots_log" || fail "the sidecar lost the clean root's record"
+
+  # A root over the ceiling only while following sources takes the existing
+  # no-source retry and passes with the disclosed memory-fallback reason.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_ROOT_RSS_KIB=65536 \
+    "$LINT" --telemetry "$tmp/fallback.tsv" "$source_hog" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a clean no-source retry after a resident kill did not pass"$'\n'"$out"
+  assert_contains "$out" "hit the memory ceiling with --external-sources (reason=memory rc=98)" \
+    "the resident kill did not take the no-source retry"
+  awk -F '\t' '$1 == "end" && $3 ~ /source-hog\.sh$/ && $10 == "memory-fallback" { found=1 } END { exit !found }' \
+    "$tmp/fallback.roots.tsv" || fail "the retried root was not recorded as memory-fallback"
+
+  # Local lint applies the wall deadline too.
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_ROOT_SECONDS=1 FM_LINT_ROOT_GRACE=1 \
+    FM_TEST_BLOCK_SECS=300 "$LINT" --telemetry "$tmp/deadline.tsv" "$blocker" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a local root pinned past its deadline unexpectedly passed"
+  assert_contains "$out" "blocker.sh reason=timeout" "the local deadline did not name a timeout"
+
+  # Without its sibling watchdog library local lint refuses rather than run unbounded.
+  lone_dir="$tmp/lone"
+  mkdir -p "$lone_dir"
+  cp "$LINT" "$lone_dir/fm-lint.sh"
+  chmod +x "$lone_dir/fm-lint.sh"
+  : > "$stub_log"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_TEST_STUB_LOG="$stub_log" "$lone_dir/fm-lint.sh" "$ok" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "a watchdog-less local run exited $rc, expected 2"$'\n'"$out"
+  assert_contains "$out" "fm-timeout-lib.sh" "the local refusal did not name the missing watchdog library"
+  assert_contains "$out" "refusing to lint unbounded" "the local refusal did not explain itself"
+  [ ! -s "$stub_log" ] || fail "a watchdog-refused local run still invoked ShellCheck"
+  pass "local lint kills a root over its resident ceiling as memory, retries without sources, applies the deadline, and refuses without its watchdog"
+}
+
+test_rejects_test_sources_into_production_modules() {
+  local tmp fakebin repo lint out rc body name
+  local -a red_names red_bodies green_names green_bodies
+  tmp=$(fm_test_tmproot fm-lint-test-source-boundary)
+  fakebin=$(fm_fakebin "$tmp")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin/backends" "$repo/tests"
+  lint="$repo/bin/fm-lint.sh"
+  cp "$LINT" "$lint"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/fm-lint-workflows.sh"
+  printf '#!/usr/bin/env bash\nmodule_value=1\n' > "$repo/bin/mod.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/bin/backends/noop.sh"
+  chmod +x "$lint" "$repo/bin/fm-lint-workflows.sh"
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/shellcheck.log"
+
+  # shellcheck disable=SC2016 # The fixtures are shell source, expanded only when linted.
+  red_names=(directive implicit braced-subshell dirname env-prefix sc1091-disabled literal-dot literal-source relative-dot relative-source double-dot double-source single-dot single-source)
+  # shellcheck disable=SC2016
+  red_bodies=(
+    'x=1\n# shellcheck source=bin/mod.sh\n. "$ROOT/bin/mod.sh"\n'
+    'x=1\n. "$ROOT/bin/mod.sh"\n'
+    'x=1\n( . "${ROOT}/bin/backends/noop.sh"; echo "$module_value" )\n'
+    'x=1\nsource "$(dirname "${BASH_SOURCE[0]}")/../bin/mod.sh"\n'
+    'x=1\nFM_X=1 . "$ROOT/bin/mod.sh"\n'
+    '# shellcheck disable=SC1091\n. "$ROOT/bin/mod.sh"\n'
+    'x=1\n. bin/mod.sh\n'
+    'x=1\nsource bin/mod.sh\n'
+    'x=1\n. ./bin/mod.sh\n'
+    'x=1\nsource ./bin/mod.sh\n'
+    'x=1\n. "bin/mod.sh"\n'
+    'x=1\nsource "bin/mod.sh"\n'
+    "x=1\n. 'bin/mod.sh'\n"
+    "x=1\nsource 'bin/mod.sh'\n"
+  )
+  for name in "${!red_names[@]}"; do
+    # shellcheck disable=SC2059 # The fixture body is the format.
+    printf "#!/usr/bin/env bash\n${red_bodies[$name]}" > "$repo/tests/edge.test.sh"
+    rc=0
+    out=$(cd "$repo" && CI=true PATH="$fakebin:$PATH" "$lint" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "lint accepted a test source into bin/: ${red_names[$name]}"$'\n'"$out"
+    assert_contains "$out" "tests/edge.test.sh:3: test source" \
+      "lint did not name the test source edge by line: ${red_names[$name]}"$'\n'"$out"
+    assert_contains "$out" "production module bin/" \
+      "lint did not name the production module: ${red_names[$name]}"$'\n'"$out"
+  done
+
+  # Explicit test roots get the same check; explicit roots outside tests/ do not.
+  rc=0
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" "$lint" tests/edge.test.sh 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an explicit test root bypassed the source-boundary check"
+  assert_contains "$out" "tests/edge.test.sh:3: test source" "the explicit test root was not named"
+  cp "$repo/tests/edge.test.sh" "$tmp/outside.sh"
+  rc=0
+  out=$(cd "$repo" && PATH="$fakebin:$PATH" "$lint" "$tmp/outside.sh" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a root outside tests/ was held to the test source boundary"$'\n'"$out"
+
+  # shellcheck disable=SC2016
+  green_names=(cut-directive cut-implicit single-quoted heredoc comment test-helper double-quoted zsh-quoted multiline-quoted cut-literal cut-double cut-single)
+  # shellcheck disable=SC2016
+  green_bodies=(
+    '# shellcheck source=/dev/null\n. "$ROOT/bin/mod.sh"\n'
+    'x=1\n# shellcheck disable=SC1091\n# shellcheck source=/dev/null\nFM_X=1 . "$ROOT/bin/mod.sh"\n'
+    "x=1\nbash -c '\n  . \"\$ROOT/bin/mod.sh\"\n'\n"
+    "x=1\ncat <<'SH' > \"\$ROOT/generated.sh\"\n. \"\$ROOT/bin/mod.sh\"\nSH\n"
+    'x=1\n# . "$ROOT/bin/mod.sh"\n'
+    'x=1\n# shellcheck source=tests/lib.sh\n. "$ROOT/tests/lib.sh"\n'
+    "x=1\nbash -c \"cd '\$ROOT' && source bin/mod.sh; . bin/mod.sh\"\n"
+    'x=1\nzsh -c "source bin/mod.sh"\n'
+    'x=1\nbash -c "\nsource bin/mod.sh\n"\n'
+    '# shellcheck source=/dev/null\n. bin/mod.sh\n'
+    '# shellcheck source=/dev/null\nsource "bin/mod.sh"\n'
+    "# shellcheck source=/dev/null\n. 'bin/mod.sh'\n"
+  )
+  for name in "${!green_names[@]}"; do
+    # shellcheck disable=SC2059 # The fixture body is the format.
+    printf "#!/usr/bin/env bash\n${green_bodies[$name]}" > "$repo/tests/edge.test.sh"
+    rc=0
+    out=$(cd "$repo" && CI=true PATH="$fakebin:$PATH" "$lint" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "lint rejected a source ShellCheck does not follow into bin/: ${green_names[$name]}"$'\n'"$out"
+  done
+  pass "fm-lint.sh names every test source edge into bin/ and accepts cut, quoted, heredoc, and comment forms"
+}
+
+
 test_require_bounds_refuses_when_enforcement_is_missing() {
   local tmp fakebin stub_log fixture out rc lone_dir
   tmp=$(fm_test_tmproot fm-lint-require-bounds)
@@ -2108,6 +2299,8 @@ test_pinned_shellcheck_memory_limit() {
     || fail "the sidecar did not record enforced bounds"
   grep -q $'^meta\troot_memory_limit_kib\t12582912$' "$roots_log" \
     || fail "the sidecar did not record the applied memory limit"
+  grep -q $'^meta\troot_memory_limit_kind\taddress-space$' "$roots_log" \
+    || fail "the sidecar did not record the address-space memory kind"
   awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$roots_log" || fail "the pinned root did not complete ok under the memory limit"
 
@@ -2188,14 +2381,16 @@ test_roots_sidecar_records_per_root_lifecycle() {
   [ -f "$roots_log" ] || fail "the run wrote no per-root sidecar beside telemetry"
   grep -q $'^format\tfm-lint-roots-v1$' "$roots_log" \
     || fail "the sidecar is missing its format header"
-  grep -q $'^meta\tbounds_enforced\t0$' "$roots_log" \
-    || fail "the sidecar did not record the unenforced bounds state"
-  grep -q $'^meta\ttiming_mechanism\tnone$' "$roots_log" \
+  grep -q $'^meta\tbounds_enforced\t1$' "$roots_log" \
+    || fail "the sidecar did not record the enforced local bounds"
+  grep -q $'^meta\ttiming_mechanism\tperl$' "$roots_log" \
     || fail "the sidecar did not record the timing mechanism"
-  grep -q $'^meta\troot_deadline_seconds\tunbounded$' "$roots_log" \
-    || fail "the sidecar did not record the unbounded deadline state"
-  grep -q $'^meta\troot_memory_limit_kib\tunbounded$' "$roots_log" \
-    || fail "the sidecar did not record the unbounded memory state"
+  grep -q $'^meta\troot_deadline_seconds\t1200$' "$roots_log" \
+    || fail "the sidecar did not record the default deadline"
+  grep -q $'^meta\troot_memory_limit_kib\t6291456$' "$roots_log" \
+    || fail "the sidecar did not record the default resident ceiling"
+  grep -q $'^meta\troot_memory_limit_kind\tresident$' "$roots_log" \
+    || fail "the sidecar did not record the resident memory kind"
   grep -q $'^meta\troots_completed\t3$' "$roots_log" \
     || fail "the sidecar did not count three completed roots"
   [ "$(grep -c '^begin' "$roots_log")" -eq 3 ] \
@@ -2303,6 +2498,8 @@ test_memory_failure_retries_without_external_sources
 test_memory_fallback_spends_only_the_remaining_root_deadline
 test_memory_evidence_outranks_findings_and_signal_reasons
 test_source_excerpt_with_oom_text_stays_findings
+test_local_lint_bounds_resident_memory_and_deadline
+test_rejects_test_sources_into_production_modules
 test_require_bounds_refuses_when_enforcement_is_missing
 test_pinned_shellcheck_memory_limit
 test_sidecar_result_exit_reflects_final_status

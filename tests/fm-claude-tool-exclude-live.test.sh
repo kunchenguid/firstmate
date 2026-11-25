@@ -83,7 +83,7 @@ print("\n".join(best))
 PY
 }
 
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 capture_tools baseline

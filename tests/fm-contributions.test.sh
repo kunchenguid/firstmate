@@ -1354,7 +1354,7 @@ test_many_settled_records_keep_the_poll_inside_the_check_bound() {
   real_jq=$(command -v jq)
   printf '#!/bin/sh\nsleep 0.05\nexec %s "$@"\n' "$real_jq" > "$home/fakebin/jq"
   chmod +x "$home/fakebin/jq"
-  # shellcheck source=bin/fm-timeout-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-timeout-lib.sh"
   with_home "$home" fm_run_timed 20 bash "$home/state/contributions.check.sh" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "a poll over 151 settled records outlived the watcher's 20-second check bound (status $rc)"
@@ -1382,7 +1382,7 @@ test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_
   real_jq=$(command -v jq)
   printf '#!/bin/sh\nsleep 0.05\nexec %s "$@"\n' "$real_jq" > "$home/fakebin/jq"
   chmod +x "$home/fakebin/jq"
-  # shellcheck source=bin/fm-timeout-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-timeout-lib.sh"
   with_home "$home" fm_run_timed 20 bash "$home/state/contributions.check.sh" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "a poll over 150 settled records and a malformed one outlived the watcher's 20-second check bound (status $rc)"

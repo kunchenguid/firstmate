@@ -16,13 +16,13 @@ set -u
 
 fm_live_gate opt-in FM_POLYTOKEN_SIGNALS_LIVE polytoken tmux jq curl git
 
-# shellcheck source=bin/fm-polytoken-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-polytoken-lib.sh"
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
-# shellcheck source=bin/fm-composer-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
 POLYTOKEN_BIN=$(fm_polytoken_binary 2>/dev/null) || POLYTOKEN_BIN=

@@ -30,6 +30,7 @@ exec_timed() {
   local path=$1
   shift
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-timeout-lib.sh"
     PATH=$path fm_exec_timed "$@"
   )
@@ -42,6 +43,7 @@ chmod +x "$RUN124/timeout"
 
 run_timed() {
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-timeout-lib.sh"
     PATH="$RUN124:$PATH" fm_run_timed "$@"
   )
@@ -186,6 +188,7 @@ test_the_bound_replaces_the_calling_shell() {
   for path in "$PATH" "$PERL_ONLY"; do
     rm -f "$dir/caller" "$dir/parent"
     (
+      # shellcheck source=/dev/null
       . "$ROOT/bin/fm-timeout-lib.sh"
       perl -e 'print getppid(), "\n"' > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
@@ -233,6 +236,7 @@ test_a_signal_to_the_bounding_process_reaches_the_command() {
   # The positional parameters belong to the bounded shell.
   # shellcheck disable=SC2016
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-timeout-lib.sh"
     PATH=$PERL_ONLY
     fm_exec_timed 60 30 bash -c '
@@ -263,6 +267,7 @@ test_a_named_owner_that_is_gone_ends_the_command() {
   wait "$gone" 2>/dev/null || true
   started=$SECONDS
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-timeout-lib.sh"
     PATH=$PERL_ONLY FM_EXEC_TIMED_OWNER_PID=$gone \
       fm_exec_timed 60 1 bash -c 'echo $$ > "$1"; exec sleep 300' _ "$dir/pid"
@@ -409,6 +414,7 @@ test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
   started=$SECONDS
   exec_timed "$fb" 1 2 bash -c 'trap "" TERM; exec sleep 300' || rc=$?
   elapsed=$((SECONDS - started))
+  # shellcheck source=/dev/null
   verdict=$( . "$ROOT/bin/fm-timeout-lib.sh"; fm_timed_out "$rc" && echo expired)
   [ "$verdict" = expired ] || fail "the GNU path's expiry status $rc is not a timed-out status"
   [ "$elapsed" -ge 3 ] || fail "the GNU path ended a TERM-ignoring command before bound plus grace (${elapsed}s)"
@@ -419,6 +425,7 @@ test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
 test_timed_out_names_exactly_the_bound_statuses() {
   local status verdict
   for status in 124 137 0 1 125 127 143 ''; do
+    # shellcheck source=/dev/null
     verdict=$( . "$ROOT/bin/fm-timeout-lib.sh"; if fm_timed_out "$status"; then echo yes; else echo no; fi)
     case "$status" in
       124|137) [ "$verdict" = yes ] || fail "status '$status' was not read as the bound" ;;
@@ -467,6 +474,7 @@ test_run_timed_delivers_piped_stdin_on_every_mechanism() {
   [ "$rc" -eq 0 ] || fail "fm_run_timed did not pass cat's status (rc=$rc out=$out)"
   [ "$out" = "$payload" ] || fail "fm_run_timed lost piped stdin (out=$out)"
 
+  # shellcheck source=/dev/null
   timeout_path=$(. "$ROOT/bin/fm-timeout-lib.sh"; fm_external_timeout_path || true)
   if [ -n "$timeout_path" ]; then
     rc=0
@@ -575,6 +583,7 @@ test_run_timed_keeps_stdout_and_nonzero_status_when_a_function_shadows_timeout()
     timeout() { echo shadowed-timeout; return 0; }
     # shellcheck disable=SC2329 # Steal a bare gtimeout invocation; the runner must not call it.
     gtimeout() { echo shadowed-gtimeout; return 0; }
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-timeout-lib.sh"
     fm_run_timed 5 bash -c 'echo hello-stdout; exit 7'
   ) || rc=$?

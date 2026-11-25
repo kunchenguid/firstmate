@@ -11,13 +11,13 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { printf 'skip: jq absent\n'; exit 0; }
 
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-wake-lib.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
-# shellcheck source=bin/fm-supervision-engine-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-engine-lib.sh"
-# shellcheck source=bin/fm-warm-compact-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-warm-compact-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-warm-compact)

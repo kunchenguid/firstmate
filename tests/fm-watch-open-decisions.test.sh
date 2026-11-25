@@ -10,13 +10,16 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-open-decisions)
 export FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$TMP_ROOT/state"
 export FM_CONFIG_OVERRIDE="$TMP_ROOT/config"
 mkdir -p "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE"
-# shellcheck source=bin/fm-watch.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-watch.sh"
 
+# shellcheck disable=SC2034 # Read by the sourced watcher.
 FM_OPEN_DECISION_OVERDUE_SECS=100
+# shellcheck disable=SC2034 # Read by the sourced watcher.
 FM_OPEN_DECISION_BACKOFF_MAX_SECS=400
 
 reset_case() {
+  # shellcheck disable=SC2153 # STATE is assigned by the sourced watcher.
   rm -f -- "$STATE"/* "$STATE"/.[!.]* "$CONFIG"/*
   OPEN_DECISION_REMINDER=
 }
@@ -125,6 +128,7 @@ test_wait_exemptions() {
   printf 'needs-decision [at=1000] [key=api]: choose\ncaptain-held [at=1050] [key=api]: transferred\n' > "$STATE/transferred.status"
   printf 'needs-decision [at=1000] [key=api]: choose\n' > "$STATE/backlog-held.status"
   # The watcher already delegates backlog ownership to this predicate.
+  # shellcheck disable=SC2329 # Runtime override called by the sourced watcher.
   task_captain_call_open() { [ "$1" = backlog-held ]; }
   open_decision_reminder_tick 1200
   [ "$(count_wakes)" = 0 ] || fail "a declared wait or captain hold queued a reminder"

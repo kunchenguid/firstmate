@@ -70,9 +70,9 @@ FM_HOME="$LAB" "$ROOT/bin/fm-spawn.sh" "$TASK" "$LAB/projects/comms" --scout --h
   || fail "could not launch the real Claude cmux probe"
 SPAWNED=1
 
-# shellcheck source=bin/fm-backend.sh
 FM_HOME="$LAB"
 export FM_HOME
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source cmux || fail "could not source the cmux adapter"
 TARGET=$(awk -F= '/^window=/{print $2}' "$LAB/state/$TASK.meta")

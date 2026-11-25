@@ -23,7 +23,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
@@ -662,7 +662,7 @@ test_records_share_one_origin_so_offsets_form_a_timeline() {
   log="$dir/timings.tsv"
 
   (
-    # shellcheck source=bin/fm-timing-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-timing-lib.sh"
     unset FM_TIMING_EPOCH_MS
     FM_TIMING_LOG=$log

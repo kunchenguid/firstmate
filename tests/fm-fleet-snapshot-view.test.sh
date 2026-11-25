@@ -209,7 +209,7 @@ test_fixture_snapshot_json() {
     'done' 0123456789abcdef 'audit complete' || fail "parent report failed"
   after=$(date +%s)
   emitted=$(tail -1 "$home/state/secondmate-task.status")
-  # shellcheck source=bin/fm-classify-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-classify-lib.sh"
   epoch=$(status_line_at_epoch "$emitted") || fail "new parent report has unknown time"
   [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \

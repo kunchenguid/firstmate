@@ -22,7 +22,7 @@ fi
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found"; exit 0; }

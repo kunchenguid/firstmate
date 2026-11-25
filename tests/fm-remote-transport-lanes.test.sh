@@ -23,7 +23,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-transport-lanes)
@@ -117,7 +117,7 @@ export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 export FM_REMOTE_JOB_QUEUE_TIMEOUT=60
 export FM_REMOTE_JOB_TIMEOUT=30
 export FM_REMOTE_JOB_STAGE_REAP_SECONDS=1
-# shellcheck source=bin/fm-remote-job-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
 fm_remote_job_prepare_state "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
