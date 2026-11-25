@@ -1,7 +1,7 @@
 """Scenario selection for the opt-in Codex app-server canary."""
 import argparse
 
-SCENARIOS = ('scout-success', 'scout-failure', 'scout-interrupt')
+SCENARIOS = ('scout-success', 'scout-failure', 'scout-interrupt', 'api-roundtrip')
 
 
 def parse_scenarios(args):

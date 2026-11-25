@@ -1190,7 +1190,7 @@ crew_dispatch_validate() {
 # snapshot's classifier and bin/fm-secondmate-reconcile.sh's nudge stay as
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
-  local marker meta control_lock meta_lock id row label has_record=0 gate_status
+  local marker meta control_lock meta_lock id row label has_record=0 gate_status retention_message
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -1212,6 +1212,8 @@ backlog_record_reconcile() {
   # this mutating sweep, so FM_BOOTSTRAP_DETECT_ONLY remains read-only.
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$SCRIPT_DIR/fm-busy-lib.sh"
 
   # Finish any close an interrupted cleanup recorded but never landed.
   for marker in "$STATE"/*.backlog-close; do
@@ -1236,11 +1238,17 @@ backlog_record_reconcile() {
         closed_incomplete)
           echo "BOOTSTRAP_INFO: closed the backlog item for $label after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
           ;;
-        retained)
-          echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after an interrupted cleanup"
-          ;;
-        retained_incomplete)
-          echo "BOOTSTRAP_INFO: kept the captain call for $label open with its deliverable recorded after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
+        retained|retained_incomplete)
+          if [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+            retention_message="kept the captain call for $label open with its deliverable recorded"
+          else
+            retention_message="returned $label to Queued"
+          fi
+          if [ "$FM_BACKLOG_CLOSE_REPLAY_RESULT" = retained_incomplete ]; then
+            echo "BOOTSTRAP_INFO: $retention_message after interrupted cleanup; its endpoint or local copy may remain and should be reconciled"
+          else
+            echo "BOOTSTRAP_INFO: $retention_message after an interrupted cleanup"
+          fi
           ;;
         answered)
           echo "BOOTSTRAP_INFO: finished the interrupted cleanup for $label; the captain had already answered its call"
@@ -1273,6 +1281,17 @@ backlog_record_reconcile() {
       return 2
     fi
     id=$(basename "$meta" .meta)
+    # Finalization takes the task's lifecycle locks itself. An unfinished
+    # close marker belongs to ordinary teardown and was handled above.
+    if [ "$(fm_meta_get "$meta" codex_transport)" = appserver ] \
+        && [ "$(fm_meta_get "$meta" kind)" = ship ] && [ "$(fm_meta_get "$meta" mode)" = local-only ]; then
+      case "$(fm_busy_appserver_read "$STATE" "$id" "$meta")" in
+        'idle codex-appserver turn-completed-result '*)
+          FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+            "$SCRIPT_DIR/fm-teardown.sh" "$id" --finalize-appserver "$(fm_meta_get "$meta" busy_gen)" || true
+          ;;
+      esac
+    fi
     meta_lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$meta_lock" || continue
     if [ -e "$STATE/$id.backlog-close" ] || [ -L "$STATE/$id.backlog-close" ]; then

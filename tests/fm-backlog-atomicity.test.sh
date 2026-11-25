@@ -628,6 +628,76 @@ run_bootstrap() {  # <case-dir>
     "$BOOTSTRAP" 2>&1
 }
 
+test_appserver_finalization_recovers_without_a_worktree() {
+  local case_dir home gen out real_tasks
+  case_dir=$(make_home appserver-terminal terminal)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" terminal
+  start_item "$case_dir" terminal
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" terminal)
+  write_task_meta "$case_dir" terminal ship local-only \
+    "spawn_gen=spawn-terminal" "codex_transport=appserver" "busy_gen=$gen"
+  printf '%s\n' 'done: published the task commit' |
+    "$ROOT/bin/fm-busy-event.sh" report "$home/state" terminal --gen "$gen"
+
+  if run_teardown "$case_dir" terminal --finalize-appserver "$gen"; then
+    fail "a result declaration alone cannot close an app-server task"
+  fi
+  if run_teardown "$case_dir" terminal; then
+    fail "ordinary teardown cannot accept an ambiguous app-server result either"
+  fi
+  [ "$(row_state "$case_dir" terminal)" = in_flight ] || fail "ambiguous result closed the backlog"
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" terminal idle --gen "$gen" \
+    --source codex-appserver --event turn-completed-result
+  if run_teardown "$case_dir" terminal --finalize-appserver stale; then
+    fail "a different generation cannot close an app-server task"
+  fi
+  [ "$(row_state "$case_dir" terminal)" = in_flight ] || fail "stale generation closed the backlog"
+  real_tasks=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = done ]; then exit 42; fi
+exec "$real_tasks" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  if run_teardown "$case_dir" terminal --finalize-appserver "$gen"; then
+    fail "an unsuccessful close was reported as final"
+  fi
+  rm "$case_dir/fakebin/tasks-axi"
+  [ "$(row_state "$case_dir" terminal)" = in_flight ] || fail "failed close mutated the backlog"
+  out=$(run_bootstrap "$case_dir") || fail "app-server recovery failed: $out"
+  [ "$(row_state "$case_dir" terminal)" = done ] || fail "terminal result was not recovered: $out"
+  [ -f "$home/state/terminal.meta" ] || fail "finalization retired the record needed for local landing"
+  out=$(run_teardown "$case_dir" terminal --finalize-appserver "$gen") || fail "retry failed: $out"
+  [ "$(row_state "$case_dir" terminal)" = done ] || fail "retry changed the terminal backlog row"
+  out=$(run_teardown "$case_dir" terminal) || fail "subsequent ordinary cleanup failed: $out"
+  [ "$(row_state "$case_dir" terminal)" = done ] || fail "cleanup changed the completed backlog row"
+  [ ! -e "$home/state/terminal.meta" ] && [ ! -e "$home/state/terminal.backlog-close" ] \
+    || fail "ordinary cleanup did not retire the task and pending close"
+  pass "app-server finalization recovers without a worktree and is idempotent"
+}
+
+test_appserver_failed_cleanup_keeps_backlog_open() {
+  local case_dir home gen out
+  case_dir=$(make_home appserver-failed failed)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" failed
+  start_item "$case_dir" failed
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" failed)
+  write_task_meta "$case_dir" failed ship local-only \
+    "spawn_gen=spawn-failed" "codex_transport=appserver" "busy_gen=$gen"
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" failed idle --gen "$gen" \
+    --source codex-appserver --event turn-failed
+  if run_teardown "$case_dir" failed; then
+    fail "failed app-server turn was accepted as a delivery"
+  fi
+  [ -f "$home/state/failed.meta" ] || fail "failed task record was discarded"
+  out=$(run_teardown "$case_dir" failed --force) || fail "explicit discard failed: $out"
+  [ "$(row_state "$case_dir" failed)" = queued ] || fail "discard falsely completed a failed task"
+  [ ! -e "$home/state/failed.meta" ] || fail "explicit discard left stale task metadata"
+  pass "explicit app-server failure cleanup requeues unfinished work"
+}
+
 # --- dispatch ---------------------------------------------------------------
 
 test_backend_resolution_preserves_config_errors() {
@@ -3075,6 +3145,8 @@ test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
+test_appserver_finalization_recovers_without_a_worktree
+test_appserver_failed_cleanup_keeps_backlog_open
 test_completion_closes_a_local_only_ship_before_reporting_success
 test_completion_closes_a_scout_with_its_report
 test_completion_refuses_a_legacy_record_without_an_incarnation

@@ -122,7 +122,8 @@ strip_msgfile() {
     echo "error: commit message file not found: $src" >&2
     return 1
   }
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-git-strip-ai-trailers.XXXXXX") || return 1
+  # Keep the replacement atomic when the worker's ambient TMPDIR is read-only.
+  tmp=$(mktemp "${src}.fm-strip-XXXXXX") || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     if fm_is_ai_attribution_line "$line"; then
       continue

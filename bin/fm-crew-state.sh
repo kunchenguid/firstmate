@@ -24,7 +24,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|cancelled|unknown> · source: <run-step|pane|status-log|codex-appserver|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -225,13 +225,6 @@ HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
 
-# A torn-down (or never-created) worktree has no current state to read. A
-# remote secondmate's recorded worktree is a path on ITS host, so the local
-# probe proves nothing for it - the remote arm below reads the true source.
-if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
-  emit unknown none "worktree gone (torn down?)"
-fi
-
 # --- status log ------------------------------------------------------------
 
 # Map a status-log verb onto a canonical state for the fallback path. `paused` is
@@ -272,7 +265,7 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # promote a worker's result, including a no-mistakes run that finished earlier.
 # An existing decision remains canonical while its dynamic call is pending.
 if [ "$(meta_value codex_transport)" = appserver ]; then
-  APPSERVER_BUSY=$(fm_busy_record_read "$STATE" "$ID") || emit unknown codex-appserver "$APPSERVER_BUSY"
+  APPSERVER_BUSY=$(fm_busy_appserver_read "$STATE" "$ID" "$META") || emit unknown codex-appserver "$APPSERVER_BUSY"
   case "$APPSERVER_BUSY" in
     'busy codex-appserver '*|'busy fm-spawn '*)
       python3 "$SCRIPT_DIR/fm-codex-appserver.py" control "$STATE" "$ID" \
@@ -283,14 +276,42 @@ if [ "$(meta_value codex_transport)" = appserver ]; then
       fi
       emit working codex-appserver "verified active turn"
       ;;
-    'idle codex-appserver turn-failed '*|'idle codex-appserver turn-interrupted '*)
+    'idle codex-appserver turn-failed '*)
+      # The supervisor journals its failure before marking the turn idle.
+      LOG_LINE=$(status_current_line "$LOG" "$KIND")
+      if [ "$(status_line_verb "$LOG_LINE")" = failed ]; then
+        publication_failure='supervisor verification refused private Git publication [private-git-verification-refused]'
+        case "$(status_line_note "$LOG_LINE")" in
+          "$publication_failure: task-private branch has no ship commit")
+            emit failed codex-appserver "$publication_failure: task-private branch has no ship commit"
+            ;;
+          "$publication_failure"|"$publication_failure: "*)
+            emit failed codex-appserver "$publication_failure"
+            ;;
+        esac
+      fi
       emit failed codex-appserver "turn failed or interrupted"
+      ;;
+    'idle codex-appserver turn-interrupted '*)
+      emit failed codex-appserver "turn failed or interrupted"
+      ;;
+    'idle codex-appserver turn-cancelled '*)
+      emit cancelled codex-appserver "turn interrupted by a verified exit request"
       ;;
     'idle codex-appserver turn-completed-result '*)
       [ "$LOG_VERB" = "done" ] || emit unknown codex-appserver "successful turn without accepted result"
+      if [ "$KIND" = scout ] || [ "$(meta_value mode)" = local-only ]; then
+        emit done codex-appserver "$(status_line_note "$LOG_LINE")"
+      fi
       ;;
     *) emit unknown codex-appserver "no verified terminal success ($APPSERVER_BUSY)" ;;
   esac
+fi
+
+# Other local state sources need the recorded worktree. The remote arm
+# below reads the secondmate's worktree on its own host.
+if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
+  emit unknown none "worktree gone (torn down?)"
 fi
 
 # --- remote secondmate: the true source is the remote endpoint ---------------

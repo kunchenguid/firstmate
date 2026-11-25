@@ -308,6 +308,27 @@ fm_busy_record_read() {  # <state-dir> <id>
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
 }
 
+# Bind the busy record to the caller's metadata snapshot as well as to the
+# armed generation. Check both sides of the read in case a task was replaced.
+fm_busy_appserver_read() {  # <state-dir> <id> <meta>
+  local state=$1 id=$2 meta=$3 gen record
+  gen=$(awk -F= '
+    $1 == "codex_transport" { transports++; transport=$0 }
+    $1 == "busy_gen" { gens++; gen=substr($0, 10) }
+    END { if (transports == 1 && transport == "codex_transport=appserver" && gens == 1) print gen; else exit 1 }
+  ' "$meta") || return 1
+  if [ -z "$gen" ] || [ "$(fm_busy_current_gen "$state" "$id")" != "$gen" ]; then
+    printf 'gen-mismatch'
+    return 1
+  fi
+  record=$(fm_busy_record_read "$state" "$id") || { printf '%s' "$record"; return 1; }
+  if [ "$(fm_busy_current_gen "$state" "$id")" != "$gen" ]; then
+    printf 'gen-mismatch'
+    return 1
+  fi
+  printf '%s' "$record"
+}
+
 # ---------------------------------------------------------------------------
 # muse session-log busy source
 #

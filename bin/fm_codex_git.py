@@ -250,8 +250,10 @@ class PrivateGit:
         if head_file.read_text().strip() != "ref: " + self.ref:
             raise PrivateGitVerificationError("task-private HEAD is not the assigned task branch")
         oid = ref_file.read_text().strip()
-        if not re.fullmatch("[0-9a-f]{" + str(len(self.base)) + "}", oid) or oid == self.base:
-            raise PrivateGitVerificationError("task-private HEAD is invalid or has no ship commit")
+        if not re.fullmatch("[0-9a-f]{" + str(len(self.base)) + "}", oid):
+            raise PrivateGitVerificationError("task-private HEAD is invalid")
+        if oid == self.base:
+            raise PrivateGitVerificationError("task-private branch has no ship commit")
         refs = []
         for directory, dirs, files in os.walk(self.root / "refs", followlinks=False):
             directory = Path(directory)

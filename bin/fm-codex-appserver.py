@@ -66,7 +66,7 @@ def socket_path(state, task, gen):
 
 
 class Adapter:
-    def __init__(self, state, task, gen, data):
+    def __init__(self, state, task, gen, data, finalize=False):
         self.state, self.task, self.gen, self.data = state.resolve(), task, gen, data.resolve()
         if not TOKEN.fullmatch(task) or not TOKEN.fullmatch(gen):
             raise ValueError("invalid supervisor binding")
@@ -83,6 +83,8 @@ class Adapter:
         self.proc = None
         self.stopping = False
         self.terminal = None
+        self.terminal_event = None
+        self.finalize = finalize
         self.private_git = None
         self.private_root = None
         self.path = socket_path(self.state, task, gen)
@@ -122,6 +124,12 @@ class Adapter:
     def report(self, text):
         subprocess.run(["bash", str(BIN / "fm-busy-event.sh"), "report", str(self.state),
                         self.task, "--gen", self.gen], input=text, text=True, check=True)
+
+    def record_terminal(self, event):
+        self.busy("idle", event)
+        self.terminal_event = event
+        if self.finalize:
+            self.stopping = True
 
     def retire_pending(self):
         if self.pending:
@@ -285,19 +293,24 @@ class Adapter:
                         self.scout_report = None
                         self.terminal = "failed"
                         self.report("failed: supervisor refused scout report publication")
-                        self.busy("idle", "turn-failed")
+                        self.record_terminal("turn-failed")
                         return
                 if self.private_git is not None:
                     try:
                         oid = self.private_git.publish(self.private_root.parent)
-                    except PrivateGitVerificationError:
+                    except PrivateGitVerificationError as error:
                         self.result = None
                         self.terminal = "failed"
+                        # Verification errors carry fixed diagnostics without Git output.
                         self.report("failed: supervisor verification refused private Git publication "
-                                    "[private-git-verification-refused]")
-                        self.busy("idle", "turn-failed")
+                                    "[private-git-verification-refused]: " + str(error))
+                        self.record_terminal("turn-failed")
                         self.stopping = True
                         return
+                    try:
+                        self.record_delivery(oid)
+                    except OSError as error:
+                        print(f"Could not retain structured Git delivery: {error}", file=sys.stderr)
                     self.result += " (task commit " + oid[:12] + ")"
                 self.report("done: " + self.result)
             elif status != "completed":
@@ -305,9 +318,22 @@ class Adapter:
                 self.scout_report = None
                 self.report("failed: app-server turn " + status)
             event = "turn-completed-result" if status == "completed" and self.result is not None else "turn-" + status
-            self.busy("idle", event)
+            self.record_terminal(event)
         elif method == "item/agentMessage/delta":
             print(p.get("delta", ""), end="", flush=True)
+
+    def record_delivery(self, oid):
+        target = self.state / (self.task + ".delivery.json")
+        temporary = target.with_name("." + target.name + "." + secrets.token_hex(8))
+        with self.bound():
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump({"generation": self.gen, "branch": self.private_git.ref.removeprefix("refs/heads/"),
+                               "commit": oid}, stream)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def publish_scout_report(self, report):
         data = self.data
@@ -429,13 +455,16 @@ class Adapter:
                         self.pump(.1)
                     if self.active:
                         raise TimeoutError("interrupt terminal event missing")
+                    if op == "exit" and self.terminal_event == "turn-interrupted":
+                        self.record_terminal("turn-cancelled")
             except (ValueError, OSError, EOFError, TimeoutError, subprocess.SubprocessError):
                 self.active = False
                 self.result = None
-                try:
-                    self.report("failed: app-server cancellation was not verified")
-                finally:
-                    self.busy("unknown", "interrupt-unverified")
+                if self.terminal_event is None:
+                    try:
+                        self.report("failed: app-server cancellation was not verified")
+                    finally:
+                        self.busy("unknown", "interrupt-unverified")
                 raise
             finally:
                 self.pending = None
@@ -571,12 +600,13 @@ class Adapter:
                 self.serve_control(listener)
                 self.answer_ready()
         except BaseException:
-            try:
-                self.retire_pending()
-                self.report("failed: app-server transport stopped without controlled shutdown")
-                self.busy("unknown", "process-failed")
-            except (ValueError, OSError, subprocess.SubprocessError):
-                pass
+            if self.terminal_event is None:
+                try:
+                    self.retire_pending()
+                    self.report("failed: app-server transport stopped without controlled shutdown")
+                    self.busy("unknown", "process-failed")
+                except (ValueError, OSError, subprocess.SubprocessError):
+                    pass
             raise
         finally:
             self.pending = None
@@ -597,8 +627,12 @@ def main():
             raise RuntimeError("adapter signal " + str(signum))
         signal.signal(signal.SIGTERM, stopped)
         signal.signal(signal.SIGHUP, stopped)
-        adapter = Adapter(state, task, gen, Path(args[0]))
+        finalize = len(args) == 6 and args[5] == "--finalize"
+        adapter = Adapter(state, task, gen, Path(args[0]), finalize)
         adapter.run(Path(args[1]), Path(args[2]), args[3] if len(args) > 3 else "", args[4] if len(args) > 4 else "")
+        if finalize and adapter.terminal_event == "turn-completed-result":
+            subprocess.run([str(BIN / "fm-teardown.sh"), task, "--finalize-appserver", gen],
+                           cwd=BIN, check=True)
     elif mode == "control":
         text = sys.stdin.read(LIMIT + 1)
         if len(text.encode()) > LIMIT:

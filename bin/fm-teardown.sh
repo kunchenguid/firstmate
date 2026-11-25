@@ -180,6 +180,9 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#        fm-teardown.sh <task-id> --finalize-appserver <busy-generation>
+# The app-server finalizer closes a verified local-only ship in the backlog
+# while keeping the task record and work available for guarded landing/cleanup.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -336,6 +339,7 @@ for _teardown_source in \
   fm-control-lib.sh \
   fm-lock-lib.sh \
   fm-classify-lib.sh \
+  fm-busy-lib.sh \
   fm-gate-refuse-lib.sh \
   fm-pr-lib.sh \
   fm-public-followup-lib.sh \
@@ -369,6 +373,8 @@ unset _teardown_source
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-busy-lib.sh
+. "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -390,11 +396,21 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+APPSERVER_FINALIZE_GEN=
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --finalize-appserver)
+      if [ "$#" -ne 2 ] || [ -n "$FORCE" ] || [ "$LEGACY_RECORD_GIVEN" = 1 ] \
+        || ! fm_busy_token_valid "$2"; then
+        echo "error: invalid app-server finalization request" >&2
+        exit 2
+      fi
+      APPSERVER_FINALIZE_GEN=$2
+      shift
+      ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -427,7 +443,7 @@ META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
 TREEHOUSE_SLOT_LOCK_REQUIRED=0
-if [ -f "$META" ] && [ ! -L "$META" ]; then
+if [ -z "$APPSERVER_FINALIZE_GEN" ] && [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
   [ -n "$TEARDOWN_LOCK_KIND" ] || TEARDOWN_LOCK_KIND=ship
   TEARDOWN_LOCK_BACKEND=$(fm_meta_get "$META" backend)
@@ -524,6 +540,47 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+
+teardown_appserver_delivery_verified() {
+  local busy status="$STATE/$ID.status"
+  busy=$(fm_busy_appserver_read "$STATE" "$ID" "$META") || return 1
+  case "$busy" in
+    'idle codex-appserver turn-completed-result '*) ;;
+    *) return 1 ;;
+  esac
+  [ -f "$status" ] && [ ! -L "$status" ] || return 1
+  [ "$(status_line_verb "$(status_current_line "$status" "$TEARDOWN_META_KIND")")" = done ] || return 1
+  [ -z "$(status_open_decisions "$status" "$TEARDOWN_META_KIND")" ]
+}
+
+if [ -n "$APPSERVER_FINALIZE_GEN" ]; then
+  fm_backlog_meta_spawn_gen "$META" "$STATE" || exit 1
+  [ "$(fm_meta_get "$META" busy_gen)" = "$APPSERVER_FINALIZE_GEN" ] || exit 1
+  [ -z "$(fm_meta_get "$META" remote_host)" ] || exit 1
+  [ "$TEARDOWN_META_KIND" = ship ] && [ "$(fm_meta_get "$META" mode)" = local-only ] || exit 1
+  [ ! -e "$STATE/$ID.backlog-close" ] && [ ! -L "$STATE/$ID.backlog-close" ] || exit 1
+  teardown_appserver_delivery_verified || exit 1
+  FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
+  if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
+    :
+  else
+    [ "$?" -eq 1 ] || exit 1
+    exit 0
+  fi
+  fm_backlog_row_probe "$DATA" "$ID" || exit 1
+  case "$FM_BACKLOG_ROW_STATE" in
+    done\ *) exit 0 ;;
+    'in_flight no no') ;;
+    *) exit 1 ;;
+  esac
+  [ "$FM_BACKLOG_ROW_HOLD_KIND" != captain ] || exit 1
+  if ! fm_backlog_done "$DATA" "$ID"; then
+    echo "error: app-server completion for $ID is still pending ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
 # Retiring a persistent secondmate is main's alone in both postures; the kind
 # is read under the metadata lock (role partition: bin/fm-lease-lib.sh).
 [ "$TEARDOWN_META_KIND" != secondmate ] || fm_lease_forbid_branch "secondmate retirement (fm-teardown)"
@@ -634,7 +691,17 @@ fi
 # Cleanup never closes a captain call (see the header). Asked here, before any
 # destructive step, so "cannot tell" can refuse while everything is intact.
 TEARDOWN_BACKLOG_TRANSITION=close
+TEARDOWN_REQUEUE_APPSERVER=0
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+  if [ "$(fm_meta_get "$META" codex_transport)" = appserver ] \
+      && ! teardown_appserver_delivery_verified; then
+    if [ "$FORCE" != --force ]; then
+      echo "error: $ID has no verified app-server delivery; retaining the task and its work" >&2
+      exit 1
+    fi
+    TEARDOWN_REQUEUE_APPSERVER=1
+    TEARDOWN_BACKLOG_TRANSITION=retain
+  fi
   TEARDOWN_CAPTAIN_OPEN_STATUS=0
   TEARDOWN_CAPTAIN_OPEN_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
@@ -1625,6 +1692,12 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
+        # The adapter proved publication to the task branch. A missing copy
+        # leaves no ordinary teardown proof that the commit reached main.
+        if [ "$(fm_meta_get "$META" codex_transport)" = appserver ] \
+          && { [ ! -d "$WT" ] || [ "$FORCE" = --force ]; }; then
+          return 0
+        fi
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
@@ -1651,7 +1724,9 @@ backlog_refresh_reminder() {
   else
     backlog_display="${DATA%/}/backlog.md"
   fi
-  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
+  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$TEARDOWN_REQUEUE_APPSERVER" = 1 ]; then
+    printf '%s\n' "Backlog: $ID was returned to Queued in $backlog_display."
+  elif [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
     printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
   elif [ "$BACKLOG_CLOSED" = 1 ]; then
     printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
@@ -3506,10 +3581,10 @@ BACKLOG_TRANSITION_FLAGS=()
 [ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
 BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
-  backlog_done_args || {
+  if [ "$TEARDOWN_REQUEUE_APPSERVER" != 1 ] && ! backlog_done_args; then
     echo "error: the pending backlog $BACKLOG_TRANSITION for $ID is not replayable; refusing destructive teardown" >&2
     exit 1
-  }
+  fi
 # Roll the accepted legacy incarnation's stamp back to the record's exact
 # pre-stamp bytes. Uses perl - already in the teardown lifecycle's curated PATH
 # (truncate is not, and is absent on stock macOS) - and verifies the restored
@@ -3849,7 +3924,7 @@ if [ "$BACKLOG_CLOSED" = 1 ]; then
     fm_lock_release "$META_LOCK"
     META_LOCK_HELD=0
     if [ "$BACKLOG_TRANSITION" = retain ]; then
-      echo "error: $ID's endpoint and local copy are cleaned up, but its captain-held backlog item could not be returned to Queued atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending retention is recorded and the next session start retries it" >&2
+      echo "error: $ID's endpoint and local copy are cleaned up, but its backlog item could not be returned to Queued atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending retention is recorded and the next session start retries it" >&2
     else
       echo "error: $ID's endpoint and local copy are cleaned up, but its backlog item could not be closed atomically ($FM_BACKLOG_TRANSITION_ERROR); the pending close is recorded and the next session start retries it" >&2
     fi

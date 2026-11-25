@@ -2519,4 +2519,29 @@ ok - live cancellation retires callbacks and reaps app-server
 The steer response and terminal trace name the same turn, and the final structured result contains both unique steering and answer markers.
 The security proof comes from a real shell command with a successful workspace-write control, kernel-denied sibling-state write and Unix-socket access, and an unchanged sentinel.
 A deliberately unavailable model produces terminal failure; cancellation of a pending dynamic call produces terminal interruption and a reaped app-server process.
-Other platforms, Codex versions, and endpoint providers are not verified by this guard.
+At this 2026-09-30 verification, other platforms, Codex versions, and endpoint providers were not established by this guard.
+
+### JSON task-control round trip
+
+Verified on 2026-10-21 with codex-cli 0.163.0 on Linux/WSL using the existing Firstmate JSON interface, a private tmux server, and a disposable registered project.
+The focused canary exercises create, working, needs-user, keyed steer, same-task resumption, completion, and exact file readback:
+
+```sh
+FM_CODEX_APPSERVER_LIVE=1 bash tests/fm-codex-appserver-live-e2e.test.sh --scenario api-roundtrip
+```
+
+Set `FM_API_ROUNDTRIP_INTERACTIVE=1` before this command to wait for the operator's reply before steering the same task.
+
+Observed output:
+
+```text
+ok - live JSON working state
+ok - live JSON needs-user question surfaced
+ok - live JSON same-task resumption
+ok - live JSON completion returned
+```
+
+The task id remains stable across steer and resumption, the active list contains one task, and status returns the completion summary after exact readback of both files from its local commit.
+The task id, decision key, and retained transcript are part of the private canary evidence.
+This verifies Firstmate's local control boundary and does not establish an OpenClaw-originated invocation or the Windows node worker transport.
+Repeat the focused command after changes to `bin/fm-api.sh`, the app-server adapter, or its supported Codex version.

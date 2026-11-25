@@ -5,7 +5,7 @@
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --codex-appserver selects the machine-supervised transport for one fresh
-#   --harness codex ship/scout. Linux, Codex 0.156.1 and python3 are required.
+#   --harness codex ship/scout. Linux, Codex 0.156.1 or 0.163.0 and python3 are required.
 #   It retains the selected terminal endpoint/worktree provider, grants only
 #   the isolated worker workspace, and reports through client-owned tools.
 #   Interactive Codex, secondmates, batch launch, and relaunch are unchanged.
@@ -801,10 +801,17 @@ if [ "$CODEX_APPSERVER" = 1 ]; then
     echo "error: --codex-appserver requires one fresh ship/scout and explicit --harness codex" >&2
     exit 1
   fi
-  if [ "$(uname)" != Linux ] || [ "$(codex --version)" != 'codex-cli 0.156.1' ] || ! command -v python3 >/dev/null; then
-    echo "error: app-server transport is verified only on Linux with Codex 0.156.1 and python3" >&2
+  if [ "$(uname)" != Linux ] || ! command -v python3 >/dev/null; then
+    echo "error: app-server transport is verified only on Linux with python3" >&2
     exit 1
   fi
+  case "$(codex --version 2>/dev/null)" in
+    'codex-cli 0.156.1'|'codex-cli 0.163.0') ;;
+    *)
+      echo "error: app-server transport is verified only with Codex 0.156.1 or 0.163.0" >&2
+      exit 1
+      ;;
+  esac
 fi
 [ -z "$want_value" ] || {
   echo "error: --$want_value requires a value" >&2
@@ -5142,6 +5149,9 @@ fi
 if [ "$CODEX_APPSERVER" = 1 ]; then
   [ "$HARNESS" = codex ] || { echo "error: --codex-appserver requires codex" >&2; exit 1; }
   LAUNCH="FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE_REAL") FM_DATA_OVERRIDE=$(shell_quote "$DATA") FM_CONFIG_OVERRIDE=$(shell_quote "$CONFIG") python3 $(shell_quote "$SCRIPT_DIR/fm-codex-appserver.py") run $(shell_quote "$STATE_REAL") $(shell_quote "$ID") $(shell_quote "$BUSY_GEN") $(shell_quote "$DATA") $(shell_quote "$BRIEF") $(shell_quote "$WT") $(shell_quote "$MODEL") $(shell_quote "$EFFORT")"
+  if [ "$KIND" = ship ] && [ "$MODE" = local-only ]; then
+    LAUNCH="$LAUNCH --finalize"
+  fi
 fi
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

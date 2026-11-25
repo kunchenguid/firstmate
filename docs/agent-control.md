@@ -189,6 +189,17 @@ Backend capability comes from each adapter's real surface, not from a policy cho
 Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`, with adapters outside its lane pinning their control mechanics in their own harness suites.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.
 
+## JSON task-control interface
+
+`bin/fm-api.sh` exposes `create`, `status`, `list`, `steer`, and `cancel` while Firstmate retains task and lifecycle state. A trusted caller supplies `FM_API_OWNER_ID` and a comma-separated `FM_API_PROJECT_ALLOWLIST`; create also requires a registered project with `local-only` posture.
+Create accepts only `request_id`, `project`, `title`, and `instruction`. It fixes the worker to Codex app-server at low effort, with push and deploy disabled. An owner, request id, and payload digest marker are stored in the existing backlog task body; the create lock plus that marker makes a repeated request id return the original task without starting another worker. After an uncertain create, reuse the same request id and inspect the returned task; do not mint a replacement id.
+`status` and `list` expose only tasks carrying the caller's owner marker in an allowlisted project, with task and backlog project IDs required to agree. They include the canonical `open_decisions` (`key`, `verb`, and `summary`). An answer to a task with an open decision must include a currently open key; a steer without `resolve_keys` remains an ordinary message when no decision is open.
+List includes terminal and backlog-only records and reports truncation when the count or response size reaches its limit.
+Status retains the optional report text in `result` and exposes an optional `delivery` object with `branch` and full `commit` for verified ship completions with a retained, generation-matched receipt.
+`cancel` verifies agent exit and preserves the task and work. If an exit request produces a matching interrupted turn, `status` reports `cancelled`. A prior outcome remains unchanged.
+After a local-only app-server delivery, `fm-teardown.sh --finalize-appserver` closes the backlog from the current generation's accepted terminal result. The adapter invokes it after shutdown and bootstrap retries it if interrupted. The task record and local work remain available for guarded landing and cleanup. Failed, cancelled, and unverified turns leave the backlog open. An explicitly forced cleanup returns those items to Queued.
+API requests and results are size-limited, and helper failures remain structured and fail-closed.
+
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
