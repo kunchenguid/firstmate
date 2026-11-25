@@ -50,6 +50,7 @@ RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
 ACK_GENERATION=
+SINCE_LAST_ACK=false
 ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
@@ -296,7 +297,6 @@ acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   done <<< "$fingerprints"
 }
 
-SINCE_LAST_ACK=false
 LAST_ACK_EPOCH_FILE="$STATE/.wake-drain-last-ack-epoch"
 
 BRANCH_OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
