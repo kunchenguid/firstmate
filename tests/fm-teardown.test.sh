@@ -2422,11 +2422,30 @@ test_secondmate_teardown_refuses_a_slot_marked_for_another_home() {
 }
 
 test_secondmate_teardown_retries_a_partial_slot_scrub() {
-  local case_dir root home name rc
+  local case_dir root home name rc backup
   case_dir=$(make_case leased-home-partial-scrub)
   write_meta "$case_dir" local-only secondmate
   root=$(make_leased_secondmate_home "$case_dir")
   home="$case_dir/pool/1/firstmate"
+  mkdir -p "$home/bin" "$home/state/procevent"
+  printf 'adapter=lavish\nargc=1\nargv:\n/bin/true\n' > "$home/state/procevent/source.source"
+  cp "$home/state/procevent/source.source" "$case_dir/expected-source"
+  cat > "$home/bin/fm-procevent.sh" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  sweep-home)
+    [ "\${2:-}" != --preflight ] || exit 0
+    rm -f -- "\$FM_HOME"/state/procevent/*.source
+    ;;
+  reconcile)
+    printf 'reconcile\n' >> "$case_dir/rearm-calls"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$home/bin/fm-procevent.sh"
+  git -C "$home" add bin/fm-procevent.sh
+  git -C "$home" -c user.email=t@t -c user.name=t commit -q -m "process-event boundary fixture"
   cat > "$case_dir/fakebin/git" <<'SH'
 #!/usr/bin/env bash
 if [ "${3:-}" = clean ] && [ -n "${FM_FAKE_CLEAN_FAIL:-}" ]; then
@@ -2445,7 +2464,13 @@ SH
   [ "$rc" -ne 0 ] || fail "leased-home-partial-scrub: teardown reported success with data/ left in the slot"
   assert_grep "still holds gitignored content" "$case_dir/stderr" \
     "leased-home-partial-scrub: the failed scrub was not named"
-  assert_absent "$home/state" "leased-home-partial-scrub: failure did not exercise a partial clean"
+  assert_absent "$home/state/nested" "leased-home-partial-scrub: failure did not exercise a partial clean"
+  cmp -s "$case_dir/expected-source" "$home/state/procevent/source.source" \
+    || fail "leased-home-partial-scrub: process-event registration was not restored"
+  assert_present "$case_dir/rearm-calls" "leased-home-partial-scrub: restored registrations were not rearmed"
+  for backup in "$home/../".fm-procevent-restore.*; do
+    assert_absent "$backup" "leased-home-partial-scrub: successful restoration stranded a backup"
+  done
   assert_absent "$case_dir/return-calls" "leased-home-partial-scrub: dirty slot was returned"
   assert_present "$case_dir/lease-held" "leased-home-partial-scrub: failed scrub released the lease"
   assert_present "$case_dir/state/task-x1.meta" "leased-home-partial-scrub: task record was removed before the scrub finished"
@@ -2462,7 +2487,10 @@ SH
   assert_present "$case_dir/return-calls" "leased-home-partial-scrub: retry never returned the slot"
   assert_absent "$case_dir/lease-held" "leased-home-partial-scrub: retry kept the clean slot leased"
   assert_absent "$case_dir/state/task-x1.meta" "leased-home-partial-scrub: retried teardown kept the task record"
-  pass "a partial slot scrub keeps the home marker and records so a retried teardown finishes it"
+  for backup in "$home/../".fm-procevent-restore.*; do
+    assert_absent "$backup" "leased-home-partial-scrub: successful retry stranded a backup"
+  done
+  pass "a partial slot scrub restores process events and keeps the lease for a clean retry"
 }
 
 test_secondmate_teardown_retries_a_failed_return_after_scrub() {

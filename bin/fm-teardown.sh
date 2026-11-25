@@ -3048,7 +3048,10 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       return 1
     }
     parent_marker=$(cat "$abs_home_path/$SUB_HOME_PARENT_MARKER" 2>/dev/null || true)
-    scrub_leased_home_slot "$abs_home_path" "$label" "$expected_id" || return 1
+    scrub_leased_home_slot "$abs_home_path" "$label" "$expected_id" || {
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+      return 1
+    }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
       printf '%s\n' "$expected_id" > "$abs_home_path/$SUB_HOME_MARKER"
