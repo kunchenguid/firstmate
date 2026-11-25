@@ -18,9 +18,7 @@ A passing coverage guard does not establish a healthy job duration; refresh the 
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains a separate measurement and is skipped by the portable CI shards.
 Measure that script through the focused Git Bash runner rather than a portable skip.
 
-The 2026-11-18 `tests/fm-wake-drain-result-replay.test.sh` hint is provisionally 68000 ms: the slowest of three local `bin/fm-test-run.sh` samples (92236-95780 ms) on a loaded Linux x86_64 host, scaled by 0.71.
-That factor is rounded up from the larger CI-hint-to-local ratio of its two sibling suites measured on the same host in the same session: `tests/fm-wake-drain-outcome-backstop.test.sh` (46316 ms hint, 65885 ms local, 0.70) and `tests/fm-wake-drain-unread-status.test.sh` (24251 ms hint, 71822 ms local, 0.34).
-Replace it with an Ubuntu timing-artifact maximum at the next CI refresh.
+The table's header comments name the rows that are provisional estimates rather than CI samples; the next CI refresh replaces them.
 
 A timed-out shard may upload no artifact, so a complete green run is what keeps the slowest scripts measured in the shard that needs them most.
 
