@@ -93,8 +93,8 @@
 # cannot apply the address-space limit at all) each root runs under the same
 # wall deadline and grace plus a resident-memory ceiling instead
 # (FM_LINT_ROOT_RSS_KIB, default 6291456 = 6 GiB summed over the root's
-# process group, polled through ps every 50 milliseconds). A root over that
-# ceiling is killed and classified memory, exactly like a CI memory death.
+# process group, sampled immediately then through ps every 500 milliseconds).
+# A root over that ceiling is killed and classified memory, like a CI memory death.
 # A local run without bin/fm-timeout-lib.sh refuses rather than lint
 # unbounded.
 #
@@ -431,8 +431,8 @@ fi
 # parent reports limit-unavailable instead of running uncapped. Under the
 # resident kind it runs the tool beside a monitor that sums resident memory
 # over this process group (the bounded runner made this process its leader)
-# every 50 milliseconds; over the limit it kills the group's other members,
-# records the observed peak, and exits 98, which the parent classifies as
+# immediately then every 500 milliseconds; over the limit it kills the
+# group's other members, records the observed peak, and exits 98, classified as
 # memory. Either kind wraps the tool in /usr/bin/time for the per-root
 # peak-RSS record when it is available.
 if [ "${1:-}" = "--internal-root" ]; then
@@ -481,8 +481,8 @@ if [ "${1:-}" = "--internal-root" ]; then
           my $done = waitpid $child, WNOHANG;
           exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $child;
           exit 127 if $done == -1;
-          # Sample immediately and on every poll: macOS may compress an
-          # idle allocation before a delayed half-second sample sees it.
+          # Sample before the first sleep too: macOS may compress an idle
+          # allocation before the next sample sees it.
           {
             my ($total, @members) = (0);
             my $ps = open(my $rows, "-|", "ps", "-A", "-o", "pid=", "-o", "pgid=", "-o", "rss=");
@@ -504,7 +504,7 @@ if [ "${1:-}" = "--internal-root" ]; then
               exit 98;
             }
           }
-          sleep 0.05;
+          sleep 0.5;
         }
       ' -- "$internal_rss_file" "$internal_memory_kib" "${internal_command[@]}"
       ;;

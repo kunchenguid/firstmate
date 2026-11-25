@@ -2056,7 +2056,7 @@ SH
 
 test_local_lint_bounds_resident_memory_and_deadline() {
   local tmp fakebin stub_log roots_log out rc hog source_hog blocker ok lone_dir hog_pid_file hog_pid
-  local sentinel_pid
+  local sentinel_pid attempt
   tmp=$(fm_test_tmproot fm-lint-local-bounds)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_reactive_shellcheck "$fakebin"
@@ -2079,32 +2079,37 @@ test_local_lint_bounds_resident_memory_and_deadline() {
   awk -F '\t' '$1 == "end" && $3 ~ /resident-hog\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$tmp/control.roots.tsv" || fail "the control root did not complete ok"
 
-  # Over a 64 MiB resident ceiling the root, and its no-source retry, are
-  # killed by name and classified memory; an unrelated process survives.
-  sleep 300 &
-  sentinel_pid=$!
-  rc=0
-  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_ROOT_RSS_KIB=65536 \
-    FM_TEST_STUB_LOG="$stub_log" FM_TEST_HOG_PID="$hog_pid_file" \
-    "$LINT" --telemetry "$tmp/capped.tsv" "$ok" "$hog" 2>&1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "a root over the local resident ceiling unexpectedly passed"
-  assert_contains "$out" "resident-hog.sh" "the over-ceiling root was not named"
-  assert_contains "$out" "reason=memory rc=98" "the resident kill was not classified as memory"
-  assert_contains "$out" "exceeded the per-root limit of 65536 KiB" "the resident kill did not explain itself"
-  kill -0 "$sentinel_pid" 2>/dev/null \
-    || fail "the resident-memory kill took an unrelated sentinel process with it"
-  kill -KILL "$sentinel_pid" 2>/dev/null || true
-  wait "$sentinel_pid" 2>/dev/null || true
-  [ -s "$hog_pid_file" ] || fail "the over-ceiling root never recorded its allocator pid"
-  hog_pid=$(cat "$hog_pid_file")
-  if kill -0 "$hog_pid" 2>/dev/null; then
-    fail "the over-ceiling root's allocator survived the resident-memory kill"
-  fi
-  roots_log="$tmp/capped.roots.tsv"
-  awk -F '\t' '$1 == "end" && $3 ~ /resident-hog\.sh$/ && $10 == "memory" && $11 > 65536 { found=1 } END { exit !found }' \
-    "$roots_log" || fail "the sidecar did not record the killed root's memory reason and peak"
-  awk -F '\t' '$1 == "end" && $3 ~ /ok\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
-    "$roots_log" || fail "the sidecar lost the clean root's record"
+  # Contract: a populated 256 MiB allocation exceeds 64 MiB and must exit
+  # 98 (memory), not 124 (deadline). Repeat through the public CLI to reject
+  # intermittent missed RSS samples on macOS, including on the no-source retry.
+  # An unrelated process must survive each attempt.
+  for attempt in 1 2 3; do
+    sleep 300 &
+    sentinel_pid=$!
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_ROOT_RSS_KIB=65536 \
+      FM_LINT_ROOT_SECONDS=5 FM_LINT_ROOT_GRACE=1 \
+      FM_TEST_STUB_LOG="$stub_log" FM_TEST_HOG_PID="$hog_pid_file" \
+      "$LINT" --telemetry "$tmp/capped.$attempt.tsv" "$ok" "$hog" 2>&1) || rc=$?
+    [ "$rc" -eq 98 ] || fail "over-ceiling attempt $attempt exited $rc, expected memory exit 98"$'\n'"$out"
+    assert_contains "$out" "resident-hog.sh" "the over-ceiling root was not named"
+    assert_contains "$out" "reason=memory rc=98" "the resident kill was not classified as memory"
+    assert_contains "$out" "exceeded the per-root limit of 65536 KiB" "the resident kill did not explain itself"
+    kill -0 "$sentinel_pid" 2>/dev/null \
+      || fail "the resident-memory kill took an unrelated sentinel process with it"
+    kill -KILL "$sentinel_pid" 2>/dev/null || true
+    wait "$sentinel_pid" 2>/dev/null || true
+    [ -s "$hog_pid_file" ] || fail "the over-ceiling root never recorded its allocator pid"
+    hog_pid=$(cat "$hog_pid_file")
+    if kill -0 "$hog_pid" 2>/dev/null; then
+      fail "the over-ceiling root's allocator survived the resident-memory kill"
+    fi
+    roots_log="$tmp/capped.$attempt.roots.tsv"
+    awk -F '\t' '$1 == "end" && $3 ~ /resident-hog\.sh$/ && $10 == "memory" && $11 > 65536 { found=1 } END { exit !found }' \
+      "$roots_log" || fail "the sidecar did not record the killed root's memory reason and peak"
+    awk -F '\t' '$1 == "end" && $3 ~ /ok\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
+      "$roots_log" || fail "the sidecar lost the clean root's record"
+  done
 
   # A root over the ceiling only while following sources takes the existing
   # no-source retry and passes with the disclosed memory-fallback reason.
