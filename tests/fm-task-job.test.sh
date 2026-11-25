@@ -738,7 +738,7 @@ test_cleanup_preserves_reused_runner_groups() {
 }
 
 test_secondmate_teardown_stops_child_job_without_delivery() {
-  local dir home child_wt out jobdir runner child tool world
+  local dir home child_wt out jobdir runner child tool world state
   dir=$(setup_case secondmate-retirement)
   world="$TMP_ROOT/secondmate-world"
   home="$world/secondmate-home"
@@ -758,12 +758,21 @@ test_secondmate_teardown_stops_child_job_without_delivery() {
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/fakebin/$tool"
     chmod +x "$dir/fakebin/$tool"
   done
-  out=$(cd "$dir/job-scratch" && PATH="$dir/fakebin:$PATH" FM_HOME="$home" \
-    FM_TASK_INBOX="$home/state/child.inbox" "$JOB" start --timeout 120 -- sleep 60) \
-    || fail "child start failed: $out"
-  jobdir="$home/state/child.inbox/jobs/$(printf '%s\n' "$out" | sed -n 's/^job: //p')"
-  runner=$(sed -n 's/^pid=//p' "$jobdir/runner")
-  child=$(sed -n 's/^pid=//p' "$jobdir/child")
+  for state in lost live; do
+    out=$(cd "$dir/job-scratch" && PATH="$dir/fakebin:$PATH" FM_HOME="$home" \
+      FM_TASK_INBOX="$home/state/child.inbox" "$JOB" start --timeout 120 -- sleep 60) \
+      || fail "child start failed: $out"
+    jobdir="$home/state/child.inbox/jobs/$(printf '%s\n' "$out" | sed -n 's/^job: //p')"
+    runner=$(sed -n 's/^pid=//p' "$jobdir/runner")
+    child=$(sed -n 's/^pid=//p' "$jobdir/child")
+    if [ "$state" = lost ]; then
+      kill -KILL "$runner"
+      wait_gone "$runner" || fail "the lost child job runner did not stop"
+      kill -KILL "$child"
+      wait_gone "$child" || fail "the lost child job command did not stop"
+      [ ! -e "$jobdir/exit" ] || fail "the lost child job already has an exit record"
+    fi
+  done
   FM_TASK_JOB_KILL_GRACE_SECS=0 FM_SEND_LOG="$dir/send.log" FM_ROOT_OVERRIDE="$ROOT" \
     case_command "$dir" "$ROOT/bin/fm-teardown.sh" t1 --force > "$dir/teardown.out" 2>&1 \
     || fail "secondmate teardown failed: $(cat "$dir/teardown.out")"
@@ -773,7 +782,7 @@ test_secondmate_teardown_stops_child_job_without_delivery() {
   job_lib "$dir" fm_task_job_reconcile "$home/state" child || fail "retired recovery failed"
   [ ! -e "$home/state/child.inbox" ] || fail "retired child inbox was recreated"
   [ ! -s "$dir/send.log" ] || fail "retiring the secondmate delivered a completion"
-  pass "task job: recursive secondmate teardown stops child jobs without ringing or recreating an inbox"
+  pass "task job: recursive secondmate teardown clears live and lost jobs without ringing"
 }
 
 test_watcher_rerings_until_acknowledged() {
@@ -806,9 +815,9 @@ watch_bg() {  # <dir> <out>
     "$WATCH" > "$2" 2>&1 &
 }
 
-test_watcher_survives_retired_completion_bookkeeping() {
+test_watcher_isolates_completion_bookkeeping_failures() {
   local scenario boundary scope dir out jobdir other wpid i rc rec retire send_retire write_retire fault busy send_fail
-  for scenario in delivery-job delivery-inbox delivery-failed busy-job escalated-job delivery-surviving busy-surviving escalated-surviving; do
+  for scenario in delivery-job delivery-inbox delivery-failed busy-job escalated-job delivery-surviving busy-surviving reset-surviving escalated-surviving; do
     boundary=${scenario%%-*}
     scope=${scenario#*-}
     dir=$(setup_case "bookkeeping-$scenario")
@@ -853,6 +862,16 @@ SH
       chmod +x "$dir/fakebin/tasks-axi"
     fi
     [ "$boundary" != busy ] || busy=1
+    if [ "$boundary" = reset ]; then
+      fault="$jobdir/busy"
+      job_lib "$dir" fm_task_job_write_record "$fault" count=1 || fail "could not seed busy bookkeeping"
+      cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+[ "${!#}" != "${FM_JOB_RECORD_FAULT:-}" ] || exit 1
+exec "$FM_REAL_RM" "$@"
+SH
+      chmod +x "$dir/fakebin/rm"
+    fi
     cat > "$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
 if [ "${!#}" = "${FM_JOB_RECORD_FAULT:-}" ]; then
@@ -864,17 +883,19 @@ SH
     chmod +x "$dir/fakebin/mv"
     FM_FAKE_TMUX_WINDOWS=$'fm-t1\nfm-t2' FM_JOB_RETIRE_ON_SEND="$send_retire" \
       FM_JOB_RETIRE_SEND_FAIL="$send_fail" FM_JOB_RECORD_FAULT="$fault" FM_JOB_RETIRE_AT_WRITE="$write_retire" \
-      FM_JOB_BUSY_TARGET="$busy" FM_BUSY_REGEX=BUSYTOKEN FM_REAL_MV="$(command -v mv)" \
+      FM_JOB_BUSY_TARGET="$busy" FM_BUSY_REGEX=BUSYTOKEN FM_REAL_MV="$(command -v mv)" FM_REAL_RM="$(command -v rm)" \
       FM_JOB_RETIRE_BEFORE_ESCALATION="$jobdir" FM_REAL_TASKS_AXI="$(command -v tasks-axi)" \
       watch_bg "$dir" "$dir/watch.out"
     wpid=$!
     if [ "$scope" = surviving ]; then
-      wait_gone "$wpid" || { kill "$wpid" 2>/dev/null; fail "$scenario swallowed a surviving job's write failure"; }
+      wait_gone "$wpid" || { kill "$wpid" 2>/dev/null; fail "$scenario did not surface a stale wake"; }
       rc=0
       wait "$wpid" || rc=$?
-      [ "$rc" -ne 0 ] || fail "$scenario reported a successful watcher exit"
+      expect_code 0 "$rc" "$scenario should report the wake normally"
       [ -d "$jobdir" ] || fail "$scenario removed the surviving job"
-      [ -s "$dir/watch.out" ] || fail "$scenario suppressed a surviving job's bookkeeping error"
+      assert_grep "task job ${jobdir##*/}" "$dir/state/.wake-queue" "$scenario must queue a stale wake for the affected job"
+      assert_grep 'bookkeeping' "$dir/watch.out" "$scenario must report the bookkeeping error"
+      assert_grep "'t2.inbox'" "$dir/send.log" "$scenario must let the second task's completion ring"
       continue
     fi
     i=0
@@ -896,11 +917,11 @@ SH
     [ ! -e "$retire" ] || fail "$scenario recreated retired job state"
     [ ! -s "$dir/watch.out" ] || fail "$scenario was not a quiet no-op: $(cat "$dir/watch.out")"
   done
-  pass "watcher: retired completion bookkeeping preserves supervision while surviving write failures remain errors"
+  pass "watcher: completion bookkeeping failures surface per task and concurrent retirement stays quiet"
 }
 
 test_watcher_reports_a_lost_runner_as_unrecoverable() {
-  local dir out jobdir runner child descendant wpid i
+  local dir out jobdir runner child descendant wpid i rc=0
   dir=$(setup_case lost)
   prime_status_seen "$dir/state" "$dir/state/t1.status"
   out=$(start_stubborn_job "$dir" 120) || fail "start failed: $out"
@@ -929,9 +950,22 @@ test_watcher_reports_a_lost_runner_as_unrecoverable() {
   [ ! -e "$jobdir/exit" ] || fail "the watcher invented an exit result"
   [ "$(record_count "$dir")" = 0 ] || fail "the watcher delivered an unproven completion"
   [ ! -s "$dir/send.log" ] || fail "the watcher rang an unproven completion"
+  case_command "$dir" "$JOB" stop-all "$dir/state" t1 > "$dir/stop.out" 2>&1 || rc=$?
+  expect_code 1 "$rc" "stop-all while an unproven group is live"
+  kill -0 "$descendant" 2>/dev/null || fail "stop-all signaled an unproven process group"
   kill -KILL "$descendant"
   wait_gone "$descendant" || fail "fixture cleanup left its descendant alive"
-  pass "watcher: runner loss preserves unproven groups and names the unrecoverable job"
+  wait_for_record "$dir" || fail "the watcher did not recover the lost job after the group drained"
+  assert_grep 'outcome=lost' "$jobdir/exit" "a drained job with no exit must be marked lost"
+  assert_contains "$(body_of "$(records "$dir")")" 'the command did not report an exit' "the completion must report the missing exit"
+  assert_grep "$DOORBELL" "$dir/send.log" "the lost completion must ring the worker"
+  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "endpoint_task_id=t1" \
+    "kind=ship" "harness=grok" "spawn_gen=gen-A" "mode=local-only" \
+    "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project"
+  FM_ROOT_OVERRIDE="$ROOT" case_command "$dir" "$ROOT/bin/fm-teardown.sh" t1 --force > "$dir/teardown.out" 2>&1 \
+    || fail "lost completion blocked teardown: $(cat "$dir/teardown.out")"
+  [ ! -e "$dir/state/t1.inbox" ] && [ ! -e "$dir/state/t1.meta" ] || fail "teardown did not remove the lost job's task records"
+  pass "watcher: runner loss refuses live groups, rings when drained, and permits teardown"
 }
 
 test_stop_all_stops_without_delivering() {
@@ -1118,8 +1152,6 @@ test_diagnostics_preserve_declared_holds_and_decisions() {
       child=$(sed -n 's/^pid=//p' "$lost/child")
       kill -KILL "$runner"
       wait_gone "$runner" || fail "lost runner did not stop"
-      kill -KILL "$child"
-      wait_gone "$child" || fail "fixture command did not stop"
       printf '%s\n' "$held" >> "$dir/state/t1.status"
     else
       cat > "$dir/fakebin/tasks-axi" <<'SH'
@@ -1141,6 +1173,10 @@ SH
     [ -s "$jobdir/delivered" ] || fail "$mode held completion was not recorded"
     [ ! -e "$jobdir/delivery" ] || fail "$mode diagnostic allowed a held delivery attempt"
     [ ! -s "$dir/send.log" ] || fail "$mode diagnostic rang a held completion"
+    if [ "$mode" = unrecoverable ]; then
+      kill -KILL "$child"
+      wait_gone "$child" || fail "fixture command did not stop"
+    fi
   done
   pass "task job: both diagnostic writers preserve declared captain holds and open decisions"
 }
@@ -1199,7 +1235,7 @@ fm_test_run \
   test_secondmate_teardown_stops_child_job_without_delivery \
   test_finished_live_runner_is_owned_until_stopped \
   test_watcher_rerings_until_acknowledged \
-  test_watcher_survives_retired_completion_bookkeeping \
+  test_watcher_isolates_completion_bookkeeping_failures \
   test_watcher_reports_a_lost_runner_as_unrecoverable \
   test_stop_all_stops_without_delivering \
   test_removed_inbox_is_never_recreated \

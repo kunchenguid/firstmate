@@ -753,61 +753,59 @@ task_job_check() {  # <window> <task>
         busy=$((busy + 1))
         if ! fm_task_job_write_record "$dir/busy" "count=$busy" 2>/dev/null; then
           [ -d "$dir" ] || continue
-          echo "error: task-job busy bookkeeping failed: $dir/busy" >&2
-          return 1
+          reason="stale: $w (task job ${dir##*/}: busy bookkeeping could not write $dir/busy for completion $rec)"
+        elif [ "$busy" -ge "$(fm_task_inbox_busy_max)" ]; then
+          reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled after $busy busy-deferred doorbells; inspect the worker)"
+        else
+          continue
         fi
-        [ "$busy" -ge "$(fm_task_inbox_busy_max)" ] || continue
-        reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled after $busy busy-deferred doorbells; inspect the worker)"
+        verb=escalate
+      elif ! rm -f "$dir/busy" 2>/dev/null; then
+        [ -d "$dir" ] || continue
+        reason="stale: $w (task job ${dir##*/}: busy bookkeeping could not reset $dir/busy for completion $rec)"
         verb=escalate
       else
-        if ! rm -f "$dir/busy" 2>/dev/null; then
-          [ -d "$dir" ] || continue
-          echo "error: task-job busy bookkeeping could not be reset: $dir/busy" >&2
-          return 1
-        fi
         ring_rc=0
         fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
         if [ "$ring_rc" -eq 3 ]; then
           reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled and its endpoint is unavailable; recover the worker)"
           verb=escalate
+        elif ! fm_task_job_write_record "$dir/delivery" "count=$((count + 1))" "last=$(date +%s)" 2>/dev/null; then
+          [ -d "$dir" ] || continue
+          reason="stale: $w (task job ${dir##*/}: delivery bookkeeping could not write $dir/delivery for completion $rec)"
+          verb=escalate
         else
-          if ! fm_task_job_write_record "$dir/delivery" "count=$((count + 1))" "last=$(date +%s)" 2>/dev/null; then
-            [ -d "$dir" ] || continue
-            echo "error: task-job delivery bookkeeping failed: $dir/delivery" >&2
-            return 1
-          fi
           triage_log "task-job delivery attempt: $task ${dir##*/} result=$ring_rc"
         fi
       fi
     fi
     if [ "$verb" = escalate ] && [ -f "$rec" ] && [ -d "$dir" ]; then
-      lock=$(fm_meta_lock_path "$STATE/$task.meta") || return 1
-      if ! fm_lock_acquire_wait "$lock"; then
-        [ -d "$dir" ] || continue
-        return 1
+      if ! lock=$(fm_meta_lock_path "$STATE/$task.meta") || ! fm_lock_acquire_wait_max "$lock" 1; then
+        lock=
+        reason="stale: $w (task job ${dir##*/}: could not lock $STATE/$task.meta to record escalation for completion $rec)"
       fi
       if [ ! -d "$dir" ] || [ ! -f "$rec" ]; then
-        fm_lock_release "$lock" || return 1
+        [ -z "$lock" ] || fm_lock_release "$lock" || true
         continue
       fi
       reason=${reason:-"stale: $w (task job ${dir##*/}: completion $rec still unhandled after $count doorbell delivery attempts; inspect the worker)"}
       if ! fm_wake_append stale "$w" "$reason" 2>/dev/null; then
-        fm_lock_release "$lock" || return 1
+        [ -z "$lock" ] || fm_lock_release "$lock" || true
         [ -d "$dir" ] || continue
         echo "error: cannot queue escalation for task job ${dir##*/}" >&2
-        exit 1
+        return 1
       fi
-      if ! fm_task_job_write_record "$dir/escalated" "record=${rec##*/}" 2>/dev/null; then
-        fm_lock_release "$lock" || return 1
-        [ -d "$dir" ] || continue
-        echo "error: task-job escalation bookkeeping failed: $dir/escalated" >&2
-        exit 1
+      if [ -n "$lock" ]; then
+        if ! fm_task_job_write_record "$dir/escalated" "record=${rec##*/}" 2>/dev/null && [ -d "$dir" ]; then
+          echo "error: task-job escalation bookkeeping failed: $dir/escalated" >&2
+        fi
+        fm_lock_release "$lock" || echo "error: could not release task-job metadata lock: $lock" >&2
       fi
-      fm_lock_release "$lock" || return 1
       [ -d "$dir" ] || continue
       TASK_JOB_WAKE_REASON=$reason
     fi
   done
+  return 0
 }
 
 # 0 (benign/absorb) if EVERY task in a no-verb "signal:" wake has positive work
@@ -4666,6 +4664,7 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
+  task_job_wake_reason=
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -4676,7 +4675,7 @@ EOF
       fm_task_job_reconcile "$STATE" "$task" || true
       task_job_check "$w" "$task" || exit 1
       inbox_steer_check "$w" "$task"
-      [ -z "$TASK_JOB_WAKE_REASON" ] || wake "$TASK_JOB_WAKE_REASON"
+      [ -z "$TASK_JOB_WAKE_REASON" ] || task_job_wake_reason=$TASK_JOB_WAKE_REASON
     fi
     key=$(window_key "$w")
     last=$(status_declared_wait_line "$STATE/$task.status")
@@ -4923,6 +4922,7 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+  [ -z "$task_job_wake_reason" ] || wake "$task_job_wake_reason"
 
   # Collect a completed hygiene scan before launching another one. The report
   # child keeps endpoint/backlog reads out of the polling path. Only a home

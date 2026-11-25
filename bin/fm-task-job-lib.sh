@@ -66,9 +66,9 @@
 #
 # Recovery (fm_task_job_reconcile, run by bin/fm-watch.sh on every poll for each
 # recorded task): a completion captured but not delivered is delivered, and a
-# job whose runner is gone without an exit record is reported as
-# unrecoverable without signaling a group whose ownership cannot be proven.
-# A missing exit record does not establish that the command stopped.
+# job whose runner is gone without an exit record becomes lost only when its
+# recorded process groups and direct command are gone. Otherwise recovery
+# reports it as unrecoverable without signaling unproven groups.
 # Recovery and hold-lookup diagnostics are
 # comment status lines that preserve declared waits and open decisions.
 # fm_task_job_stop_all is teardown's stop for a task's live jobs, including
@@ -230,6 +230,28 @@ fm_task_job_unrecoverable() {
   return 1
 }
 
+fm_task_job_child_gone() {
+  local dir=$1 pid rc=0
+  [ -f "$dir/child" ] || return 0
+  pid=$(fm_meta_get "$dir/child" pid)
+  fm_task_job_group_members "$pid" >/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || return 1
+  rc=0
+  fm_task_job_proc_state "$pid" "$(fm_meta_get "$dir/child" start)" || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+fm_task_job_recover_lost() {
+  local dir=$1 pid=$2 rc=0
+  [ ! -f "$dir/exit" ] || return 0
+  fm_task_job_group_members "$pid" >/dev/null || rc=$?
+  if [ "$rc" -ne 1 ] || ! fm_task_job_child_gone "$dir"; then
+    fm_task_job_unrecoverable "$dir"
+    return 1
+  fi
+  fm_task_job_publish_exit "$dir" lost '' || [ -f "$dir/exit" ]
+}
+
 fm_task_job_stop_runner() {
   local dir=$1 pid start rc=0 grace limit
   [ "$(fm_meta_get "$dir/job" stopped)" != 1 ] || return 0
@@ -241,33 +263,34 @@ fm_task_job_stop_runner() {
   pid=$(fm_meta_get "$dir/runner" pid)
   start=$(fm_meta_get "$dir/runner" start)
   fm_task_job_proc_state "$pid" "$start" || rc=$?
-  if [ "$rc" -eq 1 ] && [ -f "$dir/exit" ]; then
-    return 0
+  if [ "$rc" -eq 1 ]; then
+    fm_task_job_recover_lost "$dir" "$pid"
+    return
   fi
   [ "$rc" -eq 0 ] || { fm_task_job_unrecoverable "$dir"; return 1; }
   rc=0
   fm_task_job_group_members "$pid" >/dev/null || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    fm_task_job_proc_state "$pid" "$start" || rc=$?
+    if [ "$rc" -eq 1 ]; then
+      fm_task_job_recover_lost "$dir" "$pid"
+      return
+    fi
+    [ "$rc" -eq 0 ] || { fm_task_job_unrecoverable "$dir"; return 1; }
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    grace=$(fm_task_job_secs "${FM_TASK_JOB_KILL_GRACE_SECS:-}" "$FM_TASK_JOB_KILL_GRACE_DEFAULT")
+    limit=$((SECONDS + grace + 15))
+    while [ "$SECONDS" -lt "$limit" ]; do
+      fm_task_job_group_members "$pid" >/dev/null || { rc=$?; break; }
+      sleep 0.1
+    done
+  fi
   if [ "$rc" -eq 1 ]; then
+    fm_task_job_child_gone "$dir" || { fm_task_job_unrecoverable "$dir"; return 1; }
     [ -f "$dir/job" ] && printf 'stopped=1\n' >> "$dir/job"
     return
   fi
   [ "$rc" -eq 0 ] || return 1
-  rc=0
-  fm_task_job_proc_state "$pid" "$start" || rc=$?
-  [ "$rc" -eq 0 ] || { fm_task_job_unrecoverable "$dir"; return 1; }
-  kill -TERM -- "-$pid" 2>/dev/null || true
-  grace=$(fm_task_job_secs "${FM_TASK_JOB_KILL_GRACE_SECS:-}" "$FM_TASK_JOB_KILL_GRACE_DEFAULT")
-  limit=$((SECONDS + grace + 15))
-  while [ "$SECONDS" -lt "$limit" ]; do
-    rc=0
-    fm_task_job_group_members "$pid" >/dev/null || rc=$?
-    if [ "$rc" -eq 1 ]; then
-      [ -f "$dir/job" ] && printf 'stopped=1\n' >> "$dir/job"
-      return
-    fi
-    [ "$rc" -eq 0 ] || return 1
-    sleep 0.1
-  done
   rc=0
   fm_task_job_proc_state "$pid" "$start" || rc=$?
   [ "$rc" -eq 0 ] || fm_task_job_unrecoverable "$dir"
@@ -289,7 +312,7 @@ fm_task_job_message() {  # <job-dir>
   case "$outcome" in
     exited) result="the command exited with status $status" ;;
     timed-out) result="the command passed its $(fm_meta_get "$dir/job" timeout)-second timeout and was stopped (status $status)" ;;
-    lost) result="its runner stopped before recording an exit, so the command's result is unknown; any command still running was stopped" ;;
+    lost) result="the command did not report an exit and no process remains in its recorded groups" ;;
     *) return 1 ;;
   esac
   printf 'Task job %s finished: %s.\n' "$id" "$result"
@@ -327,9 +350,13 @@ fm_task_job_deliver() (
   trap 'fm_lock_release "$lock"' EXIT
   trap 'exit 143' TERM INT
   inbox=$(fm_task_inbox_dir "$state" "$task")
-  [ -d "$dir" ] && [ -f "$dir/exit" ] || return 1
+  [ -d "$dir" ] || return 1
   [ "$(fm_meta_get "$dir/job" stopped)" != 1 ] || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ -d "$inbox" ] || return 1
+  if [ ! -f "$dir/exit" ]; then
+    fm_task_job_runner_state "$dir" && return 1
+    fm_task_job_recover_lost "$dir" "$(fm_meta_get "$dir/runner" pid)" || return 1
+  fi
   msg=$(fm_task_job_message "$dir") || return 1
   rec=$(fm_task_inbox_write_idempotent "$state" "$task" "$msg" hold-aware) || return 1
   fm_task_job_write_record "$dir/delivered" "record=${rec##*/}" || true
@@ -370,12 +397,8 @@ fm_task_job_reconcile() {  # <state-dir> <task-id>
     rc=0
     fm_task_job_runner_state "$dir" || rc=$?
     [ "$rc" -ne 0 ] || continue
-    if [ ! -f "$dir/exit" ]; then
-      if [ "$rc" -eq 2 ]; then
-        [ -f "$dir/job" ] && [ "$(fm_path_age "$dir/job")" -ge "$grace" ] || continue
-      fi
-      fm_task_job_unrecoverable "$dir" || true
-      continue
+    if [ "$rc" -eq 2 ] && [ ! -f "$dir/exit" ]; then
+      [ -f "$dir/job" ] && [ "$(fm_path_age "$dir/job")" -ge "$grace" ] || continue
     fi
     fm_task_job_deliver "$1" "$2" "$dir" || true
   done

@@ -183,6 +183,9 @@ cmd_start() (
     rc=0
     fm_task_job_runner_state "$dir" || rc=$?
     if [ "$rc" -eq 1 ] || { [ "$rc" -eq 2 ] && ! kill -0 "$runner" 2>/dev/null; }; then
+      if [ "$rc" -eq 2 ] && [ ! -e "$dir/runner" ] && [ ! -e "$dir/child" ]; then
+        fm_task_job_publish_exit "$dir" lost '' || true
+      fi
       die "the job runner exited during startup; recovery records retained at $dir"
     fi
     [ "$i" -lt 100 ] || break
