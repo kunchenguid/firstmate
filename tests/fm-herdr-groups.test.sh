@@ -370,20 +370,39 @@ PY
 }
 
 test_watcher_poll_tags_tasks() {
-  local out
+  local watcher status deadline
   new_home watcher
   printf 'on\n' > "$HOME_DIR/config/herdr-project-groups"
   printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
   touch "$HOME_DIR/state/.last-watcher-beat"
   add_task web-run ship /p/storefront w2 'working: go'
   write_live_lists 0
-  out=$(env FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+  fm_test_track_watcher_state "$HOME_DIR/state"
+  env FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     PATH="$FAKEBIN:$PATH" FAKE_DIR="$FAKE_DIR" FAKE_HERDR_LOG="$FAKE_HERDR_LOG" \
     FAKE_VIEW_LOG="$FAKE_VIEW_LOG" FM_HERDR_GROUPS_AGENT_VIEW="$FAKEBIN/agent-view" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 2>&1)
-  case "$out" in *"checkpoint:"*|*"signal:"*|*"stale:"*) ;; *) fail "watcher checkpoint did not run: $out" ;; esac
+    "$ROOT/bin/fm-watch.sh" > "$FAKE_DIR/watcher.log" 2>&1 &
+  watcher=$!
+  # Reconciliation, not elapsed checkpoint time, proves that a poll completed.
+  # Keep a generous failure bound for loaded hosts and stop the owned watcher
+  # before asserting, including when reconciliation never arrives.
+  deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ] && kill -0 "$watcher" 2>/dev/null; do
+    if reports pane | grep -q 'pane report-metadata w2:p2 --source firstmate --token fm_group=storefront' \
+      && grep -q 'set' "$FAKE_VIEW_LOG"; then
+      break
+    fi
+    sleep 0.1
+  done
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 0 ] || fail "could not stop fixture watcher ($status)"
+  wait "$watcher"
+  status=$?
+  case "$status" in 0|143) ;; *) fail "watcher failed ($status): $(cat "$FAKE_DIR/watcher.log")" ;; esac
   assert_contains "$(reports pane)" "pane report-metadata w2:p2 --source firstmate --token fm_group=storefront" \
     "the watcher poll tagged the task pane"
   assert_contains "$(cat "$FAKE_VIEW_LOG")" "set" "the watcher poll set the agents view"
