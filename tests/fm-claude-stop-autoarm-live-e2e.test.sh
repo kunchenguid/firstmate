@@ -159,6 +159,13 @@ fi
   || fail "cooperative guard consumed a forced continuation while the auto-arm launch was healthy"
 [ "$(sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$HOME_DIR/state/.claude-autoarm-epoch" 2>/dev/null)" = rewake ] \
   || fail "auto-arm epoch ledger must record the rewake outcome"
+# The claim is bound to the Claude session its Stop payload names, the session
+# that receives the hook's rewake (docs/turnend-guard.md "Auto-arm generation
+# claim"), so the real payload must carry this session's own id.
+SESSION_ID=$(jq -r 'select(.type == "system" and .subtype == "init") | .session_id' "$TRANSCRIPT" 2>/dev/null | head -n 1)
+[ -n "$SESSION_ID" ] || fail "the stream-json transcript names no session id"
+grep -q "^epoch=.* claude_session=$SESSION_ID\$" "$HOME_DIR/state/.claude-autoarm-epoch" \
+  || fail "auto-arm epoch ledger must record the Stop payload's session $SESSION_ID: $(sed -n '1p' "$HOME_DIR/state/.claude-autoarm-epoch")"
 [ ! -e "$HOME_DIR/state/.claude-autoarm.lock" ] || fail "auto-arm owner lock was left behind"
 
 # Live-owner negative control: a separate supported-harness process owns a

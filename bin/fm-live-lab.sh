@@ -96,8 +96,13 @@
 #   worker        --worker: its current crew state is paused on the gate.
 #   treehouse     ~/.treehouse gained no entry since up began.
 #
+# Every tmux call names the lab's socket explicitly (tmux -S), never through
+# TMUX_TMPDIR alone, so no lab command can reach another tmux server even after
+# the private tmux directory is gone.
+#
 # down refuses any path without the lab record up writes. It kills only the
-# lab's recorded private tmux server and launch pane PIDs, and their descendants;
+# lab's recorded launch pane PIDs and their descendants, and the lab's private
+# tmux server, which it touches only while that server's socket exists;
 # runs bin/fm-lab-home.sh teardown; removes the task temp and launch dirs the
 # lab's spawns kept under /tmp, including a failed spawn's; removes every
 # project entry at or under <lab-root> from the recorded Claude store, following
@@ -159,12 +164,34 @@ load_lab() {  # <root>: refuse anything up did not build, then load its record
   TREEHOUSE_DIR=$(rec_get "$ROOT" treehouse_dir)
 }
 
-lab_tmux() {
+# lab_socket: the explicit path of the lab's tmux socket, the one a lab process
+# reaches through TMUX_TMPDIR=$TMUX_DIR. Every tmux call this script makes names
+# it with -S, never TMUX_TMPDIR alone: tmux uses TMUX_TMPDIR only while that
+# directory exists and otherwise silently falls back to /tmp/tmux-<uid>, where a
+# lab command would reach the user's own default server.
+lab_socket() {
   [ -n "${TMUX_DIR:-}" ] || return 1
-  env -u TMUX TMUX_TMPDIR="$TMUX_DIR" tmux "$@"
+  printf '%s/tmux-%s/default\n' "$TMUX_DIR" "$(id -u)"
 }
 
-# The empty-environment base every lab process starts from.
+lab_tmux() {
+  local socket
+  socket=$(lab_socket) || return 1
+  env -u TMUX tmux -S "$socket" "$@"
+}
+
+# lab_kill_server: stop the lab's tmux server, and do nothing at all when its
+# socket does not exist.
+lab_kill_server() {
+  local socket
+  socket=$(lab_socket) || return 0
+  [ -S "$socket" ] || return 0
+  lab_tmux kill-server 2>/dev/null || true
+}
+
+# The empty-environment base every lab process starts from. TMUX_TMPDIR here is
+# how the lab's own firstmate backend finds the lab server; those processes run
+# only while that server, and so its directory, exists.
 lab_env_base() {
   printf '%s\n' "HOME=$HOME" "USER=${USER:-$(id -un)}" "LOGNAME=${USER:-$(id -un)}" \
     "PATH=$PATH" "SHELL=${SHELL:-/bin/zsh}" "TERM=xterm-256color" "LANG=${LANG:-en_US.UTF-8}" \
@@ -541,7 +568,8 @@ cmd_up() {
 
   TMUX_DIR=$("$LAB_HOME_HELPER" tmux-dir "$LAB") || die "cannot create the private tmux directory"
   echo "tmux_dir=$TMUX_DIR" >> "$ROOT/$RECORD_NAME"
-  lab_run tmux -f /dev/null new-session -d -s firstmate -n lab -x 220 -y 60 -c "$ROOT" || die "cannot start the lab tmux server"
+  mkdir -m 700 "$TMUX_DIR/tmux-$(id -u)" || die "cannot create the lab tmux socket directory"
+  lab_run tmux -S "$(lab_socket)" -f /dev/null new-session -d -s firstmate -n lab -x 220 -y 60 -c "$ROOT" || die "cannot start the lab tmux server"
   record_launch_pid "$(lab_tmux display-message -p '#{pid}')"
 
   if [ "$mate" = yes ]; then
@@ -757,7 +785,7 @@ cmd_down() {
     case "$pgid" in ''|0|1|*[!0-9]*) continue ;; esac
     [ "$pgid" = "$own_group" ] || [ "$pgid" = "$caller_group" ] || groups+="$pgid "
   done
-  lab_tmux kill-server 2>/dev/null || true
+  lab_kill_server
   refresh_pairs
   survivors=$(live_pids "$pairs")
   if [ -n "$survivors" ]; then
