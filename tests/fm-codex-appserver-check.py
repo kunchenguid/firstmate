@@ -299,7 +299,10 @@ def commit_ship():
  work=os.environ['CASE_WORKTREE']
  with open(os.path.join(work,'tracked.txt'),'w') as f: f.write('app-server delivery\n')
  subprocess.run(['git','-C',work,'add','tracked.txt'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
- subprocess.run(['git','-C',work,'commit','-m','app-server delivery'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+ commit=['git','-C',work,'commit','-m','app-server delivery']
+ if mode=='decision':
+  commit+=['--trailer','Co-authored-by: Codex <noreply@openai.com>']
+ subprocess.run(commit,check=True,stdout=subprocess.DEVNULL)
  committed=True
 def emit(x):
  print(json.dumps(x),flush=True)
@@ -491,6 +494,13 @@ exec "$CASE_REAL_GIT" "$@"
         out = open(home/'output','w')
         command = ['python3',str(ROOT/'bin/fm-codex-appserver.py'),'run',str(state),'t',gen,str(home/'data'),str(brief),str(work)]
         adapter_env = dict(env,CASE=case,FM_HOME=str(home),FM_DATA_OVERRIDE=str(home/'ambient-data'),CASE_STATE=str(state),CASE_GEN=gen,CASE_WORKTREE=str(work),CASE_ROOT=str(ROOT),CASE_HOME=str(home))
+        if case == 'decision':
+            hooks = state / 't.git-hooks'
+            subprocess.run(['bash', str(ROOT/'bin/fm-git-strip-ai-trailers.sh'),
+                            'install', str(hooks), str(work)], check=True)
+            # Match fm-spawn's hook override with an unusable worker TMPDIR.
+            adapter_env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.hooksPath',
+                               GIT_CONFIG_VALUE_0=str(hooks), TMPDIR=str(state/'t.meta'))
         if case == 'managed-success':
             backlog = home/'data'/'backlog.md'
             backlog.write_text('# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n')
@@ -593,7 +603,9 @@ exec "$CASE_REAL_GIT" "$@"
                         assert hold('open',held).returncode in (1,3)
                     else:
                         assert 'resolved [key=' in statuses()
-                    wait(lambda:'turn-completed' in busy.read_text(),'same-turn result')
+                    wait(lambda:'turn-completed' in busy.read_text() or proc.poll() is not None,
+                         'same-turn result')
+                    assert 'turn-completed-result' in busy.read_text(), (home/'output').read_text()
                     assert 'done' in statuses()
                     assert control('answer','ANSWER',key).returncode!=0
                 elif case in ('decision-death','decision-backend-death'):
@@ -686,6 +698,8 @@ exec "$CASE_REAL_GIT" "$@"
                     assert real_git(repo, 'rev-parse', branch).decode().strip() == head
                     assert real_git(work, 'show', 'HEAD:tracked.txt') == b'app-server delivery\n'
                     assert real_git(work, 'status', '--porcelain').strip() == b''
+                    if case == 'decision':
+                        assert real_git(work, 'log', '-1', '--format=%B').strip() == b'app-server delivery'
                     if case == 'success':
                         real_git(repo, 'worktree', 'remove', str(work))
                         assert 'state: done' in crew()
