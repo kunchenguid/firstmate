@@ -379,7 +379,7 @@ projection_assert_replaced() {
   local dir=$1 id=$2
   grep -Fxq "herdr_workspace_id=husk-$id" "$dir/home/state/$id.meta" || fail "recovery flattened its workspace"
   grep -Fxq "pane close old-pane-$id" "$D/herdr-log" || fail "recovery did not close its exact old husk"
-  python3 - "$dir/home/state/$id.meta" "$dir/home/state/$id.herdr-presentation" "$D/model.json" "$id" <<'PY'
+  python3 - "$dir/home/state/$id.meta" "$dir/home/state/$id.herdr-presentation" "$D/model.json" "$id" <<'PY' || fail "replacement endpoint contract failed"
 import json, sys
 meta, journal = [dict(line.rstrip('\n').split('=', 1) for line in open(p) if '=' in line) for p in sys.argv[1:3]]
 state = json.load(open(sys.argv[3]))
@@ -391,7 +391,6 @@ assert journal['tab_id'] == meta['herdr_tab_id']
 assert any(p['pane_id'] == pane and p['workspace_id'] == 'husk-' + ident for p in state['panes'])
 assert not any(p['pane_id'] == 'old-pane-' + ident for p in state['panes'])
 PY
-  [ "$?" = 0 ] || fail "replacement endpoint contract failed"
 }
 
 projection_lock_holder() {
