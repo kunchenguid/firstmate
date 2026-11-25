@@ -338,6 +338,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/audio-briefings.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/calm-mode-feasibility.md",
       "audience": "maintainer-verification"
     },
