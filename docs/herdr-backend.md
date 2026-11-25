@@ -374,6 +374,7 @@ The lease outlives the pane: teardown closes the exact pane before it returns th
 An aborted spawn returns the lease only when Herdr confirms the task pane gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.
 
 Recovery is deliberately conservative and presentation-only.
+A control-plane Herdr reclaim uses the flat container shape rather than presentation projection: projection is presentation-only and never endpoint or ownership authority, and flat is the documented fallback for recoveries that cannot bind exactly.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
 The presentation lock covers the projected layout mutation only and is released before worktree allocation, the remaining spawn setup, and agent launch.
