@@ -616,6 +616,17 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
+    if (working.kind === "spaceship") {
+      // The banner is session-scoped: clear the installed widget, stop its timer, and
+      // restore Pi's stock working row, so the next session_start starts clean.
+      if (spaceshipShown && !spaceshipWidgetDisposed) {
+        ctx.ui.setWidget(CALM_WORKING_SPACESHIP_WIDGET_KEY, undefined);
+        ctx.ui.setWorkingVisible(true);
+      }
+      spaceshipShown = false;
+      spaceshipWidgetDisposed = false;
+      return;
+    }
     applyWorkingPresentation(ctx.ui);
   });
 

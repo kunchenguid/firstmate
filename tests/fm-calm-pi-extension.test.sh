@@ -4716,6 +4716,53 @@ check(
 );
 check(liveTimers === 1, `toggling Calm on left ${liveTimers} timers`);
 
+// The banner is session-scoped: a shutdown clears the installed widget, stops its
+// timer, and restores Pi's stock working row so the next session starts clean.
+for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
+  reset();
+  if (!ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY)) await fire("session_start", { reason: "startup" });
+  check(
+    ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
+    `session_shutdown(${reason}) setup did not show the banner`,
+  );
+  check(liveTimers === 1, `session_shutdown(${reason}) setup left ${liveTimers} banner timers`);
+  reset();
+  await fire("session_shutdown", { reason });
+  check(liveTimers === 0, `session_shutdown(${reason}) left ${liveTimers} banner timers`);
+  check(ui.widgets.size === 0, `session_shutdown(${reason}) left a residual banner widget`);
+  check(
+    ui.widgetOps.length === 1 &&
+      ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
+      ui.widgetOps[0].action === "clear",
+    `session_shutdown(${reason}) did not clear the banner: ${JSON.stringify(ui.widgetOps)}`,
+  );
+  check(
+    ui.workingVisible[ui.workingVisible.length - 1] === true,
+    `session_shutdown(${reason}) did not restore Pi's stock working row`,
+  );
+}
+
+// Turning Calm off across a session boundary must not strand the banner: shutdown
+// still clears it, and the next session leaves Pi's stock working row alone.
+reset();
+await fire("session_start", { reason: "startup" });
+check(ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "Calm-off setup did not show the banner");
+reset();
+writeFileSync(`${process.env.FM_HOME}/config/calm`, "off\n");
+await fire("session_shutdown", { reason: "new" });
+check(liveTimers === 0 && ui.widgets.size === 0, "shutdown on the way to Calm off left the banner installed");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === true,
+  "shutdown on the way to Calm off did not restore Pi's stock working row",
+);
+reset();
+await fire("session_start", { reason: "new" });
+check(
+  liveTimers === 0 && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
+  "a Calm-off session restored the spaceship banner",
+);
+writeFileSync(`${process.env.FM_HOME}/config/calm`, "on\n");
+
 // Anything other than "spaceship" in config/calm-ship keeps the boat, and a fresh
 // session re-reads the selection.
 reset();
