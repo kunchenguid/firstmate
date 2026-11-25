@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fm-task-job.sh - run a worker command that will outlive its turn as a task
-# job, so its exit lands in the task's steering inbox and resumes the worker.
+# fm-task-job.sh - run a worker command across a turn boundary and record
+# its completion in the task's steering inbox.
 #
 # bin/fm-task-job-lib.sh owns the job record, completion identity, delivery,
 # hold, and recovery contract; this is the command surface.
@@ -16,7 +16,7 @@
 #       timeout, rounded up to the minute) for the worker's `paused:`
 #       declaration, then returns. When the job finishes, or passes its
 #       timeout and is stopped, the runner publishes its exit record. The
-#       watcher delivers the completion and rings unless the task is held.
+#       watcher delivers the completion and rings when delivery is eligible.
 #       If the runner exits during startup, start returns 1 and names the
 #       retained job directory; use the recovery contract above to assess it.
 #   fm-task-job.sh stop-all <state-dir> <task-id>

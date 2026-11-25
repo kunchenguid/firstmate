@@ -64,24 +64,29 @@
 # A deliberate hold therefore never
 # auto-resumes, while a worker's own `paused:` wait is woken.
 #
-# Recovery (fm_task_job_reconcile, run by bin/fm-watch.sh on every poll for each
-# recorded task): a completion captured but not delivered is delivered, and a
-# job whose runner is gone without an exit record becomes lost only when its
-# recorded process groups and direct command are gone. Otherwise recovery
-# reports it as unrecoverable without signaling unproven groups.
+# Recovery (fm_task_job_reconcile) runs when bin/fm-watch.sh reaches the task
+# in its endpoint loop and delivers any captured completion. If a runner
+# died without an exit record, recovery records a lost job once its recorded
+# process groups and direct command are gone. When it cannot confirm those
+# processes are gone, it reports the job as unrecoverable without signaling
+# unproven groups.
 # Recovery and hold-lookup diagnostics are
 # comment status lines that preserve declared waits and open decisions.
-# fm_task_job_stop_all is teardown's stop for a task's live jobs, including
-# secondmate children, before removing their worktrees, metadata or homes.
-# A failed stop retains those resources. A finished job whose recorded runner
-# identity has ended is skipped before inspecting or signaling its historical
-# process group; a matching live runner is still stopped. Confirmed cleanup
-# appends stopped=1 to the existing job record, so retries skip that job and
-# neither recovery nor delivery produces a completion for it. An unconfirmed
-# job without an exit record still refuses cleanup when ownership is unproven.
-# Concurrent job retirement is quiet at watcher bookkeeping boundaries, while
-# write failures for surviving job records remain errors. The lifecycle and
-# delivery regressions are in tests/fm-task-job.test.sh.
+# Teardown uses fm_task_job_stop_all for the task and any secondmate children.
+# It checks before worktree cleanup and again after endpoint handling.
+# Either failure retains the job and task records for recovery. The second
+# check can run after the task's own worktree has already been returned.
+# A finished job whose recorded runner identity has ended is skipped before
+# inspecting or signaling its historical process group. A matching live runner
+# is still stopped. Once a live job is stopped and its recorded child is gone,
+# cleanup appends stopped=1 so retries, recovery, and delivery skip the job.
+# Cleanup of a missing runner without an exit record uses the lost-job check
+# above and refuses unless it can confirm the recorded groups and command
+# are gone.
+# Concurrent retirement is quiet at watcher bookkeeping boundaries. Busy or
+# delivery bookkeeping failures for surviving jobs surface as task-specific
+# stale wakes. The lifecycle and delivery regressions are in
+# tests/fm-task-job.test.sh.
 #
 # Tunables (env):
 #   FM_TASK_JOB_START_GRACE_SECS  default 30; how long a job may lack its runner
