@@ -209,6 +209,11 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+# Once the return succeeds, teardown scrubs the returned slot of the retired home's
+# gitignored leftovers (state/, data/, config/, projects/, .fm-secondmate-parent, and
+# finally .fm-secondmate-home) so the next worker leased that slot does not resolve a
+# home that no longer exists; it touches nothing tracked, and only while the slot still
+# carries this home's own marker (scrub_returned_home_slot).
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
@@ -2994,6 +2999,29 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   reap_task_worktree_processes "secondmate home" "$1"
 }
 
+# `treehouse return` resets tracked content but leaves gitignored files, so a
+# retired home's operational dirs and identity markers would outlive its lease
+# and make the next worker in that pool slot resolve a home that no longer
+# exists. Run only after the return succeeded (a failed return keeps the home
+# and its state intact), and only while the slot still carries this home's own
+# marker, so a slot already re-leased and reseeded is left alone. The marker
+# goes last so a partial scrub is retried by the next teardown.
+scrub_returned_home_slot() {
+  local slot=$1 label=$2 expected_id=$3 name marker_id
+  [ -d "$slot" ] || return 0
+  [ -f "$slot/$SUB_HOME_MARKER" ] && [ ! -L "$slot/$SUB_HOME_MARKER" ] || return 0
+  marker_id=$(cat "$slot/$SUB_HOME_MARKER" 2>/dev/null || true)
+  [ "$marker_id" = "$expected_id" ] || return 0
+  for name in state data config projects; do
+    find "$slot/$name" -type d -exec chmod u+w {} + 2>/dev/null || true
+    rm -rf -- "${slot:?}/$name" || {
+      echo "error: returned $label $slot still holds $name; the slot keeps its home marker so teardown can be retried" >&2
+      return 1
+    }
+  done
+  rm -f -- "$slot/$SUB_HOME_PARENT_MARKER" "$slot/$SUB_HOME_MARKER"
+}
+
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
   local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup pool_root
   [ -n "$home" ] || return 0
@@ -3030,6 +3058,7 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    scrub_returned_home_slot "$abs_home_path" "$label" "$expected_id" || return 1
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     remove_secondmate_treehouse_pool "$pool_root"
     return 0
