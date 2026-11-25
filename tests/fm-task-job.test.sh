@@ -817,6 +817,10 @@ watch_bg() {  # <dir> <out>
 
 test_watcher_isolates_completion_bookkeeping_failures() {
   local scenario boundary scope dir out jobdir other wpid i rc rec retire send_retire write_retire fault busy send_fail
+  local FM_REAL_MV FM_REAL_RM
+  FM_REAL_MV=$(command -v mv)
+  FM_REAL_RM=$(command -v rm)
+  export FM_REAL_MV FM_REAL_RM
   for scenario in delivery-job delivery-inbox delivery-failed busy-job escalated-job delivery-surviving busy-surviving reset-surviving escalated-surviving; do
     boundary=${scenario%%-*}
     scope=${scenario#*-}
@@ -883,7 +887,7 @@ SH
     chmod +x "$dir/fakebin/mv"
     FM_FAKE_TMUX_WINDOWS=$'fm-t1\nfm-t2' FM_JOB_RETIRE_ON_SEND="$send_retire" \
       FM_JOB_RETIRE_SEND_FAIL="$send_fail" FM_JOB_RECORD_FAULT="$fault" FM_JOB_RETIRE_AT_WRITE="$write_retire" \
-      FM_JOB_BUSY_TARGET="$busy" FM_BUSY_REGEX=BUSYTOKEN FM_REAL_MV="$(command -v mv)" FM_REAL_RM="$(command -v rm)" \
+      FM_JOB_BUSY_TARGET="$busy" FM_BUSY_REGEX=BUSYTOKEN \
       FM_JOB_RETIRE_BEFORE_ESCALATION="$jobdir" FM_REAL_TASKS_AXI="$(command -v tasks-axi)" \
       watch_bg "$dir" "$dir/watch.out"
     wpid=$!
@@ -895,8 +899,13 @@ SH
       [ -d "$jobdir" ] || fail "$scenario removed the surviving job"
       assert_grep "task job ${jobdir##*/}" "$dir/state/.wake-queue" "$scenario must queue a stale wake for the affected job"
       assert_grep 'bookkeeping' "$dir/watch.out" "$scenario must report the bookkeeping error"
-      assert_grep "'t2.inbox'" "$dir/send.log" "$scenario must let the second task's completion ring"
-      continue
+      assert_no_grep "'t2.inbox'" "$dir/send.log" "$scenario must surface the first task's wake inline"
+      if [ "$boundary" = escalated ]; then
+        mv "$(records "$dir")" "$dir/state/t1.inbox/handled/" || fail "could not acknowledge the first completion"
+      fi
+      job_lib "$dir" fm_recovery_marker_begin_handling "$dir/state/.watcher-down" || fail "could not begin handling the stale wake"
+      FM_WATCH_HANDLING_SUCCESSOR=1 FM_FAKE_TMUX_WINDOWS=$'fm-t1\nfm-t2' watch_bg "$dir" "$dir/watch.out"
+      wpid=$!
     fi
     i=0
     while [ "$i" -lt 200 ] && ! grep -qF "'t2.inbox'" "$dir/send.log"; do
@@ -910,11 +919,11 @@ SH
     fi
     rec="$dir/state/t2.inbox/$(sed -n 's/^record=//p' "$other/delivered")"
     mv "$rec" "$dir/state/t2.inbox/handled/"
-    sleep 2.5
-    kill -0 "$wpid" 2>/dev/null || fail "$scenario exited after concurrent retirement: $(cat "$dir/watch.out")"
+    [ "$scope" = surviving ] || sleep 2.5
+    kill -0 "$wpid" 2>/dev/null || fail "$scenario watcher stopped after ringing the second task: $(cat "$dir/watch.out")"
     kill "$wpid" 2>/dev/null || true
     wait "$wpid" 2>/dev/null || true
-    [ ! -e "$retire" ] || fail "$scenario recreated retired job state"
+    [ "$scope" = surviving ] || [ ! -e "$retire" ] || fail "$scenario recreated retired job state"
     [ ! -s "$dir/watch.out" ] || fail "$scenario was not a quiet no-op: $(cat "$dir/watch.out")"
   done
   pass "watcher: completion bookkeeping failures surface per task and concurrent retirement stays quiet"

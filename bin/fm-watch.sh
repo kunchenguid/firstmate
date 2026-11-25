@@ -780,15 +780,15 @@ task_job_check() {  # <window> <task>
       fi
     fi
     if [ "$verb" = escalate ] && [ -f "$rec" ] && [ -d "$dir" ]; then
-      if ! lock=$(fm_meta_lock_path "$STATE/$task.meta") || ! fm_lock_acquire_wait_max "$lock" 1; then
+      reason=${reason:-"stale: $w (task job ${dir##*/}: completion $rec still unhandled after $count doorbell delivery attempts; inspect the worker)"}
+      if ! lock=$(fm_meta_lock_path "$STATE/$task.meta") || ! fm_lock_acquire_wait "$lock"; then
         lock=
-        reason="stale: $w (task job ${dir##*/}: could not lock $STATE/$task.meta to record escalation for completion $rec)"
+        reason="${reason%)}. Could not lock $STATE/$task.meta to record escalation)"
       fi
       if [ ! -d "$dir" ] || [ ! -f "$rec" ]; then
         [ -z "$lock" ] || fm_lock_release "$lock" || true
         continue
       fi
-      reason=${reason:-"stale: $w (task job ${dir##*/}: completion $rec still unhandled after $count doorbell delivery attempts; inspect the worker)"}
       if ! fm_wake_append stale "$w" "$reason" 2>/dev/null; then
         [ -z "$lock" ] || fm_lock_release "$lock" || true
         [ -d "$dir" ] || continue
@@ -4664,7 +4664,6 @@ EOF
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
-  task_job_wake_reason=
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
@@ -4675,7 +4674,7 @@ EOF
       fm_task_job_reconcile "$STATE" "$task" || true
       task_job_check "$w" "$task" || exit 1
       inbox_steer_check "$w" "$task"
-      [ -z "$TASK_JOB_WAKE_REASON" ] || task_job_wake_reason=$TASK_JOB_WAKE_REASON
+      [ -z "$TASK_JOB_WAKE_REASON" ] || wake "$TASK_JOB_WAKE_REASON"
     fi
     key=$(window_key "$w")
     last=$(status_declared_wait_line "$STATE/$task.status")
@@ -4922,7 +4921,6 @@ EOF
       fi
     fi
   done < <(recorded_windows)
-  [ -z "$task_job_wake_reason" ] || wake "$task_job_wake_reason"
 
   # Collect a completed hygiene scan before launching another one. The report
   # child keeps endpoint/backlog reads out of the polling path. Only a home
