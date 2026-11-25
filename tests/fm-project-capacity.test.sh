@@ -79,6 +79,10 @@ make_case() {  # <name> [task-id...]
 printf '%s\n' "$*" >> "$FM_FAKE_CALL_LOG"
 window_file="$FM_FAKE_CALL_LOG.window"
 case "$*" in
+  *"#{pane_current_command}"*)
+    printf '%s\n' "${FM_FAKE_AGENT_COMMAND:-firstmate}"
+    exit 0
+    ;;
   *"#{pane_current_path}"*)
     # A spawn that is told to hold waits here, after its capacity check and
     # while it still holds the project lock, until the test releases it.
@@ -724,6 +728,124 @@ SH
   pass "an Orca spawn takes the shared project lock whenever a same-origin clone is capped and defers before creating anything"
 }
 
+# Ownership admission shares the same cross-home project serialization.
+test_launch_ownership() {
+  local case_dir home pane out rc mate
+  case_dir=$(make_case ownership task-new task-peer task-free task-other task-override task-stale task-unknown task-brief task-persisted)
+  home="$case_dir/home"
+  pane=$(new_worktree "$case_dir" ownership)
+  write_live "$home" owner "$case_dir/project" 'branch=fm/task-new'
+  printf 'fm-owner\n' > "$case_dir/calls.log.window"
+
+  rc=0
+  out=$(run_spawn "$case_dir" "$home" "$pane" task-new "$case_dir/project" --mode no-mistakes --yolo off --allow-duplicate '') || rc=$?
+  expect_code 1 "$rc" "an empty override must not bypass ownership: $out"
+  assert_contains "$out" 'requires a nonblank reason' 'empty override did not explain its refusal'
+
+  rc=0
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_spawn "$case_dir" "$home" "$pane" task-new "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 1 "$rc" "a different task id must not take a live worker's branch: $out"
+  assert_contains "$out" 'branch fm/task-new is already owned by worker owner' 'missing branch refusal reason'
+  assert_contains "$out" 'liveness=alive' 'the fixture must exercise positive worker liveness'
+  assert_absent "$home/state/task-new.meta" 'a refused duplicate published metadata'
+  assert_absent "$home/data/task-new/launch-brief.md" 'a refused duplicate rendered a brief'
+  assert_no_grep 'new-window' "$case_dir/calls.log" 'a refused duplicate allocated an endpoint'
+  assert_no_grep 'treehouse ' "$case_dir/calls.log" 'a refused duplicate allocated a pool slot'
+
+  mate="$case_dir/mate"
+  make_home "$mate"
+  printf -- '- mate - Mate (home: %s; scope: test; projects: project; added 2026-11-25)\n' "$mate" > "$home/data/secondmates.md"
+  write_live "$mate" peer "$case_dir/project" 'branch=other-branch' 'pr=https://github.com/Example/Project/pull/123'
+  printf 'fm-peer\n' >> "$case_dir/calls.log.window"
+  printf '\nPR start: follow-up https://github.com/example/project/pull/123 abcdef\n' >> "$home/data/task-peer/brief.md"
+  rc=0
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_spawn "$case_dir" "$home" "$pane" task-peer "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 1 "$rc" "a different task id/branch must not duplicate a secondmate worker's PR: $out"
+  assert_contains "$out" "already owned by worker peer in $mate" 'missing cross-home ownership reason'
+  assert_absent "$home/state/task-peer.meta" 'a cross-home duplicate published metadata'
+
+  write_live "$home" unknown "$case_dir/project" 'branch=fm/task-unknown' 'backend=zellij'
+  rc=0
+  out=$(run_spawn "$case_dir" "$home" "$pane" task-unknown "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 1 "$rc" "unknown liveness must not authorize a duplicate: $out"
+  assert_contains "$out" 'liveness=unknown' 'uncertain ownership must fail closed'
+
+  write_brief "$mate" brief-owner
+  printf '\nRepair https://github.com/example/project/pull/456.\n' >> "$mate/data/brief-owner/brief.md"
+  write_live "$mate" brief-owner "$case_dir/project"
+  printf 'fm-brief-owner\n' >> "$case_dir/calls.log.window"
+  printf '\nRepair https://github.com/example/project/pull/456#discussion.\n' >> "$home/data/task-brief/brief.md"
+  rc=0
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_spawn "$case_dir" "$home" "$pane" task-brief "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 1 "$rc" "legacy task briefs must claim PRs even without pr metadata: $out"
+  assert_contains "$out" 'already owned by worker brief-owner' 'a legacy brief PR was not matched'
+
+  # Independent work and a same-named branch on another origin remain allowed.
+  write_live "$home" unrelated "$case_dir/other-project" 'branch=fm/task-other'
+  printf 'fm-unrelated\n' >> "$case_dir/calls.log.window"
+  rc=0
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_spawn "$case_dir" "$home" "$pane" task-other "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "a branch in another origin must not collide: $out"
+
+  printf '\nWork on https://github.com/example/project/pull/123/files.\n' >> "$home/data/task-override/brief.md"
+  rc=0
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_spawn "$case_dir" "$home" "$pane" task-override "$case_dir/project" --mode no-mistakes --yolo off --allow-duplicate 'independent critic') || rc=$?
+  expect_code 0 "$rc" "an explicitly intended critic must be allowed: $out"
+  assert_contains "$out" 'duplicate ownership guard overridden' 'override was silent'
+  assert_grep 'duplicate_override=independent critic' "$home/state/task-override.meta" 'override reason was not recorded'
+  assert_grep 'launch_pr=https://github.com/example/project/pull/123' "$home/state/task-override.meta" 'work PR was not persisted'
+
+  write_brief "$home" task-override
+  printf '\nRepair https://github.com/example/project/pull/123.\n' >> "$home/data/task-persisted/brief.md"
+  rc=0
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_spawn "$case_dir" "$home" "$pane" task-persisted "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 1 "$rc" "a brief rewrite must not erase a running worker's PR claim: $out"
+  assert_contains "$out" 'already owned by worker task-override' 'persisted PR claim did not protect the live worker'
+
+  # A stale task record alone does not hold a branch after its endpoint is gone.
+  write_live "$home" stale "$case_dir/project" 'branch=fm/task-stale'
+  rc=0
+  out=$(run_spawn "$case_dir" "$home" "$pane" task-stale "$case_dir/project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "an authoritatively absent worker must release ownership: $out"
+  pass 'ownership admission refuses live same-branch and cross-home PR duplicates, permits unrelated/stale work and records explicit overrides'
+}
+
+test_ownership_serializes_different_origins() {
+  local case_dir home mate hold wt out rc=0 i pid
+  case_dir=$(make_case ownership-race task-a)
+  home="$case_dir/home"
+  mate="$case_dir/mate"
+  make_home "$mate" task-b
+  printf -- '- mate - Mate (home: %s; scope: test; projects: project; added 2026-11-25)\n' "$mate" > "$home/data/secondmates.md"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" > "$mate/.fm-secondmate-parent"
+  printf '\nRepair https://github.com/example/project/pull/789.\n' >> "$home/data/task-a/brief.md"
+  printf '\nRepair https://github.com/example/project/pull/789.\n' >> "$mate/data/task-b/brief.md"
+  hold="$case_dir/hold"
+  wt=$(new_worktree "$case_dir" task-a)
+  FM_FAKE_HOLD="$hold" spawn_ship "$case_dir" task-a "$wt" > "$case_dir/a.out" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -f "$hold.reached" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 400 ] || fail "ownership holder never reached launch: $(<"$case_dir/a.out")"
+    sleep 0.05
+  done
+  out=$(run_spawn "$case_dir" "$mate" "$case_dir/unused" task-b "$case_dir/other-project" --mode no-mistakes --yolo off) || rc=$?
+  : > "$hold.release"
+  wait "$pid" || fail "ownership holder failed: $(<"$case_dir/a.out")"
+  expect_code 1 "$rc" "different-origin concurrent PR ownership was not serialized: $out"
+  assert_contains "$out" 'local fleet ownership lock' 'cross-origin launch did not meet ownership serialization'
+  assert_absent "$mate/state/task-b.meta" 'a concurrent different-origin launch published ownership'
+  assert_contains "$(<"$case_dir/a.out")" 'spawned task-a' 'the first ownership holder did not finish'
+  rc=0
+  out=$(FM_FAKE_AGENT_COMMAND=codex run_spawn "$case_dir" "$mate" "$case_dir/unused" task-b "$case_dir/other-project" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 1 "$rc" "retry failed to observe published PR ownership: $out"
+  assert_contains "$out" 'already owned by worker task-a' 'retry did not read the now-published claim'
+  pass 'different-origin concurrent PR launches share ownership serialization across homes'
+}
+
+test_launch_ownership
+test_ownership_serializes_different_origins
 test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind

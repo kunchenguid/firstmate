@@ -1919,6 +1919,13 @@ When stripping is enabled, the hooks directory is read-only, so a hook manager r
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
 
+## Launch ownership admission
+
+Fresh worker launches refuse branch or GitHub PR overlap with a live worker in this home or a registered local secondmate home.
+This guard is machine-local: registered remote homes are not checked, and free-text scope without a branch or full PR URL is not inferred.
+[`bin/fm-launch-guard-lib.sh`](../bin/fm-launch-guard-lib.sh) owns matching, liveness, serialization, and the explicit override contract exposed by [`fm-spawn.sh --help`](../bin/fm-spawn.sh).
+Behavioral coverage lives in [`tests/fm-project-capacity.test.sh`](../tests/fm-project-capacity.test.sh).
+
 ## Project capacity (config/project-capacity)
 
 The optional local, gitignored `config/project-capacity` tells Firstmate how many workers a project can run at once on this machine, for a project whose machine-local resource - a heavy test suite, a local editor stack, a device - only serves a few workers at a time.

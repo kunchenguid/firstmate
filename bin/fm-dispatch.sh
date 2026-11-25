@@ -65,12 +65,12 @@ while [ "$#" -gt 0 ]; do
       [ "$VERB" != relaunch ] || die "unsupported relaunch option $1"
       case "$VERB:$1" in promote:--scout|promote:--herdr-resume-lock-wait) die "unsupported promote option $1" ;; esac
       ARGS+=("$1"); shift ;;
-    --mode|--yolo|--branch-prefix|--base-branch|--upstream-consent|--backend|--priority|--note|--note-file)
+    --mode|--yolo|--branch-prefix|--base-branch|--upstream-consent|--backend|--priority|--note|--note-file|--allow-duplicate)
       flag=$1
       [ "$#" -ge 2 ] && [ -n "$2" ] || die "$flag needs a value"
       case "$2" in --*) die "$flag needs a value, not a flag" ;; esac
       case "$VERB:$flag" in
-        new:--note|new:--note-file|promote:--note|promote:--note-file|promote:--backend|promote:--base-branch|promote:--priority) die "unsupported $VERB option $flag" ;;
+        promote:--allow-duplicate|new:--note|new:--note-file|promote:--note|promote:--note-file|promote:--backend|promote:--base-branch|promote:--priority) die "unsupported $VERB option $flag" ;;
         relaunch:*) case "$flag" in --note|--note-file|--priority) ;; *) die "unsupported relaunch option $flag" ;; esac ;;
       esac
       ARGS+=("$flag" "$2"); shift 2 ;;

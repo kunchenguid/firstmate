@@ -265,6 +265,11 @@
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
+#   Ownership admission: bin/fm-launch-guard-lib.sh owns branch/PR matching,
+#   liveness, registry coverage and fail-closed limits. Use --allow-duplicate
+#   <reason> only for intended overlapping work (such as independent critics).
+#   The reason is printed and recorded; other launch gates remain enforced.
+#
 #   Project capacity: when this machine declares how many workers a project
 #   admits at once (config/project-capacity; bin/fm-project-capacity-lib.sh owns
 #   the declaration, what holds a place, and the race argument), a fresh ship or
@@ -1082,6 +1087,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-project-capacity-lib.sh
 . "$SCRIPT_DIR/fm-project-capacity-lib.sh"
+# shellcheck source=bin/fm-launch-guard-lib.sh
+. "$SCRIPT_DIR/fm-launch-guard-lib.sh"
 # shellcheck source=bin/fm-ship-overlap-lib.sh
 . "$SCRIPT_DIR/fm-ship-overlap-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
@@ -1105,6 +1112,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 BRANCH_PREFIX=fm/
+ALLOW_DUPLICATE=
 TRACEPARENT_ARG=
 PRIORITY_ARG=
 ACCOUNT_ARG=
@@ -1154,6 +1162,10 @@ for a in "$@"; do
       claude-add-dir) CLAUDE_ADD_DIRS+=("$a") ;;
       claude-plugin-dir) CLAUDE_PLUGIN_DIRS+=("$a") ;;
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
+      allow-duplicate)
+        [ -n "$a" ] || { echo 'error: --allow-duplicate requires a nonblank reason' >&2; exit 1; }
+        ALLOW_DUPLICATE=$a
+        ;;
       base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -1193,6 +1205,11 @@ for a in "$@"; do
     --claude-add-dir=*) CLAUDE_ADD_DIRS+=("${a#--claude-add-dir=}") ;;
     --claude-plugin-dir) want_value='claude-plugin-dir' ;;
     --claude-plugin-dir=*) CLAUDE_PLUGIN_DIRS+=("${a#--claude-plugin-dir=}") ;;
+    --allow-duplicate) want_value="allow-duplicate" ;;
+    --allow-duplicate=*)
+      ALLOW_DUPLICATE=${a#--allow-duplicate=}
+      [ -n "$ALLOW_DUPLICATE" ] || { echo 'error: --allow-duplicate requires a nonblank reason' >&2; exit 1; }
+      ;;
     --branch-prefix) want_value="branch-prefix" ;;
     --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
     --base-branch) want_value="base-branch" ;;
@@ -1206,6 +1223,10 @@ done
   echo "error: --$want_value requires a value" >&2
   exit 1
 }
+if [ -n "$ALLOW_DUPLICATE" ] && { [ "$KIND" = secondmate ] || [ "$RELAUNCH" -eq 1 ]; }; then
+  echo 'error: --allow-duplicate is for fresh workers, not secondmate homes or relaunches' >&2
+  exit 1
+fi
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || {
   echo "error: --harness requires a non-empty value" >&2
   exit 1
@@ -1770,6 +1791,7 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+SPAWN_OWNERSHIP_LOCK=
 SPAWN_SLOT_CLAIMED=0
 SPAWN_FRESH_ENDPOINT_OPENED=0
 SPAWN_FRESH_WIRING_PENDING=0
@@ -2068,6 +2090,10 @@ spawn_abort_cleanup() {
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
   fi
+  if [ -n "$SPAWN_OWNERSHIP_LOCK" ]; then
+    fm_lock_release "$SPAWN_OWNERSHIP_LOCK" || true
+    SPAWN_OWNERSHIP_LOCK=
+  fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
@@ -2226,6 +2252,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   for dir in "${CLAUDE_ADD_DIRS[@]+"${CLAUDE_ADD_DIRS[@]}"}"; do shared_args+=(--claude-add-dir "$dir"); done
   for dir in "${CLAUDE_PLUGIN_DIRS[@]+"${CLAUDE_PLUGIN_DIRS[@]}"}"; do shared_args+=(--claude-plugin-dir "$dir"); done
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  [ -z "$ALLOW_DUPLICATE" ] || shared_args+=(--allow-duplicate "$ALLOW_DUPLICATE")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   for pair in "${POS[@]}"; do
@@ -4555,6 +4582,32 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
+[ -f "$BRIEF" ] || {
+  echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
+  exit 1
+}
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  SPAWN_OWNERSHIP_ROOT=$(fm_firstmate_root_home "$FM_HOME") || exit 1
+  SPAWN_OWNERSHIP_LOCK_PATH="$SPAWN_OWNERSHIP_ROOT/state/.launch-ownership.lock"
+  if ! fm_lock_try_acquire "$SPAWN_OWNERSHIP_LOCK_PATH"; then
+    echo 'error: another launch holds the local fleet ownership lock; retry after its admission completes' >&2
+    exit 1
+  fi
+  SPAWN_OWNERSHIP_LOCK=$SPAWN_OWNERSHIP_LOCK_PATH
+  if [ -n "$ALLOW_DUPLICATE" ]; then
+    case "$ALLOW_DUPLICATE" in
+      *[![:space:]]*) ;;
+      *) echo 'error: --allow-duplicate requires a nonblank reason' >&2; exit 1 ;;
+    esac
+    case "$ALLOW_DUPLICATE" in
+      *[[:cntrl:]]*) echo 'error: --allow-duplicate reason must be one line without control bytes' >&2; exit 1 ;;
+    esac
+    echo "notice: duplicate ownership guard overridden for $ID: $ALLOW_DUPLICATE" >&2
+  elif ! fm_launch_guard "$PROJ_ABS" "${BRANCH:-}" "$BRIEF" "$STATE" "$DATA" "$ID"; then
+    echo "error: launch refused: $FM_LAUNCH_GUARD_ERROR; use --allow-duplicate <reason> only for intended overlap" >&2
+    exit 1
+  fi
+fi
 if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
   if ! fm_project_capacity_occupants "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
     echo "error: spawn refused: project $(basename "$PROJ_ABS") declares a capacity of $SPAWN_PROJECT_CAPACITY, but this machine's task records cannot all be read to count it ($FM_PROJECT_CAPACITY_ERROR)" >&2
@@ -4564,10 +4617,6 @@ if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
     spawn_hold_start "deferred: project $(basename "$PROJ_ABS") admits $SPAWN_PROJECT_CAPACITY worker(s) at once on this machine ($FM_PROJECT_CAPACITY_FILE) and $FM_PROJECT_CAPACITY_OCCUPANTS already hold a place ($FM_PROJECT_CAPACITY_OCCUPANT_IDS)"
   fi
 fi
-[ -f "$BRIEF" ] || {
-  echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
-  exit 1
-}
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   HERDR_LIFECYCLE_BRIEF_GUARD=$(fm_config_source_present "$CONFIG/herdr-lifecycle-spawn-guard") || exit 1
   if [ "$HERDR_LIFECYCLE_BRIEF_GUARD" = 1 ]; then
@@ -8127,6 +8176,12 @@ preserve_relaunch_meta() {
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BRANCH:-}" ] || echo "branch=$BRANCH"
+  if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+    while IFS= read -r launch_pr; do
+      [ -z "$launch_pr" ] || echo "launch_pr=$launch_pr"
+    done < <(fm_launch_pr_urls "${SOURCE_BRIEF:-$BRIEF}" || true)
+    [ -z "$ALLOW_DUPLICATE" ] || echo "duplicate_override=$ALLOW_DUPLICATE"
+  fi
   echo "tasktmp=$TASK_TMP"
   [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
   [ -z "$UPSTREAM_CONSENT" ] || echo "upstream_consent=$UPSTREAM_CONSENT"
@@ -8301,6 +8356,10 @@ fi
 if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
   fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
+fi
+if [ -n "$SPAWN_OWNERSHIP_LOCK" ]; then
+  fm_lock_release "$SPAWN_OWNERSHIP_LOCK"
+  SPAWN_OWNERSHIP_LOCK=
 fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown

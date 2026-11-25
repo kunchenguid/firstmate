@@ -95,7 +95,7 @@ last_args() { tail -n 1 "$BROKER_LOG"; }
 reset_case
 rm -f "$FM_HOME/state/task.meta"
 export RESOLVE_MODE=error FM_ADMISSION_DISPATCH="$BROKER"
-bash "$BROKER" new task '/projects/project with spaces' --scout > "$TMP/out"
+bash "$BROKER" new task '/projects/project with spaces' --scout --allow-duplicate 'independent critic' > "$TMP/out"
 assert_contains "$(<"$TMP/out")" 'queued: task' 'async submit did not return a durable receipt'
 [ ! -s "$BROKER_LOG" ] || fail 'async submit called resolver or launch'
 assert_present "$FM_HOME/state/admission-queue/task.start" 'request was not persisted'
@@ -105,6 +105,7 @@ export RESOLVE_MODE=clear
 bash "$QUEUE_REAL" retry > "$TMP/out"
 assert_contains "$(<"$TMP/out")" 'admission: started task' 'durable replay did not finish start'
 last_args | jq -e '.[1] == "/projects/project with spaces"' >/dev/null || fail 'duplicate replaced saved project'
+last_args | jq -e 'index("--allow-duplicate") as $i | $i != null and .[$i + 1] == "independent critic"' >/dev/null || fail 'queued replay lost the explicit ownership override'
 assert_absent "$FM_HOME/state/admission-queue/task.start" 'completed request remained queued'
 pass 'new returns before resolver and durable replay preserves the original request exactly once'
 
