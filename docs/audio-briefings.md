@@ -23,6 +23,9 @@ The default engine needs `python3` 3.10 to 3.13 with its `venv` module (the Koko
 A render never needs `curl`: only `--setup` and the piper voice download do.
 Plan for about 530 MB of disk for the default engine's cache.
 
+Both engines run on macOS and Linux.
+The text pipeline is the same on either: it uses only portable tools (`awk`, `sed`, `iconv`, `tr`, `wc`), so `--print-text` and the sentence split produce the same sentences under the BSD tools macOS ships and under GNU tools.
+
 Prepare the default engine once:
 
 ```sh
@@ -31,10 +34,13 @@ bin/fm-speak.sh --setup
 
 `--setup` creates a python venv, installs `kokoro-onnx` and `soundfile` into it, downloads the Kokoro model and voice pack, and reports the C++ runtime it found.
 It is idempotent: a re-run prints what is already present and downloads nothing.
+It is also the repair: a venv that cannot import its packages is rebuilt, and each download is written to a temporary file and moved into place only when it completes, so a run interrupted by a network failure leaves nothing that a later run mistakes for a finished cache.
 
-On some Linux hosts onnxruntime cannot find a C++ runtime by itself, so the script locates `libstdc++` (a Nix store gcc build, or a standard `/usr/lib` path) and hands it to its own child process through `LD_LIBRARY_PATH`.
+The C++ runtime step is Linux only.
+On some Linux hosts onnxruntime cannot find a C++ runtime by itself, so the script locates `libstdc++` (a Nix store gcc build, or a standard multiarch `/usr/lib` path) and hands it to its own child process through `LD_LIBRARY_PATH`.
 No caller environment is needed; a shell with `PATH` and `HOME` set is enough.
-When no C++ runtime is found, `--setup` says so and a render stops with a message naming `LD_LIBRARY_PATH`.
+When no C++ runtime is found on Linux, `--setup` says so and a render stops with a message naming `LD_LIBRARY_PATH`.
+On macOS onnxruntime links the platform C++ runtime, so `--setup` reports the runtime as not needed there and a render asks for nothing extra.
 
 The optional piper engine needs its own binary, which the tool takes from `PATH` first and otherwise from a pinned build:
 
@@ -42,7 +48,7 @@ The optional piper engine needs its own binary, which the tool takes from `PATH`
 nix build 'nixpkgs#piper-tts' --out-link "$HOME/.cache/fm-tts/piper-tts"
 ```
 
-Every missing piece is reported with the command that installs it rather than failing part-way through a render, and an incomplete Kokoro cache is reported as one line naming `bin/fm-speak.sh --setup`, never as a Python traceback.
+Every missing piece is reported with the command that installs it rather than failing part-way through a render, and a Kokoro cache this build cannot use - files missing, or a venv whose packages will not import - is reported as one line naming `bin/fm-speak.sh --setup`, never as a Python traceback.
 
 ## Caches
 

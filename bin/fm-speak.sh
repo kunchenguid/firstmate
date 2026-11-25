@@ -73,8 +73,10 @@
 #   kokoro-onnx and soundfile, `kokoro-v1.0.onnx` and `voices-v1.0.bin`. Create
 #   it, or repair it, with the one command `fm-speak.sh --setup`. onnxruntime
 #   does not find a C++ runtime by itself on every Linux host, so the script
-#   locates libstdc++ (a Nix store build, or a standard /usr/lib path) and sets
-#   LD_LIBRARY_PATH for its own child process; no caller environment is needed.
+#   locates libstdc++ (a Nix store build, or a standard multiarch /usr/lib path)
+#   and sets LD_LIBRARY_PATH for its own child process; no caller environment is
+#   needed. That lookup is Linux only: on macOS onnxruntime links the platform
+#   C++ runtime, so a render there needs nothing extra.
 #   piper (optional). `piper` comes from PATH or from the pinned build linked at
 #   $FM_TTS_CACHE_DIR/piper-tts (default $HOME/.cache/fm-tts/piper-tts), and its
 #   voice models live in $FM_TTS_CACHE_DIR/voices. Missing pieces fail loudly
@@ -121,6 +123,10 @@ DEFAULT_OUT=$HOME/audio-briefings
 # duration is measured after synthesis, and a bad estimate is corrected.
 WORDS_PER_MINUTE=145
 MAX_ATTEMPTS=4
+# Only Linux needs the C++ runtime lookup below: macOS and Windows onnxruntime
+# builds link the platform runtime themselves.
+HOST_OS=$(uname -s)
+libstdcpp_dir=
 
 die() {
   printf '%s: error: %s\n' "$SCRIPT_NAME" "$*" >&2
@@ -168,10 +174,12 @@ engine_default_voice() {
   esac
 }
 
-# onnxruntime needs a C++ runtime that some hosts do not put on the default
-# loader path. Find one and hand it to the child process only.
+# onnxruntime needs a C++ runtime that some Linux hosts do not put on the
+# default loader path. Find one there and hand it to the child process only.
+# Elsewhere the platform runtime is used, so an empty result means "not needed".
 find_libstdcpp_dir() {
   local candidate dirs=()
+  [ "$HOST_OS" = Linux ] || return 0
   if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     IFS=: read -r -a dirs <<<"$LD_LIBRARY_PATH"
     for candidate in "${dirs[@]}"; do
@@ -184,6 +192,12 @@ find_libstdcpp_dir() {
   for candidate in \
     /nix/store/*-gcc-*-lib/lib/libstdc++.so.6 \
     /usr/lib/x86_64-linux-gnu/libstdc++.so.6 \
+    /usr/lib/aarch64-linux-gnu/libstdc++.so.6 \
+    /usr/lib/arm-linux-gnu/libstdc++.so.6 \
+    /usr/lib/i386-linux-gnu/libstdc++.so.6 \
+    /usr/lib/riscv64-linux-gnu/libstdc++.so.6 \
+    /usr/lib/powerpc64le-linux-gnu/libstdc++.so.6 \
+    /usr/lib/s390x-linux-gnu/libstdc++.so.6 \
     /usr/lib64/libstdc++.so.6 \
     /usr/lib/libstdc++.so.6; do
     [ -e "$candidate" ] && {
@@ -192,6 +206,44 @@ find_libstdcpp_dir() {
     }
   done
   return 1
+}
+
+# The renderer runs inside the durable venv; on Linux it is also the one child
+# that needs the located C++ runtime on its loader path.
+kokoro_python() {
+  if [ -n "$libstdcpp_dir" ]; then
+    LD_LIBRARY_PATH="$libstdcpp_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+      "$KOKORO_VENV/bin/python" "$@"
+  else
+    "$KOKORO_VENV/bin/python" "$@"
+  fi
+}
+
+# One validity test for the cache, shared by --setup (what to repair) and the
+# render preflight (what to refuse), so a cache a render cannot use is never
+# reported as present.
+kokoro_venv_ready() {
+  [ -x "$KOKORO_VENV/bin/python" ] || return 1
+  kokoro_python -c 'import kokoro_onnx, soundfile' >/dev/null 2>&1
+}
+
+kokoro_cache_ready() {
+  [ -s "$KOKORO_MODEL" ] && [ -s "$KOKORO_VOICES" ] && kokoro_venv_ready
+}
+
+# A download reaches the cache only after it completes, so an interrupted or
+# error response is never mistaken for a finished file.
+fetch_kokoro_file() {
+  local url=$1 dest=$2 tmp
+  tmp=$(mktemp "$dest.XXXXXX") || return 1
+  if ! curl -fsSL -o "$tmp" "$url" || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$dest" || {
+    rm -f "$tmp"
+    return 1
+  }
 }
 
 # The Kokoro renderer runs inside the durable venv, so the tool carries it as an
@@ -242,39 +294,49 @@ cmd_setup() {
     die "cannot create a temporary work directory"
   trap 'rm -rf "$workdir"' EXIT
 
-  if [ ! -x "$KOKORO_VENV/bin/python" ]; then
+  libstdcpp_dir=$(find_libstdcpp_dir)
+  if [ -n "$libstdcpp_dir" ]; then
+    printf 'cxx-runtime: %s\n' "$libstdcpp_dir"
+  elif [ "$HOST_OS" = Linux ]; then
+    printf 'cxx-runtime: none found; install a C++ runtime (glibc or the gcc C++ library), or set LD_LIBRARY_PATH\n'
+  else
+    printf 'cxx-runtime: not needed on %s\n' "$HOST_OS"
+  fi
+
+  if kokoro_venv_ready; then
+    printf 'venv: present\n'
+  else
     command -v python3 >/dev/null 2>&1 ||
       die "python3 is needed to build the Kokoro venv and is not on PATH"
-    printf 'venv: creating %s\n' "$KOKORO_VENV"
+    if [ -x "$KOKORO_VENV/bin/python" ]; then
+      printf 'venv: repairing %s\n' "$KOKORO_VENV"
+      rm -rf "$KOKORO_VENV" || die "could not replace the unusable venv at $KOKORO_VENV"
+    else
+      printf 'venv: creating %s\n' "$KOKORO_VENV"
+    fi
     python3 -m venv "$KOKORO_VENV" || die "could not create the venv at $KOKORO_VENV"
     "$KOKORO_VENV/bin/pip" install --quiet --disable-pip-version-check \
       kokoro-onnx soundfile || die "could not install kokoro-onnx and soundfile into $KOKORO_VENV"
-  else
-    printf 'venv: present\n'
+    kokoro_venv_ready ||
+      die "the venv at $KOKORO_VENV cannot import kokoro-onnx and soundfile"
   fi
 
-  if [ ! -s "$KOKORO_MODEL" ]; then
-    printf 'model: fetching %s\n' "$KOKORO_MODEL"
-    curl -sSL -o "$KOKORO_MODEL" \
-      https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx ||
-      die "could not download the Kokoro model to $KOKORO_MODEL"
-  else
+  if [ -s "$KOKORO_MODEL" ]; then
     printf 'model: present\n'
+  else
+    printf 'model: fetching %s\n' "$KOKORO_MODEL"
+    fetch_kokoro_file \
+      https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx \
+      "$KOKORO_MODEL" || die "could not download the Kokoro model to $KOKORO_MODEL"
   fi
 
-  if [ ! -s "$KOKORO_VOICES" ]; then
-    printf 'voices: fetching %s\n' "$KOKORO_VOICES"
-    curl -sSL -o "$KOKORO_VOICES" \
-      https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin ||
-      die "could not download the Kokoro voice pack to $KOKORO_VOICES"
-  else
+  if [ -s "$KOKORO_VOICES" ]; then
     printf 'voices: present\n'
-  fi
-
-  if libstdcpp_dir=$(find_libstdcpp_dir); then
-    printf 'cxx-runtime: %s\n' "$libstdcpp_dir"
   else
-    printf 'cxx-runtime: none found; install a C++ runtime (glibc or the gcc C++ library), or set LD_LIBRARY_PATH\n'
+    printf 'voices: fetching %s\n' "$KOKORO_VOICES"
+    fetch_kokoro_file \
+      https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin \
+      "$KOKORO_VOICES" || die "could not download the Kokoro voice pack to $KOKORO_VOICES"
   fi
   printf 'default-voice: %s\n' "$(engine_default_voice kokoro)"
   printf 'done: %s\n' "$KOKORO_DIR"
@@ -436,10 +498,10 @@ command -v ffprobe >/dev/null 2>&1 ||
 fi
 
 if [ "$print_text" -eq 0 ] && [ "$ENGINE" = kokoro ]; then
-  [ -x "$KOKORO_VENV/bin/python" ] && [ -s "$KOKORO_MODEL" ] && [ -s "$KOKORO_VOICES" ] ||
-    die "the Kokoro cache at $KOKORO_DIR is incomplete; $setup_hint"
   libstdcpp_dir=$(find_libstdcpp_dir) ||
     die "no libstdc++ found for the Kokoro runtime; install a C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH"
+  kokoro_cache_ready ||
+    die "the Kokoro cache at $KOKORO_DIR is incomplete; $setup_hint"
   case $VOICE in
     b*) kokoro_lang=en-gb ;;
     *) kokoro_lang=en-us ;;
@@ -534,7 +596,11 @@ awk '
 ' "$input" >"$text" || die "could not read the input as text: $input"
 
 # Inline pass: unwrap links, images, inline code and emphasis; normalise
-# typography, HTML entities, bullets and abbreviations into spoken words.
+# typography, HTML entities, bullets and abbreviations into spoken words. The
+# typographic single quotes are built from bytes so the shell never has to carry
+# a literal that reads as an unbalanced apostrophe.
+rsquo=$(printf '\xe2\x80\x99')
+lsquo=$(printf '\xe2\x80\x98')
 sed -E \
   -e 's/!\[[^]]*\]\([^)]*\)//g' \
   -e 's/\[\[([^]]*)\]\]/\1/g' \
@@ -543,7 +609,7 @@ sed -E \
   -e 's/\[([^]]*)\]\[[^]]*\]/\1/g' \
   -e 's/\[\^[^]]*\]//g' \
   -e 's/\[[0-9]+\]//g' \
-  -e 's/\x60+([^\x60]*)\x60+/\1/g' \
+  -e 's/`+([^`]*)`+/\1/g' \
   -e 's/\*\*([^*]+)\*\*/\1/g' \
   -e 's/__([^_]+)__/\1/g' \
   -e 's/\*([^*]+)\*/\1/g' \
@@ -552,36 +618,36 @@ sed -E \
   -e 's/&amp;/\&/g' \
   -e 's/&lt;/</g' \
   -e 's/&gt;/>/g' \
-  -e 's/\xe2\x80\x99/'"'"'/g' \
-  -e 's/\xe2\x80\x98/'"'"'/g' \
-  -e 's/\xe2\x80\x9c/"/g' \
-  -e 's/\xe2\x80\x9d/"/g' \
-  -e 's/\xe2\x80\x94/ - /g' \
-  -e 's/\xe2\x80\x93/ - /g' \
-  -e 's/\xe2\x80\xa6/... /g' \
-  -e 's/\xe2\x86\x92/ to /g' \
-  -e 's/\xe2\x86\x90/ from /g' \
-  -e 's/\xe2\x86\x94/ and /g' \
-  -e 's/\xe2\x89\x88/ about /g' \
-  -e 's/\xc2\xb1/ plus or minus /g' \
-  -e 's/\xc2\xb0/ degrees/g' \
-  -e 's/\xe2\x80\xa2/ /g' \
+  -e "s/${rsquo}/'/g" \
+  -e "s/${lsquo}/'/g" \
+  -e 's/“/"/g' \
+  -e 's/”/"/g' \
+  -e 's/—/ - /g' \
+  -e 's/–/ - /g' \
+  -e 's/…/... /g' \
+  -e 's/→/ to /g' \
+  -e 's/←/ from /g' \
+  -e 's/↔/ and /g' \
+  -e 's/≈/ about /g' \
+  -e 's/±/ plus or minus /g' \
+  -e 's/°/ degrees/g' \
+  -e 's/•/ /g' \
   -e 's/ ?-> ?/ to /g' \
   -e 's/([0-9])x([0-9])/\1 by \2/g' \
   -e 's#(https?|ftp)://[^ )>]*##g' \
-  -e 's#\bwww\.[^ )>]*##g' \
+  -e 's#(^|[^[:alnum:]_])www\.[^ )>]*#\1#g' \
   -e 's/§ ?/section /g' \
   -e 's/[[:space:]]+([.,;:!?])/\1/g' \
   "$text" >"$workdir/inline.txt" || die "could not normalise the input text"
 
 sed -E \
-  -e 's/\be\.g\./for example,/g' \
-  -e 's/\bi\.e\./that is,/g' \
-  -e 's/\betc\./et cetera,/g' \
-  -e 's/\bapprox\./approximately/g' \
-  -e 's/\bvs\.?(\s)/versus\1/g' \
-  -e 's/\bw\/o\b/without/g' \
-  -e 's/\bw\//with /g' \
+  -e 's/(^|[^[:alnum:]_])e\.g\./\1for example,/g' \
+  -e 's/(^|[^[:alnum:]_])i\.e\./\1that is,/g' \
+  -e 's/(^|[^[:alnum:]_])etc\./\1et cetera,/g' \
+  -e 's/(^|[^[:alnum:]_])approx\./\1approximately/g' \
+  -e 's/(^|[^[:alnum:]_])vs\.?([[:space:]])/\1versus\2/g' \
+  -e 's/(^|[^[:alnum:]_])w\/o([^[:alnum:]_]|$)/\1without\2/g' \
+  -e 's/(^|[^[:alnum:]_])w\//\1with /g' \
   -e 's/[[:space:]]*&[[:space:]]*/ and /g' \
   -e 's/%/ percent/g' \
   "$workdir/inline.txt" >"$workdir/abbrev.txt" || die "could not expand abbreviations"
@@ -597,11 +663,23 @@ else
 fi
 
 # Collapse runs of whitespace, then put one sentence per line so packing can cut
-# on real sentence starts instead of mid-clause.
+# on real sentence starts instead of mid-clause. The split is awk rather than a
+# sed replacement with an embedded newline, which GNU sed and BSD sed spell
+# differently.
 tr -s ' \t' ' ' <"$workdir/ascii.txt" |
-  sed -E -e 's/^ +//; s/ +$//' \
-    -e 's/([.!?]) +([A-Z0-9"'"'"'])/\1\n\2/g' \
-    -e '/^$/d' >"$sentences" || die "could not split the input into sentences"
+  awk '
+    {
+      sub(/^ +/, "")
+      sub(/ +$/, "")
+      if ($0 == "") next
+      rest = $0
+      while (match(rest, /[.!?] +[A-Z0-9"\047]/)) {
+        printf "%s\n", substr(rest, 1, RSTART)
+        rest = substr(rest, RSTART + RLENGTH - 1)
+      }
+      if (rest != "") print rest
+    }
+  ' >"$sentences" || die "could not split the input into sentences"
 
 [ -s "$sentences" ] || die "no speakable text survived cleanup: $input"
 
@@ -632,8 +710,7 @@ synthesise_chunk() {
   # One chunk text file in, one WAV out, for the selected engine.
   local chunk=$1 wav=$2
   if [ "$ENGINE" = kokoro ]; then
-    LD_LIBRARY_PATH="$libstdcpp_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-      "$KOKORO_VENV/bin/python" "$workdir/kokoro_render.py" \
+    kokoro_python "$workdir/kokoro_render.py" \
       "$KOKORO_MODEL" "$KOKORO_VOICES" "$chunk" "$wav" "$VOICE" "$speed" "$kokoro_lang" \
       >/dev/null 2>"$workdir/kokoro.err" ||
       die "kokoro failed on $(basename "$chunk"): $(tail -n 3 "$workdir/kokoro.err")"
@@ -730,7 +807,7 @@ for chunk in "$workdir"/chunk-*.txt; do
   seconds=$(probe_seconds "$dest")
   [ -n "$seconds" ] || die "cannot measure the duration of $dest"
   total_seconds=$(awk -v a="$total_seconds" -v b="$seconds" 'BEGIN { printf "%.3f", a + b }')
-  size=$(stat -c %s "$dest")
+  size=$(wc -c <"$dest" | tr -d '[:space:]')
   duration=$(fmt_duration "$seconds")
   abs_source=$(cd -- "$(dirname -- "$input")" && pwd)/$(basename -- "$input")
 
