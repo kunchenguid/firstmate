@@ -251,15 +251,15 @@ When retirement proceeds, teardown kills the direct endpoint, removes every pare
 An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.
 [`bin/fm-teardown.sh`](../../../bin/fm-teardown.sh)'s `endpoint_close_refusal` contract owns backend-specific `--force` limits; [endpoint-close verification](../../../docs/verification/runtime-backends.md#endpoint-close) records what each backend can prove.
 A plain-clone home with no pool slot is removed directly.
-For a leased home, `treehouse return` releases the lease but leaves the tracked checkout as a reusable pool slot; after return succeeds, teardown scrubs `state/`, `data/`, `config/`, `projects/`, `.fm-secondmate-parent`, and `.fm-secondmate-home` from that slot without touching tracked files.
-If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
+For a leased home, teardown scrubs all gitignored content while the lease is still held, preserving tracked files and removing `.fm-secondmate-parent` and `.fm-secondmate-home` last; only then does `treehouse return` release the clean slot for reuse.
+A failed scrub keeps the lease, home marker, and retirement records for retry. If `treehouse return` fails, teardown restores the identity markers and keeps the retirement records rather than hiding a held lease.
 Before either return or direct removal, teardown asks the target home's process-event runner to retire its registrations and physically owned machine-wide claims through the safe generation-bound path.
 It refuses retirement while that cleanup is uncertain or unavailable, preserving the home and retirement records for a later retry.
 Raw deletion is unsupported because a blocking process-event child can outlive its home.
 
 With `--force`, teardown is the explicit discard path.
 The worktree-slot ownership contract in `bin/fm-teardown.sh` still applies: `--force` never authorizes returning a descendant pool slot that another task may own.
-It kills child windows, discards child work and state inside the secondmate home, removes the route, and uses the same leased-slot return and scrub behavior above.
+It kills child windows, discards child work and state inside the secondmate home, removes the route, and uses the same leased-slot scrub-then-return behavior above.
 If forced teardown contends with a fresh task publication in any affected home, one command refuses without publishing or removing task state; treat that refusal as terminal and inspect the other operation before retrying.
 `fm-spawn.sh --relaunch` and non-forced teardown remain outside that task-set serialization; [`fm-secondmate-liveness-lib.sh`'s header](../../../bin/fm-secondmate-liveness-lib.sh) owns automatic recovery serialization.
 Never use `--force` unless the captain explicitly said to discard the work.
