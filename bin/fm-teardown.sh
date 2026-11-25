@@ -211,6 +211,10 @@
 # keeps the lease and retirement records for retry. Tracked files stay intact;
 # identity markers are removed last, and only a home with the expected marker
 # is scrubbed. A failed return restores the markers for a later teardown retry.
+# Scrubbing is not transactional: a refusal after partial or complete scrubbing
+# does not restore deleted private content. Process-event registrations are
+# restored and reconciled on scrub or return failure; failed recovery reports
+# the retained registration backup for manual recovery.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
@@ -2996,9 +3000,8 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   reap_task_worktree_processes "secondmate home" "$1"
 }
 
-# Scrub all gitignored content while the home is still leased, preserving tracked
-# files. A failed scrub keeps the lease; identity markers go last so teardown
-# can retry. Only the retired home's own marked slot may be scrubbed.
+# Nested project repositories need Git's double-force clean; ignored runtime
+# hook directories can be read-only and need writable directories for removal.
 scrub_leased_home_slot() {
   local slot=$1 label=$2 expected_id=$3 name marker_id
   [ -d "$slot" ] || return 0
