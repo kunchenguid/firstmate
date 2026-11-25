@@ -1053,6 +1053,9 @@ const mainCtx = {
     getEntries: () => entries,
   },
 };
+for (const event of [{}, { messageType: "user" }, ...[undefined, null, 42, {}].flatMap((prompt) => [{ prompt }, { messageType: "user", prompt }])]) {
+  await fire("before_agent_start", event, mainCtx);
+}
 const operational = spawnSync(
   "bash",
   [`${realRoot}/bin/fm-operational-input.sh`, "encode", "watcher"],
@@ -1131,6 +1134,9 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
 const mirroredCaptainText = globalThis.__fmSessions[0].ops
   .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
   .map((op) => op.message.content);
+if (mirroredCaptainText.filter((text) => text.startsWith("[captain] ")).length !== 1 + requestedPrompts.length) {
+  throw new Error("a missing or non-string prompt entered captain mirror context");
+}
 for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
   const copies = mirroredCaptainText.filter((text) => text === `[captain] ${content}`).length;
   if (copies !== 1) throw new Error(`current captain prompt was mirrored ${copies} times instead of once`);
