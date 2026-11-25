@@ -1943,7 +1943,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --proven-isolated)
       [ -z "$MODE" ] || die "only one selection mode is allowed"
-      MODE=proven-isolated
+      MODE="proven-isolated"
       shift
       ;;
     --changed)

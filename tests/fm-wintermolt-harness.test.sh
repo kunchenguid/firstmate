@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329,SC2034 # Assertion stubs and fixture locals are defined for the code under test, not invoked here.
 # Behavior tests for the verified Wintermolt crewmate/scout adapter.
 #
 # The facts pinned here are the ones a wintermolt release could silently change

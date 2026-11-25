@@ -255,6 +255,7 @@ test_polytoken_ambiguous_pending_is_not_confirmed_by_busy() {
   printf '╭────────────╮\n│ > fix  │\n╰────────────╯\n' > "$composer"
   touch "$dir/.swallow"
   (
+    # shellcheck disable=SC2329 # Stub override: the harness under test calls this, not the test body.
     fm_pane_is_busy() { return 0; }
     PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
       FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
