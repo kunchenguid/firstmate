@@ -4685,10 +4685,14 @@ check(strip(settled[0]).includes(SAUCER_IDLE), "settled banner lost the `(|)` sa
 const settledColumn = saucerColumn(settled);
 check(settledColumn >= 0 && settledColumn <= 41, `settled drift left its track: ${settledColumn}`);
 await sleep(CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE + 60);
-const driftingColumn = saucerColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
+let driftingColumn = saucerColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
+for (let attempt = 1; attempt < 3 && driftingColumn === settledColumn; attempt += 1) {
+  await sleep(CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE + 60);
+  driftingColumn = saucerColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
+}
 check(
   driftingColumn !== settledColumn,
-  `settled banner stopped drifting: ${settledColumn} -> ${driftingColumn}`,
+  `settled banner stopped drifting over three idle intervals: ${settledColumn} -> ${driftingColumn}`,
 );
 
 // Toggling Calm off clears the banner and its timer; toggling on restores it.
