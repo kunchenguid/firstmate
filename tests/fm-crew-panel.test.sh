@@ -93,9 +93,22 @@ test_card_order_puts_a_decision_first() {
 test_card_order_follows_the_groups() {
   local got
   got=$(panel | card_ids | tr '\n' ' ')
-  assert_equals "arc-tokens-wave2 arc-5083-history arc-memo-dedupe arc-history-errors arc-5601-role-access arc-5595-styles arc-round2-scout arc-5673-toolbar-spacing arc-5677-editor-toolbar arc-5680-upload-limit " \
+  assert_equals "arc-tokens-wave2 arc-5083-history arc-memo-dedupe arc-5700-stopped-review arc-history-errors arc-5601-role-access arc-5595-styles arc-round2-scout arc-5673-toolbar-spacing arc-5677-editor-toolbar arc-5680-upload-limit " \
     "$got" "cards go needs you, no reply, ready, verifying and checking, working, starting; the oldest first inside a group"
   pass "card order follows the groups, oldest first inside a group"
+}
+
+test_a_ship_whose_review_was_stopped_after_its_done_report_shows_pr_ready() {
+  local card out
+  card=$(fleet_card arc-5700-stopped-review)
+  assert_contains "$card" "PR READY" "the fleet card shows PR ready"
+  assert_contains "$card" "waits for your merge" "the fleet card says it waits for the merge"
+  assert_not_contains "$card" "CHECKING" "the fleet card is not checking"
+  out=$(panel --task arc-5700-stopped-review)
+  assert_contains "$out" "PR READY" "the worker panel shows PR ready"
+  assert_contains "$out" "waits for your merge" "the worker panel says it waits for the merge"
+  assert_not_contains "$out" "CHECKING" "the worker panel is not checking"
+  pass "a ship whose review was stopped after its done report shows PR ready"
 }
 
 test_the_verifier_folds_into_its_ship_card() {
@@ -528,6 +541,7 @@ test_a_second_round_plan_list_marks_only_earlier_steps_done
 test_a_second_round_step_times_come_from_the_new_plan_only
 test_card_order_puts_a_decision_first
 test_card_order_follows_the_groups
+test_a_ship_whose_review_was_stopped_after_its_done_report_shows_pr_ready
 test_the_verifier_folds_into_its_ship_card
 test_the_plan_list_shows_every_step_name_before_the_step_starts
 test_the_verifier_steps_show_in_the_ships_worker_panel

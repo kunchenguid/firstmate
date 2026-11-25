@@ -97,6 +97,12 @@ TOON
   step $id 7000 2 3 'Write the access fix'
   step $id 5000 3 3 'Run the tests'
   status $id 900 "done" 'PR https://github.com/acme/arc/pull/5601 checks green'
+  # stopped review: the worker reported done, then stopped its review run at the CI wait.
+  id=arc-5700-stopped-review
+  step $id 15000 --plan 'Read the code' 'Write the fix'
+  step $id 15000 1 2 'Read the code'
+  step $id 14000 2 2 'Write the fix'
+  status $id 13000 "done" 'PR https://github.com/acme/arc/pull/5700'
   id=arc-5601-role-access-verify
   step $id 840 --plan 'Start the app' 'Sign in as each role' 'Check each page' 'Write the report'
   step $id 840 1 4 'Start the app'
@@ -169,6 +175,7 @@ TOON
   add "$(task arc-5677-editor-toolbar ship 1000 working pane '' true '.backlog.title = "Editor toolbar order" | .paths.status_log.last_event = {state: "working", age_seconds: 900}')"
   add "$(task arc-tokens-wave2 ship 3100 working status-log '' true '.backlog.title = "Design tokens, wave 2" | .hints.pending_decision = true | .hints.open_decisions = [{key: "tokens", verb: "decide", summary: "Rename the tokens in place, or keep the old names as aliases for one release?"}]')"
   add "$(task arc-5595-styles ship 5500 working run-step 'validating (running)' true '.backlog.title = "Style cleanup"')"
+  add "$(task arc-5700-stopped-review ship 15100 unknown run-step 'run cancelled: no verdict' true '.backlog.title = "Stopped review" | .pr.url = "https://github.com/acme/arc/pull/5700"')"
   add "$(task arc-5601-role-access ship 9100 "done" status-log 'checks green: PR ready for review' true '.backlog.title = "Role access fix" | .pr.url = "https://github.com/acme/arc/pull/5601" | .backlog.body_lines = ["verifier: auth"]')"
   add "$(task arc-5601-role-access-verify scout 850 working pane '' true '.mode = "local-only" | .branch = null')"
   add "$(task arc-memo-dedupe ship 20100 "done" status-log 'checks green: PR ready for review' true '.backlog.title = "Memo dedupe" | .pr.url = "https://github.com/acme/arc/pull/5622" | .backlog.body_lines = ["verifier: data"]')"

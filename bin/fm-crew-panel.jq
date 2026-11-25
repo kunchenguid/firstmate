@@ -143,12 +143,18 @@ def newer_work($t; $x):
   | ($t.current_state.state == "working")
     or ($d != null and ((evs($x) | any(.state != "done" and .at != null and .at > $d))
                         or (($t.step.plan_recorded_at // 0) > $d)));
+# A ship whose last status line is done, while its review run was cancelled (the
+# worker stopped it at the CI wait): the done report still stands.
+def review_stopped($t; $x):
+  $t.current_state.state == "unknown" and $t.current_state.source == "run-step"
+  and (detail($t) | test("cancelled"))
+  and ((evs($x) | last // {}).state == "done");
 def phase($t; $x; $v):
   if needs($t) then "needs"
   elif $t.current_state.state == "failed" then "failed"
   elif $t.current_state.state == "blocked" then "blocked"
   elif $t.kind == "ship" and vlive($v) and (noreply($t) | not) then "verifying"
-  elif $t.kind == "ship" and done($t) then "ready"
+  elif $t.kind == "ship" and (done($t) or review_stopped($t; $x)) then "ready"
   elif $t.kind == "scout" and (done($t) or ($t.paths.report.present == true and (newer_work($t; $x) | not))) then "report"
   elif noreply($t) then "noreply"
   elif $t.current_state.source == "run-step" then "checking"
