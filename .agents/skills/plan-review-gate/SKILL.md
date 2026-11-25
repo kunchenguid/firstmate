@@ -1,6 +1,6 @@
 ---
 name: plan-review-gate
-description: Load at intake before writing the ship brief for a big ship task - one that touches several subsystems, data or money semantics, a schema or migration, security, or an irreversible change, or whose captain asks for a plan review - and whenever a plan scout or plan reviewer scout of that gate reports.
+description: Load before requesting independent plan critics, at intake before writing the ship brief for a big ship task - one that touches several subsystems, data or money semantics, a schema or migration, security, or an irreversible change, or whose captain asks for a plan review - and whenever a plan scout or plan reviewer scout of that gate reports.
 user-invocable: false
 metadata:
   internal: true
@@ -21,8 +21,8 @@ A refused or deferred launch is handled by that command's own rule and is never 
 
 - The **plan scout** writes the plan, later merges the reviews into one report, and revises the plan at most once.
   Firstmate drafts neither, per section 1.
-- Each **reviewer** is a fresh scout with one lens, given only the plan's path and its own worktree of the project.
-  It never sees the plan scout's chat, brief, or report.
+- Each **reviewer** is a fresh scout with one lens, given the review packet below and its own worktree of the project.
+  It never sees the plan scout's chat, brief, full history, or merged review report.
 
 The default gate is three runs: the plan scout plus the `claims` and `buildable` reviewers.
 
@@ -50,7 +50,30 @@ When `plan.md` exists, dispatch one reviewer per lens in parallel, with task ids
 
 Each reviewer's `## Captain's intent` is the captain's ask the plan serves.
 Its `## Firstmate spec` is the full text of [`references/reviewer-contract.md`](references/reviewer-contract.md) followed by the lens file, with `{PLAN}` replaced by the absolute path of `plan.md`.
+Append the review packet paths and scope instruction below to each reviewer's brief.
 Pass the prompt text itself, not a skill name, so a reviewer needs no skill loaded.
+
+### Revision-aware review packet
+
+Use this packet contract for every requested independent critic round, including Lavish plan reviews outside this default gate.
+It does not change live board chat, the gate's default lenses or round limit, or the captain's requested critic count: a requested four-critic round still has four independent critics.
+
+Before dispatch, the plan author saves a packet for the current revision containing:
+
+- the complete current plan, with its revision identifier;
+- a short decision ledger recording decisions, reasons, evidence pointers and superseded decisions;
+- only the revision delta since the last requested round, naming its baseline revision, changed sections as "change X to Y", why they changed, and evidence for each changed part, including affected interfaces and risks.
+
+Keep the prior round's baseline stable until the next packet is saved, so no intervening edit disappears from the delta.
+Do not attach old conversation transcripts, earlier full plans or unchanged source dumps.
+Give each critic the same packet and its own lens, without other critics' findings, and include this scope instruction in its brief:
+"Use the current plan and ledger for context; verify the revision delta and its affected dependencies against the cited evidence, reading only changed or affected source sections rather than replaying unchanged history; report any resulting cross-plan inconsistency."
+Evidence pointers remain available for targeted reads; if they cannot establish safety, report the gap rather than assume unchanged parts are sound.
+
+The first round is a full-plan review.
+Use full-plan review again for major changes (goal, architecture, interfaces, data or security semantics, or assumptions that invalidate earlier review), a missing or unreliable baseline, and whenever the captain asks.
+Label the packet `full-plan` or `revision-delta`, state the reason and baseline, and explicitly tell each critic to review the whole current plan in full-plan mode.
+Full-plan mode retains the ledger and revision delta; it does not require replaying chat history.
 
 ## 3. Not run
 

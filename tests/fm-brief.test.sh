@@ -1384,10 +1384,17 @@ test_every_brief_names_the_lavish_opener() {
       brief="$home/data/opener-$kind/brief.md"
       if [ "$version" = absent ]; then
         assert_no_grep "fm-lavish-open.sh" "$brief" "lavish absent: $kind brief named a Lavish opener"
+        assert_no_grep 'change X to Y' "$brief" "lavish absent: $kind brief offered page iteration"
       else
         assert_grep "$opener" "$brief" "lavish $version: $kind brief did not name the Lavish opener by absolute path"
         assert_grep "browser-launch: failed <url>" "$brief" "lavish $version: $kind brief did not say what to do when the page did not open"
         assert_grep "Write the page file only under the persistent \`data/\` directory" "$brief" "lavish $version: $kind brief did not require persistent page artifacts"
+        assert_grep 'keep the current plan and a short decision ledger' "$brief" "$kind brief omitted durable planning state"
+        assert_grep 'Before each board arm, save the artifact and report paths, plan revision, ledger, open questions and next action' "$brief" "$kind brief omitted page-host handoff state"
+        assert_grep 'small "change X to Y" edits in place to the existing page' "$brief" "$kind brief omitted small page updates"
+        assert_grep 'preserve unchanged sections and board chat' "$brief" "$kind brief lost board continuity"
+        assert_grep "load \`plan-review-gate\` for its revision-aware review packet contract" "$brief" "$kind brief omitted critic packet owner"
+        assert_grep 'all four independent critics whenever requested' "$brief" "$kind brief reduced requested critics"
       fi
     done
   done
