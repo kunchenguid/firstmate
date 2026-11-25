@@ -21,9 +21,11 @@
 #
 # Merge method on GitHub, when the caller passes none of --squash, --merge,
 # --rebase, or --method after the optional -- separator, is the repository's
-# only allowed method when exactly one of allow_merge_commit, allow_squash_merge,
-# and allow_rebase_merge is enabled, and --squash otherwise (several allowed, or
-# the setting could not be read).
+# only allowed method when all three settings (allow_merge_commit,
+# allow_squash_merge, and allow_rebase_merge) are JSON booleans and exactly one
+# is true. Otherwise it keeps --squash, including when all three are false or
+# settings are unreadable, missing, null, or non-boolean. An explicit caller
+# method is preserved without reading the repository's merge-method settings.
 # With the opt-in config/pr-squash-summary presence flag, a GitHub squash merge
 # whose caller passed no subject or body takes the PR title and the body's
 # "## What Changed" section as its commit text; github_add_squash_summary owns it.
