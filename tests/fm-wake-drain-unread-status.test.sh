@@ -449,6 +449,83 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+# Shared shape for the --since-last-ack regressions: a real acknowledged drain
+# records the last-ack epoch, then a status signal carries one line stamped
+# before that epoch and one stamped after it.
+since_last_ack_case() {  # <name>  (prints the case dir)
+  local dir state status
+  dir=$(make_case "$1")
+  state="$dir/state"
+  status="$state/task9.status"
+  prime_cursor "$state" "$status"
+  append_wake "$state" check bootstrap-ack "check: bootstrap ack" >/dev/null \
+    || fail "queueing the bootstrap wake failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/ack.out" 2> "$dir/ack.err" \
+    || fail "bootstrap drain before acknowledgement failed"
+  ack_drain_err "$state" "$dir/ack.err" > /dev/null 2> "$dir/ack2.err" \
+    || fail "plain acknowledgement failed: $(cat "$dir/ack2.err")"
+  [ -s "$state/.wake-drain-last-ack-epoch" ] \
+    || fail "acknowledgement recorded no last-ack epoch"
+  printf 'note: stale line [at=1]\n' >> "$status"
+  printf 'note: fresh line [at=9999999999]\n' >> "$status"
+  append_wake "$state" signal task9.status "signal: task9.status" \
+    || fail "queueing the status signal failed"
+  printf '%s\n' "$dir"
+}
+
+test_plain_ack_without_since_last_ack_succeeds() {
+  local dir state err
+  dir=$(make_case plain-ack)
+  state="$dir/state"
+  err="$dir/drain.err"
+  append_wake "$state" check plain-ack "check: plain ack" >/dev/null \
+    || fail "queueing the wake failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$err" || fail "drain before acknowledgement failed"
+  ack_drain_err "$state" "$err" > /dev/null 2> "$dir/ack.err" \
+    || fail "--ack-through without --since-last-ack failed: $(cat "$dir/ack.err")"
+  if grep -F 'unbound variable' "$dir/ack.err" >/dev/null; then
+    fail "acknowledgement hit an unbound variable: $(cat "$dir/ack.err")"
+  fi
+  pass "--ack-through with its recovery generation succeeds without --since-last-ack"
+}
+
+test_since_last_ack_omits_lines_before_last_ack() {
+  local dir out
+  dir=$(since_last_ack_case since-last-ack-filters)
+  out="$dir/drain.out"
+  FM_STATE_OVERRIDE="$dir/state" "$DRAIN" --since-last-ack > "$out" 2>/dev/null \
+    || fail "--since-last-ack drain failed"
+  grep '^wake annotation:' "$out" | grep -F 'fresh line [at=9999999999]' >/dev/null \
+    || fail "--since-last-ack dropped a line newer than the last ack: $(cat "$out")"
+  if grep '^wake annotation:' "$out" | grep -F 'stale line [at=1]' >/dev/null; then
+    fail "--since-last-ack printed a line older than the last ack: $(cat "$out")"
+  fi
+  pass "--since-last-ack omits annotation lines stamped at or before the last ack"
+}
+
+test_plain_drain_still_prints_lines_before_last_ack() {
+  local dir out
+  dir=$(since_last_ack_case plain-drain-unfiltered)
+  out="$dir/drain.out"
+  FM_STATE_OVERRIDE="$dir/state" "$DRAIN" > "$out" 2>/dev/null || fail "plain drain failed"
+  grep '^wake annotation:' "$out" | grep -F 'stale line [at=1]' >/dev/null \
+    || fail "a plain drain omitted a line older than the last ack: $(cat "$out")"
+  grep '^wake annotation:' "$out" | grep -F 'fresh line [at=9999999999]' >/dev/null \
+    || fail "a plain drain omitted a fresh line: $(cat "$out")"
+  pass "a plain drain still prints annotation lines older than the last ack"
+}
+
+test_since_last_ack_with_ack_through_is_refused() {
+  local dir rc=0
+  dir=$(make_case since-last-ack-ack-refused)
+  FM_STATE_OVERRIDE="$dir/state" "$DRAIN" --since-last-ack --ack-through 1 --recovery-generation g1 \
+    > /dev/null 2> "$dir/err" || rc=$?
+  [ "$rc" -eq 2 ] || fail "--since-last-ack with --ack-through exited $rc, want 2: $(cat "$dir/err")"
+  grep -F 'cannot be combined' "$dir/err" >/dev/null \
+    || fail "the refusal did not explain the conflict: $(cat "$dir/err")"
+  pass "--since-last-ack combined with --ack-through is refused with exit 2"
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -463,3 +540,7 @@ test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
+test_plain_ack_without_since_last_ack_succeeds
+test_since_last_ack_omits_lines_before_last_ack
+test_plain_drain_still_prints_lines_before_last_ack
+test_since_last_ack_with_ack_through_is_refused
