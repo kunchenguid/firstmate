@@ -1188,12 +1188,14 @@ crew_dispatch_validate() {
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
+    def codex_efforts($m):
+      ["low","medium","high","xhigh"] + (if $m == "gpt-5.6-luna" then ["max"] else [] end);
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
+      elif $h == "codex" then (codex_efforts($m) | index($e)) != null
       elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
       elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e))
-      elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and $m == "gpt-5.6-luna"))
       elif $h == "grok" then (["low","medium","high"] | index($e))
       elif $h == "agy" then (["low","medium","high"] | index($e))
       elif $h == "kiro" then (["low","medium","high","xhigh","max"] | index($e))
@@ -1208,9 +1210,18 @@ crew_dispatch_validate() {
       elif ($value | type) == "object" then [$value]
       else []
       end;
-    def configured_profiles:
-      ([(.rules // [])[]? | profiles(.use?)[]?]
-        + (if has("default") then [profiles(.default)[]?] else [] end));
+    def profile_entries: if type == "array" then .[] else objects end;
+    def configured_profile_paths:
+      path(.rules[]?.use | profile_entries), path(.default | profile_entries);
+    def configured_profiles: [configured_profile_paths as $p | getpath($p)];
+    def profile_location:
+      map(if type == "number" then "[\(.)]" else ".\(.)" end) | join("") | ltrimstr(".");
+    def codex_ultra_errors:
+      [(configured_profile_paths,
+        path(.pipeline_rows | arrays | .[] | objects | .use | arrays | .[]),
+        path(.ladder_rungs | arrays | .[] | objects | .[] | arrays | .[])) as $p
+       | getpath($p) | objects | select(.harness == "codex" and .effort == "ultra")
+       | "\($p | profile_location) (codex) does not support ultra; allowed efforts: \(codex_efforts(.model) | join(", "))"];
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
@@ -1287,7 +1298,9 @@ crew_dispatch_validate() {
         | map(select(. != null))
         | map(select(. as $h | verified($h) | not))
         | unique) as $bad_harnesses
+      | codex_ultra_errors as $codex_ultra
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
+        elif ($codex_ultra | length) > 0 then "invalid effort: " + ($codex_ultra | join("; "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
         else empty
         end
