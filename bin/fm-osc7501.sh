@@ -45,7 +45,9 @@
 #     needs-decision      -> blocked kind=question
 #     blocked             -> blocked kind=permission (kind=auth when the note
 #                            names a credential)
-#   otherwise the latest status line is captain-held -> blocked kind=question
+#   otherwise the latest status line (read past a settled captain hold;
+#   bin/fm-hold-status-lib.sh owns that read) is captain-held
+#                         -> blocked kind=question
 #   otherwise busy -> working
 #   otherwise the latest status line, when it is terminal:
 #     failed              -> error
