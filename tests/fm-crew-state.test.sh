@@ -3413,6 +3413,10 @@ test_secondmate_lost_endpoint_ignores_terminal_status() {
         "$endpoint secondmate must not reuse a terminal task event"
       assert_contains "$out" "backend target gone" \
         "$endpoint secondmate with $verb must report its lost endpoint"
+      assert_not_contains "$out" "state: done" \
+        "$endpoint secondmate with $verb must not appear finished"
+      assert_not_contains "$out" "state: failed" \
+        "$endpoint secondmate with $verb must not appear failed"
       if [ "$endpoint" = dead ]; then
         assert_contains "$out" "agent gone, pane shell remains" \
           "a dead secondmate must report the agent loss even when its pane exists"
