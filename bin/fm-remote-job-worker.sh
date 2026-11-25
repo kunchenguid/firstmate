@@ -7,10 +7,10 @@
 # account queue, refuses symlinks and malformed records, and executes only a
 # tracked non-symlink fm-*.sh under this worker's configured FM_ROOT/bin.
 #
-# Each child runs under env -i with the shared filesystem-composed PATH, HOME,
-# FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. Commands receive their
-# captured stdin and have a 360-second default timeout. Their stdout and stderr
-# are independently constrained to the job library's 1048576-byte bound. A
+# The shared library header owns the child environment contract. Commands
+# receive their captured stdin and have a 360-second default timeout. Their
+# stdout and stderr are independently constrained to the job library's
+# 1048576-byte bound. A
 # record is marked done only after its bounded outputs and numeric exit status
 # have been committed. The library header owns the exact record fields and
 # lifecycle.
@@ -373,13 +373,20 @@ worker_signal_process_or_group() { # process|group <signal> <pid>
 }
 
 worker_supervisor_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start
+  local job=$1 pid=$2 recorded_start
   recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    worker_process_or_group_alive process "$pid" && return 2
+  fm_remote_job_start_matches "$recorded_start" "$pid" 2>/dev/null && return 0
+  # A live process whose start cannot be read in any form stays indeterminate;
+  # a readable mismatch is PID reuse.
+  if fm_remote_job_process_start "$pid" >/dev/null 2>&1; then
     return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
+  fi
+  if [ -x /bin/ps ]; then
+    /bin/ps -p "$pid" -o lstart= >/dev/null 2>&1 && return 1
+  elif [ -x /usr/bin/ps ]; then
+    /usr/bin/ps -p "$pid" -o lstart= >/dev/null 2>&1 && return 1
+  fi
+  worker_process_or_group_alive process "$pid" && return 2
   return 1
 }
 
@@ -389,15 +396,19 @@ worker_supervisor_identity_status() { # <job-dir> <pid>
 # recorded group stale; an unreadable live leader stays indeterminate so the
 # stop loop retries rather than signaling or declaring the group dead.
 worker_group_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
+  local job=$1 pid=$2 recorded_start file="$1/.claim/group_start" ps_bin
   [ -e "$file" ] || [ -L "$file" ] || return 3
   recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    kill -0 "$pid" 2>/dev/null && return 2
-    worker_process_or_group_alive group "$pid" && return 0
+  fm_remote_job_start_matches "$recorded_start" "$pid" 2>/dev/null && return 0
+  if fm_remote_job_process_start "$pid" >/dev/null 2>&1; then
     return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
+  fi
+  if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else ps_bin=; fi
+  if [ -n "$ps_bin" ] && "$ps_bin" -p "$pid" -o lstart= >/dev/null 2>&1; then
+    return 1
+  fi
+  kill -0 "$pid" 2>/dev/null && return 2
+  worker_process_or_group_alive group "$pid" && return 0
   return 1
 }
 
@@ -606,7 +617,7 @@ worker_claim() { # <job-dir>
 }
 
 worker_claim_owner_alive() { # <job-dir>
-  local job=$1 claim="$1/.claim" owner pid recorded_start actual_start
+  local job=$1 claim="$1/.claim" owner pid recorded_start
   [ -d "$claim" ] && [ ! -L "$claim" ] || return 1
   owner="$claim/owner"
   fm_remote_job_regular_bounded "$owner" 64 || return 1
@@ -614,8 +625,7 @@ worker_claim_owner_alive() { # <job-dir>
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -e "$claim/owner_start" ] || [ -L "$claim/owner_start" ]; then
     recorded_start=$(fm_remote_job_read_single_line "$claim/owner_start" 256 2>/dev/null) || return 1
-    actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-    [ "$recorded_start" = "$actual_start" ]
+    fm_remote_job_start_matches "$recorded_start" "$pid"
     return
   fi
   kill -0 "$pid" 2>/dev/null
@@ -935,6 +945,9 @@ worker_run_job() { # <account-home> <job-dir>
   if [ -n "${FM_REMOTE_JOB_PLATFORM_OVERRIDE:-}" ]; then
     child_env+=("FM_REMOTE_JOB_PLATFORM_OVERRIDE=$FM_REMOTE_JOB_PLATFORM_OVERRIDE")
   fi
+  # macOS credential lookups (claude auth status) key on the login identity.
+  [ -z "${USER:-}" ] || child_env+=("USER=$USER")
+  [ -z "${LOGNAME:-}" ] || child_env+=("LOGNAME=$LOGNAME")
   remaining=$((deadline - $(date +%s)))
   [ "$remaining" -gt 0 ] || {
     worker_cleanup_output_capture "$job" "$stdout_reader" "$stderr_reader"
