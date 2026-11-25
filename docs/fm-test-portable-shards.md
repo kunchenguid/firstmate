@@ -79,7 +79,7 @@ The timing-aggregate job then runs `bin/fm-ci-budget-warn.sh`, which emits a Git
 ## Lint partitions and end-to-end latency
 
 `bin/fm-lint.sh` owns four canonical CI partitions.
-Each partition attempts full source-aware ShellCheck analysis and runs workflow validation and backend-purity checks.
+The script header owns each partition's analysis mode and complete check inventory.
 Pull requests pass `--changed` so only the canonical-set files changed since the merge-base are analyzed, still with `--external-sources` and full dataflow.
 A change to lint definition files (`bin/fm-lint.sh`, `bin/fm-lint-workflows.sh`, the pinned installers, or `bin/fm-timeout-lib.sh`), including a delete or rename of any of those paths, upgrades that PR to the full canonical set.
 A change to a file that another canonical script sources, found from `# shellcheck source=` directives rather than a hand list, also upgrades to the full set so an unchanged consumer cannot hide a new ShellCheck finding from the PR and then fail the full gate on main.
