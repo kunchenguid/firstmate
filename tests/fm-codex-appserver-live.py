@@ -304,7 +304,8 @@ PYSEC""".replace('PROBES',repr({name:str(path) for name,path in probes.items()})
                 'call firstmate_report progress with CANARY_RESUMED_SAME_TASK, write answer.txt with exactly '
                 'the answer followed by one newline. Run `test "$TMPDIR" = ' + shlex.quote(str(ambient_tmp)) +
                 ' && ! touch ' + tmp_probe + '` and stop if it fails. Stage both files and create one local '
-                'commit with the trailer Co-authored-by: Codex <noreply@openai.com>. Then call '
+                'commit. Pass --trailer "Co-authored-by: Codex <noreply@openai.com>" to git commit to exercise '
+                'the installed hook. The stored commit message must omit that trailer. Then call '
                 'firstmate_report result with the message FIRSTMATE_CANARY_COMPLETED GREEN. Do not push, '
                 'merge, create a PR, or access FirstMate state.'
             ),
