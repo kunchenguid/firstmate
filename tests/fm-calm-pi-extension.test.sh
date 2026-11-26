@@ -3994,201 +3994,89 @@ const spaceship = await import(
   `${pathToFileURL(`${process.cwd()}/lib/fm-calm-working-spaceship.ts`).href}?ship=${Date.now()}`
 );
 const {
-  CALM_WORKING_SPACESHIP_WIDGET_KEY,
   CALM_WORKING_SPACESHIP_TICK_MS,
-  CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_PHASE,
-  CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE,
   CALM_WORKING_SPACESHIP_WORKING_PHASES_PER_TICK,
   CALM_WORKING_SPACESHIP_TICKS_PER_MOVE,
-  CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES,
   createCalmWorkingSpaceshipAnimation,
   createCalmWorkingSpaceshipWidget,
 } = spaceship;
 const boatModule = await import(
   `${pathToFileURL(`${process.cwd()}/lib/fm-calm-working-ship.ts`).href}?boat=${Date.now()}`
 );
+// The working-row widget slot the boat module owns because it is shared with the
+// standalone Pi Calm extension. The spaceship must install under this same slot.
 const boatKey = boatModule.CALM_WORKING_SHIP_WIDGET_KEY;
+const BOAT_HULL = "\u2572\u2581\u2581\u2581\u2571";
 
 const ESC = "\u001b";
 const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
 const check = (condition, message) => {
   if (!condition) throw new Error(message);
 };
-const SAUCER_IDLE = "(|)";
-const HULL = "|^|";
 const WARP = "=( * )";
-// Idle is a two-row pose (saucer over hull, both three cells wide, so the hull
-// centers directly beneath the saucer); the warp is single-row on row 0.
-const saucerColumn = (frame) => strip(frame[0]).indexOf(SAUCER_IDLE);
-const hullColumn = (frame) => strip(frame[1]).indexOf(HULL);
+// The sprite is the single row's left-hand run; the frame is one row while working.
 const warpColumn = (frame) => strip(frame[0]).indexOf(WARP);
 
-// Cadence constants: idle twinkle is one star phase per ~1.3s, idle drift is one
-// column per 6-8 ticks (~1.3-1.8s), working twinkle is two phases per 220ms tick,
-// and the settle ease runs a bounded handful of graduated moves before it reaches
-// the drift pace.
+// Cadence contract: a 220ms tick, a two-phase star step per tick, and one column of
+// cruise every fourth tick (880ms per column).
 check(CALM_WORKING_SPACESHIP_TICK_MS === 220, `unexpected tick period ${CALM_WORKING_SPACESHIP_TICK_MS}`);
-check(
-  CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_PHASE === 6,
-  `idle twinkle is not one phase per 6 ticks: ${CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_PHASE}`,
-);
-check(
-  CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_PHASE >= 1200 &&
-    CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_PHASE <= 1400,
-  "idle twinkle is not about one star phase per ~1.3 seconds",
-);
-check(
-  CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE >= 6 && CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE <= 8,
-  `idle drift is not one column per ~6-8 ticks: ${CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE}`,
-);
-check(
-  CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE >= 1300 &&
-    CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE <= 1800,
-  "idle drift is not one column per ~1.3-1.8 seconds",
-);
 check(
   CALM_WORKING_SPACESHIP_WORKING_PHASES_PER_TICK === 2,
   `working twinkle is not two phases per tick: ${CALM_WORKING_SPACESHIP_WORKING_PHASES_PER_TICK}`,
 );
 check(
-  CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES >= 2,
-  `settle ease of ${CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES} moves is not a bounded transition`,
+  CALM_WORKING_SPACESHIP_TICKS_PER_MOVE === 4,
+  `cruise is not one column per four ticks: ${CALM_WORKING_SPACESHIP_TICKS_PER_MOVE}`,
+);
+check(
+  CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_TICKS_PER_MOVE === 880,
+  "the cruise cadence is not 880ms per column",
 );
 
-// --- Idle: continuous left-to-right marquee drift in the preserved pose -----------
+// --- The working frame: one row, the compact saucer, exact width ------------------
 {
   const animation = createCalmWorkingSpaceshipAnimation();
-  const first = animation.render(44); // idle span 41
-  check(first.length === 2, "idle first frame did not render two rows");
-  check(saucerColumn(first) === 0, `idle saucer did not start at the left edge: ${saucerColumn(first)}`);
-  check(strip(first[0]).includes(SAUCER_IDLE), "idle pose lost the `(|)` saucer");
-  check(strip(first[1]).includes(HULL), "idle pose lost the `|^|` hull");
-  check(hullColumn(first) - saucerColumn(first) === 0, `hull is not centered under the saucer: saucer ${saucerColumn(first)} hull ${hullColumn(first)}`);
-  const saucerField = strip(first[0]).replace(SAUCER_IDLE, "");
-  check(!saucerField.includes("*"), "saucer row still rendered star glyphs");
-  check(saucerField.includes("."), "saucer row lost its dots-only fill");
-  // The starfield is an asymmetric unit, so a phase step SLIDES the stars left
-  // instead of just inverting them in place: the stars visibly move past the ship.
-
-  // One column per IDLE_TICKS_PER_MOVE ticks, always left to right, wrapping back to
-  // the left edge after the right edge, and never leaving the track.
-  const drift = createCalmWorkingSpaceshipAnimation();
-  drift.render(44);
-  const moves = [];
-  let last = drift.position();
-  for (let step = 1; step <= CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE * 100; step += 1) {
-    drift.tick();
-    const column = drift.position();
-    if (column !== last) {
-      const delta = last === 41 && column === 0 ? 1 : column - last;
-      moves.push({ step, column, delta });
-      last = column;
-    }
-  }
-  check(moves.length >= 99, `idle drift moved only ${moves.length} columns in 700 ticks`);
-  check(
-    moves.every((move) => move.step % CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE === 0),
-    `idle drift lost its one-column-per-${CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE}-ticks cadence: ${JSON.stringify(moves.slice(0, 5))}`,
-  );
-  check(
-    moves.every((move) => move.delta === 1),
-    "idle drift reversed, stalled, or moved more than one column per move",
-  );
-  check(
-    moves.some((move) => move.column === 0 && move.step > 1),
-    "idle drift never wrapped from the right edge back to the left edge",
-  );
-  // The first sweep walks monotonically to the right edge before wrapping.
-  const columns = moves.map((move) => move.column);
-  const wrapIndex = columns.indexOf(0);
-  check(wrapIndex > 0, "idle drift wrapped too early");
-  const sweep = columns.slice(0, wrapIndex);
-  check(
-    sweep.every((column, index) => column === index + 1),
-    `idle sweep was not a monotonic left-to-right walk: ${sweep.join(",")}`,
-  );
-  check(sweep[sweep.length - 1] === 41, `idle sweep did not reach the right edge: ${sweep[sweep.length - 1]}`);
-  for (const move of moves) {
-    check(move.column >= 0 && move.column <= 41, `idle drift left its track: column ${move.column}`);
-  }
-
-  // Idle star cadence: exactly one phase step per 6 ticks, none before that.
-  const idle = createCalmWorkingSpaceshipAnimation();
-  idle.render(44);
-  const startPhase = idle.starPhase();
-  for (let step = 1; step <= 5; step += 1) {
-    idle.tick();
-    check(
-      idle.starPhase() === startPhase,
-      `idle star phase advanced after ${step} ticks instead of 6`,
-    );
-  }
-  idle.tick();
-  check(
-    idle.starPhase() === (startPhase + 1) % 4,
-    `idle star phase did not advance on the 6th tick: ${idle.starPhase()}`,
-  );
-  for (let cycle = 0; cycle < 3; cycle += 1) {
-    const before = idle.starPhase();
-    for (let step = 1; step <= 6; step += 1) idle.tick();
-    check(idle.starPhase() === (before + 1) % 4, "idle twinkle lost its one-phase-per-6-ticks cadence");
-  }
-  // The idle hull row is the star twinkle, not warp streaks.
-  const starRow = strip(idle.render(44)[1]).replace(HULL, "");
-  check(starRow.includes("*"), "idle hull row rendered no star glyphs");
-  check(starRow.includes("."), "idle hull row rendered no dot glyphs");
-  check(!starRow.includes("-"), "idle hull row rendered warp streak glyphs");
+  const frame = animation.render(44);
+  check(frame.length === 1, `the working presentation did not render a single row: ${frame.length} rows`);
+  check(warpColumn(frame) === 0, `the saucer did not start at the left edge: ${warpColumn(frame)}`);
+  check(strip(frame[0]).startsWith(WARP), `the sprite is not the compact =( * ) saucer: ${strip(frame[0]).slice(0, 8)}`);
+  check(strip(frame[0]).length === 44, `the frame was ${strip(frame[0]).length} cells instead of 44`);
+  check(frame[0].endsWith("\u001b[39m"), "the frame did not close with a default-foreground reset");
+  const field = strip(frame[0]).replace(WARP, "");
+  check(!field.includes("*"), "the warp field still rendered star glyphs");
+  check(field.includes("-"), "the warp field rendered no streak glyphs");
 }
 
-// --- Working: single-row compact warp sprite, faster twinkle, streaks stream left --
+// --- Stars advance two phases per tick and the streaks stream left -----------------
 {
   const animation = createCalmWorkingSpaceshipAnimation();
-  animation.render(44);
-  animation.setWorking(true);
-  check(animation.isWorking(), "setWorking(true) did not enter the working mode");
-  const thinking = animation.render(44);
-  check(thinking.length === 1, `warp did not collapse to a single row: ${thinking.length} rows`);
-  check(warpColumn(thinking) === 0, `warp sprite did not start at the current column: ${warpColumn(thinking)}`);
-  check(strip(thinking[0]).startsWith(WARP), `warp sprite is not the compact =( * ) saucer: ${strip(thinking[0]).slice(0, 8)}`);
-  const thinkingRow = strip(thinking[0]).replace(WARP, "");
-  check(!thinkingRow.includes("*"), "warp field still rendered idle star glyphs");
-  check(thinkingRow.includes("-"), "warp field rendered no warp streak glyphs");
-
-  // Working cadence: the star phase advances exactly two steps per tick.
+  const before = animation.render(44)[0];
   const phaseBefore = animation.starPhase();
-  animation.tick();
+  animation.tick(); // Tick 1: the phase advances, but a move only lands every fourth tick.
   check(
     animation.starPhase() === (phaseBefore + 2) % 4,
-    `working star phase did not advance two steps per tick: ${animation.starPhase()}`,
+    `the star phase did not advance two steps per tick: ${animation.starPhase()}`,
   );
-  for (let step = 0; step < 12; step += 1) animation.tick();
-  check(
-    animation.starPhase() === (phaseBefore + 2 * 13) % 4,
-    "working star cadence drifted from two phases per tick",
-  );
-
-  // Warp streaks stream left: with no movement tick in between, the glyph that sat
-  // two columns to the right now sits at this column.
-  const fresh = createCalmWorkingSpaceshipAnimation();
-  fresh.setWorking(true);
-  const before = fresh.render(44)[0];
-  fresh.tick(); // ticks=1: phase +2, no movement (moves land on every 4th tick)
-  const after = fresh.render(44)[0];
-  check(warpColumn(after) === warpColumn(before), "a non-movement tick moved the sprite");
+  const after = animation.render(44)[0];
+  check(warpColumn([after]) === warpColumn([before]), "a non-movement tick moved the saucer");
+  const bareBefore = strip(before);
+  const bareAfter = strip(after);
   for (let column = 7; column <= 41; column += 1) {
-    const bareBefore = strip(before);
-    const bareAfter = strip(after);
     check(
       bareAfter[column] === bareBefore[column + 2],
       `streaks did not stream left at column ${column}: ${bareBefore[column + 2]} became ${bareAfter[column]}`,
     );
   }
+  for (let step = 0; step < 12; step += 1) animation.tick();
+  check(
+    animation.starPhase() === (phaseBefore + 2 * 13) % 4,
+    "the star cadence drifted from two phases per tick",
+  );
+}
 
-  // Continuous marquee sweep: the working saucer keeps moving right one column per
-  // move across the full track, wraps from the right edge back to the left edge, and
-  // never parks.
+// --- Marquee sweep: one column per move, full track, wrap at the right edge --------
+{
   const cruiser = createCalmWorkingSpaceshipAnimation();
-  cruiser.setWorking(true);
   cruiser.render(44); // warp span 38
   const swept = [];
   let last = cruiser.position();
@@ -4200,142 +4088,66 @@ check(
     swept.push({ step, column, delta: last === 38 && column === 0 ? 1 : column - last });
     last = column;
   }
-  check(swept.length >= 99, `working sweep moved only ${swept.length} columns in 400 ticks`);
+  check(swept.length >= 99, `the sweep moved only ${swept.length} columns in 400 ticks`);
   check(
     swept.every((move) => move.step % CALM_WORKING_SPACESHIP_TICKS_PER_MOVE === 0),
-    `working sweep lost its one-column-per-${CALM_WORKING_SPACESHIP_TICKS_PER_MOVE}-ticks cadence: ${JSON.stringify(swept.slice(0, 5))}`,
+    `the sweep lost its one-column-per-${CALM_WORKING_SPACESHIP_TICKS_PER_MOVE}-ticks cadence: ${JSON.stringify(swept.slice(0, 5))}`,
   );
   check(
     swept.every((move) => move.delta === 1),
-    "working sweep reversed, stalled, or moved more than one column per move",
+    "the sweep reversed, stalled, or moved more than one column per move",
   );
   check(
     swept.some((move) => move.column === 0 && move.step > 1),
-    "working sweep never wrapped from the right edge back to the left edge",
+    "the sweep never wrapped from the right edge back to the left edge",
   );
-  // The first sweep walks monotonically to the right edge before wrapping.
   const sweptColumns = swept.map((move) => move.column);
-  const workingWrapIndex = sweptColumns.indexOf(0);
-  check(workingWrapIndex > 0, "working sweep wrapped too early");
+  const wrapIndex = sweptColumns.indexOf(0);
+  check(wrapIndex > 0, "the sweep wrapped too early");
   check(
-    sweptColumns.slice(0, workingWrapIndex).every((column, index) => column === index + 1),
-    "working sweep was not a monotonic left-to-right walk",
+    sweptColumns.slice(0, wrapIndex).every((column, index) => column === index + 1),
+    "the sweep was not a monotonic left-to-right walk",
   );
   check(
-    sweptColumns[workingWrapIndex - 1] === 38,
-    `working sweep did not reach the right edge before wrapping: ${sweptColumns[workingWrapIndex - 1]}`,
+    sweptColumns[wrapIndex - 1] === 38,
+    `the sweep did not reach the right edge before wrapping: ${sweptColumns[wrapIndex - 1]}`,
   );
   for (const move of swept) {
-    check(move.column >= 0 && move.column <= 38, `working sweep left its track: column ${move.column}`);
+    check(move.column >= 0 && move.column <= 38, `the sweep left its track: column ${move.column}`);
   }
-  // The sweep bound also holds on a narrow track: it wraps within the span.
+}
+
+// --- Narrow tracks and the too-narrow fallback ------------------------------------
+{
   const narrow = createCalmWorkingSpaceshipAnimation();
-  narrow.setWorking(true);
   narrow.render(8); // warp span 2
   const narrowColumns = [];
   for (let step = 0; step < 40; step += 1) {
     narrow.tick();
     narrow.render(8);
     narrowColumns.push(narrow.position());
-    check(narrow.position() >= 0 && narrow.position() <= 2, `narrow cruise exceeded its span: ${narrow.position()}`);
+    check(narrow.position() >= 0 && narrow.position() <= 2, `the narrow sweep exceeded its span: ${narrow.position()}`);
   }
   check(
     narrowColumns.some((column) => column === 0) && narrowColumns.some((column) => column === 2),
-    `narrow sweep did not cover the full 0..2 span: ${narrowColumns.join(",")}`,
+    `the narrow sweep did not cover the full 0..2 span: ${narrowColumns.join(",")}`,
   );
-  // Below the warp sprite's width, warp degrades to the bare streak field.
+  // Below the six-cell sprite the frame degrades to the bare streak field.
   const tiny = createCalmWorkingSpaceshipAnimation();
-  tiny.setWorking(true);
   const tinyFrame = tiny.render(5);
-  check(tinyFrame.length === 1, "width-5 warp fallback did not render a single row");
-  check(strip(tinyFrame[0]).length === 5, "width-5 warp fallback was not a bare field row");
-}
-
-// --- Settle: eased pace transition back into the idle drift ------------------------
-{
-  const animation = createCalmWorkingSpaceshipAnimation();
-  animation.setWorking(true);
-  animation.render(44);
-  for (let step = 0; step < 4 * 30; step += 1) {
-    animation.tick();
-    animation.render(44);
-  }
-  const cruiseColumn = animation.position();
-  check(cruiseColumn === 30, `settle setup did not sweep to the expected column: ${cruiseColumn}`);
-
-  animation.setWorking(false);
-  check(!animation.isWorking(), "settle did not leave the working mode");
-  check(animation.isGliding(), "settle did not start the pace ease");
-  const relaxed = animation.render(44);
-  check(relaxed.length === 2, `settled sprite did not relax to the two-row rest pose: ${relaxed.length} rows`);
-  check(strip(relaxed[0]).includes(SAUCER_IDLE) && strip(relaxed[1]).includes(HULL), "settled sprite lost the two-row rest pose");
-  check(saucerColumn(relaxed) === cruiseColumn, "settle teleported the saucer to a different column");
-
-  // The ease keeps moving one column per move at graduated intervals (the cruise pace,
-  // then one tick longer per move) until it reaches the drift pace, never teleporting.
-  const gaps = [];
-  let last = animation.position();
-  let lastStep = 0;
-  let driftReached = -1;
-  for (let step = 1; step <= 40; step += 1) {
-    animation.tick();
-    const column = animation.position();
-    check(column >= 0 && column <= 41, `settled drift left its track: column ${column}`);
-    if (column === last) continue;
-    const gap = step - lastStep;
-    gaps.push(gap);
-    check(
-      Math.abs(column - last) === 1 || (last === 41 && column === 0),
-      `settle ease teleported: ${last} became ${column}`,
-    );
-    if (gaps.length > CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES) {
-      check(gap === CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE, "post-ease drift lost its cadence");
-      if (driftReached < 0) driftReached = step;
-    }
-    last = column;
-    lastStep = step;
-  }
-  check(driftReached > 0, "settle never reached the drift pace");
-  const easeBound =
-    CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES * (CALM_WORKING_SPACESHIP_TICKS_PER_MOVE + CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES) + 1;
+  check(tinyFrame.length === 1, "the width-5 fallback did not render a single row");
+  check(strip(tinyFrame[0]).length === 5, "the width-5 fallback was not a bare field row");
+  const single = createCalmWorkingSpaceshipAnimation();
   check(
-    driftReached <= easeBound,
-    `settle ease took ${driftReached} ticks, beyond its bounded window of ${easeBound}`,
-  );
-  check(
-    gaps[0] === CALM_WORKING_SPACESHIP_TICKS_PER_MOVE,
-    `first eased move did not continue at the cruise pace: gap ${gaps[0]}`,
-  );
-  check(!animation.isGliding(), "settle ease did not end once the drift pace was reached");
-
-  // Stars are back at the idle cadence from the settle frame onward, not the fast one.
-  const glider = createCalmWorkingSpaceshipAnimation();
-  glider.setWorking(true);
-  glider.render(44);
-  for (let step = 0; step < 4 * 30; step += 1) {
-    glider.tick();
-    glider.render(44);
-  }
-  glider.setWorking(false);
-  let previous = glider.starPhase();
-  let phaseSteps = 0;
-  for (let step = 0; step < 30; step += 1) {
-    glider.tick();
-    if (glider.starPhase() !== previous) phaseSteps += 1;
-    previous = glider.starPhase();
-  }
-  check(
-    phaseSteps === Math.floor(30 / CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_PHASE),
-    `settled stars advanced ${phaseSteps} times in 30 ticks, not the slow idle cadence`,
+    JSON.stringify(single.render(1)) === JSON.stringify(["\u001b[34m \u001b[39m"]),
+    "the width-1 fallback did not render one streak cell",
   );
 }
 
-// --- Freeze/resume across hide/show, including mid-drift and mid-warp -------------
+// --- Freeze/resume across hide/show, including mid-sweep ---------------------------
 {
   const tui = { requestRender() {} };
-  // Mid-warp: the cruise resumes from the frozen column.
   const animation = createCalmWorkingSpaceshipAnimation();
-  animation.setWorking(true);
   animation.render(44);
   for (let step = 0; step < 4 * 6; step += 1) {
     animation.tick();
@@ -4358,67 +4170,14 @@ check(
   resumed.render(44);
   check(
     animation.position() === frozenColumn && animation.starPhase() === frozenPhase,
-    "resume first frame left frozen state",
+    "the resumed first frame left the frozen state",
   );
-  for (let step = 0; step < 4; step += 1) animation.tick();
+  for (let step = 0; step < CALM_WORKING_SPACESHIP_TICKS_PER_MOVE; step += 1) animation.tick();
   check(
     animation.position() === frozenColumn + 1,
-    `post-resume cruise did not continue from the frozen column: ${animation.position()}`,
+    `the post-resume sweep did not continue from the frozen column: ${animation.position()}`,
   );
   resumed.dispose();
-
-  // Mid-drift: the marquee sweep resumes from its last rendered frame.
-  const drifter = createCalmWorkingSpaceshipAnimation();
-  drifter.render(44);
-  for (let step = 0; step < CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE * 5; step += 1) drifter.tick();
-  const midDrift = drifter.position();
-  const midDriftPhase = drifter.starPhase();
-  check(midDrift === 5, "mid-drift freeze setup failed");
-  const paused = createCalmWorkingSpaceshipWidget(tui, drifter);
-  check(paused.render(44).length === 2, "mid-drift resume lost the two-row pose");
-  paused.dispose();
-  check(drifter.position() === midDrift, "hide moved the mid-drift column");
-  check(drifter.starPhase() === midDriftPhase, "hide changed the mid-drift phase");
-  const again = createCalmWorkingSpaceshipWidget(tui, drifter);
-  again.render(44);
-  check(drifter.position() === midDrift, "resume advanced the drift without a tick");
-  for (let step = 1; step <= CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE; step += 1) {
-    drifter.tick();
-    check(
-      drifter.position() === midDrift || drifter.position() === midDrift + 1,
-      "resumed drift jumped columns",
-    );
-  }
-  check(
-    drifter.position() === midDrift + 1,
-    "resumed drift did not continue within one drift interval",
-  );
-  again.dispose();
-
-  // Mid-ease: a hide during the settle ease resumes the graduated pace, not a jump.
-  const settler = createCalmWorkingSpaceshipAnimation();
-  settler.setWorking(true);
-  settler.render(44);
-  for (let step = 0; step < 4 * 30; step += 1) {
-    settler.tick();
-    settler.render(44);
-  }
-  settler.setWorking(false);
-  settler.tick();
-  settler.render(44);
-  check(settler.isGliding(), "mid-ease hide setup failed");
-  const midEase = settler.position();
-  const pausedEase = createCalmWorkingSpaceshipWidget(tui, settler);
-  pausedEase.dispose();
-  check(settler.position() === midEase && settler.isGliding(), "hide changed the mid-ease state");
-  const resumedEase = createCalmWorkingSpaceshipWidget(tui, settler);
-  resumedEase.render(44);
-  check(settler.position() === midEase, "resume advanced the ease without a tick");
-  // The first eased move was already one tick into its cruise-pace gap; it completes
-  // three ticks later, exactly where the eased countdown left off.
-  for (let step = 1; step <= CALM_WORKING_SPACESHIP_TICKS_PER_MOVE - 1; step += 1) settler.tick();
-  check(settler.position() === midEase + 1, "resumed ease did not continue its graduated pace");
-  resumedEase.dispose();
 
   // Unpainted timer ticks must not leak into logical state.
   const realSetInterval = globalThis.setInterval;
@@ -4443,7 +4202,7 @@ check(
     check(handles.size === 0, "disposing the widget left its timer scheduled");
     check(
       parked.position() === 0 && parked.starPhase() === 0,
-      "unpainted ticks leaked into the frozen idle state",
+      "unpainted ticks leaked into the frozen state",
     );
   } finally {
     globalThis.setInterval = realSetInterval;
@@ -4454,7 +4213,6 @@ check(
 // --- Resize clamps, visible and hidden --------------------------------------------
 {
   const animation = createCalmWorkingSpaceshipAnimation();
-  animation.setWorking(true);
   animation.render(44);
   for (let step = 0; step < 4 * 30; step += 1) {
     animation.tick();
@@ -4465,89 +4223,49 @@ check(
   // Shrink while sweeping: clamp immediately, then the sweep continues within the
   // narrowed track and wraps marquee-style at the new right edge.
   const shrunk = animation.render(24); // warp span 18
-  check(animation.position() === 18, `shrink did not clamp the track immediately: ${animation.position()}`);
-  check(shrunk.length === 1, "shrunk warp frame did not stay a single row");
-  check(strip(shrunk[0]).length === 24, `shrunk warp row was ${strip(shrunk[0]).length} cells instead of 24`);
+  check(animation.position() === 18, `the shrink did not clamp the track immediately: ${animation.position()}`);
+  check(shrunk.length === 1, "the shrunk frame did not stay a single row");
+  check(strip(shrunk[0]).length === 24, `the shrunk row was ${strip(shrunk[0]).length} cells instead of 24`);
   const shrunkColumns = [];
   for (let step = 0; step < 4 * 10; step += 1) {
     animation.tick();
     animation.render(24);
-    check(animation.position() >= 0 && animation.position() <= 18, "shrunk sweep left its track");
+    check(animation.position() >= 0 && animation.position() <= 18, "the shrunk sweep left its track");
     shrunkColumns.push(animation.position());
   }
   check(
     shrunkColumns.some((column) => column === 0) && shrunkColumns.some((column) => column === 18),
-    `shrunk sweep did not wrap across the full 0..18 span: ${shrunkColumns.slice(0, 12).join(",")}`,
+    `the shrunk sweep did not wrap across the full 0..18 span: ${shrunkColumns.slice(0, 12).join(",")}`,
   );
   const shrunkLanding = animation.position();
 
   // Grow while hidden must not invent movement either.
   animation.clampToWidth(60);
-  check(animation.position() === shrunkLanding, `hidden grow moved the saucer: ${animation.position()}`);
+  check(animation.position() === shrunkLanding, `the hidden grow moved the saucer: ${animation.position()}`);
   animation.render(60);
   for (let step = 0; step < 4 * 30; step += 1) {
     animation.tick();
     animation.render(60);
-    check(animation.position() >= 0 && animation.position() <= 54, "grown sweep left its track");
+    check(animation.position() >= 0 && animation.position() <= 54, "the grown sweep left its track");
   }
-  check(animation.position() > shrunkLanding, `grown sweep did not advance: ${animation.position()}`);
-
-  // Shrink while idle clamps the drifting saucer into the new track without a jump,
-  // and the marquee sweep then wraps within the narrowed track.
-  const idle = createCalmWorkingSpaceshipAnimation();
-  idle.render(44);
-  for (let step = 0; step < CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE * 10; step += 1) idle.tick();
-  check(idle.position() === 10, "idle resize setup did not drift");
-  idle.clampToWidth(13); // idle span 10 (the saucer chevron is 3 cells wide)
-  check(idle.position() === 10, "hidden idle resize did not clamp into the new track");
-  const clampedIdle = idle.render(13);
-  check(
-    clampedIdle.length === 2 && strip(clampedIdle[0]).includes(SAUCER_IDLE) && strip(clampedIdle[1]).includes(HULL),
-    "clamped idle pose lost the two-row saucer over hull",
-  );
-  const bareNarrow = createCalmWorkingSpaceshipAnimation();
-  check(
-    JSON.stringify(bareNarrow.render(1)) === JSON.stringify(["\u001b[34m*\u001b[39m"]),
-    "width-1 fallback did not render one star cell",
-  );
-  // At the saucer width and one above it the full two-row pose still fits; only
-  // below the three-cell saucer does the row collapse to the bare starfield.
-  const fullNarrow = createCalmWorkingSpaceshipAnimation();
-  const fullNarrowFrame = fullNarrow.render(4);
-  check(
-    fullNarrowFrame.length === 2 &&
-      strip(fullNarrowFrame[0]).includes(SAUCER_IDLE) &&
-      strip(fullNarrowFrame[1]).includes(HULL),
-    "width-4 idle did not keep the two-row saucer over hull",
-  );
-  idle.render(13);
-  let wrapped = false;
-  for (let step = 0; step < CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE * 12; step += 1) {
-    idle.tick();
-    idle.render(13);
-    check(idle.position() >= 0 && idle.position() <= 10, `clamped drift left its track: ${idle.position()}`);
-    if (idle.position() === 0) wrapped = true;
-  }
-  check(wrapped, "clamped drift did not wrap within the narrowed track");
+  check(animation.position() > shrunkLanding, `the grown sweep did not advance: ${animation.position()}`);
 }
 
 // --- reset() and instance independence --------------------------------------------
 {
   const left = createCalmWorkingSpaceshipAnimation();
   const right = createCalmWorkingSpaceshipAnimation();
-  left.setWorking(true);
   left.render(44);
   right.render(44);
   for (let step = 0; step < 4 * 3; step += 1) left.tick();
   check(left.position() === 3 && right.position() === 0, "separate animations leaked motion state");
   left.reset();
-  check(
-    left.position() === 0 && left.starPhase() === 0 && !left.isWorking() && !left.isGliding(),
-    "reset() did not restore the left-edge pose and idle mode",
-  );
+  check(left.position() === 0 && left.starPhase() === 0, "reset() did not restore the left-edge pose");
   const afterReset = left.render(44);
-  check(afterReset.length === 2, "reset() first frame lost the two-row rest pose");
-  check(strip(afterReset[0]).includes(SAUCER_IDLE) && strip(afterReset[1]).includes(HULL), "reset() first frame lost the saucer over hull");
+  check(
+    afterReset.length === 1 && warpColumn(afterReset) === 0,
+    "reset() first frame did not start at the left edge",
+  );
 }
 
 // --- Selection and lifecycle wiring through the Calm extension --------------------
@@ -4639,69 +4357,84 @@ const reset = () => {
 const widgetOf = (key) => ui.widgets.get(key);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// config/calm-ship=spaceship installs nothing while idle: the banner is run-scoped,
-// exactly like the boat, and Pi's stock working row stays visible.
+// config/calm-ship=spaceship installs nothing while idle: the presentation is
+// run-scoped, exactly like the boat, and Pi's stock working row stays visible.
 await fire("session_start", { reason: "startup" });
 check(
   ui.widgetOps.length === 0 && liveTimers === 0,
-  `an idle spaceship session installed a banner: ${JSON.stringify(ui.widgetOps)} ${liveTimers}`,
+  `an idle spaceship session installed a working widget: ${JSON.stringify(ui.widgetOps)} ${liveTimers}`,
 );
 check(
   ui.workingVisible.every((visible) => visible === true),
   `an idle spaceship session hid Pi's stock working row: ${JSON.stringify(ui.workingVisible)}`,
 );
 
-// A run start installs the banner, starts its timer, and hides Pi's stock working row.
+// A run start installs the selected presentation in the shared working-row slot.
 reset();
 await fire("agent_start");
 check(
-  ui.widgetOps.length === 1 &&
-    ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
-    ui.widgetOps[0].action === "set",
-  `run start did not install exactly one spaceship banner: ${JSON.stringify(ui.widgetOps)}`,
+  ui.widgetOps.length === 1 && ui.widgetOps[0].key === boatKey && ui.widgetOps[0].action === "set",
+  `run start did not install exactly one working widget in the shared slot: ${JSON.stringify(ui.widgetOps)}`,
 );
-check(liveTimers === 1, `spaceship run kept ${liveTimers} animation timers instead of one`);
+check(liveTimers === 1, `the spaceship run kept ${liveTimers} animation timers instead of one`);
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === false,
-  "spaceship run did not hide Pi's stock working row",
+  "the spaceship run did not hide Pi's stock working row",
 );
-const workingFrame = widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44);
-check(workingFrame.length === 1, "spaceship run did not render the single-row warp sprite");
-check(strip(workingFrame[0]).includes(WARP), "spaceship run lost the compact warp sprite");
+const workingFrame = widgetOf(boatKey).render(44);
+check(workingFrame.length === 1, "the spaceship run did not render the single-row warp sprite");
+check(strip(workingFrame[0]).includes(WARP), "the spaceship run lost the compact warp sprite");
 
-// The cruise is driven by the module's own tick clock.
-const beforeCruise = warpColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
+// The cruise is driven by the module's own tick clock, and every tick requests a repaint.
+const beforeCruise = warpColumn(widgetOf(boatKey).render(44));
 await sleep(CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_TICKS_PER_MOVE * 4 + 60);
-const afterCruise = warpColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
-check(afterCruise > beforeCruise, `working banner did not cruise right: ${beforeCruise} -> ${afterCruise}`);
+const afterCruise = warpColumn(widgetOf(boatKey).render(44));
+check(afterCruise > beforeCruise, `the working sprite did not cruise right: ${beforeCruise} -> ${afterCruise}`);
+check(renderRequests > 0, "the spaceship timer never requested a repaint");
 
-// A settle removes the banner and its timer and restores Pi's stock working row.
+// A settle removes the widget and its timer and restores Pi's stock working row.
 reset();
 await fire("agent_settled");
 check(
-  ui.widgetOps.length === 1 &&
-    ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
-    ui.widgetOps[0].action === "clear",
-  `settle did not remove the spaceship banner: ${JSON.stringify(ui.widgetOps)}`,
+  ui.widgetOps.length === 1 && ui.widgetOps[0].key === boatKey && ui.widgetOps[0].action === "clear",
+  `the settle did not remove the spaceship widget: ${JSON.stringify(ui.widgetOps)}`,
 );
-check(liveTimers === 0, `settle left ${liveTimers} animation timers`);
-check(ui.widgets.size === 0, "settle left a residual spaceship banner");
+check(liveTimers === 0, `the settle left ${liveTimers} animation timers`);
+check(ui.widgets.size === 0, "the settle left a residual working widget");
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === true,
-  "settle did not restore Pi's stock working row",
+  "the settle did not restore Pi's stock working row",
 );
 
-// Toggling Calm off during a run clears the banner and its timer; toggling it back on
-// during the same run restores the banner.
+// Dual install: the standalone Pi Calm extension's boat lives in the same slot, so a
+// run replaces it with exactly one selected presentation instead of rendering both.
+let standaloneDisposed = false;
+const standaloneWidget = {
+  render: () => ["standalone boat"],
+  dispose: () => { standaloneDisposed = true; },
+};
+ui.setWidget(boatKey, () => standaloneWidget);
+reset();
+await fire("agent_start");
+const renderedDualInstallWidgets = [...ui.widgets.values()].map((widget) => widget.render(44));
+check(
+  standaloneDisposed &&
+    renderedDualInstallWidgets.length === 1 &&
+    strip(renderedDualInstallWidgets[0][0]).includes(WARP),
+  `a dual Calm install rendered ${renderedDualInstallWidgets.length} working widgets instead of one spaceship`,
+);
+await fire("agent_settled");
+check(liveTimers === 0 && ui.widgets.size === 0, "the dual-install run did not clean up");
+
+// Toggling Calm off during a run clears the widget and its timer; toggling it back on
+// during the same run restores the selected presentation.
 reset();
 await fire("agent_start");
 reset();
 await calmCommand.handler("", ctx);
 check(
-  ui.widgetOps.length === 1 &&
-    ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
-    ui.widgetOps[0].action === "clear",
-  `toggling Calm off did not clear the spaceship banner: ${JSON.stringify(ui.widgetOps)}`,
+  ui.widgetOps.length === 1 && ui.widgetOps[0].key === boatKey && ui.widgetOps[0].action === "clear",
+  `toggling Calm off did not clear the spaceship widget: ${JSON.stringify(ui.widgetOps)}`,
 );
 check(liveTimers === 0, `toggling Calm off left ${liveTimers} timers`);
 check(
@@ -4711,10 +4444,8 @@ check(
 reset();
 await calmCommand.handler("", ctx);
 check(
-  ui.widgetOps.length === 1 &&
-    ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
-    ui.widgetOps[0].action === "set",
-  "toggling Calm on did not restore the spaceship banner",
+  ui.widgetOps.length === 1 && ui.widgetOps[0].key === boatKey && ui.widgetOps[0].action === "set",
+  "toggling Calm on did not restore the spaceship widget",
 );
 check(liveTimers === 1, `toggling Calm on left ${liveTimers} timers`);
 check(
@@ -4724,25 +4455,21 @@ check(
 await fire("agent_settled");
 check(liveTimers === 0 && ui.widgets.size === 0, "the toggled-on run did not clean up");
 
-// The banner is session-scoped: a shutdown during a run clears the installed widget,
-// stops its timer, and restores Pi's stock working row so the next session starts clean.
+// The presentation is session-scoped: a shutdown during a run clears the installed
+// widget, stops its timer, and restores Pi's stock working row so the next session
+// starts clean.
 for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
   reset();
   await fire("agent_start");
-  check(
-    ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
-    `session_shutdown(${reason}) setup did not show the banner`,
-  );
-  check(liveTimers === 1, `session_shutdown(${reason}) setup left ${liveTimers} banner timers`);
+  check(ui.widgets.has(boatKey), `session_shutdown(${reason}) setup did not show the widget`);
+  check(liveTimers === 1, `session_shutdown(${reason}) setup left ${liveTimers} animation timers`);
   reset();
   await fire("session_shutdown", { reason });
-  check(liveTimers === 0, `session_shutdown(${reason}) left ${liveTimers} banner timers`);
-  check(ui.widgets.size === 0, `session_shutdown(${reason}) left a residual banner widget`);
+  check(liveTimers === 0, `session_shutdown(${reason}) left ${liveTimers} animation timers`);
+  check(ui.widgets.size === 0, `session_shutdown(${reason}) left a residual widget`);
   check(
-    ui.widgetOps.length === 1 &&
-      ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
-      ui.widgetOps[0].action === "clear",
-    `session_shutdown(${reason}) did not clear the banner: ${JSON.stringify(ui.widgetOps)}`,
+    ui.widgetOps.length === 1 && ui.widgetOps[0].key === boatKey && ui.widgetOps[0].action === "clear",
+    `session_shutdown(${reason}) did not clear the widget: ${JSON.stringify(ui.widgetOps)}`,
   );
   check(
     ui.workingVisible[ui.workingVisible.length - 1] === true,
@@ -4750,31 +4477,25 @@ for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
   );
 }
 
-// Turning Calm off across a session boundary must not strand the banner: shutdown
+// Turning Calm off across a session boundary must not strand the widget: shutdown
 // still clears it, and the next session leaves Pi's stock working row alone.
 reset();
 await fire("session_start", { reason: "startup" });
 await fire("agent_start");
-check(ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "Calm-off setup did not show the banner");
+check(ui.widgets.has(boatKey), "the Calm-off setup did not show the widget");
 reset();
 writeFileSync(`${process.env.FM_HOME}/config/calm`, "off\n");
 await fire("session_shutdown", { reason: "new" });
-check(liveTimers === 0 && ui.widgets.size === 0, "shutdown on the way to Calm off left the banner installed");
+check(liveTimers === 0 && ui.widgets.size === 0, "shutdown on the way to Calm off left the widget installed");
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === true,
   "shutdown on the way to Calm off did not restore Pi's stock working row",
 );
 reset();
 await fire("session_start", { reason: "new" });
-check(
-  liveTimers === 0 && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
-  "a Calm-off session restored the spaceship banner",
-);
+check(liveTimers === 0 && !ui.widgets.has(boatKey), "a Calm-off session restored the spaceship widget");
 await fire("agent_start");
-check(
-  liveTimers === 0 && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
-  "a Calm-off run installed the spaceship banner",
-);
+check(liveTimers === 0 && !ui.widgets.has(boatKey), "a Calm-off run installed the spaceship widget");
 await fire("agent_settled");
 writeFileSync(`${process.env.FM_HOME}/config/calm`, "on\n");
 
@@ -4783,47 +4504,58 @@ writeFileSync(`${process.env.FM_HOME}/config/calm`, "on\n");
 reset();
 writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "yacht\n");
 await fire("session_start", { reason: "new" });
-check(liveTimers === 0 && ui.widgets.size === 0, "selection switch left a stale spaceship banner");
+check(liveTimers === 0 && ui.widgets.size === 0, "a boat session installed a widget while idle");
 await fire("agent_start");
-check(liveTimers === 1, "boat selection did not start the animation");
-check(ui.widgets.has(boatKey), "a non-spaceship config/calm-ship did not select the boat");
-check(!ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "a non-spaceship selection still showed the spaceship");
+check(liveTimers === 1, "the boat selection did not start the animation");
+check(
+  strip(widgetOf(boatKey).render(44).join("\n")).includes(BOAT_HULL),
+  "a non-spaceship config/calm-ship did not select the boat",
+);
 await fire("agent_settled");
-check(liveTimers === 0 && ui.widgets.size === 0, "boat cycle after selection switch did not clean up");
+check(liveTimers === 0 && ui.widgets.size === 0, "the boat cycle after a selection change did not clean up");
 
-// Re-selecting spaceship installs the banner for the next run, and a mid-run switch
-// replaces the installed banner with the boat instead of leaving it behind.
+// Re-selecting spaceship installs the saucer for the next run, and a mid-run
+// config/calm-ship edit takes effect at the next session_start, not at a /calm toggle.
 reset();
 writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "spaceship\n");
 await fire("session_start", { reason: "new" });
-check(liveTimers === 0 && ui.widgets.size === 0, "an idle spaceship session installed a banner");
+check(liveTimers === 0 && ui.widgets.size === 0, "an idle spaceship session installed a widget");
 await fire("agent_start");
-check(ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "re-selecting spaceship did not install the banner for the run");
-writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "yacht\n");
-reset();
-await calmCommand.handler("", ctx);
 check(
-  liveTimers === 0 && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
-  "a mid-run selection switch left the spaceship banner installed",
+  strip(widgetOf(boatKey).render(44)[0]).includes(WARP),
+  "re-selecting spaceship did not install the saucer for the run",
 );
+writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "yacht\n");
+await calmCommand.handler("", ctx);
 await calmCommand.handler("", ctx);
 check(
-  ui.widgets.has(boatKey) && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
-  "a mid-run selection switch did not install the boat",
+  strip(widgetOf(boatKey).render(44)[0]).includes(WARP),
+  "a /calm toggle re-read config/calm-ship instead of leaving it for session_start",
 );
 await fire("agent_settled");
-check(liveTimers === 0 && ui.widgets.size === 0, "default-boat cycle did not clean up");
+check(liveTimers === 0 && ui.widgets.size === 0, "the mid-run selection edit did not clean up");
+reset();
+await fire("session_start", { reason: "new" });
+await fire("agent_start");
+check(
+  strip(widgetOf(boatKey).render(44).join("\n")).includes(BOAT_HULL),
+  "the next session_start did not re-read the boat selection",
+);
+await fire("agent_settled");
+check(liveTimers === 0 && ui.widgets.size === 0, "the re-read boat cycle did not clean up");
 
 // An absent config/calm-ship keeps the boat default too.
 reset();
 writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "");
 await fire("session_start", { reason: "new" });
-check(liveTimers === 0 && ui.widgets.size === 0, "second selection switch left a stale banner");
+check(liveTimers === 0 && ui.widgets.size === 0, "the absent selection left a stale widget");
 await fire("agent_start");
-check(ui.widgets.has(boatKey), "an absent config/calm-ship did not keep the boat default");
-check(!ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "an absent config/calm-ship still showed the spaceship");
+check(
+  strip(widgetOf(boatKey).render(44).join("\n")).includes(BOAT_HULL),
+  "an absent config/calm-ship did not keep the boat default",
+);
 await fire("agent_settled");
-check(liveTimers === 0 && ui.widgets.size === 0, "default-boat cycle did not clean up");
+check(liveTimers === 0 && ui.widgets.size === 0, "the default-boat cycle did not clean up");
 
 globalThis.setInterval = realSetInterval;
 globalThis.clearInterval = realClearInterval;
@@ -4832,7 +4564,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-spaceship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-spaceship test printed output: $out"
-  pass "Pi Calm spaceship variant drifts slowly left to right across the banner in the two-row rest pose, the three-cell (|) saucer directly over the three-cell |^| hull with a ~1.3s idle twinkle (the asymmetric * and . unit slides, so the stars move past the chasing ship) and a marquee wrap at the right edge, warps as the single-row compact =( * ) sprite sweeping continuously across the full span at the working cadence with a two-phase-per-tick streak field, never parking while thinking, eases back into the drift within its bounded settle window without teleporting, freezes and resumes across hide/show including mid-drift and mid-warp, clamps visible and hidden resizes, installs the banner only for the duration of one agent run when config/calm-ship names spaceship, removes it and restores Pi's stock working row when the run ends, and keeps the boat default for every other value"
+  pass "Pi Calm spaceship variant renders the single-row compact =( * ) saucer sweeping continuously across the full track at one column per 880ms with a two-phase-per-tick streak field streaming left past it, never parking while thinking, wraps marquee-style at the right edge, degrades to a bare streak field when narrow, clamps visible and hidden resizes, freezes and resumes mid-sweep without hidden-time jumps or duplicate timers, installs under the shared Calm working-row slot for exactly one agent run when config/calm-ship names spaceship so a dual Calm install still shows one animation, removes it and restores Pi's stock working row when the run ends, and keeps the boat default for every other value"
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step

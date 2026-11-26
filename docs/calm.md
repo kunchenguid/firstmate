@@ -69,7 +69,7 @@ While a run is thinking, the sprite is the single-row compact `=( * )` saucer, y
 Freeze/resume continuity, resize clamping, fresh-session reset, and narrow fallbacks follow the boat's contract, and a run start or settle installs and removes the banner exactly as it shows and hides the boat.
 [`configuration.md`](configuration.md#working-presentation-variant-configcalm-ship) owns the `config/calm-ship` schema and re-read points.
 
-The spaceship banner installs under its own Firstmate-only Pi widget slot, so the standalone Pi Calm extension's shared boat slot rule above does not apply to it.
+The spaceship claims the same shared Pi working-row widget slot as the boat, so the shared-slot rule above applies to whichever presentation `config/calm-ship` selects: a session that loads both Calms shows one working animation rather than two.
 
 ### What Calm hides on Pi
 
