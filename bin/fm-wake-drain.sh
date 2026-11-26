@@ -480,9 +480,15 @@ print_open_decisions_section() {
   local snapshot=${1:-} open task key verb until note line item_bytes=220 global_bytes=4000
   local output='' used=0 shown=0 omitted=0 bytes deferral
 
+  # Advance the untimed fold first, as every drain always has: fm-wake-lib.sh's
+  # fm_wake_status_append_self_announced accepts a home-written close after a
+  # presented decision only when that cursor already sits at the pre-append
+  # size. The rows below come from the timed view, which carries the deferral.
   if [ -n "$snapshot" ]; then
+    scan_open_decisions_snapshot "$STATE" "$snapshot" >/dev/null || return 1
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot" timed) || return 1
   else
+    scan_open_decisions_incremental "$STATE" >/dev/null || return 1
     open=$(scan_open_decisions_incremental "$STATE" timed) || return 1
   fi
   [ -n "$open" ] || return 0
