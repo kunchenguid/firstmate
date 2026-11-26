@@ -12,6 +12,8 @@
 #   - the local-HEAD secondmate sync (bin/fm-spawn.sh on launch, bin/fm-bootstrap.sh
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
+#     An optional primary config/secondmate-sync-ref retargets it to a named
+#     local branch (secondmate_sync_target below).
 #
 # A REMOTE secondmate home follows that same primary commit. Its host cannot read
 # this object store, so bin/fm-spawn.sh and bin/fm-bootstrap.sh hand the commit to
@@ -75,6 +77,65 @@ primary_head_commit() {
   local root=$1 default
   default=$(default_branch "$root") || return 1
   git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
+}
+
+# Resolve the commit every secondmate sync targets (bootstrap and spawn, local
+# and remote routes). The optional primary-home config/secondmate-sync-ref names
+# one local branch (for example local/patches) to follow instead of the default
+# branch; absent, it is primary_head_commit exactly. A malformed or unresolvable
+# file falls back to primary_head_commit and explains why in
+# SECONDMATE_SYNC_REF_ERROR so the caller can report it. Sets globals, so call it
+# in the caller's shell, never in $(...):
+#   SECONDMATE_SYNC_COMMIT = the target commit SHA
+#   SECONDMATE_SYNC_REF    = the configured branch name, only while it is in effect
+#   SECONDMATE_SYNC_REF_ERROR = why a present file was ignored, else empty
+# Returns 1 only when no target commit can be resolved at all.
+SECONDMATE_SYNC_COMMIT=""
+SECONDMATE_SYNC_REF=""
+SECONDMATE_SYNC_REF_ERROR=""
+# shellcheck disable=SC2034 # Output globals read by sourcing callers.
+secondmate_sync_target() { # <root> <config-dir>
+  local root=$1 file=$2/secondmate-sync-ref name commit
+  SECONDMATE_SYNC_COMMIT=""
+  SECONDMATE_SYNC_REF=""
+  SECONDMATE_SYNC_REF_ERROR=""
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+      SECONDMATE_SYNC_REF_ERROR="config/secondmate-sync-ref is not a readable file"
+    elif [ "$(grep -c . "$file" 2>/dev/null)" != 1 ]; then
+      SECONDMATE_SYNC_REF_ERROR="config/secondmate-sync-ref must hold exactly one local branch name"
+    else
+      name=$(grep . "$file" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+      if [ -z "$name" ] || ! git check-ref-format --branch "$name" >/dev/null 2>&1; then
+        SECONDMATE_SYNC_REF_ERROR="config/secondmate-sync-ref names an invalid branch name"
+      elif ! commit=$(git -C "$root" rev-parse --verify --quiet "refs/heads/$name^{commit}" 2>/dev/null); then
+        SECONDMATE_SYNC_REF_ERROR="config/secondmate-sync-ref names $name, which is not a local branch of the primary checkout"
+      else
+        SECONDMATE_SYNC_COMMIT=$commit
+        SECONDMATE_SYNC_REF=$name
+        return 0
+      fi
+    fi
+  fi
+  SECONDMATE_SYNC_COMMIT=$(primary_head_commit "$root") || return 1
+}
+
+# Prove that every commit a home holds beyond TARGET is preserved somewhere else:
+# reachable from origin/<default> or from a local branch in the configured
+# sync ref's family (refs/heads/<ref>*, for example local/patches-prev-<sha>)
+# other than the target branch itself. Only then may a rebuilt target replace
+# the home's HEAD without dropping unlanded work.
+rebuild_commits_preserved() { # <dir> <target-commit> <sync-ref> <default>
+  local dir=$1 target=$2 ref=$3 default=$4 keep=() r
+  if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$default"; then
+    keep+=("refs/remotes/origin/$default")
+  fi
+  while IFS= read -r r; do
+    [ "$r" != "refs/heads/$ref" ] || continue
+    case "$r" in "refs/heads/$ref"*) keep+=("$r") ;; esac
+  done < <(git -C "$dir" for-each-ref --format='%(refname)' refs/heads/ 2>/dev/null)
+  r=$(git -C "$dir" rev-list -1 HEAD --not "$target" "${keep[@]}" -- 2>/dev/null) || return 1
+  [ -z "$r" ]
 }
 
 resolve_path() {
@@ -388,12 +449,18 @@ live_secondmate_meta_records() {
 # wrong-branch target and leave its work untouched. An optional secondmate id
 # enables the content-equivalent divergence proof and durable marker described
 # in this file's header.
+# An optional sync_ref (the in-effect config/secondmate-sync-ref branch whose
+# commit is base_mode) also allows a rebuild move: a clean DETACHED secondmate
+# home that is not a fast-forward of the rebuilt target moves there with
+# `reset --keep` when rebuild_commits_preserved proves every commit it holds
+# beyond the target is kept elsewhere. It reports as updated, so the usual
+# re-read nudge follows; any other divergence keeps the skip and record below.
 FF_STATUS=""
 FF_INSTR=""
 FF_IMPORT_FROM=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
-  local secondmate_id=${6:-} reconciliation_state=${7:-}
+  local secondmate_id=${6:-} reconciliation_state=${7:-} sync_ref=${8:-}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -485,6 +552,25 @@ ff_target() {
       echo "$label: skipped: redundant divergence could not be reconciled with reset --keep"
       return 0
     fi
+    if [ -n "$sync_ref" ] && [ -n "$secondmate_id" ] && [ -n "$reconciliation_state" ] && [ -z "$cur" ] \
+      && rebuild_commits_preserved "$dir" "$base_rev" "$sync_ref" "$default"; then
+      instr=$(changed_instr "$dir" "$base")
+      before=$(git -C "$dir" rev-parse --short HEAD)
+      if git -C "$dir" reset --keep "$base" >/dev/null 2>&1; then
+        after=$(git -C "$dir" rev-parse --short HEAD)
+        FF_STATUS="updated"
+        FF_INSTR="$instr"
+        secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
+        if [ -n "$instr" ]; then
+          echo "$label: moved to rebuilt $sync_ref $before..$after (instructions changed: $instr)"
+        else
+          echo "$label: moved to rebuilt $sync_ref $before..$after"
+        fi
+        return 0
+      fi
+      echo "$label: skipped: rebuilt $sync_ref could not be applied with reset --keep"
+      return 0
+    fi
     if [ -n "$secondmate_id" ] && [ -n "$reconciliation_state" ]; then
       local marker
       if marker=$(secondmate_update_reconcile_record "$reconciliation_state" "$secondmate_id" "$local_rev" "$base_rev" "$base"); then
@@ -524,7 +610,8 @@ FF_SEEN_HOMES=""
 # Validate and fast-forward one secondmate home, accumulating its stable
 # fm-<id> task selector into FF_NUDGE_WINDOWS when it should be live-converged.
 # Args:
-#   id home window base_mode nudge_requires_instr
+#   id home window base_mode nudge_requires_instr [sync_ref]
+# sync_ref passes through to ff_target's rebuild move (see ff_target).
 # A home is nudged only when it ACTUALLY advanced (FF_STATUS=updated) and has a
 # live window. With nudge_requires_instr=yes the advance must also have changed
 # the instruction surface (FF_INSTR non-empty): an already-current home, or one
@@ -546,7 +633,7 @@ FF_SEEN_HOMES=""
 #     ones that needed no advance to get there.
 # An undefined hook is simply not called.
 process_secondmate() {
-  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
+  local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} sync_ref=${6:-} home_real fm_root_real
   [ -n "$id" ] || return 0
   [ -n "$home" ] || return 0
   fm_root_real=$(resolve_path "$FM_ROOT")
@@ -562,7 +649,7 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$id" "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$id" "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "$sync_ref"
   if [ -n "$window" ] && { [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; } \
     && type fm_ff_after_secondmate_settled >/dev/null 2>&1; then
     fm_ff_after_secondmate_settled "$id" "$home_real" "$window" "$FF_STATUS" "$FF_INSTR"
@@ -580,15 +667,15 @@ process_secondmate() {
 }
 
 # Sweep this home's LIVE secondmate direct reports - state/<id>.meta files with
-# kind=secondmate - fast-forwarding each to base_mode. Passes base_mode and
-# nudge_requires_instr through to process_secondmate. Accumulates into
+# kind=secondmate - fast-forwarding each to base_mode. Passes base_mode,
+# nudge_requires_instr, and the optional trailing sync_ref through to process_secondmate. Accumulates into
 # FF_NUDGE_WINDOWS / FF_SEEN_HOMES, which the caller resets before and reads after.
 # The registry argument is only for home= fallback on older or incomplete meta records.
 sweep_live_secondmate_metas() {
-  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} id home window meta
+  local state=$1 base_mode=$2 nudge_requires_instr=${3:-no} registry=${4:-$FM_HOME/data/secondmates.md} sync_ref=${5:-} id home window meta
   [ -d "$state" ] || return 0
   while IFS='|' read -r id home window meta; do
     if grep -q '^remote_host=.' "$meta" 2>/dev/null; then continue; fi
-    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr"
+    process_secondmate "$id" "$home" "$window" "$base_mode" "$nudge_requires_instr" "$sync_ref"
   done < <(live_secondmate_meta_records "$state" "$registry")
 }
