@@ -1262,6 +1262,8 @@ host_error_case() {
   [ "$(wc -l < "$poll_count" | tr -d ' ')" -eq 1 ] || fail "healthy poll did not reach adapter"
   case "$shape" in
     package)
+      # macOS refuses to rename a directory its owner cannot write; the root is 0555.
+      chmod 0700 "$installed"
       mv "$installed" "$installed.saved"
       expected_code='package-missing'
       ;;
@@ -1315,7 +1317,7 @@ host_error_case() {
   done
   assert_contains "$(wake_payloads "$home")" "procevent ext-host-error $source 1" "$shape first failure was suppressed"
   case "$shape" in
-    package) mv "$installed.saved" "$installed" ;;
+    package) mv "$installed.saved" "$installed" && chmod 0555 "$installed" ;;
     conflict) cp "$case_root/other-binding.saved" "$home/config/extensions.d/org.example.other.json" ;;
     barrier) mv "$case_root/code/bin/fm-extension-launch-barrier.original.mjs" "$case_root/code/bin/fm-extension-launch-barrier.mjs" ;;
   esac
@@ -1356,6 +1358,7 @@ assert_absent "$H_IDENTICAL/state/procevent-inbox/identical-source.1.handled" "f
 assert_absent "$H_IDENTICAL/state/procevent-inbox/identical-source.2.handled" "second adapter result was acknowledged"
 pass "successful identical adapter results retain distinct sequences even with host-shaped output"
 identical_installed=$(binding_value "$H_IDENTICAL" org.example.identical package_root)
+chmod 0700 "$identical_installed"
 mv "$identical_installed" "$identical_installed.saved"
 for _ in 1 2; do
   FM_HOME="$H_IDENTICAL" "$PROCEVENT" start identical-source > "$TMP_ROOT/identical-failure.out" \
