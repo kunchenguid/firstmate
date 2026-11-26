@@ -37,14 +37,17 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # Run one library expression with <fakebin> shadowing ps. kill is stubbed so
 # liveness questions are decided by the process table alone (FM_TEST_KILL_RC=1
 # makes every pid dead). The suite itself may run inside a Claude session whose
-# CLAUDE_CODE_SESSION_ID and CLAUDE_PID would leak into the expression, so both
-# are scrubbed and only FM_TEST_SESSION_ID and FM_TEST_CLAUDE_PID reach it.
+# CLAUDE_CODE_SESSION_ID and CLAUDE_PID, or a Codex session whose
+# CODEX_THREAD_ID, would leak into the expression, so all three are scrubbed and
+# only FM_TEST_SESSION_ID, FM_TEST_CLAUDE_PID, and FM_TEST_CODEX_THREAD_ID reach
+# it.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
   local -a session_env=()
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
-  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
+  [ -z "${FM_TEST_CODEX_THREAD_ID:-}" ] || session_env+=("CODEX_THREAD_ID=$FM_TEST_CODEX_THREAD_ID")
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u CODEX_THREAD_ID ${session_env[@]+"${session_env[@]}"} \
     PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -439,6 +442,134 @@ test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id() {
     || fail "no anchor pid was resolved for the healthy chain with a trusted id"
   [ "$got" = 710 ] || fail "the healthy chain with a trusted id anchored '$got', expected 710 rather than the front-end"
   pass "session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid"
+}
+
+# A Codex primary: the tool shell's parent is the codex process 800, the whole
+# contiguous run. FM_TEST_INNER=pi makes the caller a Pi primary (810)
+# hand-started from that Codex shell, so it still carries CODEX_THREAD_ID while
+# its own innermost harness is pi. 900 is a different live codex process
+# outside this ancestry, standing in for an earlier lock holder.
+write_codex_session_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_INNER:-codex}" in
+  800:comm=:*) printf '%s\n' codex ;;
+  800:args=:*) printf '%s\n' 'codex --yolo' ;;
+  800:ppid=:*) printf '%s\n' 1 ;;
+  810:comm=:*) printf '%s\n' pi ;;
+  810:args=:*) printf '%s\n' pi ;;
+  810:ppid=:*) printf '%s\n' 1 ;;
+  900:comm=:*) printf '%s\n' codex ;;
+  900:args=:*) printf '%s\n' 'codex resume' ;;
+  900:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=:codex) printf '%s\n' 800 ;;
+  *:ppid=:pi) printf '%s\n' 810 ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+test_codex_thread_id_is_the_trusted_id_only_inside_codex() {
+  local dir fakebin state got
+  dir="$TMP_ROOT/codex-session"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state"
+  write_codex_session_ps "$fakebin"
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pids') || fail "no ancestry for the Codex session"
+  [ "$got" = 800 ] || fail "the Codex session's ancestry was '$got', expected the codex process 800"
+  got=$(FM_TEST_INNER=pi lib_eval "$fakebin" 'fm_harness_ancestry_pids') || fail "no ancestry for the Pi session"
+  [ "$got" = 810 ] || fail "the Pi session's ancestry was '$got', expected the pi process 810"
+
+  # 1. The Codex thread id is trusted from inside the codex process.
+  got=$(FM_TEST_CODEX_THREAD_ID=T1 lib_eval "$fakebin" 'fm_session_lock_trusted_session_id') \
+    || fail "a Codex primary's CODEX_THREAD_ID was not trusted"
+  [ "$got" = T1 ] || fail "the Codex primary trusted '$got', expected T1"
+  # 2. A Codex primary started from a Claude pane carries that pane's Claude
+  # id and pid; they stay untrusted and the Codex thread id still wins.
+  got=$(FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=700 FM_TEST_CODEX_THREAD_ID=T1 \
+    lib_eval "$fakebin" 'fm_session_lock_trusted_session_id') \
+    || fail "a Codex primary under a Claude pane lost its own thread id"
+  [ "$got" = T1 ] || fail "a Codex primary under a Claude pane trusted '$got', expected T1"
+  # 3. A retained thread id under another innermost harness is never trusted.
+  if FM_TEST_INNER=pi FM_TEST_CODEX_THREAD_ID=T1 lib_eval "$fakebin" 'fm_session_lock_trusted_session_id' >/dev/null; then
+    fail "a Pi primary started from a Codex shell trusted the retained CODEX_THREAD_ID"
+  fi
+  if FM_TEST_CODEX_THREAD_ID=$'T1\rx' lib_eval "$fakebin" 'fm_session_lock_trusted_session_id' >/dev/null; then
+    fail "a thread id containing a carriage return was trusted"
+  fi
+  # 4. The anchor stays the codex process itself.
+  got=$(FM_TEST_CODEX_THREAD_ID=T1 lib_eval "$fakebin" 'fm_session_lock_anchor_pid') \
+    || fail "no anchor pid was resolved for a trusted Codex thread id"
+  [ "$got" = 800 ] || fail "a trusted Codex thread id anchored '$got', expected 800"
+  # 5. The recorded id is the second ownership signal, exactly as for Claude.
+  printf '900\n' > "$state/.lock"
+  printf 'T1\n' > "$state/.lock-session"
+  FM_TEST_CODEX_THREAD_ID=T1 owned "$fakebin" "$state" \
+    || fail "the same Codex thread did not own the lock recorded under its id"
+  if FM_TEST_CODEX_THREAD_ID=T1 foreign_owner "$fakebin" "$state" >/dev/null; then
+    fail "the same Codex thread saw its own recorded lock as a foreign owner"
+  fi
+  if FM_TEST_CODEX_THREAD_ID=T2 owned "$fakebin" "$state"; then
+    fail "a different Codex thread claimed a live owner's lock"
+  fi
+  got=$(FM_TEST_CODEX_THREAD_ID=T2 foreign_owner "$fakebin" "$state") \
+    || fail "a different Codex thread did not see the live owner as foreign"
+  [ "$got" = 900 ] || fail "the foreign owner pid was '$got', expected 900"
+  if FM_TEST_INNER=pi FM_TEST_CODEX_THREAD_ID=T1 owned "$fakebin" "$state"; then
+    fail "a retained Codex thread id owned the lock from a Pi primary"
+  fi
+  if FM_TEST_KILL_RC=1 FM_TEST_CODEX_THREAD_ID=T1 owned "$fakebin" "$state"; then
+    fail "a same-thread lock whose recorded pid is dead was owned instead of left for reclaim"
+  fi
+  pass "session-lock: a Codex primary's thread id is trusted only from its own codex process"
+}
+
+# The real bin/fm-lock.sh records the trusted id beside the lock for a Codex
+# primary, never for a retained id, and keeps Claude's id when both are present.
+test_lock_records_the_codex_thread_id() {
+  local dir harness name expected
+  for harness in codex:T1 pi: claude:S1; do
+    name=${harness%%:*}
+    expected=${harness#*:}
+    dir="$TMP_ROOT/codex-lock-$name"
+    mkdir -p "$dir/state" "$dir/bin"
+    ln -sf /bin/bash "$dir/bin/$name"
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u CODEX_THREAD_ID \
+      FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" FM_TEST_HARNESS="$name" \
+      "$dir/bin/$name" -c '
+        if [ "$FM_TEST_HARNESS" = claude ]; then
+          export CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$
+        fi
+        CODEX_THREAD_ID=T1 "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
+        printf "%s\n" "$?" > "$FM_HOME/state/acquire.rc"
+        printf "%s\n" "$$" > "$FM_HOME/state/harness-pid"
+      '
+    expect_code 0 "$(tr -d '[:space:]' < "$dir/state/acquire.rc")" \
+      "the $name primary could not acquire its lock: $(cat "$dir/state/acquire.out")"
+    [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$(tr -d '[:space:]' < "$dir/state/harness-pid")" ] \
+      || fail "the $name primary did not anchor the lock on its own process"
+    if [ -n "$expected" ]; then
+      [ "$(tr -d '[:space:]' 2>/dev/null < "$dir/state/.lock-session")" = "$expected" ] \
+        || fail "the $name primary recorded '$(cat "$dir/state/.lock-session" 2>/dev/null)', expected $expected"
+    else
+      [ ! -e "$dir/state/.lock-session" ] \
+        || fail "the $name primary recorded a retained Codex thread id: $(cat "$dir/state/.lock-session")"
+    fi
+  done
+  pass "session-lock: fm-lock.sh records a Codex primary's thread id and nothing retained"
 }
 
 # --- Cygwin / Git-for-Windows layer ------------------------------------------
@@ -1665,6 +1796,8 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
+test_codex_thread_id_is_the_trusted_id_only_inside_codex
+test_lock_records_the_codex_thread_id
 test_windows_session_is_identified_from_its_published_pid
 test_windows_published_pid_is_confirmed_before_it_is_trusted
 test_windows_pid_is_never_resolved_as_a_cygwin_pid
