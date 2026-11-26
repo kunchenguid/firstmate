@@ -173,7 +173,9 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
 
 # Privacy-safe correlation id: 16 lowercase hex chars. openssl's rand supplies
 # 64 random bits; where it is absent or returns nothing, the id falls back to a
-# hash of pid, clock, and $RANDOM, so it stays unique rather than unguessable.
+# shasum/sha256sum hash of pid, clock, and $RANDOM, so it stays unique rather
+# than unguessable. With neither hashing tool it prints nothing, so a
+# pending-reply expectation cannot be created.
 fm_pending_reply_new_id() {
   local raw='' hex=''
   if command -v openssl >/dev/null 2>&1; then
