@@ -169,6 +169,24 @@ test_ordinary_is_measured_from_the_default_root() {
   pass "ordinary is measured from the default ~/.claude root"
 }
 
+test_a_setup_token_account_is_unmeasured_without_a_read() {
+  local out
+  new_case token
+  account "$CASE/a" 70 0.2
+  mkdir -p "$CASE/tokens"
+  printf 'sk-ant-oat01-FAKETOKENSENTINEL\n' > "$CASE/tokens/second.token"
+  chmod 600 "$CASE/tokens/second.token"
+  printf '%s\n' "$CASE/a" "token:$CASE/tokens/second.token" > "$HOME_DIR/config/claude-accounts"
+  out=$(run_tool)
+  assert_contains "$out" "row: $CASE/a  root=$CASE/a  scope=all_models  status=known  remaining=70%  spendPriority=0.2" "the config-root account keeps its own row"
+  assert_contains "$out" "row: token:$CASE/tokens/second.token  root=-  uncertainty: setup-token account has no config root for quota-axi to read" \
+    "a setup-token account is disclosed as unmeasured"
+  assert_not_contains "$out" "FAKETOKENSENTINEL" "the token must never be printed"
+  assert_no_grep "$CASE/tokens" "$CASE/reads" "quota-axi must never be run for a setup-token account"
+  assert_no_choice "$out"
+  pass "a setup-token account is reported unmeasured without running quota-axi or reading its token"
+}
+
 test_absent_or_malformed_lists_refuse() {
   local out rc
   new_case refuse
@@ -190,5 +208,6 @@ test_projected_runway_prints_its_seconds
 test_a_rate_limited_account_names_the_vendor_reason
 test_ordinary_is_measured_from_the_default_root
 test_absent_or_malformed_lists_refuse
+test_a_setup_token_account_is_unmeasured_without_a_read
 
 echo "# all fm-claude-account-quota tests passed"
