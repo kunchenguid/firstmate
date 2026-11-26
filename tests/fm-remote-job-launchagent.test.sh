@@ -199,6 +199,15 @@ launch_count() { grep -c "^$1 " "$LAUNCH_LOG" 2>/dev/null || true; }
 
 fm_remote_job_prepare_state "$ACCOUNT_HOME" || fail 'could not prepare remote job state'
 fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not write the LaunchAgent'
+# A plist written before ProcessType=Interactive joined the contract is stale.
+fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail 'a freshly written LaunchAgent does not match its own contract'
+python3 -c 'import plistlib,sys; p=sys.argv[1]; d=plistlib.load(open(p, "rb")); assert d.pop("ProcessType") == "Interactive"; plistlib.dump(d, open(p, "wb"))' "$FM_TEST_PLIST" \
+  || fail 'the written LaunchAgent does not set ProcessType=Interactive'
+fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  && fail 'a LaunchAgent without ProcessType was accepted as matching'
+fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not rewrite the LaunchAgent'
+pass 'a LaunchAgent without ProcessType=Interactive is out of contract'
 # Persisted crash leftovers are the public worker state contract. The old
 # process is gone, but its stale code identity and fresh heartbeat remain.
 printf 'stale-code\n' > "$STATE_ROOT/worker.identity"

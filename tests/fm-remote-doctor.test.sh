@@ -433,6 +433,8 @@ assert_herdr_launch_agent_contract() { # <plist> <herdr-bin> [login-shell]
     || fail "ProgramArguments[3] is not exec of the guard with $herdr_bin for session fm-remote: $cmd"
   [ "$(printf '%s' "$json" | jq -r '.LimitLoadToSessionType')" = Aqua ] \
     || fail "LimitLoadToSessionType is not Aqua"
+  [ "$(printf '%s' "$json" | jq -r '.ProcessType')" = Interactive ] \
+    || fail "ProcessType is not Interactive"
   [ "$(printf '%s' "$json" | jq -r '.RunAtLoad')" = true ] \
     || fail "RunAtLoad is not true"
   [ "$(printf '%s' "$json" | jq -r '.KeepAlive.SuccessfulExit')" = false ] \
@@ -528,6 +530,8 @@ assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
   || fail "the worker plist does not carry the Firstmate label"
 [ "$(plist_value "$CASE_JOB_PLIST" LimitLoadToSessionType)" = Aqua ] \
   || fail "the worker plist is not Aqua-scoped"
+[ "$(plist_value "$CASE_JOB_PLIST" ProcessType)" = Interactive ] \
+  || fail "the worker plist does not set ProcessType=Interactive"
 [ "$(plist_first_value "$CASE_JOB_PLIST" ProgramArguments)" = "$ROOT/bin/fm-remote-job-worker.sh" ] \
   || fail "the worker plist does not use the configured code root"
 assert_absent "$CASE_STATE/dscl-count" "the injected login shell still consulted Directory Services"
@@ -550,6 +554,25 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" bootstrap \
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
+
+# A plist written before ProcessType=Interactive joined the contract must not
+# pass as matching, or its worker sessions keep launchd's coarse timers.
+strip_process_type() { # <plist>
+  python3 -c 'import plistlib,sys; p=sys.argv[1]; d=plistlib.load(open(p, "rb")); d.pop("ProcessType"); plistlib.dump(d, open(p, "wb"))' "$1"
+}
+strip_process_type "$CASE_PLIST"
+strip_process_type "$CASE_JOB_PLIST"
+doctor
+expect_code 1 "$DOCTOR_RC" "launch agents without ProcessType were reported ready"
+assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "a Herdr launch agent without ProcessType was accepted as matching"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable:' "a remote job worker without ProcessType was accepted as matching"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not repair launch agents missing ProcessType"
+assert_contains "$DOCTOR_OUT" 'fix launchagent=applied:' "--fix did not rewrite the Herdr launch agent missing ProcessType"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
+[ "$(plist_value "$CASE_JOB_PLIST" ProcessType)" = Interactive ] \
+  || fail "--fix did not restore ProcessType=Interactive to the remote job worker"
+pass "launch agents written before ProcessType=Interactive are repaired, not reported ready"
 
 # --- a second code root must not rewrite the shared running service ----------
 

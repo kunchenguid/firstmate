@@ -414,6 +414,9 @@ launch_agent_exec_command() { # <resolved-herdr-path>
     "$(launch_agent_shell_quote "$HERDR_SESSION_NAME")"
 }
 
+# ProcessType=Interactive lifts launchd's default resource limits, which
+# coarsen timers for the server and every pane it spawns, so short sleeps and
+# lock timeouts in worker sessions oversleep several times over.
 render_launch_agent() { # <resolved-herdr-path> <resolved-login-shell>
   local herdr_bin=$1 shell=$2 exec_cmd shell_xml
   shell_xml=$(launch_agent_xml_escape "$shell")
@@ -434,6 +437,8 @@ render_launch_agent() { # <resolved-herdr-path> <resolved-login-shell>
 	</array>
 	<key>LimitLoadToSessionType</key>
 	<string>Aqua</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -900,7 +905,7 @@ check_launch_agent() { # <resolved-login-shell>
         "$(herdr_blocked_action)"
     else
       record launchagent "fixable: $LAUNCH_AGENT_PLIST does not match the current Firstmate-owned contract" \
-        "rerun this command with --fix to rewrite its label, program arguments, session scope, restart policy, and log paths"
+        "rerun this command with --fix to rewrite its label, program arguments, session scope, process type, restart policy, and log paths"
     fi
     if launch_agent_is_aqua; then
       record launchagent-scope "ok: LimitLoadToSessionType=Aqua"
