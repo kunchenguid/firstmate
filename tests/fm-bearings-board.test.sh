@@ -769,6 +769,97 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+board_digest() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1"; else sha256sum "$1"; fi | awk '{print $1}'; }
+
+test_build_refuses_bad_more_and_refs_before_touching_the_board() {
+  local home data board before rc out page
+  home=$(make_home more-refusal)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  page="$home/pick.html"
+  printf '<p>pick</p>\n' > "$page"
+  write_valid_payload "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the baseline build for More refusals failed"
+  before=$(board_digest "$board")
+
+  for edit in \
+    '.captains_call[0].more = [{"asked":"why","answer":"because","page":"pick.html"}]' \
+    '.captains_call[0].more = [{"asked":"why","answer":"because","page":"/tmp/pick.pdf"}]' \
+    '.captains_call[0].more = [{"asked":"","answer":"because"}]' \
+    '.captains_call[0].more = {"asked":"why","answer":"because"}' \
+    '.captains_call[0].refs = [{"label":"plan","url":"http://example.com/plan"}]' \
+    '.captains_call[0].refs = [{"label":"","url":"https://example.com/plan"}]' \
+    '.captains_call[0].refs = [{"label":"plan","url":"javascript:alert(1)"}]'; do
+    write_valid_payload "$data"
+    jq "$edit" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid More or refs payload was accepted: $edit"
+    [ "$(board_digest "$board")" = "$before" ] || fail "a refused More or refs payload changed the board: $edit"
+  done
+
+  write_valid_payload "$data"
+  jq --arg page "$home/missing.html" '.captains_call[0].more = [{"asked":"why","answer":"because","page":$page}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a missing More page was accepted"
+  assert_contains "$out" "not a readable regular file" "the missing-page refusal did not say why: $out"
+  [ "$(board_digest "$board")" = "$before" ] || fail "a missing More page changed the board"
+
+  ln -s "$page" "$home/link.html"
+  write_valid_payload "$data"
+  jq --arg page "$home/link.html" '.captains_call[0].more = [{"asked":"why","answer":"because","page":$page}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a symlinked More page was accepted"
+  [ "$(board_digest "$board")" = "$before" ] || fail "a symlinked More page changed the board"
+  pass "build refuses invalid More and refs entries before touching the board"
+}
+
+test_build_copies_more_pages_beside_the_board_and_prunes_old_ones() {
+  local home data board pages first second rel
+  home=$(make_home more-pages)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  pages="$home/.lavish/bearings-board-pages"
+  printf '<p>first answer</p>\n' > "$home/First.HTML"
+  printf '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n' > "$home/second.svg"
+
+  write_valid_payload "$data"
+  jq --arg page "$home/First.HTML" '
+    .captains_call[0].detail = "the full picture"
+    | .captains_call[0].refs = [{"label":"plan","url":"https://example.com/plan"}]
+    | .captains_call[0].more = [{"asked":"show it","answer":"here it is","page":$page},
+                                {"asked":"and why","answer":"no page this time"}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "a payload with a More page failed to build"
+  rel=$(extract_payload "$board" | jq -r '.captains_call[0].more[0].page')
+  case "$rel" in
+    bearings-board-pages/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].html) ;;
+    *) fail "the More page path was not rewritten to the copy beside the board: $rel" ;;
+  esac
+  first="$home/.lavish/$rel"
+  [ -f "$first" ] || fail "the More page was not copied beside the board"
+  cmp -s "$first" "$home/First.HTML" || fail "the copied More page differs from its source"
+  extract_payload "$board" | jq -e '
+    .captains_call[0].more[1] == {"asked":"and why","answer":"no page this time"}
+    and .captains_call[0].detail == "the full picture"
+    and .captains_call[0].refs == [{"label":"plan","url":"https://example.com/plan"}]' >/dev/null \
+    || fail "the published board lost a More, detail, or refs field"
+
+  jq --arg page "$home/second.svg" '.captains_call[0].more = [{"asked":"show it","answer":"redrawn","page":$page}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the rebuild with a new More page failed"
+  second="$home/.lavish/$(extract_payload "$board" | jq -r '.captains_call[0].more[0].page')"
+  [ -f "$second" ] || fail "the new More page was not copied beside the board"
+  assert_absent "$first" "a More page the board no longer names was kept"
+
+  jq 'del(.captains_call[0].more)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the rebuild without More pages failed"
+  assert_absent "$second" "a More page was kept after its card dropped it"
+  [ -z "$(find "$pages" -mindepth 1 -maxdepth 1 2>/dev/null)" ] || fail "stale files remain beside the board"
+  pass "build copies More pages beside the board and prunes the ones it no longer names"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
@@ -787,3 +878,5 @@ test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value
+test_build_refuses_bad_more_and_refs_before_touching_the_board
+test_build_copies_more_pages_beside_the_board_and_prunes_old_ones

@@ -232,6 +232,29 @@ a { color: inherit; text-decoration: none; }
 .bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+/* More: the captain's earlier asks and their answers, each with an optional
+   page copied beside the board. References: https links to fuller pictures. */
+.bb-more { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
+.bb-more__item { display: flex; flex-direction: column; gap: 6px; }
+.bb-more__asked { margin: 0; font-size: var(--fs-xs); color: var(--text-faint); line-height: 1.4; }
+.bb-more__answer { margin: 0; font-size: var(--fs-sm); color: var(--text-body); line-height: 1.45; white-space: pre-line; }
+.bb-more__frame { width: 100%; height: 260px; border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); background: var(--white); }
+.bb-more__img { display: block; max-width: 100%; height: auto; border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); background: var(--white); }
+.bb-refs { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.bb-refs a { font-size: var(--fs-sm); color: var(--ocean-600); font-weight: 600; overflow-wrap: anywhere; }
+.bb-refs a:hover, .bb-more a:hover { text-decoration: underline; }
+.bb-more a { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; }
+.bb-section-k { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-faint); }
+/* Ask for more never answers the card: it sits beside Queue answer, outside the form. */
+.fm-btn--quiet { background: transparent; color: var(--text-strong); border-color: var(--ink-900); }
+.fm-btn--quiet:hover { background: var(--paper-000); }
+.bb-ask { display: flex; flex-direction: column; gap: 8px; }
+.bb-ask[hidden] { display: none; }
+.bb-ask__row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bb-asked { display: none; font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--ocean-600); border: 1.5px solid var(--ocean-500); border-radius: var(--radius-xs); padding: 5px 9px 4px; }
+.bb-asked.is-visible { display: inline-flex; }
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
@@ -483,6 +506,101 @@ __FM_BEARINGS_BOARD_DATA__
     row.appendChild(el("span", "bb-ctx__v", v));
     return row;
   }
+  function link(cls, text, href) {
+    var a = el("a", cls, text);
+    a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+    return a;
+  }
+  /* build copies every More page beside the board under this exact name shape;
+     anything else is not a page this board serves, so it is not shown. */
+  var PAGE_PATH = /^bearings-board-pages\/[0-9a-f]{16}\.(html|htm|svg|png|jpg|jpeg|webp|gif)$/;
+  function moreBlock(more) {
+    var block = el("div", "bb-more");
+    block.appendChild(el("span", "bb-section-k", "more · " + more.length + (more.length === 1 ? " answer" : " answers")));
+    more.forEach(function (m) {
+      var it = el("div", "bb-more__item");
+      it.appendChild(el("p", "bb-more__asked", "You asked: " + m.asked));
+      it.appendChild(el("p", "bb-more__answer", m.answer));
+      if (typeof m.page === "string" && PAGE_PATH.test(m.page)) {
+        if (/\.html?$/.test(m.page)) {
+          /* inline view runs no scripts; open full page for anything interactive */
+          var frame = el("iframe", "bb-more__frame");
+          frame.setAttribute("sandbox", "");
+          frame.setAttribute("loading", "lazy");
+          frame.setAttribute("title", m.asked);
+          frame.setAttribute("src", m.page);
+          it.appendChild(frame);
+        } else {
+          var img = el("img", "bb-more__img");
+          img.setAttribute("alt", m.asked);
+          img.setAttribute("loading", "lazy");
+          img.setAttribute("src", m.page);
+          it.appendChild(img);
+        }
+        it.appendChild(link("bb-more__open", "open full page", m.page));
+      }
+      block.appendChild(it);
+    });
+    return block;
+  }
+  function refsBlock(refs) {
+    var block = el("div", "bb-more");
+    block.appendChild(el("span", "bb-section-k", "references"));
+    var list = el("ul", "bb-refs");
+    refs.forEach(function (r) {
+      if (!r || typeof r.url !== "string" || !/^https:\/\//.test(r.url)) return;
+      var li = el("li");
+      li.appendChild(link("bb-ref", r.label, r.url));
+      list.appendChild(li);
+    });
+    block.appendChild(list);
+    return block;
+  }
+  /* Ask for more queues a plain prompt, never a `choice` row, so the answer
+     intake never reads it: the card stays open and the deck does not advance. */
+  function askBox(item, asked) {
+    var box = el("div", "bb-ask");
+    box.hidden = true;
+    box.appendChild(el("span", "bb-section-k", "ask for more - this does not answer the card"));
+    var field = document.createElement("input");
+    field.type = "text"; field.className = "bb-freeform bb-ask__field";
+    field.placeholder = "what would help you decide?";
+    box.appendChild(field);
+    var row = el("div", "bb-ask__row");
+    var send = el("button", "fm-btn fm-btn--sm fm-btn--quiet bb-ask__send", "Send question");
+    send.type = "button";
+    row.appendChild(send);
+    var limit = el("span", "bb-limit");
+    limit.setAttribute("role", "alert");
+    row.appendChild(limit);
+    box.appendChild(row);
+    send.addEventListener("click", function () {
+      limit.classList.remove("is-visible");
+      var q = (field.value || "").trim();
+      if (!q) return;
+      if (utf8ByteLength(q) > 512) {
+        limit.textContent = "Question is too long to queue (512 bytes maximum).";
+        limit.classList.add("is-visible");
+        return;
+      }
+      if (!(window.lavish && window.lavish.queuePrompt)) {
+        limit.textContent = "Open this board in Lavish to ask.";
+        limit.classList.add("is-visible");
+        return;
+      }
+      window.lavish.queuePrompt(
+        "Ask for more - " + item.title + " (" + item.key + "): " + q,
+        { tag: "ask-more", text: item.title + " -> asked: " + q, element: box,
+          queueKey: "ask-more." + item.key,
+          data: { schema: "fm-bearings-ask-more.v1", question: item.key, ask: q } }
+      );
+      field.value = "";
+      box.hidden = true;
+      asked.classList.add("is-visible");
+    });
+    box.field = field;
+    return box;
+  }
 
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
@@ -513,7 +631,11 @@ __FM_BEARINGS_BOARD_DATA__
       if (item.about) ctx.appendChild(ctxRow("about", item.about));
       if (item.decide) ctx.appendChild(ctxRow("decide", item.decide));
       pad.appendChild(ctx);
+      if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
     }
+
+    if (Array.isArray(item.more) && item.more.length) pad.appendChild(moreBlock(item.more));
+    if (Array.isArray(item.refs) && item.refs.length) pad.appendChild(refsBlock(item.refs));
 
     var form = document.createElement("form");
     form.setAttribute("data-lavish-question", item.key);
@@ -548,10 +670,20 @@ __FM_BEARINGS_BOARD_DATA__
     var q = el("span", "bb-queued");
     q.innerHTML = CHECK_SVG + " queued";
     foot.appendChild(q);
+    var askBtn = el("button", "fm-btn fm-btn--sm fm-btn--quiet bb-ask-btn", "Ask for more");
+    askBtn.type = "button";
+    foot.appendChild(askBtn);
+    var asked = el("span", "bb-asked", "asked");
+    foot.appendChild(asked);
     var answerLimit = el("span", "bb-limit");
     answerLimit.setAttribute("role", "alert");
     foot.appendChild(answerLimit);
     form.appendChild(foot);
+    var ask = askBox(item, asked);
+    askBtn.addEventListener("click", function () {
+      ask.hidden = !ask.hidden;
+      if (!ask.hidden) ask.field.focus();
+    });
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
@@ -588,6 +720,7 @@ __FM_BEARINGS_BOARD_DATA__
     });
 
     pad.appendChild(form);
+    pad.appendChild(ask);
     card.appendChild(pad);
     deck.appendChild(card);
   });

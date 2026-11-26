@@ -3682,6 +3682,30 @@ if "$ROOT/bin/fm-procevent-lavish.sh" reconciles "$ANS" >/dev/null 2>&1; then
 fi
 pass "answers reads list-form choices and refuses a block it cannot account for"
 
+# A board's Ask for more row is a question, never an answer: even when its
+# Context data names the card key, `answers` and `reconciles` read nothing from
+# it, while `read` still presents the typed question to the first mate.
+cat > "$ANS" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[1]:
+  - uid: "7"
+    prompt: "Ask for more - Drafts nav (sample-ask-call): show the options as a picture\n\nContext data:\n{\n  \"schema\": \"fm-bearings-ask-more.v1\",\n  \"question\": \"sample-ask-call\",\n  \"ask\": \"show the options as a picture\"\n}"
+    selector: "div.bb-ask"
+    tag: ask-more
+    text: "Drafts nav -> asked: show the options as a picture"
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$ANS") || fail "answers failed on an Ask for more capture"
+[ -z "$out" ] || fail "an Ask for more row was read as an answer: $out"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$ANS") || fail "reconciles failed on an Ask for more capture"
+[ -z "$out" ] || fail "an Ask for more row was read as a reconcile request: $out"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" read "$ANS") || fail "read failed on an Ask for more capture"
+assert_contains "$out" "tag: ask-more" "read did not present the Ask for more row"
+assert_contains "$out" "| Ask for more - Drafts nav (sample-ask-call): show the options as a picture" \
+  "read dropped the Ask for more question"
+pass "an Ask for more row is presented as a question and never read as an answer"
+
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.
