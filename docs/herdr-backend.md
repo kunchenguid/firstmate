@@ -980,7 +980,7 @@ The helper:
 - Performs destructive stop/delete only through its guarded lifecycle actions.
 
 Immediately before every destructive call it re-queries the named session and refuses empty, missing, literal `default`, or `default:true` identities.
-For the live-fleet tripwire and custom fleet-session selection, see the [helper's header](../bin/fm-herdr-lab.sh); its header and `--help` own exact commands.
+For automatic long-socket-path handling, the live-fleet tripwire, and custom fleet-session selection, see the [helper's header](../bin/fm-herdr-lab.sh); its header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.
 
 ## Active limits
