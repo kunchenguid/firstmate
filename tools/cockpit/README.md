@@ -38,7 +38,7 @@ A second run in the same minute changes nothing; `tests/cockpit-tools.test.sh` p
 
 ## Doelen: Miko and Geris page hosts
 
-Run the shared drive-state pass after the usual page generator has rendered `<h2 id="doelen">` and a container with `id="doel-<id>"` for every goal in that page's home.
+Run the shared drive-state pass after the usual page generator has rendered `<h2 id="doelen">` and a container with `id="doel-<id>"` for every goal the pass will include.
 The page keeps its existing `mikoSend(event, key)` handler from the Jouw beslissingen forms.
 The pass preserves the goal cards, their contents and actions, and refreshes only the drive KPI and switches.
 
@@ -46,6 +46,8 @@ The pass preserves the goal cards, their contents and actions, and refreshes onl
 python3 -I tools/cockpit/goal_drive.py --goal-home "$GOAL_HOME" --page "$COCKPIT_PAGE"
 ```
 
+Repeat `--goal-id <id>` to limit the switches and drive KPI to selected goals from a shared home (for example, on the Geris cockpit).
+Omit `--goal-id` to include every goal in the home.
 Use `--output "$PREVIEW_PAGE"` to leave the installed page untouched.
 Set `COCKPIT_GOAL_HOME` instead if the same page is published by `refresh-cockpit.sh`.
 Use the goal record owner's home, not the page host's home if they differ.

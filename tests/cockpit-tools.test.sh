@@ -277,6 +277,17 @@ goal apply-drive-answer "$TMP_ROOT/toggles.result" >/dev/null || fail 'apply rej
 goal export | jq -e '([.goals[] | select(.driven) | .id] == ["beta"])' >/dev/null || fail 'both keyed answers were not applied'
 pass 'cockpit goal switches: grey off card, 1-of-2 KPI, stable rebuild and both keyed answers applied'
 
+# ---- a page can show just one goal from the shared home ----
+printf '%s\n' '<h2 id="doelen">Doelen</h2><div id="doel-alpha">Alpha steps</div>' > "$preview"
+python3 -I "$TOOLS/goal_drive.py" --goal-home "$GOAL_HOME" --page "$preview" --goal-id alpha || fail 'filtered goal-drive refresh failed'
+grep -Fq 'id="doel-alpha" data-fm-goal-drive="off"' "$preview" || fail 'allowed card was not patched'
+grep -Fq 'value="resume alpha"' "$preview" || fail 'allowed goal switch was not rendered'
+if grep -Eq 'value="(pause|resume) beta"' "$preview"; then
+  fail 'excluded goal switch was rendered'
+fi
+grep -Fq '0 van 1 doelen actief gedreven' "$preview" || fail 'drive KPI included the excluded goal'
+pass 'cockpit goal allowlist: one patched card and 0-of-1 KPI with no card for the excluded goal'
+
 # ---- paths come from the environment: no MIKO_WORKTREE is a clear failure, not a stray path ----
 if env -i PATH="$FAKEBIN:$PATH" HOME="$TMP_ROOT/home" TMPDIR="$SCRATCH" FM_HOME="$FM_FIX" COCKPIT_DATA_DIR="$DATA" \
   bash "$TOOLS/refresh-cockpit.sh" > "$TMP_ROOT/nowt.out" 2>&1; then

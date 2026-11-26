@@ -73,12 +73,14 @@ def generated(fragment):
     return '<!-- fm-goal-drive -->' + fragment + '<!-- /fm-goal-drive -->'
 
 
-def render(page, home):
+def render(page, home, allow=None):
     base = ATTRIBUTE.sub('', GENERATED.sub('', page))
     anchors = GoalAnchors(base)
     if anchors.heading is None:
         raise ValueError('missing cockpit goal heading <h2 id="doelen">')
     goals = goals_from(home)
+    if allow:
+        goals = [g for g in goals if g['id'] in allow]
     driven = sum(g['driven'] for g in goals)
     patches = [(anchors.heading, generated(STYLE + '<p class="small mute" id="doel-drive-kpi">'
                 f'{driven} van {len(goals)} doelen actief gedreven</p>'))]
@@ -105,13 +107,14 @@ def render(page, home):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--goal-home', type=Path, required=True, help='home that owns the goal records')
+    parser.add_argument('--goal-id', action='append', help='limit switches and KPI to this goal ID (repeatable)')
     parser.add_argument('--page', type=Path, required=True, help='already generated cockpit HTML; updated atomically')
     parser.add_argument('--output', type=Path, help='write a preview instead of changing --page')
     args = parser.parse_args()
     target = args.output or args.page
     try:
         page = args.page.read_text(encoding='utf-8')
-        updated = render(page, args.goal_home)
+        updated = render(page, args.goal_home, args.goal_id)
         if target == args.page and updated == page:
             return
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent, delete=False) as f:
