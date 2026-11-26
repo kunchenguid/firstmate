@@ -157,6 +157,7 @@ case "${1:-}" in
 path = $FM_FAKE_JOB_PLIST
 program = $FM_FAKE_JOB_WORKER
 properties = keepalive | runatload | inferred program
+spawn type = interactive
 EOF
         ;;
       *)
@@ -183,6 +184,7 @@ semaphores = {
 	successful exit => 0
 }
 properties = runatload | inferred program
+spawn type = interactive
 EOF
         # A mate launch racing the repair lands its pane in the fresh server.
         [ ! -f "$FM_FAKE_STATE/panes-after-bootstrap" ] || cp "$FM_FAKE_STATE/panes-after-bootstrap" "$FM_FAKE_STATE/panes.json"
@@ -386,8 +388,8 @@ doctor() {
   set -e
 }
 
-write_loaded_contract() { # <herdr-path> [properties] [exec-command]
-  local herdr_bin=$1 properties=${2:-'runatload | inferred program'} exec_cmd
+write_loaded_contract() { # <herdr-path> [properties] [exec-command] [spawn-type]
+  local herdr_bin=$1 properties=${2:-'runatload | inferred program'} exec_cmd spawn_type=${4:-interactive}
   exec_cmd=${3:-"exec '$GUARD' '$herdr_bin' 'fm-remote'"}
   cat > "$CASE_STATE/loaded-$LABEL" <<EOF
 path = $CASE_PLIST
@@ -404,6 +406,7 @@ semaphores = {
 	successful exit => 0
 }
 properties = $properties
+spawn type = $spawn_type
 EOF
 }
 
@@ -868,6 +871,21 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale loaded launch-agent contract"
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the replacement loaded contract was not confirmed"
 assert_no_grep '/obsolete/bin/herdr' "$CASE_STATE/loaded-$LABEL" "the stale effective program survived replacement"
+
+# A job loaded before ProcessType=Interactive joined the contract keeps
+# launchd's default daemon spawn type until it is actually reloaded.
+strip_process_type "$CASE_PLIST"
+write_loaded_contract "$CASE_BIN/herdr" 'runatload | inferred program' "exec '$GUARD' '$CASE_BIN/herdr' 'fm-remote'" 'daemon (3)'
+touch "$CASE_STATE/bootout-fail"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a loaded daemon spawn type passed after its replacement failed"
+assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the rewritten ProcessType=Interactive plist was not confirmed"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "a loaded daemon spawn type did not remain a readiness gap"
+rm -f "$CASE_STATE/bootout-fail"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not replace the loaded daemon spawn type"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the interactive replacement was not confirmed"
+assert_no_grep 'spawn type = daemon' "$CASE_STATE/loaded-$LABEL" "the daemon spawn type survived replacement"
 pass "a failed reload leaves stale effective launch-agent state unready"
 
 # --- a launch agent that is not Aqua-scoped is repaired in place -------------

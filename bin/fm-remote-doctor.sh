@@ -485,6 +485,7 @@ launch_agent_loaded_contract_matches() { # <resolved-login-shell>
   # semaphore rather than a keepalive property.
   [[ "$loaded" == *'successfulexit=>0'* ]] || return 1
   [[ "$loaded" == *'properties=runatload'* ]] || return 1
+  [[ "$loaded" == *'spawntype=interactive'* ]] || return 1
 }
 
 # --- remote job and tool checks ---------------------------------------------

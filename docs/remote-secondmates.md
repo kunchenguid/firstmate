@@ -270,7 +270,7 @@ Over the plain SSH doctor bootstrap, it writes and reloads the applicable Firstm
 
 Both are scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
 Both also set `ProcessType=Interactive`, because launchd's default resource limits coarsen timers in the worker session, so short sleeps and lock timeouts there oversleep several times over.
-The doctor treats an agent written without it as out of contract and rewrites it under the repair rules below.
+The doctor treats an agent written without it, or a loaded job whose `launchctl print` spawn type is not `interactive`, as out of contract and rewrites or reloads it under the repair rules below.
 The Herdr agent applies only to the herdr backend; a rex-verified host needs only the remote-job worker there.
 The primary Firstmate code root keeps the `fm-remote` session and `dev.firstmate.herdr.fm-remote` launch-agent label.
 The doctor records that root as the service owner, and a different code root on the same account receives a separate, root-derived Herdr session and launch-agent label.

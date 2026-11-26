@@ -966,6 +966,7 @@ fm_remote_job_launchagent_loaded() { # <remote-root> <account-home> <uid>
   [[ "$compact" == *"$FM_REMOTE_JOB_LABEL"* ]] || return 1
   [[ "$compact" == *"$worker"* ]] || return 1
   [[ "$compact" == *"$FM_REMOTE_JOB_LAUNCH_AGENT_PLIST"* ]] || return 1
+  [[ "$compact" == *'spawntype=interactive'* ]] || return 1
 }
 
 fm_remote_job_worker_pid_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.pid"; }

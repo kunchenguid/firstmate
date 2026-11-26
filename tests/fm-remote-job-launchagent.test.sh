@@ -112,6 +112,7 @@ case "${1:-}" in
       gui/*/dev.firstmate.remote-job)
         [ -f "$FM_TEST_LOADED" ] || exit 113
         printf 'path = %s\nprogram = %s\n' "$FM_TEST_PLIST" "$FM_TEST_WORKER"
+        printf 'spawn type = %s\n' "$(cat "$FM_TEST_LOADED")"
         if pid=$(tracked_pid); then printf '\tpid = %s\n' "$pid"; fi
         printf 'label = dev.firstmate.remote-job\n'
         ;;
@@ -132,7 +133,7 @@ case "${1:-}" in
     ;;
   bootstrap)
     [ ! -f "$FM_TEST_LOADED" ] && [ ! -f "$FM_TEST_REMOVING" ] || { printf 'Bootstrap failed: 5: Input/output error\n' >&2; exit 5; }
-    : > "$FM_TEST_LOADED"
+    python3 -c 'import plistlib,sys; print("interactive" if plistlib.load(open(sys.argv[1], "rb")).get("ProcessType") == "Interactive" else "daemon (3)")' "${3:-}" > "$FM_TEST_LOADED" || exit 5
     start_worker
     ;;
   kickstart)
@@ -208,6 +209,15 @@ fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   && fail 'a LaunchAgent without ProcessType was accepted as matching'
 fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not rewrite the LaunchAgent'
 pass 'a LaunchAgent without ProcessType=Interactive is out of contract'
+# launchd keeps the spawn type it loaded until the job is actually reloaded.
+printf 'daemon (3)\n' > "$FM_TEST_LOADED"
+fm_remote_job_launchagent_loaded "$REMOTE_ROOT" "$ACCOUNT_HOME" "$(id -u)" \
+  && fail 'a loaded job with the daemon spawn type was accepted after its plist was rewritten'
+printf 'interactive\n' > "$FM_TEST_LOADED"
+fm_remote_job_launchagent_loaded "$REMOTE_ROOT" "$ACCOUNT_HOME" "$(id -u)" \
+  || fail 'a loaded job with the interactive spawn type was not accepted'
+rm -f "$FM_TEST_LOADED"
+pass 'a loaded job keeps failing its contract until it reloads with the interactive spawn type'
 # Persisted crash leftovers are the public worker state contract. The old
 # process is gone, but its stale code identity and fresh heartbeat remain.
 printf 'stale-code\n' > "$STATE_ROOT/worker.identity"
