@@ -259,6 +259,19 @@ test_build_refuses_malformed_payloads_before_touching_the_board() {
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a captains_call option with an empty label was accepted"
 
+  for invalid_context in '"a bare string"' '[]' '[""]' '["ok", 3]'; do
+    write_valid_payload "$data"
+    jq --argjson ctx "$invalid_context" '.captains_call[0].context = $ctx' "$data" > "$data.tmp" \
+      && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "an invalid captains_call context was accepted: $invalid_context"
+    write_valid_payload "$data"
+    jq --argjson det "$invalid_context" '.captains_call[0].options[0].details = $det' "$data" > "$data.tmp" \
+      && mv "$data.tmp" "$data"
+    set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+    [ "$rc" -ne 0 ] || fail "invalid captains_call option details were accepted: $invalid_context"
+  done
+
   write_valid_payload "$data"
   jq 'del(.charted[0].repo)' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e

@@ -146,12 +146,24 @@ a { color: inherit; text-decoration: none; }
   display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; min-width: 0;
   background: var(--surface-card-warm); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
 }
+/* each tile is a button that scrolls to the section it counts */
+button.bb-stat {
+  font: inherit; color: inherit; text-align: left; width: 100%; margin: 0; cursor: pointer;
+  transition: background 120ms, border-color 120ms, transform 120ms;
+}
+button.bb-stat:hover { background: var(--paper-000); border-color: var(--ink-500); }
+button.bb-stat:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+button.bb-stat:active { transform: translateY(1px); }
 .bb-stat--call { background: var(--rust-050); border: 2px solid var(--rust-500); }
+button.bb-stat--call:hover { background: var(--rust-100); border-color: var(--rust-600); }
 .bb-stat__num { font-family: var(--font-mono); font-size: var(--fs-h3); font-weight: 600; line-height: 1; color: var(--text-strong); }
 .bb-stat--call .bb-stat__num { color: var(--rust-600); }
 .bb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 
 .bb-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+/* a tile scrolls its section heading to the first line under the sticky nav
+   (64px bar plus its 1px bottom border), with no gap above it */
+.bb-section[id] { scroll-margin-top: 65px; }
 .bb-section__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .bb-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; }
 
@@ -201,9 +213,10 @@ a { color: inherit; text-decoration: none; }
 .bb-decision__link { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ocean-600); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .bb-decision__link:hover { text-decoration: underline; }
 /* One rhythm owner: the answer form is a flex column with the same 12px gap as
-   the card pad, and the foot rides margin-top:auto so every Queue answer button
-   sits on the same baseline with identical breathing room. */
-.bb-decision form { display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto; }
+   the card pad. It does not grow, so a card stretched to the stack height keeps
+   its answer field and Queue answer button in place, with the extra space at
+   the bottom. */
+.bb-decision form { display: flex; flex-direction: column; gap: 12px; flex: none; }
 .bb-opts { display: flex; flex-direction: column; gap: 7px; }
 .bb-opt {
   display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; cursor: pointer;
@@ -219,7 +232,9 @@ a { color: inherit; text-decoration: none; }
   letter-spacing: 0.07em; color: var(--navy-700); background: var(--gold-300);
   border: 1px solid var(--gold-600); border-radius: var(--radius-xs); padding: 3px 7px 2px; }
 .bb-opt:has(input:checked) { border-color: var(--rust-500); background: var(--rust-050); box-shadow: inset 0 0 0 1px var(--rust-500); }
-.bb-decision__foot { display: flex; align-items: center; gap: 10px; margin-top: auto; }
+/* the answer row wraps, so on a narrow card the queued badge or the limit
+   message moves Details to a row of its own instead of clipping it */
+.bb-decision__foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
 .bb-queued {
   display: none; align-items: center; gap: 6px;
   font-size: var(--fs-2xs); font-weight: 800; text-transform: uppercase; letter-spacing: 0.07em;
@@ -232,6 +247,45 @@ a { color: inherit; text-decoration: none; }
 .bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+/* Details opens the full-screen explanation of the call; it sits at the far end
+   of the answer row so it never shifts the answer controls. */
+.bb-detailsbtn { margin-left: auto; background: var(--paper-000); color: var(--ink-900); border-color: var(--ink-900); box-shadow: var(--shadow-hard-sm); }
+.bb-detailsbtn:hover { background: var(--paper-200); }
+
+/* ---- full-screen decision details ---- */
+.bb-modal {
+  position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column;
+  background: var(--bg-page); background-image: var(--texture-paper);
+}
+.bb-modal[hidden] { display: none; }
+.bb-modal__head { flex: none; border-bottom: 1.5px solid var(--border-default); background: var(--paper-000); }
+.bb-modal__headin {
+  max-width: 820px; margin: 0 auto; padding: 16px 28px;
+  display: flex; align-items: flex-start; gap: 16px;
+}
+/* a long title scrolls inside the heading, capped at a share of the view, so
+   Close beside it stays in view and the body keeps room to read */
+.bb-modal__heading { flex: 1 1 auto; min-width: 0; max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.bb-modal__meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bb-modal__title { margin: 0; font-size: var(--fs-h3); font-weight: 800; color: var(--text-strong); line-height: 1.25; }
+.bb-modal__close { flex: none; }
+.bb-modal__body { flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.bb-modal__bodyin { max-width: 820px; margin: 0 auto; padding: 22px 28px 48px; display: flex; flex-direction: column; gap: 26px; }
+.bb-modal__section { display: flex; flex-direction: column; gap: 12px; }
+.bb-modal__p { margin: 0; font-size: var(--fs-base); color: var(--text-body); line-height: 1.6; overflow-wrap: anywhere; }
+.bb-modal__p a, .bb-modal__link { color: var(--ocean-600); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.bb-modal__none { margin: 0; font-size: var(--fs-sm); color: var(--text-faint); font-style: italic; }
+.bb-modal__opt {
+  display: flex; flex-direction: column; gap: 8px; padding: 14px 16px;
+  background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm);
+}
+.bb-modal__opt--rec { border-color: var(--gold-600); box-shadow: inset 0 0 0 1px var(--gold-600); }
+.bb-modal__optlabel { display: flex; align-items: center; gap: 10px; font-size: var(--fs-h4); font-weight: 800; color: var(--text-strong); line-height: 1.3; }
+.bb-modal__opthint { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); line-height: 1.45; }
+body.bb-modal-open { overflow: hidden; }
+@media (max-width: 640px) {
+  .bb-modal__headin, .bb-modal__bodyin { padding-left: 16px; padding-right: 16px; }
+}
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
@@ -297,7 +351,7 @@ a { color: inherit; text-decoration: none; }
   <div class="bb-stats" id="bb-stats"></div>
 
   <div class="bb-cols">
-  <section class="bb-section">
+  <section class="bb-section" id="bb-sec-call">
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
@@ -321,7 +375,7 @@ a { color: inherit; text-decoration: none; }
     </div>
   </section>
 
-  <section class="bb-section">
+  <section class="bb-section" id="bb-sec-charted">
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -344,7 +398,7 @@ a { color: inherit; text-decoration: none; }
   </div>
 
   <div class="bb-cols">
-    <section class="bb-section">
+    <section class="bb-section" id="bb-sec-underway">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10.189V14"/><path d="M12 2v3"/><path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-8.188-3.639a2 2 0 0 0-1.624 0L3 14a11.6 11.6 0 0 0 2.81 7.76"/><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/></svg>
@@ -354,7 +408,7 @@ a { color: inherit; text-decoration: none; }
       <div class="fm-card"><div class="bb-rows" id="bb-underway"></div></div>
     </section>
 
-    <section class="bb-section">
+    <section class="bb-section" id="bb-sec-landed">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
@@ -370,6 +424,21 @@ a { color: inherit; text-decoration: none; }
   </footer>
 
 </main>
+
+<div class="bb-modal" id="bb-modal" role="dialog" aria-modal="true" aria-labelledby="bb-modal-title" hidden>
+  <div class="bb-modal__head">
+    <div class="bb-modal__headin">
+      <div class="bb-modal__heading" tabindex="0">
+        <div class="bb-modal__meta" id="bb-modal-meta"></div>
+        <h2 class="bb-modal__title" id="bb-modal-title"></h2>
+      </div>
+      <button type="button" class="fm-btn fm-btn--sm bb-detailsbtn bb-modal__close" id="bb-modal-close">Close</button>
+    </div>
+  </div>
+  <div class="bb-modal__body" id="bb-modal-scroll" tabindex="0">
+    <div class="bb-modal__bodyin" id="bb-modal-body"></div>
+  </div>
+</div>
 
 <!-- ONE SLOT. bin/fm-bearings-board.sh build injects the fresh
      fm-bearings-board.v1 payload in place of the placeholder below; everything
@@ -435,6 +504,9 @@ __FM_BEARINGS_BOARD_DATA__
     return n;
   }
   function badge(tone, text) { return el("span", "fm-badge fm-badge--" + tone, text); }
+  function typeBadge(item) {
+    return item.type === "merge" ? badge("online", "checks green") : badge("solid", "decision");
+  }
   /* Warnings ride the charted feed for layout only; they are alarms, not work,
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
@@ -460,16 +532,28 @@ __FM_BEARINGS_BOARD_DATA__
   /* stat strip */
   var callTotal = data.captains_call.length;
   var stats = [
-    { n: callTotal, l: "need you", call: true },
-    { n: data.underway.length, l: "underway" },
-    { n: data.landed.length, l: "landed recently" },
-    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next" }
+    { n: callTotal, l: "need you", call: true, target: "bb-sec-call" },
+    { n: data.underway.length, l: "underway", target: "bb-sec-underway" },
+    { n: data.landed.length, l: "landed recently", target: "bb-sec-landed" },
+    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next", target: "bb-sec-charted" }
   ];
   var strip = document.getElementById("bb-stats");
+  /* A tile scrolls the page to the section it counts. It is a plain button that
+     only scrolls in place: no hash navigation and no queued prompt, so a click
+     never reaches the agent. */
+  function scrollToSection(id) {
+    var section = document.getElementById(id);
+    if (!section) return;
+    var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    section.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  }
   stats.forEach(function (s) {
-    var t = el("div", "bb-stat" + (s.call ? " bb-stat--call" : ""));
+    var t = el("button", "bb-stat" + (s.call ? " bb-stat--call" : ""));
+    t.type = "button";
+    t.setAttribute("aria-controls", s.target);
     t.appendChild(el("span", "bb-stat__num", String(s.n)));
     t.appendChild(el("span", "bb-stat__label", s.l));
+    t.addEventListener("click", function () { scrollToSection(s.target); });
     strip.appendChild(t);
   });
   document.getElementById("bb-call-sub").textContent =
@@ -484,16 +568,135 @@ __FM_BEARINGS_BOARD_DATA__
     return row;
   }
 
+  /* Details: one full-screen view explains a call - its context, then every
+     option with its hint and details. Opening or closing it queues nothing for
+     the agent; answering stays on the card. */
+  var modal = document.getElementById("bb-modal");
+  var modalMeta = document.getElementById("bb-modal-meta");
+  var modalTitle = document.getElementById("bb-modal-title");
+  var modalBody = document.getElementById("bb-modal-body");
+  var modalScroll = document.getElementById("bb-modal-scroll");
+  var modalClose = document.getElementById("bb-modal-close");
+  var detailsButtons = [];
+  /* Only https:// URLs become links; trailing sentence punctuation stays text. */
+  var URL_RE = /https:\/\/[^\s<>"'`]+/g;
+  var URL_OPENER = { ")": "(", "]": "[" };
+  function trimUrl(url) {
+    for (;;) {
+      var end = url.charAt(url.length - 1), open = URL_OPENER[end];
+      if (/[.,;:!?*_~]/.test(end) || (open && url.split(open).length < url.split(end).length)) url = url.slice(0, -1);
+      else return url;
+    }
+  }
+  function richText(node, text) {
+    var s = String(text), last = 0, m;
+    URL_RE.lastIndex = 0;
+    while ((m = URL_RE.exec(s)) !== null) {
+      var url = trimUrl(m[0]);
+      if (url === "https://") { URL_RE.lastIndex = m.index + m[0].length; continue; }
+      if (m.index > last) node.appendChild(el("span", null, s.slice(last, m.index)));
+      var a = el("a", null, url);
+      a.href = url; a.target = "_blank"; a.rel = "noopener";
+      node.appendChild(a);
+      last = m.index + url.length;
+      URL_RE.lastIndex = last;
+    }
+    if (last < s.length) node.appendChild(el("span", null, s.slice(last)));
+    return node;
+  }
+  function paragraphs(list) {
+    return Array.isArray(list) ? list.filter(function (p) { return typeof p === "string" && p; }) : [];
+  }
+  function modalSection(title) {
+    var sec = el("section", "bb-modal__section");
+    sec.appendChild(el("span", "fm-sign fm-sign--eyebrow", title));
+    return sec;
+  }
+  function setPageInert(on) {
+    [document.querySelector(".bb-main"), document.querySelector(".bb-nav")].forEach(function (n) {
+      if (n) n.inert = on;
+    });
+  }
+  function openDetails(item) {
+    modalMeta.textContent = "";
+    modalMeta.appendChild(typeBadge(item));
+    if (item.repo) modalMeta.appendChild(el("span", "bb-decision__repo", item.repo));
+    modalTitle.textContent = item.title;
+    modalBody.textContent = "";
+
+    var ctxSec = modalSection("Context");
+    var rows = el("div", "bb-ctx");
+    if (item.about) rows.appendChild(ctxRow("about", item.about));
+    if (item.decide) rows.appendChild(ctxRow("decide", item.decide));
+    if (item.type === "merge" && item.risk) rows.appendChild(ctxRow("risk", item.risk));
+    if (rows.children.length) ctxSec.appendChild(rows);
+    if (item.detail) ctxSec.appendChild(richText(el("p", "bb-modal__p"), item.detail));
+    if (item.pr_url) {
+      var pr = el("a", "bb-modal__link", item.pr_url);
+      pr.href = item.pr_url; pr.target = "_blank"; pr.rel = "noopener";
+      ctxSec.appendChild(pr);
+    }
+    var context = paragraphs(item.context);
+    context.forEach(function (p) { ctxSec.appendChild(richText(el("p", "bb-modal__p bb-modal__ctxp"), p)); });
+    if (!context.length) ctxSec.appendChild(el("p", "bb-modal__none", "No further context was recorded for this call."));
+    modalBody.appendChild(ctxSec);
+
+    var optSec = modalSection("Options");
+    item.options.forEach(function (o) {
+      var rec = !!item.recommend_value && o.value === item.recommend_value;
+      var box = el("div", "bb-modal__opt" + (rec ? " bb-modal__opt--rec" : ""));
+      var label = el("div", "bb-modal__optlabel");
+      label.appendChild(el("span", "bb-modal__optname", o.label));
+      if (rec) label.appendChild(el("span", "bb-opt__rec", "rec"));
+      box.appendChild(label);
+      if (o.hint) box.appendChild(el("p", "bb-modal__opthint", o.hint));
+      paragraphs(o.details).forEach(function (p) { box.appendChild(richText(el("p", "bb-modal__p bb-modal__optp"), p)); });
+      optSec.appendChild(box);
+    });
+    if (item.allow_freeform) {
+      optSec.appendChild(el("p", "bb-modal__opthint", "Or answer in your own words in the card's note field."));
+    }
+    modalBody.appendChild(optSec);
+
+    modal.hidden = false;
+    modalScroll.scrollTop = 0;
+    document.body.classList.add("bb-modal-open");
+    setPageInert(true);
+    modalClose.focus();
+  }
+  function closeDetails() {
+    if (modal.hidden) return;
+    modal.hidden = true;
+    document.body.classList.remove("bb-modal-open");
+    setPageInert(false);
+    /* Focus returns to the Details button of the card now shown: the one that
+       opened the view, or, when an answer queued just before opening has since
+       dealt the next card, that card's. */
+    detailsButtons[active].focus();
+  }
+  modalClose.addEventListener("click", closeDetails);
+  document.addEventListener("keydown", function (ev) {
+    if (modal.hidden) return;
+    if (ev.key === "Escape") { ev.preventDefault(); closeDetails(); return; }
+    if (ev.key !== "Tab") return;
+    /* keep keyboard focus inside the open view */
+    var focusable = Array.prototype.filter.call(modal.querySelectorAll("a[href], button, [tabindex]"),
+      function (n) { return !n.disabled; });
+    if (!focusable.length) return;
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  });
+
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
     var pad = el("div", "bb-decision__pad");
 
     var top = el("div", "bb-decision__top");
+    top.appendChild(typeBadge(item));
     if (item.type === "merge") {
-      top.appendChild(badge("online", "checks green"));
       top.appendChild(badge(item.risk === "low" ? "neutral" : "warn", "risk " + item.risk));
     } else {
-      top.appendChild(badge("solid", "decision"));
       top.appendChild(el("span", "bb-decision__repo", item.repo));
     }
     pad.appendChild(top);
@@ -551,11 +754,21 @@ __FM_BEARINGS_BOARD_DATA__
     var answerLimit = el("span", "bb-limit");
     answerLimit.setAttribute("role", "alert");
     foot.appendChild(answerLimit);
+    var detailsBtn = el("button", "fm-btn fm-btn--sm bb-detailsbtn", "Details");
+    detailsBtn.type = "button";
+    detailsBtn.setAttribute("aria-haspopup", "dialog");
+    detailsBtn.setAttribute("aria-controls", "bb-modal");
+    detailsBtn.addEventListener("click", function () { openDetails(item); });
+    foot.appendChild(detailsBtn);
+    detailsButtons.push(detailsBtn);
     form.appendChild(foot);
 
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       answerLimit.classList.remove("is-visible");
+      /* the queued badge or limit message this submit shows can wrap the
+         answer row, so the stack height is read again */
+      queueFit();
       var fd = new FormData(form);
       var value = fd.get("answer");
       var note = (fd.get("note") || "").trim();
@@ -611,10 +824,43 @@ __FM_BEARINGS_BOARD_DATA__
     deck.classList.toggle("bb-call--penult", active === cards.length - 2);
     deck.classList.toggle("bb-call--last", active === cards.length - 1);
   }
+  /* One stack height: every card takes the height of the tallest, so paging
+     never moves the nav or anything below the stack. Each card's natural
+     height is read with every card laid out at once - the inactive ones
+     invisible and the active one never hidden, so a focused answer field
+     keeps its focus - and is re-read whenever wrapping can change: on
+     resize, once web fonts load, and on each answer submit. */
+  function fitStackHeight() {
+    var tallest = 0;
+    cards.forEach(function (c) {
+      c.style.minHeight = "";
+      c.style.alignSelf = "start";
+      if (c.hidden) { c.hidden = false; c.style.visibility = "hidden"; }
+    });
+    cards.forEach(function (c) {
+      tallest = Math.max(tallest, Math.ceil(c.getBoundingClientRect().height));
+    });
+    cards.forEach(function (c, j) {
+      c.style.alignSelf = "";
+      c.style.visibility = "";
+      c.hidden = j !== active;
+      c.style.minHeight = tallest + "px";
+    });
+  }
+  var fitPending = false;
+  function queueFit() {
+    if (fitPending) return;
+    fitPending = true;
+    window.requestAnimationFrame(function () { fitPending = false; fitStackHeight(); });
+  }
   if (cards.length) {
     stackPrev.addEventListener("click", function () { showCard(active - 1); });
     stackNext.addEventListener("click", function () { showCard(active + 1); });
     showCard(0);
+    fitStackHeight();
+    window.addEventListener("resize", queueFit);
+    document.fonts.ready.then(queueFit);
+    document.fonts.addEventListener("loadingdone", queueFit);
   } else {
     deck.classList.add("bb-call--empty");
     deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
