@@ -88,7 +88,9 @@
 # because Lavish serves only files beside the board. build copies each
 # surviving card's page into bearings-board-pages/ beside the board under a
 # content-addressed name, rewrites `page` to that relative path, and removes
-# copied pages the published board no longer names. That relative path is
+# copied pages the published board no longer names. A copied page is
+# published at the board's origin, readable by anyone who can open the board,
+# so name only a page meant for the captain. That relative path is
 # also accepted as input while its copy still exists, so a rebuild can carry
 # an open card's `more` forward from the published board. A page that is not
 # a readable regular file refuses the build before any page is copied or the
