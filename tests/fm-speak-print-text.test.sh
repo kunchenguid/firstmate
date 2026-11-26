@@ -13,14 +13,16 @@
 #
 # The render case checks the report against the file on disk: `size:` must be the
 # real byte count of the mp3 that was produced, and the index row must name it.
+# It renders through the shipped engine rather than a fixture engine, with the
+# venv python, ffmpeg and ffprobe shimmed at those process boundaries.
 #
 # The cache cases are the ones a fresh user hits: a venv that exists but cannot
 # import its packages, and a download that failed. Both used to look present to
 # `--setup` and to the render preflight, which then died inside python. They run
-# entirely offline against PATH shims for python3, curl, piper, ffmpeg and
-# ffprobe. `uname` is shimmed to Darwin in the two platform cases so the
-# Linux-only C++ runtime lookup stays out of the way on any CI host, which is also
-# what proves a macOS host reaches synthesis without libstdc++.
+# entirely offline against PATH shims for python3, curl, ffmpeg and ffprobe.
+# `uname` is shimmed to Darwin in the two platform cases so the Linux-only C++
+# runtime lookup stays out of the way on any CI host, which is also what proves a
+# macOS host reaches synthesis without libstdc++.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -175,14 +177,16 @@ test_emphasis_keeps_identifiers_and_arithmetic() {
   local input out expected
   input=$TMP_ROOT/emphasis.md
   cat > "$input" <<'MD'
-Set `FM_TTS_CACHE_DIR` and `kokoro_venv_ready` or leave _emphasis_ alone.
+Set `FM_TTS_KOKORO_DIR` and `kokoro_venv_ready` or leave _emphasis_ alone.
 The range 2 * 3 * 4 stays, and *real*, **strong**, __solid__ and _under_ markers go.
 Use ***bold italic***, ___both___ and ****x**** here.
+Nested **bold *em*** and _ital **bold**_ and *italic with **bold*** lose theirs too.
 MD
   IFS= read -r -d '' expected <<'TXT' || true
-Set FM_TTS_CACHE_DIR and kokoro_venv_ready or leave emphasis alone.
+Set FM_TTS_KOKORO_DIR and kokoro_venv_ready or leave emphasis alone.
 The range 2 * 3 * 4 stays, and real, strong, solid and under markers go.
 Use bold italic, both and x here.
+Nested bold em and ital bold and italic with bold lose theirs too.
 TXT
   expected=${expected%$'\n'}
   out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
@@ -217,28 +221,28 @@ TXT
 }
 
 test_render_reports_the_mp3_size_and_indexes_it() {
-  local root fakebin cache outdir input out mp3
+  local root fakebin kokoro outdir input out mp3
   root=$TMP_ROOT/render
-  cache=$root/cache
+  kokoro=$root/kokoro
   outdir=$root/out
   input=$root/report.md
   fakebin=$(fm_fakebin "$root")
-  mkdir -p "$cache/voices"
-  : > "$cache/voices/en_US-lessac-high.onnx"
-  : > "$cache/voices/en_US-lessac-high.onnx.json"
+  mkdir -p "$kokoro/venv/bin" "$root/lib"
+  # A file named libstdc++.so.6 gives the Linux C++ runtime lookup something to
+  # find, so the case runs the same way on a host that has none.
+  : > "$root/lib/libstdc++.so.6"
+  printf '%s' model > "$kokoro/kokoro-v1.0.onnx"
+  printf '%s' voices > "$kokoro/voices-v1.0.bin"
   printf '%s\n' 'One sentence here. Second sentence there.' > "$input"
 
-  cat > "$fakebin/piper" <<'SH'
+  # The renderer is invoked as
+  # python <renderer.py> <model> <voices> <chunk> <wav> <voice> <speed> <lang>.
+  cat > "$kokoro/venv/bin/python" <<'SH'
 #!/usr/bin/env bash
-out=
-while [ $# -gt 0 ]; do
-  case $1 in
-    -f) out=$2; shift 2 ;;
-    *) shift ;;
-  esac
-done
-printf '%s' wav-bytes > "$out"
+[ "${1:-}" = -c ] && exit 0
+printf '%s' wav-bytes > "$5"
 SH
+  chmod +x "$kokoro/venv/bin/python"
   cat > "$fakebin/ffmpeg" <<'SH'
 #!/usr/bin/env bash
 for last; do :; done
@@ -248,14 +252,16 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' 12.5
 SH
-  chmod +x "$fakebin/piper" "$fakebin/ffmpeg" "$fakebin/ffprobe"
+  chmod +x "$fakebin/ffmpeg" "$fakebin/ffprobe"
 
-  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_CACHE_DIR="$cache" \
-    FM_TTS_ENGINE=piper "$SPEAK" "$input" --out "$outdir" --title "Fixture report") ||
+  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    LD_LIBRARY_PATH="$root/lib" "$SPEAK" "$input" --out "$outdir" --title "Fixture report") ||
     fail "render failed: $out"
 
   mp3=$(printf '%s\n' "$out" | sed -n 's/^file: //p')
   [ -f "$mp3" ] || fail "render reported a file that does not exist: $mp3"
+  [ "$(printf '%s\n' "$out" | sed -n 's/^voice: //p')" = "af_heart" ] ||
+    fail "a render without --voice must report the documented default voice af_heart (got: $out)"
   [ "$(printf '%s\n' "$out" | sed -n 's/^duration: //p')" = "0:13" ] ||
     fail "duration line must round the measured 12.5 seconds to 0:13 (got: $out)"
   [ "$(printf '%s\n' "$out" | sed -n 's/^size: //p')" = "$(wc -c <"$mp3" | tr -d '[:space:]')" ] ||

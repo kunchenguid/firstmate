@@ -3,8 +3,8 @@
 # neural voice, and index what was rendered beside the audio.
 #
 # Usage:
-#   fm-speak.sh <input.md|txt> [--engine kokoro|piper] [--out <dir>]
-#               [--title <t>] [--max-minutes <n>] [--voice <id>] [--speed <n>]
+#   fm-speak.sh <input.md|txt> [--out <dir>] [--title <t>]
+#               [--max-minutes <n>] [--voice <id>] [--speed <n>]
 #               [--name <stem>] [--print-text]
 #   fm-speak.sh --setup
 #   fm-speak.sh --help
@@ -15,12 +15,11 @@
 # cloud text to speech, no API key, and no network call except the one-time model
 # and voice fetches named below.
 #
-# ENGINES. Kokoro-82M (ONNX, CPU only) is the default and reads `af_heart` at
-# speed 1.0 unless --voice or --speed says otherwise; it is the voice this tool
-# was built around. `--engine piper` selects piper-tts instead, where the default
-# voice is `en_US-lessac-high`. Both engines honour --voice and --speed, and both
-# are local: nothing leaves the machine, and nothing is fetched or synthesised
-# until a render actually runs.
+# ENGINE AND VOICE. One local engine reads every file: Kokoro-82M (ONNX, CPU
+# only), reading `af_heart` at speed 1.0 unless --voice or --speed says
+# otherwise. It is the voice this tool was built around and it runs entirely on
+# this machine: nothing leaves it, and nothing is fetched or synthesised until a
+# render actually runs. Shipping a second engine is deliberately out of scope.
 #
 # AUDIO STAYS LOCAL. The default output directory is "audio-briefings" in your
 # home directory, and the tool REFUSES to write anywhere whose path names a
@@ -52,11 +51,10 @@
 # exactly that stem instead, which is what a fixed comparison set needs, and
 # replaces an existing render of the same stem.
 #
-# --voice names a voice for the selected engine (a Kokoro voice id such as
-# `af_heart`, or a piper voice id such as `en_US-ryan-high`), and --speed scales
-# the delivery rate: 1.0 is the voice's own pace, 0.9 is slower, 1.1 faster.
-# Voice quality as such is the voice model's business; there is no other prosody
-# knob.
+# --voice names a Kokoro voice id (such as `af_heart` or `af_bella`), and
+# --speed scales the delivery rate: 1.0 is the voice's own pace, 0.9 is slower,
+# 1.1 faster. Voice quality as such is the voice model's business; there is no
+# other prosody knob.
 #
 # INDEX. `<out-dir>/index.md` gets one row per rendered file - date, title,
 # duration, file name, source path - with the newest row on top. It is a record
@@ -64,11 +62,10 @@
 # on its own, and nothing is ever re-read aloud automatically. The file is
 # created with its header on first use and edited in place afterwards.
 #
-# DEPENDENCIES AND CACHES, all local, all outside any checkout so the tool keeps
+# DEPENDENCIES AND CACHE, all local, all outside any checkout so the tool keeps
 # working after the checkout that installed it is gone. ffmpeg and ffprobe must
-# be on PATH; the default engine also needs python3 3.10-3.13 on PATH to build
-# its venv once.
-#   Kokoro (default). Everything lives in $FM_TTS_KOKORO_DIR, default
+# be on PATH, and python3 3.10-3.13 is needed on PATH once to build the venv.
+#   Kokoro. Everything lives in $FM_TTS_KOKORO_DIR, default
 #   $HOME/.local/share/fm-tts/kokoro: a python venv (`venv/`) holding
 #   kokoro-onnx and soundfile, `kokoro-v1.0.onnx` and `voices-v1.0.bin`. Create
 #   it, or repair it, with the one command `fm-speak.sh --setup`. onnxruntime
@@ -77,27 +74,17 @@
 #   and sets LD_LIBRARY_PATH for its own child process; no caller environment is
 #   needed. That lookup is Linux only: on macOS onnxruntime links the platform
 #   C++ runtime, so a render there needs nothing extra.
-#   piper (optional). `piper` comes from PATH or from the pinned build linked at
-#   $FM_TTS_CACHE_DIR/piper-tts (default $HOME/.cache/fm-tts/piper-tts), and its
-#   voice models live in $FM_TTS_CACHE_DIR/voices. Missing pieces fail loudly
-#   with the exact command that installs them:
-#     nix build 'nixpkgs#piper-tts' --out-link "$HOME/.cache/fm-tts/piper-tts"
-#     curl -sSL -o "$HOME/.cache/fm-tts/voices/en_US-lessac-high.onnx" \
-#       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx
-#     curl -sSL -o "$HOME/.cache/fm-tts/voices/en_US-lessac-high.onnx.json" \
-#       https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/high/en_US-lessac-high.onnx.json
 #
-# --setup prepares or repairs the default engine's cache (venv, python packages,
-# model files) and reports where it lives and which C++ runtime it found. It is
-# idempotent and safe to re-run.
+# --setup prepares or repairs the cache (venv, python packages, model files) and
+# reports where it lives and which C++ runtime it found. It is idempotent and
+# safe to re-run.
 #
-# ENVIRONMENT. FM_TTS_ENGINE picks the default engine, FM_TTS_KOKORO_DIR the
-# Kokoro cache, FM_TTS_CACHE_DIR the piper cache root, FM_TTS_VOICE the default
-# voice id, and FM_TTS_PIPER an explicit piper binary.
+# ENVIRONMENT. FM_TTS_KOKORO_DIR moves the Kokoro cache and FM_TTS_VOICE sets the
+# default voice id.
 #
 # --print-text writes the cleaned speakable prose to stdout in place of the
-# audio and exits, which is how an alternate synthesiser or a human can check and
-# reuse exactly what this tool would read aloud.
+# audio and exits, which is how another tool or a human can check and reuse
+# exactly what this tool would read aloud.
 #
 # OUTPUT. One `file:`, one `duration:` and one `size:` line per rendered MP3,
 # then `index:`, `engine:`, `voice:`, `speed:` and `total:`. Exit 0 on success,
@@ -107,16 +94,12 @@ set -u
 set -o pipefail
 
 SCRIPT_NAME=fm-speak.sh
-ENGINE=${FM_TTS_ENGINE:-kokoro}
-CACHE_DIR=${FM_TTS_CACHE_DIR:-$HOME/.cache/fm-tts}
-VOICE_DIR=$CACHE_DIR/voices
 KOKORO_DIR=${FM_TTS_KOKORO_DIR:-$HOME/.local/share/fm-tts/kokoro}
 KOKORO_VENV=$KOKORO_DIR/venv
 KOKORO_MODEL=$KOKORO_DIR/kokoro-v1.0.onnx
 KOKORO_VOICES=$KOKORO_DIR/voices-v1.0.bin
-# VOICE stays empty until the engine is known, so each engine can keep its own
-# default without the other one leaking into it.
-VOICE=${FM_TTS_VOICE:-}
+DEFAULT_VOICE=af_heart
+VOICE=${FM_TTS_VOICE:-$DEFAULT_VOICE}
 DEFAULT_OUT=$HOME/audio-briefings
 # Conservative spoken pace (a touch under the measured ~150 words per minute)
 # used only to pack sentences into chunks; the real
@@ -166,13 +149,6 @@ escape_cell() {
 
 # --setup failure text is one line so it can be pasted as-is.
 setup_hint='prepare it once with: bin/fm-speak.sh --setup'
-
-engine_default_voice() {
-  case $1 in
-    kokoro) printf 'af_heart' ;;
-    *) printf 'en_US-lessac-high' ;;
-  esac
-}
 
 # onnxruntime needs a C++ runtime that some Linux hosts do not put on the
 # default loader path. Find one there and hand it to the child process only.
@@ -285,8 +261,8 @@ sf.write(out_path, np.concatenate(parts), 24000)
 KOKORO_PY
 }
 
-# Build or repair the default engine's cache. Idempotent; every step is skipped
-# when its output is already there, so a re-run costs nothing.
+# Build or repair the Kokoro cache. Idempotent; every step is skipped when its
+# output is already there, so a re-run costs nothing.
 cmd_setup() {
   printf 'kokoro cache: %s\n' "$KOKORO_DIR"
   mkdir -p "$KOKORO_DIR" || die "cannot create the Kokoro cache directory: $KOKORO_DIR"
@@ -338,23 +314,8 @@ cmd_setup() {
       https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin \
       "$KOKORO_VOICES" || die "could not download the Kokoro voice pack to $KOKORO_VOICES"
   fi
-  printf 'default-voice: %s\n' "$(engine_default_voice kokoro)"
+  printf 'default-voice: %s\n' "$DEFAULT_VOICE"
   printf 'done: %s\n' "$KOKORO_DIR"
-}
-
-# The piper-voices catalogue organises models by language/name/quality; an idle
-# voice outside that map still gets a clear message naming the two files it needs.
-voice_path_in_catalogue() {
-  case $1 in
-    en_US-lessac-high) printf 'en/en_US/lessac/high' ;;
-    en_US-lessac-medium) printf 'en/en_US/lessac/medium' ;;
-    en_US-ryan-high) printf 'en/en_US/ryan/high' ;;
-    en_US-ljspeech-high) printf 'en/en_US/ljspeech/high' ;;
-    en_GB-cori-high) printf 'en/en_GB/cori/high' ;;
-    en_GB-alan-medium) printf 'en/en_GB/alan/medium' ;;
-    en_US-amy-medium) printf 'en/en_US/amy/medium' ;;
-    *) printf '' ;;
-  esac
 }
 
 # --- arguments ---------------------------------------------------------------
@@ -388,13 +349,8 @@ while [ $# -gt 0 ]; do
       max_minutes=$2
       shift 2
       ;;
-    --engine)
-      [ $# -ge 2 ] || die "--engine needs 'kokoro' or 'piper'"
-      ENGINE=$2
-      shift 2
-      ;;
     --voice)
-      [ $# -ge 2 ] || die "--voice needs a voice id for the selected engine"
+      [ $# -ge 2 ] || die "--voice needs a Kokoro voice id, for example af_heart"
       VOICE=$2
       shift 2
       ;;
@@ -439,12 +395,6 @@ if [ -n "${1:-}" ]; then
   [ $# -eq 0 ] || die "unexpected arguments after the input file: $*"
 fi
 
-case $ENGINE in
-  kokoro|piper) ;;
-  *) die "--engine must be 'kokoro' or 'piper' (got: $ENGINE)" ;;
-esac
-[ -n "$VOICE" ] || VOICE=$(engine_default_voice "$ENGINE")
-
 case $max_minutes in
   ''|*[!0-9]*) die "--max-minutes needs a whole number of minutes (got: $max_minutes)" ;;
 esac
@@ -459,8 +409,6 @@ case $speed in
 esac
 awk -v s="$speed" 'BEGIN { exit !(s >= 0.5 && s <= 2.0) }' ||
   die "--speed must be between 0.5 and 2.0 (got: $speed)"
-# piper scales DURATION, so a faster delivery is a smaller length scale.
-length_scale=$(awk -v s="$speed" 'BEGIN { printf "%.4f", 1 / s }')
 
 if [ -n "$name_stem" ]; then
   case $name_stem in
@@ -498,53 +446,14 @@ command -v ffmpeg >/dev/null 2>&1 ||
   die "ffmpeg is not on PATH; it is required to encode the MP3 (install it with your package manager, for example nix shell nixpkgs#ffmpeg or brew install ffmpeg)"
 command -v ffprobe >/dev/null 2>&1 ||
   die "ffprobe is not on PATH; it is required to verify the rendered audio (it ships with ffmpeg)"
-fi
-
-if [ "$print_text" -eq 0 ] && [ "$ENGINE" = kokoro ]; then
-  libstdcpp_dir=$(find_libstdcpp_dir) ||
-    die "no libstdc++ found for the Kokoro runtime; install a C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH"
-  kokoro_cache_ready ||
-    die "the Kokoro cache at $KOKORO_DIR is incomplete; $setup_hint"
-  case $VOICE in
-    b*) kokoro_lang=en-gb ;;
-    *) kokoro_lang=en-us ;;
-  esac
-fi
-
-if [ "$print_text" -eq 0 ] && [ "$ENGINE" = piper ]; then
-piper_bin=${FM_TTS_PIPER:-}
-if [ -z "$piper_bin" ]; then
-  if command -v piper >/dev/null 2>&1; then
-    piper_bin=$(command -v piper)
-  elif [ -x "$CACHE_DIR/piper-tts/bin/piper" ]; then
-    piper_bin=$CACHE_DIR/piper-tts/bin/piper
-  else
-    die "piper-tts is not available. Install the local synthesiser once with:
-  nix build 'nixpkgs#piper-tts' --out-link \"$CACHE_DIR/piper-tts\"
-or put a 'piper' binary on PATH."
-  fi
-fi
-[ -x "$piper_bin" ] || die "piper binary is not executable: $piper_bin"
-
-model_onnx=$VOICE_DIR/$VOICE.onnx
-model_json=$VOICE_DIR/$VOICE.onnx.json
-voice_url_base=https://huggingface.co/rhasspy/piper-voices/resolve/main
-voice_url_dir=$(voice_path_in_catalogue "$VOICE")
-if [ ! -r "$model_onnx" ] || [ ! -r "$model_json" ]; then
-  if [ -n "$voice_url_dir" ]; then
-    die "voice model '$VOICE' is not in $VOICE_DIR. Fetch it once with:
-  mkdir -p \"$VOICE_DIR\"
-  curl -sSL -o \"$model_onnx\" $voice_url_base/$voice_url_dir/$VOICE.onnx
-  curl -sSL -o \"$model_json\" $voice_url_base/$voice_url_dir/$VOICE.onnx.json"
-  else
-    die "voice model '$VOICE' is not in $VOICE_DIR. That id is not in this
-script's catalogue map, so place both files there yourself:
-  $model_onnx
-  $model_json
-The public catalogue is https://huggingface.co/rhasspy/piper-voices (paths are
-<language>/<locale>/<voice>/<quality>/<voice-id>.onnx[.json])."
-  fi
-fi
+libstdcpp_dir=$(find_libstdcpp_dir) ||
+  die "no libstdc++ found for the Kokoro runtime; install a C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH"
+kokoro_cache_ready ||
+  die "the Kokoro cache at $KOKORO_DIR is incomplete; $setup_hint"
+case $VOICE in
+  b*) kokoro_lang=en-gb ;;
+  *) kokoro_lang=en-us ;;
+esac
 fi
 
 # --- output directory --------------------------------------------------------
@@ -670,7 +579,7 @@ awk '
         if (substr(s, j, 1) != ch) { j++; continue }
         m = j
         while (m <= n && substr(s, m, 1) == ch) m++
-        if (m - j == run && j > k && !space_char(substr(s, j - 1, 1)) &&
+        if (m - j >= run && j > k && !space_char(substr(s, j - 1, 1)) &&
             !(ch == "_" && word_char(substr(s, m, 1)))) break
         j = m
         m = 0
@@ -681,7 +590,7 @@ awk '
         continue
       }
       out = out substr(s, k, j - k)
-      i = m
+      i = j + run
     }
     return out
   }
@@ -817,21 +726,13 @@ pack_chunks() {
 }
 
 synthesise_chunk() {
-  # One chunk text file in, one WAV out, for the selected engine.
+  # One chunk text file in, one WAV out.
   local chunk=$1 wav=$2
-  if [ "$ENGINE" = kokoro ]; then
-    kokoro_python "$workdir/kokoro_render.py" \
-      "$KOKORO_MODEL" "$KOKORO_VOICES" "$chunk" "$wav" "$VOICE" "$speed" "$kokoro_lang" \
-      >/dev/null 2>"$workdir/kokoro.err" ||
-      die "kokoro failed on $(basename "$chunk"): $(tail -n 3 "$workdir/kokoro.err")"
-  else
-    # piper writes the WAV, not the transcript, so its chatter goes to stderr.
-    "$piper_bin" -m "$model_onnx" -c "$model_json" -i "$chunk" -f "$wav" \
-      --length-scale "$length_scale" \
-      >/dev/null 2>"$workdir/piper.err" ||
-      die "piper failed on $(basename "$chunk"): $(tail -n 3 "$workdir/piper.err")"
-  fi
-  [ -s "$wav" ] || die "$ENGINE produced no audio for $(basename "$chunk")"
+  kokoro_python "$workdir/kokoro_render.py" \
+    "$KOKORO_MODEL" "$KOKORO_VOICES" "$chunk" "$wav" "$VOICE" "$speed" "$kokoro_lang" \
+    >/dev/null 2>"$workdir/kokoro.err" ||
+    die "kokoro failed on $(basename "$chunk"): $(tail -n 3 "$workdir/kokoro.err")"
+  [ -s "$wav" ] || die "kokoro produced no audio for $(basename "$chunk")"
 }
 
 render_chunks() {
@@ -848,9 +749,7 @@ render_chunks() {
   return "$over"
 }
 
-if [ "$ENGINE" = kokoro ]; then
-  write_kokoro_renderer
-fi
+write_kokoro_renderer
 
 words_per_chunk=$((max_minutes * WORDS_PER_MINUTE))
 attempt=1
@@ -958,7 +857,7 @@ awk -v rows_file="$rows" '
 mv -f "$workdir/index.new" "$index" || die "cannot replace the index: $index"
 
 printf 'index: %s\n' "$index"
-printf 'engine: %s\n' "$ENGINE"
+printf 'engine: kokoro\n'
 printf 'voice: %s\n' "$VOICE"
 printf 'speed: %s\n' "$speed"
 printf 'total: %s\n' "$(fmt_duration "$total_seconds")"
