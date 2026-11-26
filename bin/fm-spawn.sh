@@ -185,10 +185,11 @@
 #   metadata are unchanged.
 #   A clean projected create and an exact resume both hold the one
 #   session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff.
-#   On contention a create makes one bounded attempt and falls back to the
-#   ordinary flat layout before any projection mutation. A resume refuses by
-#   default on the same contention (it does not degrade flat; a concurrent
+#   canonical socket, outside any home's state/) through the projected layout
+#   mutation, releasing it before worktree allocation, remaining spawn setup,
+#   and agent launch. On contention a create makes one bounded attempt and falls back
+#   to the ordinary flat layout before any projection mutation. A resume refuses
+#   by default on the same contention (it does not degrade flat; a concurrent
 #   resume is a hard failure). Pass --herdr-resume-lock-wait to opt that
 #   resume into waiting for the lock instead, so two concurrent recoveries
 #   can serialize and each still replace its own exact husk. The flag acts
@@ -5289,6 +5290,9 @@ else
         fi
       fi
     fi
+    if [ "$HERDR_PROJECTED" -eq 1 ]; then
+      spawn_herdr_presentation_order_lock_release
+    fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS" "$HERDR_LAUNCHER_RELATIONSHIP") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
@@ -8121,7 +8125,6 @@ else
   sleep 0.3
   if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
-    spawn_herdr_presentation_order_lock_release
   fi
   if ! spawn_send_key "$T" Enter; then
     [ "$ORCA_LAUNCH_ENV_ENABLED" != 1 ] || spawn_orca_launch_send_fail

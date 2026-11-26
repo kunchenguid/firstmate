@@ -67,17 +67,10 @@ case "$1 ${2:-}" in
       printf '%s\n' "$FM_FAKE_HERDR_SERVER_FAIL" >&2
       exit 1
     fi
-    if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
-      printf '%s\n' "$$" > "$state/$session.launch-pid"
-      if [ "$FM_FAKE_HERDR_SERVER_DELAY" = until-cancel ]; then
-        # Block on an event, not a wall-clock delay that can expire while a
-        # slower host is still making the provisioner's status polls.
-        mkfifo "$state/$session.launch-release"
-        exec 3<>"$state/$session.launch-release"
-        read -r release <&3
-      else
-        "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
-      fi
+    if [ -n "${FM_FAKE_HERDR_SERVER_GATE:-}" ]; then
+      # Hold the launch on a FIFO no writer opens, so only cancellation ends it.
+      printf '%s\n' "$$" > "$state/$session.gated"
+      read -r _ < "$FM_FAKE_HERDR_SERVER_GATE"
     fi
     printf '%s\n' running > "$state/$session"
     if [ -n "${FM_FAKE_HERDR_SERVER_STAY:-}" ]; then
@@ -123,7 +116,6 @@ run_with_fake() {
     FM_FAKE_HERDR_STATE="$FAKE_STATE" \
     FM_FAKE_HERDR_LOG="$FAKE_LOG" \
     FM_FAKE_HERDR_REAL_SLEEP="$REAL_SLEEP" \
-    FM_FAKE_HERDR_SERVER_DELAY="${FM_FAKE_HERDR_SERVER_DELAY:-0}" \
     FM_FAKE_HERDR_FAST_POLL="${FM_FAKE_HERDR_FAST_POLL:-}" \
     FM_FAKE_HERDR_DELETE_FAIL="${FM_FAKE_HERDR_DELETE_FAIL:-}" \
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
@@ -462,13 +454,15 @@ exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
 SH
   chmod +x "$FAKEBIN/sleep"
   : > "$FAKE_LOG"
-  # The status polls wait until the delayed launch has recorded its own pid,
+  mkfifo "$TMP_ROOT/late-launch.gate"
+  # The status polls wait until the gated launch has recorded its own pid,
   # so the timeout always cancels a launch that is already running.
-  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=until-cancel \
-    FM_FAKE_HERDR_WAIT_MARKER="$FAKE_STATE/$name.launch-pid" \
+  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_GATE="$TMP_ROOT/late-launch.gate" \
+    FM_FAKE_HERDR_WAIT_MARKER="$FAKE_STATE/$name.gated" \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
-  launch_pid=$(cat "$FAKE_STATE/$name.launch-pid")
+  assert_present "$FAKE_STATE/$name.gated" "timed-out provision never launched its server"
+  launch_pid=$(cat "$FAKE_STATE/$name.gated")
   if kill -0 "$launch_pid" 2>/dev/null; then
     kill -KILL "$launch_pid" 2>/dev/null || true
     fail "timed-out provision returned with its herdr server launch (pid $launch_pid) still running"
@@ -481,6 +475,8 @@ SH
   if [ -f "$FAKE_STATE/$name" ] && [ "$(cat "$FAKE_STATE/$name")" = running ]; then
     fail "timed-out provision left a late-starting lab session after teardown"
   fi
+  # The gate never opens, so the launch cannot reach running; reap it if it outlived the cancel.
+  kill -KILL "$(cat "$FAKE_STATE/$name.gated")" 2>/dev/null || true
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
@@ -658,30 +654,33 @@ test_viewer_stop_requires_the_recorded_parent() {
 test_interrupted_viewer_start_cancels_launcher() {
   local name="fm-lab-viewer-interrupt-$$" command_pid launcher_pid status=0
   local started="$TMP_ROOT/viewer-interrupt-started" attached="$TMP_ROOT/viewer-interrupt-attached"
+  local gate="$TMP_ROOT/viewer-interrupt-gate"
   run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-interrupt fixture provision failed"
+  # FIFOs, not sleeps: the launcher reports its pid through one, then holds its
+  # attach on a gate no writer opens, so only cancellation ends it.
+  mkfifo "$started" "$gate"
   cat > "$FAKEBIN/python3" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$$" > "$FM_FAKE_VIEWER_STARTED"
-"$FM_FAKE_HERDR_REAL_SLEEP" 0.5
+read -r _ < "$FM_FAKE_VIEWER_GATE"
 : > "$FM_FAKE_VIEWER_ATTACHED"
 printf '%s\n' cleared > "$FM_FAKE_HERDR_STATE/$FM_FAKE_VIEWER_SESSION.foreground"
 exec "$FM_FAKE_HERDR_REAL_SLEEP" 20
 SH
   chmod +x "$FAKEBIN/python3"
-  FM_FAKE_VIEWER_STARTED="$started" FM_FAKE_VIEWER_ATTACHED="$attached" \
+  FM_FAKE_VIEWER_STARTED="$started" FM_FAKE_VIEWER_ATTACHED="$attached" FM_FAKE_VIEWER_GATE="$gate" \
     FM_FAKE_VIEWER_SESSION="$name" run_with_fake exec "$ROOT/bin/fm-herdr-lab.sh" \
     viewer start "$name" >/dev/null 2>&1 &
   command_pid=$!
-  while [ ! -f "$started" ]; do
-    "$REAL_SLEEP" 0.01
-  done
-  launcher_pid=$(cat "$started")
+  read -r launcher_pid < "$started"
   kill -TERM "$command_pid"
   wait "$command_pid" || status=$?
   rm -f "$FAKEBIN/python3"
   [ "$status" -ne 0 ] || fail "interrupted viewer start unexpectedly succeeded"
-  "$REAL_SLEEP" 0.6
-  kill -0 "$launcher_pid" 2>/dev/null && fail "interrupted viewer start left its launcher running"
+  if kill -0 "$launcher_pid" 2>/dev/null; then
+    kill -KILL "$launcher_pid" 2>/dev/null || true
+    fail "interrupted viewer start left its launcher running"
+  fi
   assert_absent "$attached" "interrupted viewer start attached after its command exited"
   [ ! -f "$FAKE_STATE/$name.foreground" ] || fail "interrupted viewer start left a foreground client"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-interrupt fixture teardown failed"

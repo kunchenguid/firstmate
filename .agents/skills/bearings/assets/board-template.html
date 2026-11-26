@@ -245,6 +245,14 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bb-row__sub { font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.3; margin-top: 1px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Charted Next rows show the whole title and reason: they wrap instead of
+   clipping, and the picker and badge stay level with the first title line */
+.bb-row--full { align-items: flex-start; }
+.bb-row--full .bb-row__title,
+.bb-row--full .bb-row__sub { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.bb-row--full .bb-pick,
+.bb-row--full .bb-pick-spacer { margin-top: 2px; }
+.bb-row--full .fm-badge { flex: none; }
 .bb-row__id { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-faint); white-space: nowrap; }
 .bb-row__pr { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ocean-600); white-space: nowrap; }
 .bb-row__pr:hover { text-decoration: underline; }
@@ -679,7 +687,7 @@ __FM_BEARINGS_BOARD_DATA__
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
   chartedOrder(data.charted).forEach(function (t) {
-    var row = el("div", "bb-row");
+    var row = el("div", "bb-row bb-row--full");
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
