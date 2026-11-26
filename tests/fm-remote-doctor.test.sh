@@ -566,10 +566,15 @@ strip_process_type() { # <plist>
 }
 strip_process_type "$CASE_PLIST"
 strip_process_type "$CASE_JOB_PLIST"
+grep -v '^spawn type' "$CASE_STATE/loaded-$JOB_LABEL" > "$CASE_STATE/loaded-$JOB_LABEL.tmp"
+printf 'spawn type = daemon (3)\n' >> "$CASE_STATE/loaded-$JOB_LABEL.tmp"
+mv "$CASE_STATE/loaded-$JOB_LABEL.tmp" "$CASE_STATE/loaded-$JOB_LABEL"
 doctor
 expect_code 1 "$DOCTOR_RC" "launch agents without ProcessType were reported ready"
 assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "a Herdr launch agent without ProcessType was accepted as matching"
 assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable:' "a remote job worker without ProcessType was accepted as matching"
+assert_contains "$DOCTOR_OUT" "check remote-job-worker-loaded=fixable: gui/$(id -u)/$JOB_LABEL does not match the effective" \
+  "a remote job worker loaded with the daemon spawn type was not reported as an off-contract loaded job"
 doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not repair launch agents missing ProcessType"
 assert_contains "$DOCTOR_OUT" 'fix launchagent=applied:' "--fix did not rewrite the Herdr launch agent missing ProcessType"

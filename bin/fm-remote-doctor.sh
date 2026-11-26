@@ -540,6 +540,9 @@ check_remote_job_worker() {
         "restore launchctl and a readable account uid, then rerun this command"
     elif fm_remote_job_launchagent_loaded "$FM_ROOT" "${HOME:-}" "$UID_NUM"; then
       record remote-job-worker-loaded "ok: $FM_REMOTE_JOB_LABEL is loaded in gui/$UID_NUM"
+    elif launchctl print "gui/$UID_NUM/$FM_REMOTE_JOB_LABEL" >/dev/null 2>&1; then
+      record remote-job-worker-loaded "fixable: gui/$UID_NUM/$FM_REMOTE_JOB_LABEL does not match the effective Firstmate-owned worker contract" \
+        "rerun this command with --fix to reload the worker with the current launch-agent contract"
     elif check_is_ok gui-session; then
       record remote-job-worker-loaded "fixable: $FM_REMOTE_JOB_LABEL is not loaded in gui/$UID_NUM" \
         "rerun this command with --fix to bootstrap the worker"
