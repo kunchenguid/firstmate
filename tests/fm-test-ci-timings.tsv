@@ -20,6 +20,7 @@ tests/fm-agy-primary.test.sh	33804
 tests/fm-agy-signals-live-e2e.test.sh	189
 tests/fm-approval-failover.test.sh	13630
 tests/fm-arm-pretool-check.test.sh	31250
+tests/fm-ask-freshness.test.sh	1000
 tests/fm-ask-user-authority.test.sh	438
 tests/fm-assertions.test.sh	210
 tests/fm-backend-autodetect-smoke.test.sh	7232

@@ -20,6 +20,8 @@ Measure that script through the focused Git Bash runner rather than a portable s
 
 A timed-out shard may upload no artifact, so a complete green run is what keeps the slowest scripts measured in the shard that needs them most.
 
+The new `tests/fm-ask-freshness.test.sh` serial hint is provisionally 1000 ms, above the slowest of five successful local macOS arm64 `bin/fm-test-run.sh` samples (613-635 ms) on 2026-11-13, until the next CI refresh replaces it with an Ubuntu timing-artifact maximum.
+
 ## Parallel lanes
 
 The two parallel lanes use longest-processing-time assignment over the committed hints.
