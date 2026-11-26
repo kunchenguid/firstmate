@@ -80,6 +80,12 @@ SH
   chmod +x "$fakebin/curl"
 }
 
+# cache_entries <dir>: the names directly under a cache directory, space
+# separated, so an assertion can name exactly what a run left behind.
+cache_entries() {
+  find "$1" -mindepth 1 -maxdepth 1 | sed 's|.*/||' | sort | tr '\n' ' '
+}
+
 # fake_venv_builder <fakebin>: `python3 -m venv DIR` builds a DIR whose python can
 # import the Kokoro packages, which is what a working `pip install` leaves behind.
 fake_venv_builder() {
@@ -302,8 +308,11 @@ test_setup_on_macos_does_not_require_libstdcxx() {
   tmp=$root/no-such-tmp
   fakebin=$(fm_fakebin "$root")
   mkdir -p "$kokoro/venv/bin"
-  printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = -c ] || exit 1' 'exit 0' \
-    > "$kokoro/venv/bin/python"
+  cat > "$kokoro/venv/bin/python" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -c ] || exit 1
+exit 0
+SH
   chmod +x "$kokoro/venv/bin/python"
   printf '%s' model > "$kokoro/kokoro-v1.0.onnx"
   printf '%s' voices > "$kokoro/voices-v1.0.bin"
@@ -553,8 +562,11 @@ test_setup_leaves_no_cache_file_after_a_failed_download() {
   outdir=$root/out
   fakebin=$(fm_fakebin "$root")
   mkdir -p "$kokoro/venv/bin"
-  printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = -c ] || exit 1' 'exit 0' \
-    > "$kokoro/venv/bin/python"
+  cat > "$kokoro/venv/bin/python" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -c ] || exit 1
+exit 0
+SH
   chmod +x "$kokoro/venv/bin/python"
   printf '%s' voices > "$kokoro/voices-v1.0.bin"
   printf '%s\n' 'One sentence here.' > "$input"
@@ -569,14 +581,14 @@ test_setup_leaves_no_cache_file_after_a_failed_download() {
     "a failed download must name what could not be fetched"
   [ ! -e "$kokoro/kokoro-v1.0.onnx" ] ||
     fail "a failed download left a cache file holding the error body, which the next run would treat as present"
-  [ "$(ls -A "$kokoro" | tr '\n' ' ')" = "venv voices-v1.0.bin " ] ||
-    fail "a failed download left temporary files behind: $(ls -A "$kokoro" | tr '\n' ' ')"
+  [ "$(cache_entries "$kokoro")" = "venv voices-v1.0.bin " ] ||
+    fail "a failed download left temporary files behind: $(cache_entries "$kokoro")"
 
   # The damaged model must not read as present to a render either.
-  command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1 || {
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
     pass "setup: a failed download leaves no cache file and a render refuses it (skipped render: ffmpeg and ffprobe are not on PATH)"
     return 0
-  }
+  fi
   out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
     "$SPEAK" "$input" --out "$outdir" 2>&1)
   rc=$?
@@ -596,8 +608,10 @@ test_render_refuses_a_cache_that_cannot_import() {
   outdir=$root/out
   input=$root/report.md
   fakebin=$(fm_fakebin "$root")
-  command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1 ||
-    { pass "render preflight: cache gate (skipped: ffmpeg and ffprobe are not on PATH)"; return 0; }
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+    pass "render preflight: cache gate (skipped: ffmpeg and ffprobe are not on PATH)"
+    return 0
+  fi
   mkdir -p "$kokoro/venv/bin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$kokoro/venv/bin/python"
   chmod +x "$kokoro/venv/bin/python"

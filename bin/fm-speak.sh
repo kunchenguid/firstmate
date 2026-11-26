@@ -531,6 +531,7 @@ awk '
 # unbalanced apostrophe.
 rsquo=$(printf '\xe2\x80\x99')
 lsquo=$(printf '\xe2\x80\x98')
+# shellcheck disable=SC2016 # A sed program: the backtick pattern is a regular expression, not shell expansion.
 sed -E \
   -e 's/!\[[^]]*\]\([^)]*\)//g' \
   -e 's/\[\[([^]]*)\]\]/\1/g' \
