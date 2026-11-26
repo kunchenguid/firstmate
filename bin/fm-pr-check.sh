@@ -337,11 +337,11 @@ case "$PROVIDER:$MODE" in
 esac
 FM_DOD_REFRESH_REMOTES=1
 # A merge-time re-record runs under the control lock bin/fm-pr-merge.sh already
-# holds (it exports FM_MERGE_HOLDS_CONTROL_LOCK), so the gate is told to reuse
-# that lock instead of taking it a second time and deadlocking.
+# holds (it exports FM_MERGE_HOLDS_CONTROL_LOCK), so the gate is told to skip
+# that lock while still taking the live metadata lock.
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META" \
-    "${FM_MERGE_HOLDS_CONTROL_LOCK:+meta-locked}"); then
+    "${FM_MERGE_HOLDS_CONTROL_LOCK:+control-locked}"); then
   echo "error: $GATE_REASON" >&2
   exit 1
 fi

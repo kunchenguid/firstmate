@@ -675,7 +675,7 @@ fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
 # This run now holds the task's control lock, so any gate it runs must not take
 # that same lock again: a local-only named-head pin would otherwise deadlock
 # against its own merge. Exported for bin/fm-pr-check.sh, which passes
-# meta-locked to fm_dod_accept_ship_done when it sees this marker.
+# control-locked to fm_dod_accept_ship_done when it sees this marker.
 FM_MERGE_HOLDS_CONTROL_LOCK=1
 export FM_MERGE_HOLDS_CONTROL_LOCK
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
