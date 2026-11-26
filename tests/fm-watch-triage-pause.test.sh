@@ -1912,8 +1912,8 @@ test_declared_wait_surfaces_superseding_state() {
   superseded_pause_round "$dir" \
     'state: parked · source: run-step · ask-user: authority decision · run: R' exit \
     || fail "idle paused run parked at an unreported human gate did not surface"
-  grep -F "stale: $window (paused wait superseded: run R is parked at a human-owed gate with no open decision)" \
-    "$dir/watch.out" >/dev/null || fail "gate wake did not identify the run and missing decision"
+  grep -F "stale: $window (paused wait superseded: run R is parked at a human-owed gate with no open decision) task=paused" \
+    "$dir/watch.out" >/dev/null || fail "gate wake did not identify the run, the missing decision, and the task id"
   ack_stopped_cycle "$state" || fail "could not acknowledge the idle gate wake"
   superseded_pause_round "$dir" \
     'state: parked · source: run-step · ask-user: authority decision · run: R' absorb \
@@ -1939,8 +1939,8 @@ test_declared_wait_surfaces_superseding_state() {
   state="$dir/state"
   superseded_pause_round "$dir" 'state: done · source: run-step · run: R' exit \
     || fail "terminal validation run did not supersede the declared wait"
-  grep -F 'paused wait superseded: current run R is terminal (done)' "$dir/watch.out" >/dev/null \
-    || fail "terminal wake did not identify the superseded wait"
+  grep -F 'paused wait superseded: current run R is terminal (done)) task=paused' "$dir/watch.out" >/dev/null \
+    || fail "terminal wake did not identify the superseded wait and the task id"
 
   dir=$(make_superseded_pause_case gate-terminal-pr 'paused: waiting for validation run R')
   state="$dir/state"

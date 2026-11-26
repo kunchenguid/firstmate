@@ -79,8 +79,9 @@
 #                          (wedge_defer_validating), while a parked, terminal,
 #                          ci-monitoring, absent or unreadable run, or a home
 #                          without that flag, escalates unchanged.
-#                          Each long-cadence recheck (declared pause, deferred
-#                          wait, deferred write, or validating run) ends with " task=<id>" after
+#                          Each long-cadence recheck (declared pause, superseded
+#                          declared wait, deferred wait, deferred write, or
+#                          validating run) ends with " task=<id>" after
 #                          its parenthetical, so the supervisor reports on the
 #                          task rather than the pane. A stale that would
 #                          otherwise carry no parenthetical (first sight, away
@@ -2467,7 +2468,7 @@ paused_wait_superseded() {  # <window> <task>
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || line=''
   if run=$(crew_gate_awaits_human_decision "$task" "$line") \
     && ! status_has_open_needs_decision "$statusf" "$run"; then
-    reason="stale: $win (paused wait superseded: run $run is parked at a human-owed gate with no open decision)"
+    reason="stale: $win (paused wait superseded: run $run is parked at a human-owed gate with no open decision) task=$task"
     state="gate:$run"
   else
     state=${line#state: }; state=${state%% *}
@@ -2480,7 +2481,7 @@ paused_wait_superseded() {  # <window> <task>
       case "$part" in "run: "?*) run=${part#run: } ;; esac
     done
     case "$run" in *[[:space:]]*) run='' ;; esac
-    reason="stale: $win (paused wait superseded: current run${run:+ $run} is terminal ($state))"
+    reason="stale: $win (paused wait superseded: current run${run:+ $run} is terminal ($state)) task=$task"
     state="terminal${run:+:$run}"
   fi
   key=$(window_key "$win")
