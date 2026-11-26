@@ -830,6 +830,29 @@ test_secondmate_record_refuses_a_pr_watch() {
   pass "fm-pr-check refuses to record a PR or arm a merge watch on a secondmate record"
 }
 
+test_scout_record_refuses_a_pr_watch() {
+  local dir rc
+  dir=$(make_case scout-refuses-watch)
+  fm_write_meta "$dir/home/state/review.meta" \
+    'window=session:fm-review' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=scout'
+  cp "$dir/home/state/review.meta" "$dir/meta.before"
+  set +e
+  run_check_entry "$dir" review https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr"; rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a merge watch was armed on a scout record"
+  grep -qi 'scout' "$dir/stderr" || fail "the refusal did not name the record's kind"
+  cmp -s "$dir/meta.before" "$dir/home/state/review.meta" \
+    || fail "the refusal changed scout metadata"
+  [ ! -e "$dir/home/state/review.check.sh" ] || fail "the refusal armed a poll on a scout"
+  [ ! -e "$dir/home/state/review.pr-poll" ] || fail "the refusal wrote a poll sidecar on a scout"
+  [ ! -s "$dir/gh.log" ] || fail "the refusal reached the forge"
+  pass "fm-pr-check refuses to record a PR or arm a merge watch on a scout record"
+}
+
 # With no forge-reported head (gh cannot supply one), the named head is the
 # worker copy's HEAD, and a HEAD that exists only there is refused.
 test_unpushed_named_head_refuses_registration() {
@@ -5696,6 +5719,7 @@ test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
+test_scout_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
 test_merge_rerecord_refreshes_before_refusing

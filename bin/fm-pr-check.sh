@@ -229,6 +229,13 @@ if [ "$KIND" = secondmate ]; then
   echo "error: $ID is a secondmate, not a delivery lane - $URL was reported on its status channel but belongs to a task in the mate's own home, which arms its own merge watch" >&2
   exit 1
 fi
+# A scout delivers a report, never a pull request, so its record never carries
+# pr= or a merge watch either; a PR its report reviewed for another home merges
+# through bin/fm-pr-merge.sh --routed-review, which writes neither.
+if [ "$KIND" = scout ]; then
+  echo "error: $ID is a scout, not a delivery lane - it delivers a report and never owns $URL; a PR it reviewed for another home merges with bin/fm-pr-merge.sh --routed-review" >&2
+  exit 1
+fi
 
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.

@@ -234,8 +234,11 @@
 # name the canonical PR URL and the full --expected-head commit, each as a
 # whole token, so the home merges only a PR it reviewed, at the commit it
 # reviewed; a later push to the PR needs a new review that records the new
-# head. The flag is refused when state/<review-id>.meta exists, because that id
-# is one of this home's own tasks and merges the ordinary way.
+# head. The flag is refused when state/<review-id>.meta is a record of any kind
+# but scout, because that id is one of this home's own delivery tasks and
+# merges the ordinary way. A scout record is accepted and left untouched: a
+# scout delivers exactly that report and never owns a pull request, so a
+# review this home ran as a scout task merges here while the task is live.
 # Every merge gate above still applies unchanged: the role partition, the
 # away-posture record and its lock, a captain hold on a backlog item of that
 # id, the live pre-merge conditions, and the head match. What differs is only
@@ -250,7 +253,9 @@
 # (bin/fm-merge-outcome-lib.sh), whose merge-notification marker is the one
 # state file a routed merge leaves.
 # With no poll to follow up, a routed merge must be proved landed in this run:
-# --attended-override and --update-branch are refused, a GitLab merge request
+# --attended-override and --update-branch are refused, a GitHub base branch
+# whose rules do not prove it has no merge queue is refused before anything is
+# handed to the forge, a GitLab merge request
 # with auto-merge requested or configured is refused and merges with
 # --auto-merge=false, and an accepted request that reads back queued or
 # unconfirmed exits nonzero naming that nothing here will watch it.
@@ -731,10 +736,18 @@ routed_report_names() {  # <report> <token>
 # The --routed-review gate (the header's "Routed review" paragraph owns the
 # contract). Run before the control lock and again under it.
 require_routed_review_record() {
-  local data report
+  local data report kind
   data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
   report="$data/$ID/report.md"
   if [ -e "$META" ] || [ -L "$META" ]; then
+    kind=
+    if [ -f "$META" ] && [ ! -L "$META" ]; then
+      kind=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+    fi
+  else
+    kind=scout
+  fi
+  if [ "$kind" != scout ]; then
     echo "error: $ID is one of this home's own tasks, not a routed review; merge it without --routed-review" >&2
     return 1
   fi
@@ -758,9 +771,6 @@ if [ "$ROUTED_REVIEW" = true ]; then
 else
   if [ ! -f "$META" ] || [ -L "$META" ]; then
     echo "error: task metadata is unavailable" >&2
-    if [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$ID/report.md" ]; then
-      echo "note: $ID has a report in this home; a PR this home reviewed for another home merges with --routed-review (see --help)" >&2
-    fi
     exit 1
   fi
   if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
@@ -1763,9 +1773,10 @@ persist_accepted_merge_authority() {
   return 1
 }
 
-# While away, a merge proceeds only when the base branch's rules prove no
-# merge queue, because a queued merge can land after its away authority
-# lapses with the record's archive. A repository whose
+# While away, and for a routed review, a merge proceeds only when the base
+# branch's rules prove no merge queue: a queued merge can land after its away
+# authority lapses with the record's archive, and a routed review has no poll
+# in this home to watch one. A repository whose
 # plan does not expose branch rules at all (GitHub's "Upgrade to GitHub Pro or
 # make this repository public" 403) proves that on its own, since such a
 # repository cannot have a merge_queue rule either; see
@@ -1774,14 +1785,20 @@ persist_accepted_merge_authority() {
 # 404, or an unrelated 403) stays unreadable and refuses the merge. The merge
 # stays synchronous (--auto is refused earlier) and every other gate still
 # applies.
-refuse_github_queue_while_away() {
-  [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
+refuse_github_unprovable_immediate_merge() {
+  [ "$FM_PR_AWAY_POSTURE" = true ] || [ "$ROUTED_REVIEW" = true ] || return 0
   # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
   # oversight: a queue rule or PR base change after this preflight can still
-  # enqueue the merge, which can land after its away authority lapses.
+  # enqueue the merge, which can land after its away authority lapses or with
+  # no poll in this home watching it.
   github_read_queue_method
   [ "$FM_PR_GITHUB_QUEUE_STATUS" = none ] && return 0
-  echo "error: GitHub merge refused while away because the base branch's merge-queue state does not prove an immediate merge; nothing was handed to the forge" >&2
+  if [ "$FM_PR_AWAY_POSTURE" = true ]; then
+    echo "error: GitHub merge refused while away because the base branch's merge-queue state does not prove an immediate merge; nothing was handed to the forge" >&2
+  else
+    printf 'error: GitHub merge refused for --routed-review because the base branch'"'"'s merge-queue state does not prove an immediate merge and nothing in this home would watch a queued one; nothing was handed to the forge - merge %s from the home that dispatched the task\n' \
+      "$URL" >&2
+  fi
   return 2
 }
 
@@ -2027,7 +2044,7 @@ case "$PROVIDER" in
     away_status=0
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
-    refuse_github_queue_while_away || exit 2
+    refuse_github_unprovable_immediate_merge || exit 2
     if [ "$FM_PR_GITHUB_BEHIND" = true ]; then
       if [ "$UPDATE_BRANCH" != true ]; then
         echo "error: $URL is behind its base; updating its source branch requires explicit --update-branch consent on this authorized merge request (the update remains if new checks prevent merging)" >&2
