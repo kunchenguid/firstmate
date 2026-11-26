@@ -1201,7 +1201,16 @@ reload_launch_agent() { # <check-to-report-under>
     return 1
   fi
   authorize_guard_takeover
-  [ "$AUTOMATIC" -eq 1 ] || launchctl bootout "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+  if [ "$AUTOMATIC" -eq 0 ]; then
+    launchctl bootout "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+    # launchd refuses to bootstrap a label it is still removing, so wait
+    # (bounded; the server can take a while to exit) until the job is gone.
+    if ! wait_for_launch_agent_removed; then
+      fix_report "$report" failed "timed out waiting for launchd to finish removing $LAUNCH_AGENT_LABEL after bootout"
+      revoke_guard_takeover
+      return 1
+    fi
+  fi
   if ! out=$(launchctl bootstrap "gui/$UID_NUM" "$LAUNCH_AGENT_PLIST" 2>&1); then
     fix_report "$report" failed "launchctl bootstrap gui/$UID_NUM refused: ${out:-no diagnostic}"
     rc=1
@@ -1245,6 +1254,15 @@ kickstart_launch_agent() { # <check-to-report-under> <applied-text>
     return 1
   fi
   fix_report "$report" applied "$2"
+}
+
+wait_for_launch_agent_removed() {
+  local i=0
+  while launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; do
+    [ "$i" -lt 60 ] || return 1
+    i=$((i + 1))
+    sleep 0.5
+  done
 }
 
 wait_for_herdr_server() {
