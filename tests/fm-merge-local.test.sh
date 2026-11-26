@@ -170,9 +170,11 @@ test_done_recording_preserves_caller_locks() {
   for caller in ledger teardown; do
     make_case "locked-$caller"
     (
+      # shellcheck disable=SC2030 # The fixture environment stays inside this isolated subshell.
       local FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state"
       # shellcheck source=bin/fm-wake-lib.sh
       . "$ROOT/bin/fm-wake-lib.sh"
+      # shellcheck disable=SC2030 # The fixture control lock is subshell-local by design.
       local lock control='' owner
       lock=$(fm_meta_lock_path "$META") || exit 1
       if [ "$caller" = teardown ]; then
