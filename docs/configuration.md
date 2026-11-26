@@ -860,6 +860,16 @@ With the file absent, nothing is armed and an already armed check prints nothing
 Creating the flag takes effect at the next session start, or immediately after `bin/fm-pr-health.sh arm`.
 The flag is a home-local preference and is not inherited by secondmate homes.
 
+## Answer words (config/hold-answer-words)
+
+The optional local, gitignored `config/hold-answer-words` presence flag enables stricter answer intake and a selected-answer field in captain-call records.
+Create an empty file to enable it.
+`bin/fm-captain-hold.sh --help` owns the accepted input shapes and record format.
+With the file absent, bare option selections remain accepted, blank labels remain unchanged, and resolution records gain no `Selected answer:` field.
+No existing setting enables this behavior.
+The flag is used only for answer words, takes effect on the next command, and is not inherited by secondmate homes.
+Removing it restores the default intake without rewriting existing records.
+
 ## PR hold settlement (config/hold-pr-settle)
 
 The optional local, gitignored `config/hold-pr-settle` presence flag enables settlement of explicitly declared PR-dependent captain holds.
