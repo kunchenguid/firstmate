@@ -358,7 +358,8 @@ test_legacy_observation_review_request_is_baseline() { test_existing_review_requ
 # still wraps the watcher's own checks and bounds a watcher that never gets there.
 quiet_checkpoint_clock() {
   local home=$1 real
-  real=$(command -v timeout) || fail 'timeout(1) is required'
+  # With neither command the checkpoint uses its perl bound and needs no stand-in.
+  real=$(command -v timeout || command -v gtimeout) || return 0
   mkdir -p "$home/quietbin"
   cat > "$home/quietbin/timeout" <<SH
 #!/usr/bin/env bash
