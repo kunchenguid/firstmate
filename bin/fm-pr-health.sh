@@ -535,6 +535,9 @@ poll() {
     jq --slurpfile owned "$TMP/owned.json" '
       reduce ($owned[0][] | select(.final) | .url) as $u (.; if (.prs[$u].open_seen // false) then . else .prs[$u] = ((.prs[$u] // {}) + {final:true}) end)' \
       "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
+  elif jq -e 'any(.prs[]; has("open_seen"))' "$TMP/health.json" > /dev/null; then
+    jq '.prs |= map_values(del(.open_seen))' "$TMP/health.json" > "$TMP/next.json" \
+      && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
   fi
   jq -r --slurpfile health "$TMP/health.json" '
     .[] | select(($health[0].prs[.url].final // false) | not)

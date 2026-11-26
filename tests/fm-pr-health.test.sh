@@ -1223,14 +1223,14 @@ test_final_report_forgets_open_seen_when_the_flag_is_removed() {
   arm "$home"
   expect_silent "$home" 'an open PR must stay silent'
   rm "$home/config/pr-health-final"
-  expect_silent "$home" 'an open PR must stay silent with the flag off'
   set_pr "$home" 9 '.state = "merged" | .merged_by = "merger"'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail 'could not record the merge'
+  expect_silent "$home" 'a poll with the flag off must stay silent'
   opt "$home" pr-health-final
   expect_silent "$home" 'a merge recorded while the flag was off must not print'
   [ "$(jq '.prs["https://github.com/o/r/pull/9"].final' "$home/state/pr-health.json")" = true ] \
     || fail 'the PR was not marked final'
-  pass 'open_seen does not survive a read with the flag off'
+  pass 'open_seen does not survive a poll with the flag off'
 }
 
 failures=0
