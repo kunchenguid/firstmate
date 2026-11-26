@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Preview or remove ignored, regenerable directories in idle Treehouse slots.
 
-Read Treehouse v4 pool state under its existing exclusive flock. Do not invoke
+Read Treehouse pool state under its existing exclusive flock. Do not invoke
 Treehouse: even `status` can recover a slot and move its untracked files.
+Schema v4 reservation records prove a slot is free; a pool in any other state
+version is inspected slot by slot, and a slot there must also be untouched for
+24 hours, as must any slot while a same-user process hides its cwd. A pool with
+a duplicate slot identity is skipped whole.
 """
 
 import argparse
@@ -15,12 +19,14 @@ import re
 import stat
 import subprocess
 import sys
+import time
 
 
 POOL_STATE = "treehouse-state.json"
 POOL_LOCK = "treehouse-state.lock"
 DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 READ = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+IDLE_SECONDS = 24 * 60 * 60
 GIT_ENV = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
@@ -54,11 +60,13 @@ def unique_fields(pairs):
 
 
 def read_pool(fd):
+    """Return the slot inventory and whether its reservation records are schema v4."""
     with regular_file(fd, POOL_STATE) as (entry, _), os.fdopen(os.dup(entry), "rb") as f:
         data = json.load(f, object_pairs_hook=unique_fields)
-    if (not isinstance(data, dict) or type(data.get("version")) is not int
-            or data["version"] != 4 or "worktrees" not in data):
-        raise Keep("unsupported Treehouse state (requires schema v4)")
+    if not isinstance(data, dict) or "worktrees" not in data:
+        raise Keep("unrecognized Treehouse state")
+    # Any other version still names its slots, but its reservations are unverified.
+    verified = type(data.get("version")) is int and data["version"] == 4
     rows = [] if data["worktrees"] is None else data["worktrees"]
     if not isinstance(rows, list):
         raise Keep("invalid Treehouse slot inventory")
@@ -74,7 +82,7 @@ def read_pool(fd):
             raise Keep("duplicate Treehouse slot identity")
         paths.add(physical)
         slots[name] = (Path(path), row)
-    return slots
+    return slots, verified
 
 
 def slot_layout(pool, slot):
@@ -83,13 +91,18 @@ def slot_layout(pool, slot):
             and slot.resolve(strict=True) == slot)
 
 
-def check_reservation(row):
+def check_reservation(row, verified):
     for key, empty in {"leased": False, "destroying": False, "owner_pid": 0,
                        "owner_started_at": 0, "lease_id": "", "lease_holder": "",
                        "leased_at": None, "recovery_error": "", "recovery_reason": ""}.items():
         val = row.get(key, empty)
         if type(val) is not type(empty) or val != empty:
             raise Keep("Treehouse reservation, process owner, or recovery hold")
+    if not verified:
+        # Unversioned records carry no seed inventory; honor one only if present.
+        if row.get("seeded_paths") not in (None, []):
+            raise Keep("seeded or unverified Treehouse slot")
+        return
     digest = row.get("seed_inventory_digest", "")
     if (row.get("seed_inventory_known") is not True or row.get("seeded_paths") not in (None, [])
             or row.get("seed_backend", "") not in ("", "git") or row.get("seed_auth_identity")
@@ -145,8 +158,23 @@ def check_mounts(slot):
         raise Keep("procfs does not expose the full process census")
 
 
+def process_uids(pid):
+    # The status file stays world-readable when cwd is hidden; the /proc/PID
+    # owner does not, because non-dumpable tasks show as root-owned.
+    with open(f"/proc/{pid}/status", "rb") as f:
+        for line in f:
+            if line.startswith(b"Uid:"):
+                return {int(uid) for uid in line.split()[1:]}
+    raise ValueError("no Uid line")
+
+
 def check_cwds(slot):
-    denied = 0
+    """Refuse a visible or unverifiable cwd in the slot; return hidden same-user cwds.
+
+    Another user's process with a hidden cwd is not a Firstmate worker, and
+    everything this tool removes is regenerable, so it does not block.
+    """
+    hidden = unverifiable = 0
     for pid in os.listdir("/proc"):
         if not pid.isdecimal():
             continue
@@ -155,14 +183,33 @@ def check_cwds(slot):
         except FileNotFoundError:  # Exited, or a kernel thread/zombie with no cwd.
             continue
         except PermissionError:
-            denied += 1
+            try:
+                uids = process_uids(pid)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                unverifiable += 1
+                continue
+            hidden += os.geteuid() in uids  # Any of real, effective, saved, or fs uid.
             continue
         if under(cwd, str(slot.parent)) or under(cwd.removesuffix(" (deleted)"), str(slot.parent)):
             raise Keep("process cwd in the slot")
         if not cwd.startswith("/"):
-            denied += 1
-    if denied:
-        raise Keep(f"cannot verify {denied} process cwd(s)")
+            unverifiable += 1
+    if unverifiable:
+        raise Keep(f"cannot verify {unverifiable} process cwd(s)")
+    return hidden
+
+
+def check_idle(repo, git_dir, why):
+    # Newest change to the slot's top-level entries or its Git index.
+    try:
+        newest = max([os.fstat(repo).st_mtime, os.stat(os.path.join(git_dir, "index")).st_mtime]
+                     + [entry.stat(follow_symlinks=False).st_mtime for entry in os.scandir(repo)])
+    except FileNotFoundError:
+        raise Keep("cannot verify slot idle age") from None
+    if time.time() - newest < IDLE_SECONDS:
+        raise Keep(f"slot touched within 24 hours{why}")
 
 
 def git(slot, *args):
@@ -181,6 +228,7 @@ def check_git(slot):
         raise Keep("Git storage is inside the slot")
     if git(slot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"):
         raise Keep("Git status is not clean")
+    return layout[1]
 
 
 def protected(name):
@@ -247,7 +295,8 @@ def walk(fd, device, remove=False):
     return size
 
 
-def inspect(slot, container, repo, state_dirs):
+def verify(slot, container, repo, state_dirs, verified):
+    """Run every slot gate; repeated immediately before removal."""
     if not os.path.samestat(os.fstat(repo), os.stat(slot, follow_symlinks=False)):
         raise Keep("worktree identity changed")
     marker = os.stat(".git", dir_fd=repo, follow_symlinks=False)
@@ -255,7 +304,14 @@ def inspect(slot, container, repo, state_dirs):
         raise Keep("not a linked Git worktree")
     check_metadata(slot, container, state_dirs)
     check_mounts(slot)
-    check_cwds(slot)
+    hidden = check_cwds(slot)
+    git_dir = check_git(slot)
+    # Without reservation records, or with a same-user cwd hidden from the
+    # census, only age shows the slot is idle.
+    if hidden:
+        check_idle(repo, git_dir, f" and {hidden} same-user process cwd(s) are hidden")
+    elif not verified:
+        check_idle(repo, git_dir, "")
 
 
 def clean_slot(fd, pool, name, slot, state_dirs, apply):
@@ -264,13 +320,13 @@ def clean_slot(fd, pool, name, slot, state_dirs, apply):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Keep("Treehouse pool lock held") from None
-        current, row = read_pool(fd).get(name, (None, None))
+        slots, verified = read_pool(fd)
+        current, row = slots.get(name, (None, None))
         if current != slot or not slot_layout(pool, slot):
             raise Keep("slot changed or not in the built-in pool layout")
-        check_reservation(row)
+        check_reservation(row, verified)
         with opened(slot.parent.name, DIR, fd) as container, opened(slot.name, DIR, container) as repo:
-            inspect(slot, container, repo, state_dirs)
-            check_git(slot)
+            verify(slot, container, repo, state_dirs, verified)
             device = os.fstat(repo).st_dev
             plans = []
             for parts in candidates(slot):
@@ -286,12 +342,11 @@ def clean_slot(fd, pool, name, slot, state_dirs, apply):
                     reason = str(exc) if isinstance(exc, Keep) else "not an ordinary directory"
                     print(f"{str(slot)!r}: keeping {'/'.join(parts)!r}: {reason}")
             if apply and plans:
-                check_git(slot)
+                verify(slot, container, repo, state_dirs, verified)
                 if not {parts for parts, _, _ in plans}.issubset(candidates(slot)):
                     raise Keep("generated directory no longer eligible in Git")
                 if not os.path.samestat(lock_info, os.stat(POOL_LOCK, dir_fd=fd, follow_symlinks=False)):
                     raise Keep("Treehouse lock file changed")
-                inspect(slot, container, repo, state_dirs)
             if not plans:
                 print(f"{str(slot)!r}: no eligible generated directories")
             for parts, expected, size in plans:
@@ -312,7 +367,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
         "Allows ignored node_modules, .next, .venv, dbt/{target,dbt_packages}, and "
         "terraform/**/.terraform/providers directories. Linux with Python 3.9+ only. "
-        "Run in the workers' PID and mount namespaces with a readable cwd census. "
+        "Run in the workers' PID and mount namespaces. Another user's process with a hidden cwd "
+        "does not block a slot; a hidden cwd of the same user blocks a slot touched within 24 hours. "
         "Supply every relevant Firstmate state directory and keep manual access to idle slots "
         "quiescent during --apply; the pool lock excludes Treehouse allocation, not a direct cd. "
         "Byte counts estimate allocated space, excluding multiply linked files."
@@ -345,7 +401,11 @@ def main():
         for pool in pools:
             try:
                 with opened(pool, DIR) as fd:
-                    for name, (slot, _) in read_pool(fd).items():
+                    slots, verified = read_pool(fd)
+                    if not verified:
+                        print(f"{str(pool)!r}: reservation state is not schema v4; "
+                              "each slot must also be untouched for 24 hours")
+                    for name, (slot, _) in slots.items():
                         try:
                             for size in clean_slot(fd, pool, name, slot, state_dirs, args.apply):
                                 total += size
