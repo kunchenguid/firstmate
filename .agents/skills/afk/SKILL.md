@@ -133,7 +133,7 @@ for the supervisor's own backend (see [supervisor backend configuration](../../.
   Every other or future verdict defers, including an unreadable pane, ambiguous geometry, a blank unidentified row, and a bare shell prompt left after the agent exits.
   Each adapter contributes only capture and capability facts to the fleet-wide screen classifier in `bin/fm-composer-lib.sh`, which owns every shape and verdict.
   It preserves proven idle composers as empty but requires a genuine container around shell glyphs; see `docs/herdr-backend.md` "Composer and injection safety" for the operator contract.
-  Droid's cursorless footer exception remains deliberately exact; `docs/herdr-backend.md` "Composer and injection safety" owns its current operator-visible form.
+  Droid's cursorless footer exception is gated on proven `droid=1` identity, and `bin/fm-afk-launch.sh` refuses Herdr away-daemon launch for a Droid primary until authenticated Herdr lab delivery is refreshed.
   `pane_input_pending` is the tested fail-closed predicate for callers that need to know whether the composer is unsafe: it treats every result except exact `empty` as pending.
 
 A busy primary pane, or any composer verdict other than `empty`, defers the injection; the buffered escalation survives in `state/.subsuper-escalations` and is retried on the next housekeeping tick.

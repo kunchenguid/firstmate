@@ -196,10 +196,11 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   # Gate that read on its exact foreground process, so shells and other
   # harnesses retain the strict cursor guard. Both reads still require the
   # shared classifier to prove the composer empty before allowing input.
-  if [ "$verdict" = unknown ] \
-     && { fm_tmux_pane_is_cursor "$target" \
-          || fm_tmux_pane_is_droid "$target"; }; then
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+  fi
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_droid "$target"; then
+    verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)"$'\ndroid=1' "$pane" '')
   fi
   # Cortex Code parks its terminal cursor in the first column of the blank row
   # under its footer, before and after typing (verified cortex 1.1.104 in
@@ -381,12 +382,18 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 # fm_tmux_submit_busy_harness: the busy-footer harness for a submit on
-# <target> - polytoken when the pane's composer identity is polytoken, empty
-# (the harness-less union) for every other pane.
+# <target> - polytoken when the pane's composer identity is polytoken, droid
+# when the pane's foreground process group contains droid, or empty (the
+# harness-less union) for every other pane.
 fm_tmux_submit_busy_harness() {  # <target>
   local identity
-  identity=$(fm_tmux_composer_identity "$1") || return 0
-  [ "${identity%%$'\t'*}" != polytoken ] || printf 'polytoken'
+  if identity=$(fm_tmux_composer_identity "$1") && [ "${identity%%$'\t'*}" = polytoken ]; then
+    printf 'polytoken'
+    return 0
+  fi
+  if fm_tmux_pane_is_droid "$1"; then
+    printf 'droid'
+  fi
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>

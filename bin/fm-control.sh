@@ -600,9 +600,9 @@ deliver_interrupt() {
     printf '%s' "$cancel"
     return 0
   fi
-  # Devin does not emit Stop for cancellation. Capture this incarnation before
-  # keys, then invalidate its state conservatively rather than claiming idle.
-  if [ "$HARNESS" = devin ]; then
+  # Devin and Droid do not emit Stop for cancellation. Capture this incarnation
+  # before keys, then invalidate its state conservatively rather than claiming idle.
+  if [ "$HARNESS" = devin ] || [ "$HARNESS" = droid ]; then
     devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
   fi
   # T3 Code has no keys: its native interrupt confirms the run's end itself.
@@ -618,7 +618,7 @@ deliver_interrupt() {
     cancel=not-running
   else
     cancel=$(interrupt_cancel_claim)
-    if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
+    if { [ "$HARNESS" = devin ] || [ "$HARNESS" = droid ]; } && [ -n "$devin_gen" ]; then
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
         --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
     fi
@@ -631,14 +631,14 @@ verify_interrupt_running() {
   local proof after
   fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
-  proof=endpoint
+  proof='endpoint'
   if fm_control_backend_state_verified "$BACKEND"; then
     # An interrupt cancels a turn; it must never have stopped the agent. This
     # is the postcondition that separates a landed interrupt from an accident.
     after=$(agent_state)
     [ "$after" = alive ] \
       || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
-    proof=agent-alive
+    proof='agent-alive'
   fi
   printf '%s' "$proof"
 }

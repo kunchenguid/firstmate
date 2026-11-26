@@ -609,7 +609,6 @@ This establishes the tmux launch path; Herdr and Zellij use their existing viewp
 
 Portable regressions in `tests/fm-spawn-dispatch-profile.test.sh` exercise the trust choice, incomplete and negative selections, failed reads and key delivery, bounded failure, exact native/custom catalog selection, ambiguous or unavailable selection refusal, omitted defaults, and generation-bound runtime reconciliation that preserves requested selection and registered PR identity.
 `tests/fm-control-relaunch.test.sh` covers exact model changes, model/effort clearing, pre-stop catalog refusal, fresh generation accounting, and removal of Droid accounting on a harness switch; `tests/fm-remote-secondmate-relaunch.test.sh` covers the parent publication boundary for refreshed or unknown accounting, harness switches, and preserved PR registration.
-`tests/fm-remote-secondmate-lifecycle-e2e.test.sh` checks that the parent record preserves the model observed by the remote host.
 
 ## Pi seeded-secondmate project trust
 
@@ -3660,6 +3659,43 @@ This live proof covers the watcher and queue boundary; it does not establish liv
 Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
 
 ## Droid
+
+### 2026-11-26 Droid 1.21.1 worker, relaunch, and primary refresh
+
+Verified on 2026-11-26 UTC on macOS arm64 with Droid 1.21.1, tmux 3.7b, Fish 4.9.3, Treehouse 3.1.8, and `tasks-axi` 0.2.6 in isolated scratch checkouts, temporary homes, and private tmux servers while confirming the host `~/.factory/settings.json` SHA-256 unchanged before and after both runs.
+`FM_DROID_SIGNALS_LIVE=1 FM_DROID_LIVE_MODEL=gpt-5.4-mini bash bin/fm-test-run.sh --per-script-timeout-secs 600 tests/fm-droid-signals-live-e2e.test.sh` passed all assertions:
+
+```text
+ok - Droid 1.21.1 independent working signals match the scoped busy guard
+ok - Droid 1.21.1 trusted worktree brief runs, exact ancestry detects Droid, and Stop fires
+ok - Droid 1.21.1 idle composer permits delivery
+ok - Droid 1.21.1 process-local dynamic effort and requested model apply in native settings
+ok - Droid 1.21.1 single Escape interrupts a running turn
+ok - Droid 1.21.1 /quit exits the agent
+DROID_LIVE_RESULT version=1.21.1 detection=pass launch=pass busy=pass stop=pass composer=pass profile=pass interrupt=pass exit=pass
+ok - Droid 1.21.1 exact-worktree trust is retired after exit
+ok - Droid 1.21.1 replacement SessionStart confirms its current launch generation
+ok - Droid 1.21.1 public scout relaunch completes a replacement turn with dynamic effort
+DROID_FISH_IDLE command=fish cursor=42
+ok - Droid 1.21.1 public Fish-backed ship exit preserves drafts and stops the idle agent
+```
+
+The Fish-backed ship probe also verified semantic `idle droid-hook` settlement after `Stop`, `"includeCoAuthoredByDroid": false` in the generated process settings, and a real committed change in the worker worktree carrying no `factory-droid[bot]` or `Co-authored-by` trailer.
+`FM_DROID_PRIMARY_LIVE_E2E=1 FM_DROID_PIN_MODEL=gpt-6-luna bash bin/fm-test-run.sh --per-script-timeout-secs 600 tests/fm-droid-primary-live-e2e.test.sh` also passed:
+
+```text
+Droid 1.21.1 live spawn: trust cleared; effective_model=claude-opus-5-5; runtime model override absent
+ok - Droid live spawn: fresh-worktree folder trust is answered and the default model is observed
+Droid 1.21.1 live spawn: observed=gpt-6-luna; effort indicator unverified (no model-row High indicator)
+ok - Droid live spawn: exact native runtime model overrides conflicting project defaults
+Droid 1.21.1 live relaunch: effort indicator unverified (no model-row Medium indicator)
+ok - Droid live primary hooks: project settings, SessionStart, PreToolUse, Stop blocking, and loop guard
+ok - Droid live composer: detached cursor remains safe for idle and typed input
+ok - Droid live foreground tool: no reasoning continuation until tool completion
+ok - Droid 1.21.1 primary live verification complete
+```
+
+Herdr away-daemon launch (`bin/fm-afk-launch.sh`) and SSH remote secondmate launch/relaunch (`bin/fm-remote-secondmate-control.sh`) remain refused until authenticated `FACTORY_API_KEY` Herdr lab and remote-host runs verify them.
 
 ### 2026-11-05 primary and launch refresh
 

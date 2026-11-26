@@ -1730,7 +1730,7 @@ test_droid_exact_model_ids_and_selection_refusals() {
       native|custom-first|custom-second)
         expect_code 0 "$status" "exact Droid ID failed: $scenario"$'\n'"$out"
         settings="$HOME_DIR/state/$id.droid-settings.json"
-        jq -e --arg model "$selection" '.sessionDefaultSettings == {model:$model,reasoningEffort:"high",autonomyLevel:"high",autonomyMode:"auto-high",interactionMode:"auto"} and (keys == ["hooks","sessionDefaultSettings"])' "$settings" >/dev/null || fail 'Droid changed exact ID, effort, or unrelated settings'
+        jq -e --arg model "$selection" '.includeCoAuthoredByDroid == false and .sessionDefaultSettings == {model:$model,reasoningEffort:"high",autonomyLevel:"high",autonomyMode:"auto-high",interactionMode:"auto"} and (keys == ["hooks","includeCoAuthoredByDroid","sessionDefaultSettings"])' "$settings" >/dev/null || fail 'Droid changed exact ID, effort, or unrelated settings'
         assert_meta_profile "$HOME_DIR/state/$id.meta" droid "$selection" high
         assert_equals unknown-at-spawn "$(sed -n 's/^effective_model=//p' "$HOME_DIR/state/$id.meta")" 'Droid pin claimed execution without observation'
         assert_not_contains "$(cat "$settings" "$HOME_DIR/state/$id.meta")" must-not-copy 'Droid copied unrelated settings'
@@ -3348,8 +3348,8 @@ SH
   expect_code 0 "$status" "raw droid launch should not require template settings support"
   assert_contains "$out" "spawned $id harness=droid" "spawn did not report raw droid command harness"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI droid --experimental" \
-    "raw Droid launch lost its explicit autonomy and command"
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u CLAUDECODE droid --experimental" \
+    "raw Droid launch lost its explicit autonomy, CLAUDECODE scrub, or command"
   assert_not_contains "$launch" "--settings" "raw Droid launch added template settings"
   assert_absent "$HOME_DIR/state/$id.droid-settings.json" \
     "raw droid launch unexpectedly generated template settings"
@@ -3375,12 +3375,24 @@ test_droid_threads_native_model_and_dynamic_effort_through_settings() {
   turnend="$(cd "$HOME_DIR/state" && pwd -P)/$id.turn-ended"
   assert_contains "$launch" "droid --settings '$settings' --auto high" \
     "droid launch did not use its process-only settings merge"
-  jq -e '.sessionDefaultSettings.model == "gpt-5.6-sol" and .sessionDefaultSettings.reasoningEffort == "dynamic" and .sessionDefaultSettings.autonomyLevel == "high"' "$settings" >/dev/null \
-    || fail "droid settings rewrote the requested native model id or lost dynamic effort"
+  assert_contains "$launch" "-u CLAUDECODE" \
+    "droid launch did not scrub CLAUDECODE"
+  jq -e '.includeCoAuthoredByDroid == false and .sessionDefaultSettings.model == "gpt-5.6-sol" and .sessionDefaultSettings.reasoningEffort == "dynamic" and .sessionDefaultSettings.autonomyLevel == "high"' "$settings" >/dev/null \
+    || fail "droid settings omitted includeCoAuthoredByDroid:false, rewrote the requested native model id, or lost dynamic effort"
   jq -e --arg turnend "$turnend" \
     '.hooks.Stop[0].hooks[0] == {"type":"command","command":("touch '\''" + $turnend + "'\''")}' "$settings" >/dev/null \
     || fail "droid settings lost the Stop turn-end hook"
-  pass "droid retains the exact native model despite a colliding custom alias, alongside dynamic effort and Stop"
+
+  touch "$HOME_DIR/config/keep-ai-trailers"
+  id=profile-droid-keep-trailers-z20
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness droid --model gpt-5.6-sol --effort dynamic)
+  expect_code 0 $? "droid spawn with keep-ai-trailers should succeed: $out"
+  jq -e 'has("includeCoAuthoredByDroid") | not' "$HOME_DIR/state/$id.droid-settings.json" >/dev/null \
+    || fail "droid settings forced includeCoAuthoredByDroid when config/keep-ai-trailers was set"
+  rm -f "$HOME_DIR/config/keep-ai-trailers"
+  pass "droid suppresses co-author attribution unless keep-ai-trailers is set, scrubs CLAUDECODE, and retains exact native model"
 }
 
 test_droid_retains_explicit_custom_registry_id() {

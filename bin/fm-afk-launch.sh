@@ -785,6 +785,10 @@ fm_afk_launch_start() {
     fm_afk_launch_log "backend t3code hosts no terminal to launch the daemon in; use 'fm-afk-launch.sh start-native' and run bin/fm-afk-start.sh through the harness's tracked background tool"
     return 1
   fi
+  if [ "$captain_backend" = herdr ] && [ "$(fm_afk_launch_primary_harness)" = droid ]; then
+    fm_afk_launch_log "away-daemon escalation delivery for a droid primary on herdr is not yet live-verified; use tmux or run attended supervision"
+    return 1
+  fi
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 

@@ -46,6 +46,11 @@
 #               shape Cortex's identity could change. A probe answering
 #               `cortex` then proves it, as cortex=1 does. Other callers
 #               never see this sentinel for a titled box.
+#   droid=1     the caller proved the pane's foreground process is Droid
+#               (tmux exact foreground process group, or a droid identity).
+#               Opt-in: only then is Droid's `[⏱ ...]` status row beneath a
+#               bordered box treated as composer furniture; every other
+#               harness keeps the shared staleness check unchanged.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -527,7 +532,7 @@ FM_DELIVERY_OMP_BUSY_REGEX_DEFAULT='Working…|^[[:space:]]*'"$FM_OMP_SPINNER_FR
 # Independent Droid activity and interrupt hints survive either being cropped.
 # Alternation keeps multibyte spinner frames intact under LC_ALL=C.
 FM_DROID_SPINNER_FRAMES_RE='(⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏|⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)'
-FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT='Press ESC to stop|^[[:space:]]*'"$FM_DROID_SPINNER_FRAMES_RE"'[[:space:]]+(Thinking|Streaming|Invoking tools|Executing)\.\.\.'
+FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT='Press ESC to stop|^[[:space:]]*'"$FM_DROID_SPINNER_FRAMES_RE"'[[:space:]]+(Thinking|Streaming|Invoking tools|Executing|Compacting)\.\.\.'
 FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT='Ctrl\+c:cancel'
 # cursor-agent's busy footer. The TOKEN is matched, not the spinner verb: the
 # same version rendered both `Working` and `Running` beside its braille spinner
@@ -2029,8 +2034,8 @@ _fm_composer_droid_status_row() {  # <trimmed-row>
   [[ $1 =~ $re ]]
 }
 
-_fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
-  local plain=$1 screen=$2 styled=$3 generic=-1 next boundary raw trimmed glyph bare footer=0
+_fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled> [droid_proven]
+  local plain=$1 screen=$2 styled=$3 droid_proven=${4:-0} generic=-1 next boundary raw trimmed glyph bare footer=0
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -2150,7 +2155,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ] \
        && ! fm_composer_row_has_edge "$trimmed" \
-       && ! _fm_composer_droid_status_row "$trimmed"; then
+       && ! { [ "$droid_proven" = 1 ] && _fm_composer_droid_status_row "$trimmed"; }; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
@@ -2159,17 +2164,20 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
 }
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
-  local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
+  local caps=$1 screen=$2 styled=0 droid_proven=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
   local leading_blank=1 placeholder_position=0 prompt_is_shell=0 cwd_start
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
-    [ "$kv" = styled=1 ] && styled=1
+    case "$kv" in
+      styled=1) styled=1 ;;
+      droid=1) droid_proven=1 ;;
+    esac
   done <<EOF
 $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_cursorless "$plain" "$screen" "$styled" || return 1
+  _fm_composer_select_cursorless "$plain" "$screen" "$styled" "$droid_proven" || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
   cwd_start=-1
   if [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ]; then
@@ -2341,7 +2349,7 @@ _fm_composer_hermes_state() {  # <screen> <styled>
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
+  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 droid_proven=0 kv plain
   # Note the dialog before any early return so a pending picker is still named.
   fm_composer_note_blocking_dialog "$screen" || true
   while IFS= read -r kv; do
@@ -2351,6 +2359,7 @@ fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
       identity=1) has_identity=1 ;;
       cortex=1) cortex_proven=1 ;;
       cortex=ask) cortex_ask=1 ;;
+      droid=1) droid_proven=1 ;;
     esac
   done <<EOF
 $caps
@@ -2364,6 +2373,7 @@ EOF
         local FM_COMPOSER_GHOST_LUMA_MAX=160
         ;;
       cortex) cortex_proven=1 ;;
+      droid) droid_proven=1 ;;
     esac
   fi
   [ "$cursor" = 1 ] || cy=''
@@ -2442,7 +2452,7 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  if ! _fm_composer_select_cursorless "$plain" "$screen" "$styled"; then
+  if ! _fm_composer_select_cursorless "$plain" "$screen" "$styled" "$droid_proven"; then
     printf 'unknown'
     return 0
   fi

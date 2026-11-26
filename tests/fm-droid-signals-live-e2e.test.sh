@@ -18,11 +18,13 @@ VERSION=$("$DROID_BIN" --version)
 LAB=$(fm_test_tmproot fm-droid-signals)
 SOCKET="fm-droid-signals-$$"
 TARGET=droid-signals:droid
+REAL_HOME=$HOME
 cleanup() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
   if [ -n "${scout_id:-}" ] && [ -f "$LAB/fleet/state/$scout_id.meta" ]; then
     HOME="$LAB/home" FM_HOME="$LAB/fleet" "$ROOT/bin/fm-teardown.sh" "$scout_id" >/dev/null 2>&1 || true
   fi
+  rm -f "$LAB/home/Library/Keychains" 2>/dev/null || true
   chmod -R u+w "$LAB" 2>/dev/null || true
   rm -rf -- "$LAB"
   fm_test_cleanup
@@ -36,8 +38,13 @@ fm_tasks_axi_compatible || fail "scout teardown requires compatible tasks-axi (>
 mkdir -p "$LAB/home/.factory" "$LAB/workspace" "$LAB/state"
 chmod 700 "$LAB/home" "$LAB/home/.factory"
 for name in settings.json config.json auth.encrypted auth.v2.file auth.v2.key auth.v2.loginkeychain; do
-  [ ! -f "$HOME/.factory/$name" ] || cp "$HOME/.factory/$name" "$LAB/home/.factory/$name"
+  [ ! -f "$REAL_HOME/.factory/$name" ] || cp "$REAL_HOME/.factory/$name" "$LAB/home/.factory/$name"
 done
+# macOS auth.v2.loginkeychain decrypts via /usr/bin/security against ~/Library/Keychains.
+if [ -f "$LAB/home/.factory/auth.v2.loginkeychain" ] && [ -d "$REAL_HOME/Library/Keychains" ]; then
+  mkdir -p "$LAB/home/Library"
+  ln -s "$REAL_HOME/Library/Keychains" "$LAB/home/Library/Keychains"
+fi
 # Global primary hooks and pre-existing folder trust do not belong in this lab.
 if [ -f "$LAB/home/.factory/settings.json" ]; then
   jq 'del(.hooks,.trustedFolders,.enabledPlugins)' "$LAB/home/.factory/settings.json" > "$LAB/home/.factory/settings.clean.json"
@@ -129,7 +136,16 @@ pass "Droid $VERSION idle composer permits delivery"
 submit /settings
 sleep 1
 screen=$(capture)
-printf '%s' "$screen" | grep -q 'Default reasoning level.*Dynamic.*overridden by runtime --settings flag' || fail 'runtime dynamic effort was not applied'
+case "$model" in
+  custom:*)
+    printf '%s' "$screen" | grep -q 'Default reasoning level.*Dynamic.*overridden by runtime --settings flag' || fail 'runtime dynamic effort was not applied'
+    ;;
+  *)
+    # Native Factory CLI models that do not advertise dynamic reasoning clamp the
+    # displayed level while still marking the runtime --settings override active.
+    printf '%s' "$screen" | grep -q 'Default reasoning level.*overridden by runtime --settings flag' || fail 'runtime reasoning effort override was not applied'
+    ;;
+esac
 if [ -n "$model" ]; then
   printf '%s' "$screen" | grep -q 'Default model.*overridden by runtime --settings flag' || fail 'native settings did not apply the requested model'
 fi
@@ -231,7 +247,7 @@ scout_id="droid-recovery-$$"
   ship_id="droid-fish-$$"
   report="$LAB/fleet/data/$ship_id/report.md"
   mkdir -p "$LAB/fleet/data/$ship_id"
-  printf '# Task\n## Captain'\''s intent\nCalculate 12345 + 67890. Use Execute to write only the sum to "%s" and reply with it. Do not change project files, start validation, or perform other tasks.\n\n## Firstmate spec\nVerify launch only.\n' \
+  printf '# Task\n## Captain'\''s intent\nCalculate 12345 + 67890. Use Execute to write only the sum to "%s", write only the sum to answer.txt in this repository, stage answer.txt, and commit it with message "chore: record arithmetic result". Do not start validation or perform other tasks.\n\n## Firstmate spec\nVerify launch and clean commit attribution only.\n' \
     "$report" > "$LAB/fleet/data/$ship_id/brief.md"
   "$ROOT/bin/fm-spawn.sh" "$ship_id" "$LAB/project" --harness droid --effort dynamic --mode no-mistakes --yolo off \
     || fail 'public Fish-backed ship launch failed'
@@ -242,10 +258,20 @@ scout_id="droid-recovery-$$"
   done
   [ -f "$LAB/fleet/state/$ship_id.turn-ended" ] && [ "$(tr -d '[:space:]' < "$report")" = 80235 ] \
     || fail 'Fish-backed ship did not complete its report and Stop hook'
+  ship_wt=$(sed -n 's/^worktree=//p' "$LAB/fleet/state/$ship_id.meta")
+  commit_body=$(git -C "$ship_wt" log -1 --format=%B -- answer.txt 2>/dev/null || true)
+  [ -n "$commit_body" ] || fail 'Fish-backed ship did not commit answer.txt'
+  if printf '%s\n' "$commit_body" | grep -qiE 'co-authored-by|factory-droid'; then
+    fail "Fish-backed ship commit carried AI attribution: $commit_body"
+  fi
   for _ in $(seq 1 30); do
     capture | fm_busy_droid_tail_busy || break
     sleep 1
   done
+  jq -e '.includeCoAuthoredByDroid == false' "$LAB/fleet/state/$ship_id.droid-settings.json" >/dev/null \
+    || fail 'Fish-backed ship omitted includeCoAuthoredByDroid: false'
+  [ "$(fm_busy_classify tmux "$TARGET" droid "$ship_id" "$LAB/fleet/state")" = 'idle droid-hook' ] \
+    || fail 'Fish-backed ship did not settle to idle droid-hook'
   PATH="$LAB/shim:$PATH" fm_tmux_pane_is_droid "$TARGET" || fail 'Fish-backed pane lacks exact foreground Droid identity'
   current=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{pane_current_command}')
   cy=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{cursor_y}')

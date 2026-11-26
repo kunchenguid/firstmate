@@ -375,7 +375,7 @@ family_for_basename() {
     fm-composer-codex-idle-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
     fm-grok-continuity-live-e2e.test.sh|\
-    fm-droid-afk-herdr-live-e2e.test.sh|fm-droid-primary-live-e2e.test.sh|fm-cursor-primary-live-e2e.test.sh|fm-agy-primary-live-e2e.test.sh|\
+    fm-droid-primary-live-e2e.test.sh|fm-cursor-primary-live-e2e.test.sh|fm-agy-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|fm-backend-hc-liveness-live-e2e.test.sh|\
     fm-kimi-trust-prompt-live-e2e.test.sh|\

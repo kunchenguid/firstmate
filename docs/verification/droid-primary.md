@@ -45,12 +45,13 @@ Same-session hook receipt established delivery, but the bounded viewport did not
 The original response probes did not independently establish hook-output context for both SessionStart and UserPromptSubmit; corrected distinct hook-only nonce assertions still require a live refresh.
 The five-second marker-retirement wait has portable coverage but was not rerun in that historical refresh.
 The 2026-09-09 AskUser refresh established denial, independent progress, and return without automatic approval under the historical integration.
+Because current builds have not refreshed Herdr away-daemon delivery with a disposable `FACTORY_API_KEY` inside an authorized `--herdr-lab` session, `bin/fm-afk-launch.sh` refuses Herdr away-daemon launch when the primary harness is `droid`.
 
 ## Portable verification
 
 `tests/fm-droid-primary.test.sh` executes the registered SessionStart, Execute PreToolUse, AskUser PreToolUse, and Stop commands against observable fixture owners.
 `tests/fm-droid-afk-approval.test.sh` exercises away-mode denial and inert behavior after return.
-`tests/fm-droid-harness.test.sh` exercises exact process identity, independent busy signals, composer safety, exact-path trust, and receipt ownership.
+`tests/fm-droid-harness.test.sh` exercises exact process identity, semantic and fallback busy signals, gated composer safety, rewind-picker dismissal, runtime model lock contention, exact-path trust, and receipt ownership.
 `tests/fm-watch-checkpoint.test.sh` exercises the tracked background completion protocol and bounded foreground fallback.
 
 These tests establish the integration's behavior, not a vendor hook transport or rendered UI on a new CLI version.
@@ -64,12 +65,10 @@ FM_DROID_SIGNALS_LIVE=1 bash tests/fm-droid-signals-live-e2e.test.sh
 FM_DROID_PRIMARY_LIVE_E2E=1 bash tests/fm-droid-primary-live-e2e.test.sh
 ```
 
-The first guard covers identity, independent busy signals, composer delivery, dynamic effort, interrupt, exit, and recovery.
+The first guard covers identity, semantic and fallback busy signals, co-author trailer suppression, composer delivery, dynamic effort, interrupt, exit, and recovery.
 The second covers real spawn trust and runtime model accounting, project hooks, SessionStart context, PreToolUse denial, Stop continuation, composer behavior, and foreground-tool blocking.
+Both credentialed tmux guards were refreshed on 2026-11-26 UTC on macOS arm64 with Droid 1.21.1, tmux 3.7b, and Fish 4.9.3.
 [Runtime backend verification](runtime-backends.md#droid) records dated current results and the installed versions.
 
-The separate Herdr away-mode guard is `tests/fm-droid-afk-herdr-live-e2e.test.sh`.
-It requires explicit authorization for an isolated non-default lab through its guarded helper; a portable pass or the historical run does not authorize driving a live Herdr session.
-No Herdr refresh was performed during this integration.
-
+Remote SSH secondmate operation (`bin/fm-remote-secondmate-control.sh`) and Herdr away-daemon escalation delivery (`bin/fm-afk-launch.sh`) remain refused until authenticated remote and Herdr lab runs refresh them.
 Rendered viewport retention after away-mode submission and direct live AskUser parity with another harness remain unproven.

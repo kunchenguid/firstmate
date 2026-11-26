@@ -796,7 +796,7 @@ test_raw_gemini_launch_has_no_semantic_wiring() {
 }
 
 test_droid_stop_hook_and_rendered_state() {
-  local rec id=busy-droid-1 out state settings cmd
+  local rec id=busy-droid-1 out state settings cmd gen
   rec=$(make_spawn_case droid-wiring droid "$id")
   read_case_record "$rec"
   out=$(FM_FAKE_PANE_CAPTURE='Executing...  (Press ESC to stop)' \
@@ -806,16 +806,39 @@ test_droid_stop_hook_and_rendered_state() {
   settings="$state/$id.droid-settings.json"
   assert_present "$settings" "Droid spawn did not write its process settings"
   jq -e . "$settings" >/dev/null || fail "Droid process settings are not valid JSON"
-  assert_absent "$state/$id.busy-gen" \
-    "Droid must not arm a semantic contract without a verified semantic source"
+  assert_present "$state/$id.busy-gen" "Droid spawn did not arm a semantic busy generation"
+  gen=$(cat "$state/$id.busy-gen")
+  out=$(classify droid "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "freshly spawned Droid must seed busy fm-spawn, got '$out'"
+
   rm -f "$state/$id.turn-ended"
   cmd=$(jq -r '.hooks.Stop[0].hooks[0].command' "$settings")
-  sh -c "$cmd" || fail "Droid Stop hook command failed"
+  sh -c "$cmd" || fail "Droid Stop turn-end hook command failed"
   [ -f "$state/$id.turn-ended" ] || fail "Droid Stop hook did not touch the turn-end notification"
+  cmd=$(jq -r '.hooks.Stop[0].hooks[1].command' "$settings")
+  sh -c "$cmd" || fail "Droid Stop busy hook command failed"
+  out=$(classify droid "$id" "$state")
+  [ "$out" = "idle droid-hook" ] || fail "Droid Stop hook must settle state to idle droid-hook, got '$out'"
+
+  cmd=$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$settings")
+  sh -c "$cmd" || fail "Droid UserPromptSubmit hook command failed"
+  out=$(classify droid "$id" "$state")
+  [ "$out" = "busy droid-hook" ] || fail "Droid UserPromptSubmit hook must reopen busy droid-hook, got '$out'"
+
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" unknown --gen "$gen" --source fm-interrupt --event interrupt \
+    || fail "fm-interrupt invalidation failed"
   out=$(fm_busy_classify tmux fake:w droid "$id" "$state" 'Executing...  (Press ESC to stop)')
   [ "$out" = "busy droid-regex" ] \
-    || fail "Droid must classify through its isolated rendered fallback, got '$out'"
-  pass "Droid spawn installs its Stop notification and keeps worker state on the isolated rendered fallback"
+    || fail "invalidated Droid busy record must fall back to droid-regex when busy, got '$out'"
+  out=$(fm_busy_classify tmux fake:w droid "$id" "$state" 'idle composer')
+  [ "$out" = "idle droid-regex" ] \
+    || fail "invalidated Droid busy record must fall back to droid-regex when idle, got '$out'"
+
+  cmd=$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$settings")
+  sh -c "$cmd" || fail "Droid SessionEnd hook command failed"
+  out=$(classify droid "$id" "$state")
+  [ "$out" = "idle droid-hook" ] || fail "Droid SessionEnd hook must close state to idle droid-hook, got '$out'"
+  pass "Droid spawn wires UserPromptSubmit/Stop/SessionEnd into fm-busy-event.sh with droid-regex fallback on interrupt"
 }
 
 test_gemini_is_refused_as_a_secondmate() {

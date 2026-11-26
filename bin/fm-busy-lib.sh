@@ -38,6 +38,10 @@
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   devin-hook       Devin UserPromptSubmit / Stop / SessionEnd hooks; manual
 #                    cancellation emits no Stop, so control invalidates to unknown.
+#   droid-hook       Droid UserPromptSubmit / Stop / SessionEnd hooks; manual
+#                    cancellation emits no Stop, so control invalidates to unknown
+#                    and classification falls back to droid-regex when unarmed or
+#                    invalidated by fm-interrupt.
 #   commandcode-mod  Command Code per-task mod (run_start opens; run_end, including
 #                    an Escape interrupt, and session end close)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
@@ -322,9 +326,9 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # fm_busy_sources_for_harness: the semantic sources trusted to classify a
 # task recorded with <harness>. One line, space-separated, possibly empty.
 # The firstmate-owned sources are appended for every converted adapter.
-# Grok, Droid, and muse deliberately trust nothing: none has a semantic WRITER, so
-# none is armed, and all read their live source on demand in the classifier
-# (Grok's and Droid's rendered tails, muse's session log) rather than through a stored
+# Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
+# neither is armed, and both read their live source on demand in the classifier
+# (Grok's rendered tail, muse's session log) rather than through a stored
 # record. Listing a source here without a writer that can clear it would seed a
 # busy record nothing could ever settle.
 fm_busy_sources_for_harness() {  # <harness>
@@ -338,6 +342,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
+    droid) adapter=droid-hook ;;
     cortex) adapter=cortex-hook ;;
     hermes) adapter=hermes-hook ;;
     commandcode) adapter=commandcode-mod ;;
@@ -984,8 +989,8 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
-# Droid has no verified semantic busy writer; its activity and interrupt
-# signals are scoped so another adapter can never inherit this fallback.
+# Rendered-tail fallback for unarmed Droid launches or turns invalidated by
+# fm-interrupt; scoped so another adapter can never inherit this fallback.
 fm_busy_droid_tail_busy() {
   if [ -z "${FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT:-}" ]; then
     # shellcheck source=bin/fm-composer-lib.sh
@@ -1191,16 +1196,20 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
-      if [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
+      if [ "$harness" = droid ] && [ "$r_state" = unknown ] && [ "$r_source" = fm-interrupt ]; then
+        :
+      elif [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
         && printf '%s' "$tail40" | fm_busy_launch_prompt_parked "$harness"; then
         printf 'unknown launch-prompt'
+        return 0
       else
         printf '%s %s' "$r_state" "$r_source"
+        return 0
       fi
     else
       printf 'unknown source-mismatch'
+      return 0
     fi
-    return 0
   fi
   case "$out" in
     malformed|gen-mismatch)

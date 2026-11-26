@@ -255,7 +255,7 @@ cmd_launch() {
   validate_id "$id"
   validate_home "$id"
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp|droid) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   [ "$effort" = - ] || fm_profile_effort_valid "$effort" || die "invalid remote secondmate effort: $effort"
@@ -345,7 +345,7 @@ cmd_relaunch() {
   validate_id "$id"
   validate_home "$id"
   case "$harness" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp|droid) ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) die "unverified remote secondmate harness: $harness" ;;
   esac
   case "$effort" in -|default) ;; *) fm_profile_effort_valid "$effort" || die "invalid remote secondmate effort: $effort" ;; esac

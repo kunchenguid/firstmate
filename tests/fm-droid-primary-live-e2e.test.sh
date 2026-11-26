@@ -17,11 +17,16 @@ SESSION=droid-primary-live
 
 # Copy only the local authentication/configuration needed by this opt-in guard.
 # Vendor writes and trust registration must never reach the operator's HOME.
+REAL_HOME=$HOME
 mkdir -p "$LAB/home/.factory"
 chmod 700 "$LAB/home" "$LAB/home/.factory"
 for name in settings.json config.json auth.encrypted auth.v2.file auth.v2.key auth.v2.loginkeychain; do
-  [ ! -f "$HOME/.factory/$name" ] || cp "$HOME/.factory/$name" "$LAB/home/.factory/$name"
+  [ ! -f "$REAL_HOME/.factory/$name" ] || cp "$REAL_HOME/.factory/$name" "$LAB/home/.factory/$name"
 done
+if [ -f "$LAB/home/.factory/auth.v2.loginkeychain" ] && [ -d "$REAL_HOME/Library/Keychains" ]; then
+  mkdir -p "$LAB/home/Library"
+  ln -s "$REAL_HOME/Library/Keychains" "$LAB/home/Library/Keychains"
+fi
 if [ -f "$LAB/home/.factory/settings.json" ]; then
   jq 'del(.hooks,.trustedFolders,.enabledPlugins)' "$LAB/home/.factory/settings.json" >"$LAB/home/.factory/settings.clean.json"
   mv "$LAB/home/.factory/settings.clean.json" "$LAB/home/.factory/settings.json"
@@ -30,6 +35,7 @@ export HOME="$LAB/home"
 
 cleanup() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  rm -f "$LAB/home/Library/Keychains" 2>/dev/null || true
   fm_test_cleanup
 }
 trap cleanup EXIT
@@ -54,14 +60,29 @@ SPAWN_WT="$LAB/spawn-worktree"
 FLEET_HOME="$LAB/fleet"
 SPAWN_ID=droid-live-spawn
 SPAWN_SESSION=droid-spawn-live
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SPAWN_SESSION" -n setup -c "$PROJECT"
+BASH_BIN=$(command -v bash)
+"$REAL_TMUX" -L "$SOCKET" -f /dev/null new-session -d -s "$SPAWN_SESSION" -n setup -c "$PROJECT" "$BASH_BIN" --noprofile --norc
+"$REAL_TMUX" -L "$SOCKET" set-option -g default-shell "$BASH_BIN"
+"$REAL_TMUX" -L "$SOCKET" set-option -g default-command "$BASH_BIN --noprofile --norc"
 fm_git_worktree "$SPAWN_PROJECT" "$SPAWN_WT" droid-live-worktree
 fm_test_spawn_home "$FLEET_HOME" droid
 fm_test_spawn_brief "$FLEET_HOME" "$SPAWN_ID" \
   'Reply with exactly DROID_LIVE_SPAWN_READY and end your turn. Do not use tools.'
 cat >"$LAB/shim/treehouse" <<SH
 #!/usr/bin/env bash
-case "\${1:-}" in get) printf '%s\n' '$SPAWN_WT' ;; esac
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    --root) shift 2 ;;
+    get)
+      if [ -t 0 ]; then
+        cd '$SPAWN_WT' && exec '$BASH_BIN' --noprofile --norc
+      fi
+      printf '%s\n' '$SPAWN_WT'
+      exit 0
+      ;;
+    *) shift ;;
+  esac
+done
 SH
 chmod +x "$LAB/shim/treehouse"
 
@@ -118,7 +139,7 @@ pass "Droid live spawn: fresh-worktree folder trust is answered and the default 
 
 # Exercise a real exact native pin against a conflicting project default.
 # The installed catalog must advertise both IDs; there is no guessed fallback.
-PIN_MODEL=gpt-6.1-sol
+PIN_MODEL=${FM_DROID_PIN_MODEL:-gpt-6.1-sol}
 bash "$ROOT/bin/fm-droid-model.sh" resolve "$PIN_MODEL" >/dev/null ||
   fail "Droid $(droid --version): native pin is not in the installed catalog"
 bash "$ROOT/bin/fm-droid-model.sh" resolve auto >/dev/null ||
@@ -310,33 +331,26 @@ done
   fail "Droid live foreground probe was no longer active during its busy capture"
 printf '%s' "$running_capture" | grep -q 'Press ESC to stop' ||
   fail "Droid live foreground probe never exposed the verified busy token"
-printf '%s\n' "$running_capture" | awk '
-  /Execute bash -lc/ { execute = NR }
-  /DROID_LIVE_MIDCALL_UPDATE/ && execute && NR > execute { found = 1 }
-  END { exit !found }
-' && fail "Droid unexpectedly emitted the requested visible update during the active foreground tool"
-printf '%s\n' "$running_capture" | awk '
-  /Execute bash -lc/ { execute = NR }
-  /DROID_LIVE_FOREGROUND_FINISHED/ && execute && NR > execute { found = 1 }
-  END { exit !found }
-' && fail "Droid reasoned past the foreground tool before it completed"
+if printf '%s\n' "$running_capture" | grep -Fq 'DROID_LIVE_MIDCALL_UPDATE'; then
+  fail "Droid unexpectedly emitted the requested visible update during the active foreground tool"
+fi
+if printf '%s\n' "$running_capture" | grep -Fq 'DROID_LIVE_FOREGROUND_FINISHED'; then
+  fail "Droid reasoned past the foreground tool before it completed"
+fi
 
 finished_capture=
 for _ in $(seq 1 160); do
   finished_capture=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:foreground" -S -100 2>/dev/null || true)
-  printf '%s\n' "$finished_capture" | awk '
-    /DROID_LIVE_TOOL_DONE/ { tool_done = NR }
-    /DROID_LIVE_FOREGROUND_FINISHED/ && tool_done && NR > tool_done { found = 1 }
-    END { exit !found }
-  ' && break
+  if [ ! -e "$PROJECT/.factory/foreground-running" ] &&
+    printf '%s\n' "$finished_capture" | grep -Fq 'DROID_LIVE_FOREGROUND_FINISHED'; then
+    break
+  fi
   sleep 0.25
 done
-printf '%s\n' "$finished_capture" | awk '
-  /DROID_LIVE_TOOL_DONE/ { tool_done = NR }
-  /DROID_LIVE_FOREGROUND_FINISHED/ && tool_done && NR > tool_done { found = 1 }
-  END { exit !found }
-' ||
+if [ -e "$PROJECT/.factory/foreground-running" ] ||
+  ! printf '%s\n' "$finished_capture" | grep -Fq 'DROID_LIVE_FOREGROUND_FINISHED'; then
   fail "Droid did not resume reasoning after the foreground tool completed"
+fi
 pass "Droid live foreground tool: no reasoning continuation until tool completion"
 
 printf 'ok - Droid %s primary live verification complete\n' "$(droid --version)"

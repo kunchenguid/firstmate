@@ -68,7 +68,17 @@ fi
 [ -f "$OBSERVATION" ] || exit 0
 MODEL=$(cat "$OBSERVATION")
 LOCK=$(fm_meta_lock_path "$META")
-if ! fm_lock_try_acquire "$LOCK"; then
+LOCK_TRIES=5
+[ "$ACTION" != reconcile ] || LOCK_TRIES=20
+LOCK_ACQUIRED=0
+for _ in $(seq 1 "$LOCK_TRIES"); do
+  if fm_lock_try_acquire "$LOCK"; then
+    LOCK_ACQUIRED=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$LOCK_ACQUIRED" -ne 1 ]; then
   LOCK=
   exit 0
 fi

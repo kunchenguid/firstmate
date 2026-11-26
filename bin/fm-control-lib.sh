@@ -109,7 +109,7 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, devin, droid,
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, devin,
 # commandcode, polytoken, cortex, kiro, and hermes are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
@@ -138,7 +138,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes) printf 'key' ;;
+    droid|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'key' ;;
     *) return 1 ;;
   esac
 }
@@ -225,11 +225,15 @@ fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
     commandcode) printf '%s' 'Select a checkpoint to restore your session|Press Enter to select · Esc to cancel' ;;
+    # Droid opens its Rewind message/file-restore modal on repeated Escapes on
+    # an idle session (verified in Droid 1.21.1); one Escape closes either screen
+    # without rewinding or deleting files.
+    droid) printf '%s' 'Select a user message to rewind before|Enter to select · Esc/Q to close|This rewind point has [0-9]+ file change\(s\) that can be undone:' ;;
     # polytoken's interrupt rides the REST API, never keys, so no key can open
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
     polytoken) ;;
-    droid|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes) ;;
     *) return 1 ;;
   esac
 }
@@ -553,7 +557,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
-    droid) printf '%s\n' "$state/$id.droid-settings.json" "$state/$id.meta".droid-model.* ;;
+    droid)
+      printf '%s\n' "$state/$id.droid-settings.json" "$state/$id.meta".droid-model.*
+      [ "$kind" != secondmate ] || printf '%s\n' "$wt/.fm-busy-stop"
+      ;;
     # gemini's busy-state and turn-end hooks live in a firstmate-owned
     # settings file the launch reaches through GEMINI_CLI_SYSTEM_SETTINGS_PATH,
     # so retiring that one file retires the whole incarnation's wiring. Nothing

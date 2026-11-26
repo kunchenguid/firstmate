@@ -1968,6 +1968,9 @@ spawn_abort_cleanup() {
       rm -f "$DROID_SETTINGS_CLEANUP" "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}" \
         "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}.started" \
         "$STATE/$ID.meta.droid-model.${SPAWN_GEN:-unset}.progress" || true
+      if [ -n "${BUSY_GEN:-}" ] && [ -n "${STATE_REAL:-}" ]; then
+        "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --gen "$BUSY_GEN" >/dev/null 2>&1 || true
+      fi
     fi
     DROID_SETTINGS_CLEANUP=
   fi
@@ -3132,7 +3135,7 @@ launch_template() {
   # Pin high autonomy in settings as well: user session defaults can override
   # --auto high (verified 0.237.0). Exact-worktree trust is registered below.
 
-  droid) printf '%s' 'droid --settings __DROIDSETTINGS__ --auto high "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  droid) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI droid --settings __DROIDSETTINGS__ --auto high "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
   # --yolo does NOT cover and which would otherwise block every spawn, since
   # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -4013,8 +4016,9 @@ droid_effort_value() {
   esac
 }
 
-droid_settings_json() { # <resolved-model>; render this launch's process-local settings
-  local model=$1 effort hook_command='' observe_command start_command progress_command
+droid_settings_json() { # <resolved-model> [busy-gen]; render this launch's process-local settings
+  local model=$1 busy_gen=${2:-} effort hook_command='' observe_command start_command progress_command
+  local busy_cmd_prefix='' busy_suffix='' busy_submit='' busy_stop='' busy_sessionend=''
   effort=$(droid_effort_value "$EFFORT")
   [ "$KIND" = secondmate ] || hook_command="touch $(shell_quote "$TURNEND")"
   observe_command="bash $(shell_quote "$SCRIPT_DIR/fm-droid-model.sh") observe $(shell_quote "$STATE_REAL/$ID.meta") $(shell_quote "$SPAWN_GEN")"
@@ -4024,20 +4028,35 @@ droid_settings_json() { # <resolved-model>; render this launch's process-local s
     start_command="(umask 077; printf '%s\\n' $(shell_quote "$SPAWN_GEN") > $(shell_quote "$DROID_START_RECEIPT")) && $observe_command"
     progress_command="if [ -f $(shell_quote "$DROID_START_RECEIPT") ] && [ ! -L $(shell_quote "$DROID_START_RECEIPT") ] && [ \"\$(cat $(shell_quote "$DROID_START_RECEIPT"))\" = $(shell_quote "$SPAWN_GEN") ]; then (umask 077; printf '%s\\n' $(shell_quote "$SPAWN_GEN") > $(shell_quote "$DROID_PROGRESS_RECEIPT")); fi; $observe_command"
   fi
+  if [ -n "$busy_gen" ]; then
+    busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
+    busy_suffix="--gen $(shell_quote "$busy_gen") --source droid-hook"
+    busy_submit="$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true"
+    [ "$KIND" = secondmate ] || busy_stop="$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true"
+    busy_sessionend="$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true"
+  fi
   jq -n \
+    --arg keep_trailers "$KEEP_AI_TRAILERS" \
     --arg model "$model" \
     --arg effort "$effort" \
     --arg start_command "$start_command" \
     --arg progress_command "$progress_command" \
-    --arg hook_command "$hook_command" '
+    --arg hook_command "$hook_command" \
+    --arg busy_submit "$busy_submit" \
+    --arg busy_stop "$busy_stop" \
+    --arg busy_sessionend "$busy_sessionend" '
+      (if $keep_trailers == "1" then {} else {includeCoAuthoredByDroid: false} end) +
       {sessionDefaultSettings:
          ({autonomyLevel: "high", autonomyMode: "auto-high", interactionMode: "auto"} +
           (if $model == "" then {} else {model: $model} end) +
           (if $effort == "" then {} else {reasoningEffort: $effort} end))} +
-      {hooks: {SessionStart: [{hooks: [{type: "command", command: $start_command}]}],
+      {hooks: ({SessionStart: [{hooks: [{type: "command", command: $start_command}]}],
                 PreToolUse: [{hooks: [{type: "command", command: $progress_command}]}],
                 Stop: [{hooks: ((if $hook_command == "" then [] else [{type: "command", command: $hook_command}] end) +
-                  [{type: "command", command: $progress_command}])}]}}
+                  (if $busy_stop == "" then [] else [{type: "command", command: $busy_stop}] end) +
+                  [{type: "command", command: $progress_command}])}]} +
+               (if $busy_submit == "" then {} else {UserPromptSubmit: [{hooks: [{type: "command", command: $busy_submit}]}]} end) +
+               (if $busy_sessionend == "" then {} else {SessionEnd: [{hooks: [{type: "command", command: $busy_sessionend}]}]} end))}
     '
 }
 
@@ -6747,7 +6766,7 @@ if [ "$KIND" = secondmate ]; then
   busy_notify_turnend=false
   if [ "$RAW_LAUNCH" -ne 0 ]; then
     case "$HARNESS" in
-    claude* | pi | pi-signed | omp)
+    claude* | pi | pi-signed | omp | droid)
       WIRING_HARNESS=
       if [ -e "$STATE_REAL/$ID.busy-gen" ]; then
         "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE_REAL" "$ID" --current-gen || {
@@ -6758,7 +6777,7 @@ if [ "$KIND" = secondmate ]; then
       ;;
     esac
     case "$HARNESS" in
-    claude*) rm -f "$WT/.fm-busy-stop" ;;
+    claude* | droid) rm -f "$WT/.fm-busy-stop" ;;
     esac
   fi
 fi
@@ -6782,6 +6801,15 @@ BUSY_GEN=
       exit 1
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+    ;;
+  droid)
+    if [ "$DROID_TEMPLATE" -eq 1 ] && { [ "$KIND" != secondmate ] || grep -qF '.fm-busy-stop' "$WT/bin/fm-turnend-guard.sh" 2>/dev/null; }; then
+      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+        echo "error: failed to arm the busy-state contract for $ID" >&2
+        exit 1
+      }
+      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+    fi
     ;;
   gemini | devin | commandcode | polytoken | cortex | kiro | hermes)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -6867,6 +6895,30 @@ BUSY_GEN=
   devin)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       FM_KEEP_AI_TRAILERS="$KEEP_AI_TRAILERS" "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
+    fi
+    ;;
+  droid)
+    if [ "$DROID_TEMPLATE" -eq 1 ] && [ -n "$BUSY_GEN" ]; then
+      DROID_SETTINGS_TMP=$(mktemp "$STATE/.${ID}.droid-settings.XXXXXXXXXXXX")
+      if ! droid_settings_json "$DROID_MODEL" "$BUSY_GEN" >"$DROID_SETTINGS_TMP" ||
+        ! jq -e 'type == "object"' "$DROID_SETTINGS_TMP" >/dev/null ||
+        ! mv -f "$DROID_SETTINGS_TMP" "$DROID_SETTINGS_PATH"; then
+        rm -f "$DROID_SETTINGS_TMP"
+        DROID_SETTINGS_TMP=
+        echo "error: failed to arm droid busy-state hooks for $ID" >&2
+        exit 1
+      fi
+      DROID_SETTINGS_TMP=
+      if [ "$KIND" = secondmate ]; then
+        {
+          printf 'writer=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
+          printf 'state=%s\n' "$STATE_REAL"
+          printf 'id=%s\n' "$ID"
+          printf 'gen=%s\n' "$BUSY_GEN"
+          printf 'source=droid-hook\n'
+        } >"$WT/.fm-busy-stop"
+        exclude_path '.fm-busy-stop'
+      fi
     fi
     ;;
   commandcode)
@@ -7961,7 +8013,10 @@ case "$LAUNCH" in
   ;;
 esac
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | droid | commandcode | cortex | kiro | hermes)
+droid)
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u CLAUDECODE $LAUNCH"
+  ;;
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin | commandcode | cortex | kiro | hermes)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

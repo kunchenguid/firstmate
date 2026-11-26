@@ -34,9 +34,15 @@ pass 'Droid control supports crews, scouts, and secondmates and retires task set
 [ "$(fm_agent_process_classify_name /usr/local/bin/droid)" = agent ] || fail 'Droid process identity missing'
 [ "$(fm_agent_process_classify_name /usr/local/bin/android)" = other ] || fail 'Droid substring match claims an unrelated process'
 pass 'Droid process identity is anchored to the executable name'
-[ -z "$(fm_busy_sources_for_harness droid)" ] || fail 'Droid must not arm a record without a semantic writer'
+[ "$(fm_busy_sources_for_harness droid)" = 'droid-hook fm-spawn fm-interrupt fm-recovery' ] ||
+  fail 'Droid busy sources must trust droid-hook and lifecycle writers'
+[ "$(FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=droid bash "$ROOT/bin/fm-harness.sh")" = droid ] ||
+  fail 'supervision_primary_pin rejected droid'
+[ -n "$(fm_control_interrupt_hazard_signal droid)" ] || fail 'Droid rewind-picker hazard signal missing'
 [ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" 'Executing... (Press ESC to stop)')" = 'busy droid-regex' ] ||
   fail 'Droid busy footer lost through cmux classification'
+[ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" ' ⠸ Compacting...')" = 'busy droid-regex' ] ||
+  fail 'Droid Compacting spinner did not classify busy'
 [ "$(fm_busy_classify cmux target droid task "$TMP_ROOT/state" 'idle composer')" = 'idle droid-regex' ] ||
   fail 'Droid idle footer did not settle'
 [ "$(fm_busy_classify tmux target claude task "$TMP_ROOT/state" 'Press ESC to stop')" = 'unknown missing' ] ||
@@ -60,10 +66,12 @@ fm_backend_capture() { return 1; }
   fail 'Droid busy fallback claimed an unverified prefix'
 pass 'Droid capture failure remains unknown and unverified prefixes are refused'
 
-# The live Droid footer sits directly below the box; a shell or arbitrary
-# activity below the same box must still refuse delivery.
-caps=$'styled=0\ncursor=0\nidentity=0'
+# The live Droid footer sits directly below the box; it is gated on droid=1 so
+# non-Droid callers keep the shared staleness check unchanged.
+caps=$'styled=0\ncursor=0\nidentity=0\ndroid=1'
+ungated_caps=$'styled=0\ncursor=0\nidentity=0'
 screen=$'╭──────────╮\n│ >        │\n╰──────────╯\n[⏱ 17s, context: <1%] TMUX ⧉\nworkspace main'
+[ "$(fm_composer_classify_screen "$ungated_caps" "$screen")" = unknown ] || fail 'Droid timer leaked into ungated cursorless classification'
 [ "$(fm_composer_classify_screen "$caps" "$screen")" = empty ] || fail 'Droid timer made an empty box stale'
 [ "$(LC_ALL=C fm_composer_classify_screen "$caps" "$screen")" = empty ] || fail 'Droid timer classification depends on UTF-8 locale'
 [ "$(fm_composer_classify_screen "$caps" "$screen"$'\n$ typed command')" = unknown ] || fail 'Droid timer hid a newer shell composer'
@@ -169,7 +177,7 @@ SH
   done
   [ "$cy" = 7 ] || fail 'background fixture did not park its cursor below the box'
   pane=$(PATH="$lab/shim:$PATH" fm_tmux_composer_capture background)
-  [ "$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')" = empty ] ||
+  [ "$(fm_composer_classify_screen "$(fm_tmux_composer_caps)"$'\ndroid=1' "$pane" '')" = empty ] ||
     fail 'background fixture lacks a structurally empty stale composer'
   tty=$("$real_tmux" -L "$socket" display-message -p -t background '#{pane_tty}')
   background=$(LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm= | while read -r pgid tpgid comm; do
@@ -178,9 +186,62 @@ SH
   [ "$background" = background ] || fail 'fixture did not isolate Droid in a background process group'
   verdict=$(PATH="$lab/shim:$PATH" FM_DROID_MASK_COMMAND=1 fm_tmux_composer_state background)
   [ "$verdict" = unknown ] || fail "background Droid authorized stale composer as $verdict"
-  pass 'Droid parked cursor uses composer structure without relaxing other process or input guards'
+
+  # Mid-turn fm-send submit core must observe Droid's busy state through
+  # fm_tmux_submit_busy_harness and confirm queued-Enter delivery when text stays pending.
+  busy_queued=$' ⠸ Invoking tools...  (Press ESC to stop)\n╭──────────╮\n│ > steer  │\n╰──────────╯\n[⏱ 4s, context: <1%] TMUX ⧉'
+  printf '%s\n' "$busy_queued" >"$lab/screen"
+  # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
+  "$real_tmux" -L "$socket" new-session -d -s midturn -x 45 -y 10 \
+    "$lab/bin/droid" -c 'cat "$1"; printf "\033[6;1H"; while IFS= read -r line; do :; done' _ "$lab/screen" ||
+    fail 'cannot start mid-turn Droid submit pane'
+  for _ in $(seq 1 100); do
+    current=$("$real_tmux" -L "$socket" display-message -p -t midturn '#{pane_current_command}')
+    [ "$current" != droid ] || break
+    sleep 0.1
+  done
+  [ "$(PATH="$lab/shim:$PATH" fm_tmux_submit_busy_harness midturn)" = droid ] ||
+    fail 'fm_tmux_submit_busy_harness did not map a foreground Droid pane'
+  submit_verdict=$(PATH="$lab/shim:$PATH" fm_tmux_submit_core midturn steer 1 0.05 0.05)
+  [ "$submit_verdict" = empty ] ||
+    fail "mid-turn Droid queued-Enter submit returned '$submit_verdict', expected empty"
+  "$real_tmux" -L "$socket" kill-session -t midturn
+  pass 'Droid parked cursor and mid-turn submit use foreground process identity without relaxing guards'
 }
 (test_droid_parked_cursor) || exit 1
+
+# Verify fm-droid-model.sh retries past short metadata lock contention and
+# fm-control interrupt dismisses Droid's Rewind picker while invalidating droid-hook.
+model_meta="$TMP_ROOT/state/lockrace.meta"
+printf 'harness=droid\nspawn_gen=s1\neffective_model=unknown-at-spawn\n' >"$model_meta"
+printf '{"model":"gpt-5.4"}\n' >"$TMP_ROOT/state/session.settings.json"
+(
+  . "$ROOT/bin/fm-wake-lib.sh"
+  lock=$(fm_meta_lock_path "$model_meta")
+  fm_lock_try_acquire "$lock" || exit 1
+  sleep 0.12
+  fm_lock_release "$lock"
+) &
+# shellcheck disable=SC2031 # Background job is in this shell, not the isolated tmux subshell above.
+holder=$!
+sleep 0.02
+printf '{"transcript_path":"%s"}\n' "$TMP_ROOT/state/session.jsonl" |
+  bash "$ROOT/bin/fm-droid-model.sh" observe "$model_meta" s1 || fail 'fm-droid-model observe failed under contention'
+wait "$holder" || fail 'transient metadata lock holder failed'
+[ "$(sed -n 's/^effective_model=//p' "$model_meta")" = gpt-5.4 ] ||
+  fail 'fm-droid-model lost effective_model update under transient lock contention'
+pass 'Droid runtime model observation retries past short metadata lock contention'
+
+afk_home="$TMP_ROOT/afk-herdr"
+mkdir -p "$afk_home/state" "$afk_home/config" "$afk_home/data"
+FM_HOME="$afk_home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null || fail 'could not enter afk posture'
+if afk_out=$(FM_HOME="$afk_home" FM_SUPERVISION_ACTOR=branch FM_SUPERVISION_PRIMARY_HARNESS=droid \
+  FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=lab:pane1 \
+  bash "$ROOT/bin/fm-afk-launch.sh" start 2>&1); then
+  fail 'fm-afk-launch allowed unverified Herdr away-daemon launch for Droid primary'
+fi
+assert_contains "$afk_out" 'not yet live-verified' 'Herdr Droid away-daemon refusal omitted reason'
+pass 'Herdr away-daemon launch fails closed for a Droid primary until live-verified'
 
 fm_git_worktree "$TMP_ROOT/project" "$TMP_ROOT/task" droid-trust
 mkdir -p "$TMP_ROOT/user/.factory"
@@ -331,6 +392,7 @@ for _ in 1 2 3; do
     user="$TMP_ROOT/user"
     [ "$((i % 2))" -eq 0 ] || user="$TMP_ROOT/alias-user"
     HOME="$user" "$ROOT/bin/fm-droid-trust.sh" --receipt "$TMP_ROOT/state/concurrent-$i.droid-trust" "$TMP_ROOT/concurrent-$i" "$TMP_ROOT/project" >/dev/null &
+    # shellcheck disable=SC2031
     pids+=("$!")
   done
   for pid in "${pids[@]}"; do wait "$pid" || fail 'concurrent registration failed'; done
@@ -340,6 +402,7 @@ for _ in 1 2 3; do
     user="$TMP_ROOT/user"
     [ "$((i % 2))" -eq 0 ] || user="$TMP_ROOT/alias-user"
     HOME="$user" "$ROOT/bin/fm-droid-trust.sh" --rollback "$TMP_ROOT/state/concurrent-$i.droid-trust" >/dev/null &
+    # shellcheck disable=SC2031
     pids+=("$!")
   done
   for pid in "${pids[@]}"; do wait "$pid" || fail 'concurrent removal failed'; done
