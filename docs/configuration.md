@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Codex hook trust](#codex-hook-trust-configcodex-hook-trust), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1632,9 +1632,44 @@ Malformed values and unreadable files refuse before spawn mutation, and the sett
 The fallback uses a model reviewer in the workspace-write sandbox, which starts with network access disabled and reviews writes outside the working directory.
 It remedies a managed policy that leaves bypass launches with user-reviewed approvals even when its sandbox bypass applies.
 Firstmate targets current CLIs rather than detecting versions or emulating older approval flags.
-Crew and scout launches still request hook disablement and retain their notification wiring, while secondmates retain their primary-session hooks.
-A managed policy can override the requested hook disablement, so it may still require an operator's hook review.
+The [Codex hook trust](#codex-hook-trust-configcodex-hook-trust) section below owns what the crew and scout launches request of the hook layer.
 See the [current verification and limits](verification/runtime-backends.md#codex-automatic-approval-review) for observed task-channel and network access.
+
+## Codex hook trust (config/codex-hook-trust)
+
+The optional local, gitignored `config/codex-hook-trust` selects whether a Codex launch Firstmate builds runs the hook layer Codex has enabled for it, or stays hook-free.
+It applies to ships, scouts, secondmates, and relaunches from this home, and it is inherited into secondmate homes.
+
+| File content | Launch flags |
+| --- | --- |
+| Absent or `enforce` | No `--dangerously-bypass-hook-trust`, and `--disable hooks` on the crew and scout path |
+| `bypass` | `--dangerously-bypass-hook-trust`, and no `--disable hooks` |
+
+Create the file containing exactly one of the two tokens, optionally followed by a newline.
+An absent file selects `enforce`, so an unconfigured home keeps the existing hook-free launch byte-for-byte.
+Any other content or an unreadable file refuses every spawn from that home before mutation, naming the accepted values; Firstmate never falls back to a posture the captain did not choose.
+
+### What the bypass does and does not do
+
+The flag applies to the hooks enabled for that one invocation.
+It does not enable anything by itself, it does not discover, enroll, or enable hooks found in arbitrary repositories, and it does not replace Codex's project directory trust.
+What it removes is Codex's persisted-trust consent step, so the hooks that are already enabled for the launch run without parking the pane on the "Hooks need review" modal, whose initial selection is "Review hooks" and cannot be moved by Firstmate's key plane.
+In practice the enabled sources are the operator's own `~/.codex/hooks.json` plus any `.codex/hooks.json` the trusted launch directory carries, which includes a project cloned from anywhere else.
+`bypass` is therefore a deliberate, opt-in posture that runs those hooks unreviewed.
+It is not the default: an unconfigured home keeps the hook-free launch, and choosing `bypass` is what makes hooks an operator enables, such as a plugin's hooks, run for every worker instead of leaving the launch on a prompt nobody can answer.
+
+This repository's own tracked `.codex/hooks.json` registers primary-session infrastructure whose entries scope themselves to a real primary checkout, so they stand down in a child worktree by their own check rather than by the hook layer being off.
+
+### Why the two flags travel together
+
+`bypass` pairs the trust bypass with the removal of the blanket hook disablement, and `enforce` pairs the absence of the bypass with that disablement, because the other two combinations are both broken.
+Bypassing trust on a layer that is disabled runs nothing, which is not the requested posture.
+Enabling the layer without either control parks the launch on the modal, which Firstmate cannot answer.
+
+`enforce` is the long-standing hook-free crewmate launch and is the default; a managed policy that re-enables hooks under it still reaches the modal.
+
+[`fm-spawn.sh`](../bin/fm-spawn.sh) owns the file and both flags.
+[The hook trust verification](verification/runtime-backends.md#codex-hook-trust) records the real-launch evidence.
 
 ## Claude permission mode (config/claude-permission-mode)
 

@@ -499,6 +499,29 @@
 #   firstmate observes a bypass approval prompt or policy refusal; no polling.
 #   T3 Code always uses full-access, so it refuses Claude `auto` and Codex
 #   `approve-for-me` or `restricted` before mutation.
+# Codex hook trust (config/codex-hook-trust):
+#   One whitespace-trimmed token selecting one posture for the whole codex
+#   launch path - ship, scout, secondmate, and relaunch alike.
+#   Absent or `enforce` (the default) is the long-standing hook-free posture:
+#   no --dangerously-bypass-hook-trust, plus --disable hooks on the
+#   crewmate/scout path, so a launch that enables no hook never reaches the
+#   modal - today's launch, byte-for-byte. `bypass` is the opt-in ENABLED-HOOKS
+#   posture: the launch carries --dangerously-bypass-hook-trust, which runs the
+#   hooks Codex has enabled for that invocation without its persisted-trust
+#   modal, and a crewmate/scout launch additionally drops the blanket
+#   --disable hooks - so the enabled hook layer actually runs for ordinary
+#   workers too, not only for a secondmate. Any other value or an unreadable
+#   file refuses before mutation, like the approval file. It is inherited into
+#   secondmate homes (bin/fm-config-inherit-lib.sh).
+#   SCOPE OF THE BYPASS. The flag applies to the hooks enabled for THAT
+#   INVOCATION. It does not enable anything by itself, it does not discover or
+#   enroll hooks from arbitrary repositories, and it does not replace Codex's
+#   project directory trust. In practice the enabled hooks are the operator's
+#   ~/.codex/hooks.json plus any .codex/hooks.json the trusted launch directory
+#   carries - including a project cloned from anywhere - so `bypass` is a
+#   deliberate posture that trusts those sources without review.
+#   T3 Code starts Codex itself and cannot apply the flag; a raw codex command
+#   owns its own flags.
 # Worker tool exclusions:
 #   docs/configuration.md "Worker tool exclusions" owns config/crew-exclude-tools
 #   and its operator contract. Resolve it with bin/fm-exclude-tools-lib.sh
@@ -887,8 +910,50 @@ if [ "$CODEX_APPROVAL_PRESENT" = 1 ]; then
   esac
 fi
 case "$CODEX_APPROVAL_MODE" in
-  approve-for-me) CODEX_APPROVAL_FLAG='--approve-for-me' ;;
-  *) CODEX_APPROVAL_FLAG='--dangerously-bypass-approvals-and-sandbox' ;;
+  approve-for-me) CODEX_APPROVAL_FLAG='--approve-for-me ' ;;
+  *) CODEX_APPROVAL_FLAG='--dangerously-bypass-approvals-and-sandbox ' ;;
+esac
+# Codex hook-trust posture (config/codex-hook-trust, header above owns the
+# config): `enforce` is the default and neither bypasses trust nor enables hooks
+# for crewmates and scouts; `bypass` is the opt-in that runs the enabled hooks
+# without Codex's persisted-trust consent step and leaves the hook layer enabled
+# for crewmates and scouts too. Both tokens carry their own trailing space, so
+# `enforce` leaves the rest of the launch byte-identical to the pre-setting
+# shape.
+CODEX_HOOK_TRUST_MODE=enforce
+if ! CODEX_HOOK_TRUST_PRESENT=$(fm_config_source_present "$CONFIG/codex-hook-trust"); then
+  exit 1
+fi
+if [ "$CODEX_HOOK_TRUST_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/codex-hook-trust" ] || [ ! -r "$CONFIG/codex-hook-trust" ]; then
+    echo "error: config/codex-hook-trust must be a readable regular file holding one of: bypass, enforce" >&2
+    exit 1
+  fi
+  if ! CODEX_HOOK_TRUST_MODE=$(perl -0777 -pe 's/\A\s+|\s+\z//g' <"$CONFIG/codex-hook-trust"); then
+    echo 'error: could not read config/codex-hook-trust' >&2
+    exit 1
+  fi
+  case "$CODEX_HOOK_TRUST_MODE" in
+    bypass | enforce) ;;
+    *)
+      echo "error: config/codex-hook-trust holds '$CODEX_HOOK_TRUST_MODE'; accepted values are: enforce (the default), bypass" >&2
+      exit 1
+      ;;
+  esac
+fi
+case "$CODEX_HOOK_TRUST_MODE" in
+  enforce) CODEX_HOOK_TRUST_FLAG='' ;;
+  *) CODEX_HOOK_TRUST_FLAG='--dangerously-bypass-hook-trust ' ;;
+esac
+# The crewmate/scout hook layer follows the same setting, and deliberately so:
+# `bypass` is the posture where the enabled hooks must actually RUN, so the
+# blanket hook disablement is dropped from that launch path. `enforce` keeps the
+# long-standing hook-free crewmate launch, because a launch that neither runs
+# hooks nor bypasses their trust would park on the unreachable modal again.
+# A secondmate never carried the disablement and is unchanged by this.
+case "$CODEX_HOOK_TRUST_MODE" in
+  enforce) CODEX_HOOK_DISABLE_FLAG='--disable hooks ' ;;
+  *) CODEX_HOOK_DISABLE_FLAG='' ;;
 esac
 # Resolve the opt-in Codex posture before any spawn or relaunch mutation.
 # docs/configuration.md owns config/codex-permission-mode and its limits.
@@ -914,7 +979,7 @@ fi
 # record reports it so approval failover never treats the launch as bypass.
 if [ "$CODEX_PERMISSION_MODE" = restricted ]; then
   CODEX_APPROVAL_MODE=restricted
-  CODEX_APPROVAL_FLAG='--sandbox workspace-write --ask-for-approval on-request'
+  CODEX_APPROVAL_FLAG='--sandbox workspace-write --ask-for-approval on-request '
 fi
 # config/lavish-axi-host is the primary-owned per-machine address for the
 # shared Lavish server. Read it once per launch and refuse malformed values so
@@ -2950,25 +3015,33 @@ launch_template() {
     # naming it is passed. A record that cannot be published stops the spawn.
     printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;
-  # --disable hooks (equivalent to -c features.hooks=false) requests that codex
-  # turn its whole lifecycle-hook layer off for CREWMATE and SCOUT launches only.
-  # Without it a crewmate launch parks forever on codex's hook-trust modal
-  # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
-  # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
-  # and Ctrl-C with no arrow navigation, so the selection cannot be moved, and
-  # pre-accepting the prompt by writing codex's own trust store would manufacture
-  # an operator consent that was never given. The hooks it asks about are the
-  # OPERATOR's machine-level ~/.codex/hooks.json plus any project-local
-  # .codex/hooks.json, and a crewmate needs none of them: its turn-end signal is
-  # the -c notify= program on this same launch (verified still firing with hooks
-  # disabled, codex-cli 0.151.0), and firstmate's own .codex/hooks.json registers
-  # PRIMARY-session infrastructure that already stands down in a child worktree.
-  # This is the opposite of --dangerously-bypass-hook-trust, which RUNS untrusted
-  # hooks; when honored, disabling the feature runs none of them and leaves the
-  # operator's ~/.codex untouched. An unknown feature name is a hard codex error, so a future
-  # release that drops this flag stops the launch rather than silently restoring
-  # the modal. A managed policy can override the requested disablement, so its
-  # effective hook state is not guaranteed.
+  # __CODEXHOOKTRUSTFLAG__ and __CODEXHOOKDISABLEFLAG__ are the two tokens
+  # config/codex-hook-trust selects (header above owns the config). Together they
+  # give exactly two coherent postures, and no third one:
+  #   enforce - no bypass flag, --disable hooks on the crewmate/scout path. The
+  #             long-standing hook-free launch, and the default.
+  #   bypass  - --dangerously-bypass-hook-trust, no --disable hooks. The enabled
+  #             hook layer RUNS, for crewmates and scouts as well as secondmates,
+  #             without codex's persisted-trust modal. This is the opt-in posture
+  #             where a hook the launch enables actually executes.
+  # The pairing is deliberate: a launch that disabled hooks AND bypassed their
+  # trust would run nothing (the flag is inert, which is not the requested
+  # posture), and a launch that enabled hooks without either control parks forever
+  # on codex's modal. The modal text is "N hooks are new or changed", its
+  # selection starts on "Review hooks" - neither trusting nor declining - and
+  # firstmate's key plane carries Enter, Escape and Ctrl-C with no arrow
+  # navigation, so the selection cannot be moved. Pre-accepting the prompt by
+  # writing codex's own trust store is not an option; the launch flag is.
+  # The hooks in play are the OPERATOR's machine-level ~/.codex/hooks.json plus
+  # any project-local .codex/hooks.json the launch directory carries. Note that a
+  # crewmate/scout worktree of this repository also carries the tracked
+  # .codex/hooks.json, whose entries scope themselves to a real primary checkout
+  # through bin/fm-primary-scope-lib.sh and stand down in a child worktree; that
+  # scoping, not the hook layer being off, is what keeps them inert there.
+  # A managed policy can override the hook feature either way; a managed policy
+  # that re-enables hooks under `enforce` therefore still parks on the modal.
+  # An unknown feature name is a hard codex error, so a future release that drops
+  # --disable hooks stops the enforce launch rather than silently changing it.
   # --approve-for-me uses Codex's automatic approval review with its workspace-write
   # sandbox. When selected, it replaces complete bypass because managed settings
   # can override its approval component while accepting the sandbox bypass. The
@@ -2978,12 +3051,12 @@ launch_template() {
   # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
   # session-start digest, and cd/arm seatbelts are exactly those project hooks
   # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
-  # secondmate launch deliberately keeps hooks on but shares this approval posture.
+  # secondmate launch keeps hooks on and shares this approval posture.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG____CODEXHOOKTRUSTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG__ --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG____CODEXAPPROVALFLAG____CODEXHOOKTRUSTFLAG____CODEXHOOKDISABLEFLAG__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -7594,6 +7667,8 @@ case "$LAUNCH" in
   ;;
 esac
 LAUNCH=${LAUNCH//__CODEXAPPROVALFLAG__/$CODEX_APPROVAL_FLAG}
+LAUNCH=${LAUNCH//__CODEXHOOKTRUSTFLAG__/$CODEX_HOOK_TRUST_FLAG}
+LAUNCH=${LAUNCH//__CODEXHOOKDISABLEFLAG__/$CODEX_HOOK_DISABLE_FLAG}
 if [ "$KEEP_AI_TRAILERS" = 1 ]; then
   LAUNCH=${LAUNCH//__CLAUDEATTRIBUTION__/}
 else
