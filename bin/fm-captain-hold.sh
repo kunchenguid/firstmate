@@ -1628,10 +1628,11 @@ defer_keyed_answer() (
   body=$(show_field_value "$show" body) || fail "could not decode the existing body for $id"
   load_decision "$decision_file"
   note=$(printf 'Captain hold deferred until: %s\n%s' "$until" "$DECISION_TEXT")
-  rm -f -- "$DATA/$id/hold-pr-policy.json" \
-    || fail "could not invalidate the PR policy for $id"
   tasks_axi hold "$id" --reason "$reason" --kind captain --until "$until" >/dev/null \
     || fail "could not defer task $id for the captain"
+  if ! rm -f -- "$DATA/$id/hold-pr-policy.json"; then
+    fail "task $id was deferred, but its PR policy could not be invalidated"
+  fi
   case "$body" in
     "$note"|*"$NL_SEP$NL_SEP$note") ;;
     *)
