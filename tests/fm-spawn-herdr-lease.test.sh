@@ -393,17 +393,24 @@ assert not any(p['pane_id'] == 'old-pane-' + ident for p in state['panes'])
 PY
 }
 
+# Runs only as a background child, so its exports and sourced libraries stay
+# out of the test shell.
+projection_lock_holder_child() {
+  export PATH="$A/fakebin:$PATH" FM_FAKE_DIR="$D" FM_HOME="$A/home"
+  export FM_PROJECTION_FAKE="$ROOT/tests/fixtures/herdr-projection-fake.py"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/backends/herdr.sh"
+  local lock
+  lock=$(fm_backend_herdr_presentation_session_lock_path default) || exit 1
+  fm_lock_try_acquire "$lock" || exit 1
+  printf 'held\n' > "$D/events"
+  read -r -t 60 _ <&8
+  fm_lock_release "$lock"
+  printf 'released\n' > "$D/events"
+}
+
 projection_lock_holder() {
-  (export PATH="$A/fakebin:$PATH" FM_FAKE_DIR="$D" FM_HOME="$A/home"
-   export FM_PROJECTION_FAKE="$ROOT/tests/fixtures/herdr-projection-fake.py"
-   . "$ROOT/bin/fm-wake-lib.sh"
-   . "$ROOT/bin/backends/herdr.sh"
-   lock=$(fm_backend_herdr_presentation_session_lock_path default) || exit 1
-   fm_lock_try_acquire "$lock" || exit 1
-   printf 'held\n' > "$D/events"
-   read -r -t 60 _ <&8
-   fm_lock_release "$lock"
-   printf 'released\n' > "$D/events") &
+  projection_lock_holder_child &
   PROJECTION_PIDS+=("$!")
   projection_event held
 }
