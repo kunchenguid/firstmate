@@ -48,10 +48,10 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
-[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
 exit 0
 SH
   chmod +x "$fb/orca"
@@ -406,6 +406,70 @@ test_remove_worktree_rejects_orca_error_json() {
   [ "$status" -ne 0 ] || fail "remove_worktree should fail on Orca ok:false JSON"
   assert_contains "$out" "worktree not found" "remove_worktree should surface the Orca removal error"
   pass "fm_backend_orca_remove_worktree: fails closed on ok:false JSON"
+}
+
+test_remove_worktree_selector_not_found_treats_gone_path_as_removed() {
+  local out status gone="$TMP_ROOT/gone-wt-path"
+  orca_case remove-selector-gone
+  rm -rf "$gone"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$gone" 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "selector_not_found with the path gone should count as removed, got $status: $out"
+  assert_contains "$out" "treating it as already removed" "gone-path removal did not explain itself"
+  pass "fm_backend_orca_remove_worktree: selector_not_found with the path gone is already removed"
+}
+
+test_remove_worktree_selector_not_found_refuses_when_path_present() {
+  local out status present="$TMP_ROOT/present-wt-path"
+  orca_case remove-selector-present
+  mkdir -p "$present"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$present" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "selector_not_found with the path present must still refuse"
+  assert_contains "$out" "orca worktree rm failed" "refusal printed no diagnostic"
+  [ -d "$present" ] || fail "the present path must be untouched"
+  pass "fm_backend_orca_remove_worktree: selector_not_found with the path present still refuses"
+}
+
+test_remove_worktree_selector_not_found_refuses_when_parent_unsearchable() {
+  local out status parent="$TMP_ROOT/locked-parent"
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "fm_backend_orca_remove_worktree: unsearchable-parent case skipped when running as root"
+    return 0
+  fi
+  orca_case remove-selector-locked
+  mkdir -p "$parent/wt"
+  chmod 000 "$parent"
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector not found"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$parent/wt" 2>&1 )
+  status=$?
+  chmod 755 "$parent"
+  [ "$status" -ne 0 ] || fail "selector_not_found with an unsearchable parent must still refuse"
+  assert_contains "$out" "orca worktree rm failed" "refusal printed no diagnostic"
+  [ -d "$parent/wt" ] || fail "the files behind the unsearchable parent must be untouched"
+  pass "fm_backend_orca_remove_worktree: selector_not_found with an unsearchable parent still refuses"
+}
+
+test_remove_worktree_other_error_refuses_even_when_path_gone() {
+  local out status gone="$TMP_ROOT/gone-wt-path-2"
+  orca_case remove-other-error
+  rm -rf "$gone"
+  printf '{"ok":false,"error":{"code":"internal_error","message":"boom"}}\n' > "$RESP/1.out"
+  echo 1 > "$RESP/1.exit"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_remove_worktree "repo-1::$1"' "$ROOT" "$gone" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "a non-selector_not_found error must still refuse"
+  assert_contains "$out" "boom" "refusal did not surface the Orca error"
+  pass "fm_backend_orca_remove_worktree: other Orca errors still refuse"
 }
 
 test_worktree_path_resolves_id() {
@@ -1371,6 +1435,10 @@ test_kill_is_best_effort_close
 test_kill_refuses_when_the_orca_cli_is_absent
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
+test_remove_worktree_selector_not_found_treats_gone_path_as_removed
+test_remove_worktree_selector_not_found_refuses_when_path_present
+test_remove_worktree_selector_not_found_refuses_when_parent_unsearchable
+test_remove_worktree_other_error_refuses_even_when_path_gone
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
