@@ -650,8 +650,8 @@ test_signal_crew_provably_working_classifier() {
   pass "signal_crew_provably_working: benign only when every referenced crew is provably working"
 }
 
-abort_absorb_case() {  # <name> <run-status> <run-error> <busy-state> <busy-ts> <flag:on|off> [crew-state-line]
-  local dir state wt
+abort_absorb_case() {  # <name> <run-status> <run-error> <busy-state> <busy-ts> <flag:on|off> [crew-state-line] [harness] [busy-source]
+  local dir state wt harness=${8:-claude} source=${9:-claude-hook}
   dir=$(make_case "$1"); state="$dir/state"; wt="$dir/wt"
   mkdir -p "$wt" "$dir/nm" "$dir/config"
   python3 -I -c '
@@ -661,9 +661,9 @@ db.execute("CREATE TABLE runs (id TEXT PRIMARY KEY, status TEXT, error TEXT, upd
 db.execute("INSERT INTO runs VALUES (?, ?, ?, ?)", ("01ABORT", sys.argv[2], sys.argv[3], 1000))
 db.commit()
 ' "$dir/nm" "$2" "$3"
-  printf 'worktree=%s\nkind=ship\n' "$wt" > "$state/abort.meta"
+  printf 'worktree=%s\nkind=ship\nharness=%s\nwindow=%%1\n' "$wt" "$harness" > "$state/abort.meta"
   printf 'gen1\n' > "$state/abort.busy-gen"
-  printf 'v1 gen=gen1 seq=1 state=%s source=claude-hook event=prompt ts=%s\n' "$4" "$5" > "$state/abort.busy-state"
+  printf 'v1 gen=gen1 seq=1 state=%s source=%s event=prompt ts=%s\n' "$4" "$source" "$5" > "$state/abort.busy-state"
   [ "$6" = on ] && : > "$dir/config/turnend-abort-absorb"
   export NM_HOME="$dir/nm" STATE="$state" CONFIG="$dir/config"
   export FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
@@ -719,6 +719,12 @@ test_aborted_run_superseded_by_busy_verdict() {
     'state: failed · source: run-step · run failed'
   ! signal_crew_provably_working "$STATE/abort.turn-ended" \
     || fail "flag on: a verdict naming no run was absorbed"
+  abort_absorb_case abort-respawn-seed cancelled 'cancelled: aborted by user' busy 2000 on '' grok fm-spawn
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a respawn-seeded fm-spawn busy record the classifier does not trust was absorbed"
+  abort_absorb_case abort-respawn-seed-trusted cancelled 'cancelled: aborted by user' busy 2000 on '' claude fm-spawn
+  signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a trusted fm-spawn busy verdict newer than the abort was not absorbed"
   abort_absorb_cleanup
   pass "an aborted run is superseded by a newer busy verdict only under the opt-in flag"
 }

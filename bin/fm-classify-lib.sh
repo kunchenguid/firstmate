@@ -2910,7 +2910,8 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
 # the no-mistakes run store with an explicit abort record (status cancelled with error
 # exactly "cancelled: aborted by user", or status failed with error exactly
 # "step <name>: aborted by user" optionally followed by ": <reason>"), and the task's
-# busy-state record reads exactly state=busy with a ts newer than that run's last update. Every other shape - flag
+# busy-state verdict (fm_busy_classify_meta) is exactly busy <source> and the record's
+# ts is newer than that run's last update. Every other shape - flag
 # absent, a run that failed for another reason, a busy verdict at or before the
 # abort, or any unreadable input - returns 1, so the wake surfaces as before.
 crew_aborted_run_superseded_by_busy() {  # <id>
@@ -2953,8 +2954,12 @@ if len(r) == 1 and isinstance(r[0][2], int):
     # shellcheck source=bin/fm-busy-lib.sh
     . "$_FM_CLASSIFY_LIB_DIR/fm-busy-lib.sh" || return 1
   }
-  busy=$(fm_busy_record_read "$state" "$id") || return 1
-  [ "${busy%% *}" = busy ] || return 1
+  declare -F fm_backend_of_meta >/dev/null 2>&1 || {
+    # shellcheck source=bin/fm-backend.sh
+    . "$_FM_CLASSIFY_LIB_DIR/fm-backend.sh" || return 1
+  }
+  busy=$(fm_busy_classify_meta "$state/$id.meta" "$id" "$state") || return 1
+  case "$busy" in busy\ *) ;; *) return 1 ;; esac
   ts=$(sed -n 's/.* ts=\([0-9]\{1,\}\)$/\1/p' "$(fm_busy_record_path "$state" "$id")" 2>/dev/null | head -1)
   [ -n "$ts" ] && [ "$ts" -gt "$run_end" ]
 }

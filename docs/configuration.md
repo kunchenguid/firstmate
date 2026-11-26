@@ -1141,7 +1141,7 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 The optional local, gitignored `config/turnend-abort-absorb` presence flag opts this home into a default-off further form of positive work evidence for a bare turn-end.
 After a worker deliberately aborts a no-mistakes run and keeps working, current state keeps reading the aborted run until a fresh run starts, so every routine turn-end of that worker surfaces.
-With the flag present, a turn-end is absorbed when the task's current-state read is a run-step failed or unknown verdict naming a run that is terminal in the no-mistakes run store with an explicit abort record, and its busy-state record reads exactly `state=busy` with a timestamp newer than that run's last update.
+With the flag present, a turn-end is absorbed when the task's current-state read is a run-step failed or unknown verdict naming a run that is terminal in the no-mistakes run store with an explicit abort record, and the busy-state verdict is exactly `busy <source>` and its busy-state record has a timestamp newer than that run's last update.
 The abort record is a `cancelled` status with the error `cancelled: aborted by user`, or a `failed` status with the error `step <name>: aborted by user` optionally followed by `: <reason>`, read from structured run-store fields and never from status-line prose.
 A run that failed for any other reason still surfaces, and with the flag absent behavior is unchanged.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
