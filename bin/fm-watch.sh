@@ -2898,6 +2898,14 @@ reconcile_overdue_pauses() {
 # endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive kind statusf rc
+  # The caller checks immediately before invoking this slow classifier, but a
+  # teardown can still retire the record in the hand-off between that check and
+  # this function's first read. Reconcile here as well so a retired endpoint
+  # cannot acquire pause bookkeeping while its classification is in flight.
+  if retire_unrecorded_endpoint "$win"; then
+    printf 'none'
+    return
+  fi
   key=$(window_key "$win")
   statusf="$STATE/$task.status"
   pause_overdue_reconcile "$task" "$statusf"; rc=$?
