@@ -3604,6 +3604,41 @@ On 2.0.22 the brief is submitted on its own, yet the composer still reads pendin
 `opencode debug config` on 2.0.11 normalized the launch's legacy `{"permission":{"*":"allow"}}` into an allow-all `permissions` rule; the same command printed no configuration on 2.0.22, so on 2.0.22 the legacy shape rests on the earlier 2.0.21 verification recorded in the OpenCode harness reference.
 `tests/fm-spawn-dispatch-profile.test.sh` pins the gate's outcomes portably: an auto-submitted brief gets no extra Enter, a prefilled brief gets exactly one, a composer that reads unknown before it draws gets its one Enter only once it reads pending, a composer that only reads unknown gets its one Enter at the submit deadline, and a turn that never starts fails the spawn.
 
+## OpenCode 2 session-lock anchor
+
+Verified on 2026-11-15 on Linux x86_64 against OpenCode 2.3.0, with scratch `HOME`, XDG directories, and `OPENCODE_DB` and a loopback provider, so no credential or model token was used.
+A native tool shell read its own ancestry with `ps -o pid=,ppid=,comm=,args=` under three servers: a plain `opencode serve --hostname 127.0.0.1 --port <port>`, the private `opencode serve --stdio --port 0` that `opencode --standalone` starts, and the shared `opencode serve --service --hostname 127.0.0.1 --port <port>`.
+Under each, the shell's parent was the server's PTY helper and the helper's parent was the server, which also hosts the plugins:
+
+```
+zsh             /bin/zsh +o nomatch -c <tool command>
+opencode-pty    <scratch home>/cache/opencode/bin/opencode-pty/0.5.2-bc9cb0fa0ebb4e56/opencode-pty daemon --runtime-dir <scratch home>/state/opencode/pty --name <uuid>
+opencode        opencode serve --stdio --port 0
+```
+
+The helper's install path has an `opencode` component, so only its own executable name tells it apart from the server.
+Read from the installed binary: the server spawns the helper detached, and a client starts the shared service detached, so the service's parent is whichever client started it until that client exits.
+With `bin/fm-session-lock-lib.sh` refusing the helper and the shared service as sessions, `bin/fm-lock.sh` in that shell printed `lock acquired: harness pid <server pid>` under the plain and private servers, after which the watch-arm plugin armed a watcher and the turn-end guard queued no follow-up.
+Under the shared service it printed ``error: this session runs under OpenCode's shared background service, which hosts every attached session and is never one; start the OpenCode TUI as `opencode --standalone`; operate read-only until resolved`` and wrote no lock.
+
+The token-free live guard takes its session lock through `bin/fm-lock.sh` in a native tool shell, asserts that shell runs under `opencode-pty`, and refreshes this result:
+
+```
+$ tests/fm-opencode-primary-live-e2e.test.sh
+ok - OpenCode 2.3.0 loaded all five V2 Firstmate plugins
+ok - V2 parses the build-agent model variant and applies it when selected
+ok - native shell execute.before rejects persistent-cd before execution
+ok - native shell execute.before rejects watcher-redirection before execution
+ok - native terminal event admits a turn-end guard follow-up
+ok - the session lock taken from a native tool shell under opencode-pty names the server
+ok - native watcher prompt delivery preserves a live successor
+ok - native interrupted turn retains watcher supervision
+ok - native failed turn retains supervision and startup remains exactly once
+ok - private OpenCode server, provider, watcher, configuration and database cleaned
+```
+
+`tests/fm-session-lock-ancestry.test.sh` pins both identities portably under each platform's `ps` reporting, and runs the real lock script and the real watch-arm plugin in a faked `opencode-pty` -> `opencode serve` -> `opencode --standalone` chain.
+
 ## Pi repeated-read containment
 
 Verified on 2026-10-27 UTC on Linux x86_64 with Node 24.22.1 and npm 11.19.1.
