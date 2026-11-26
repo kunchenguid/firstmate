@@ -4168,15 +4168,15 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-  if [ "$wt_pool_slot" = 1 ]; then
-    teardown_note_dirty_return "$WT"
-    teardown_destroy_pool_slot "$WT" "$PROJ" "worktree"
-  fi
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
+  if [ "$wt_pool_slot" = 1 ]; then
+    teardown_note_dirty_return "$WT"
+    teardown_destroy_pool_slot "$WT" "$PROJ" "worktree"
+  fi
 fi
 
 if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
