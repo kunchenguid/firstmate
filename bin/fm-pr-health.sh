@@ -531,7 +531,12 @@ poll() {
   save_health "$TMP/next.json"
   cp "$TMP/next.json" "$TMP/health.json"
   # With config/pr-health-final, a PR the contribution record already calls final
-  # is still read once, so the account can be named. health.final stops the next read.
+  # and the monitor never tracked is marked final silently; one the monitor
+  # tracked is read once, so the account can be named. health.final stops the next read.
+  if [ "${FM_PR_HEALTH_FINAL:-}" = 1 ]; then
+    jq --slurpfile owned "$TMP/owned.json" '
+      reduce ($owned[0][] | select(.final) | .url) as $u (.; if .prs[$u] == null then .prs[$u] = {final:true} else . end)'       "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
+  fi
   jq -r --slurpfile health "$TMP/health.json" '
     .[] | select(($health[0].prs[.url].final // false) | not)
     | select((.final | not) or env.FM_PR_HEALTH_FINAL == "1") | .url' "$TMP/owned.json" > "$TMP/owned-urls"
