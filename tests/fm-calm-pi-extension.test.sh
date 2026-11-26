@@ -4639,63 +4639,63 @@ const reset = () => {
 const widgetOf = (key) => ui.widgets.get(key);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// config/calm-ship=spaceship installs the persistent banner while idle.
+// config/calm-ship=spaceship installs nothing while idle: the banner is run-scoped,
+// exactly like the boat, and Pi's stock working row stays visible.
 await fire("session_start", { reason: "startup" });
+check(
+  ui.widgetOps.length === 0 && liveTimers === 0,
+  `an idle spaceship session installed a banner: ${JSON.stringify(ui.widgetOps)} ${liveTimers}`,
+);
+check(
+  ui.workingVisible.every((visible) => visible === true),
+  `an idle spaceship session hid Pi's stock working row: ${JSON.stringify(ui.workingVisible)}`,
+);
+
+// A run start installs the banner, starts its timer, and hides Pi's stock working row.
+reset();
+await fire("agent_start");
 check(
   ui.widgetOps.length === 1 &&
     ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
     ui.widgetOps[0].action === "set",
-  `session_start did not install exactly one spaceship banner: ${JSON.stringify(ui.widgetOps)}`,
+  `run start did not install exactly one spaceship banner: ${JSON.stringify(ui.widgetOps)}`,
 );
-check(liveTimers === 1, `spaceship idle banner kept ${liveTimers} animation timers instead of one`);
+check(liveTimers === 1, `spaceship run kept ${liveTimers} animation timers instead of one`);
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === false,
-  "spaceship idle banner did not hide Pi's stock working row",
+  "spaceship run did not hide Pi's stock working row",
 );
-const idleFrame = widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44);
-check(idleFrame.length === 2, "spaceship idle banner lost the two-row rest pose");
-check(strip(idleFrame[0]).includes(SAUCER_IDLE), "spaceship idle banner lost the `(|)` saucer");
-check(strip(idleFrame[1]).includes(HULL), "spaceship idle banner lost the `|^|` hull");
+const workingFrame = widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44);
+check(workingFrame.length === 1, "spaceship run did not render the single-row warp sprite");
+check(strip(workingFrame[0]).includes(WARP), "spaceship run lost the compact warp sprite");
 
-// A run start cruises the same banner rightward as the compact warp sprite; a settle
-// eases it back into the idle drift without removing the widget.
-reset();
-await fire("agent_start");
-check(ui.widgetOps.length === 0, "run start churned the spaceship widget");
-check(liveTimers === 1, `run start left ${liveTimers} timers`);
+// The cruise is driven by the module's own tick clock.
 const beforeCruise = warpColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
 await sleep(CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_TICKS_PER_MOVE * 4 + 60);
 const afterCruise = warpColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
 check(afterCruise > beforeCruise, `working banner did not cruise right: ${beforeCruise} -> ${afterCruise}`);
-check(
-  strip(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44)[0]).includes(WARP),
-  "working banner lost the compact warp sprite",
-);
+
+// A settle removes the banner and its timer and restores Pi's stock working row.
 reset();
 await fire("agent_settled");
-check(ui.widgetOps.length === 0, "settle removed the spaceship banner instead of easing it back into the drift");
-check(liveTimers === 1, `settle left ${liveTimers} timers`);
-await sleep(
-  CALM_WORKING_SPACESHIP_TICK_MS *
-    (CALM_WORKING_SPACESHIP_TICKS_PER_MOVE + CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES * 8) + 60,
-);
-const settled = widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44);
-check(settled.length === 2, "settled banner did not relax to the two-row rest pose");
-check(strip(settled[0]).includes(SAUCER_IDLE), "settled banner lost the `(|)` saucer");
-const settledColumn = saucerColumn(settled);
-check(settledColumn >= 0 && settledColumn <= 41, `settled drift left its track: ${settledColumn}`);
-await sleep(CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE + 60);
-let driftingColumn = saucerColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
-for (let attempt = 1; attempt < 3 && driftingColumn === settledColumn; attempt += 1) {
-  await sleep(CALM_WORKING_SPACESHIP_TICK_MS * CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE + 60);
-  driftingColumn = saucerColumn(widgetOf(CALM_WORKING_SPACESHIP_WIDGET_KEY).render(44));
-}
 check(
-  driftingColumn !== settledColumn,
-  `settled banner stopped drifting over three idle intervals: ${settledColumn} -> ${driftingColumn}`,
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "clear",
+  `settle did not remove the spaceship banner: ${JSON.stringify(ui.widgetOps)}`,
+);
+check(liveTimers === 0, `settle left ${liveTimers} animation timers`);
+check(ui.widgets.size === 0, "settle left a residual spaceship banner");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === true,
+  "settle did not restore Pi's stock working row",
 );
 
-// Toggling Calm off clears the banner and its timer; toggling on restores it.
+// Toggling Calm off during a run clears the banner and its timer; toggling it back on
+// during the same run restores the banner.
+reset();
+await fire("agent_start");
+reset();
 await calmCommand.handler("", ctx);
 check(
   ui.widgetOps.length === 1 &&
@@ -4711,16 +4711,24 @@ check(
 reset();
 await calmCommand.handler("", ctx);
 check(
-  ui.widgetOps.length === 1 && ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY,
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SPACESHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "set",
   "toggling Calm on did not restore the spaceship banner",
 );
 check(liveTimers === 1, `toggling Calm on left ${liveTimers} timers`);
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === false,
+  "toggling Calm on did not hide Pi's stock working row",
+);
+await fire("agent_settled");
+check(liveTimers === 0 && ui.widgets.size === 0, "the toggled-on run did not clean up");
 
-// The banner is session-scoped: a shutdown clears the installed widget, stops its
-// timer, and restores Pi's stock working row so the next session starts clean.
+// The banner is session-scoped: a shutdown during a run clears the installed widget,
+// stops its timer, and restores Pi's stock working row so the next session starts clean.
 for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
   reset();
-  if (!ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY)) await fire("session_start", { reason: "startup" });
+  await fire("agent_start");
   check(
     ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
     `session_shutdown(${reason}) setup did not show the banner`,
@@ -4746,6 +4754,7 @@ for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
 // still clears it, and the next session leaves Pi's stock working row alone.
 reset();
 await fire("session_start", { reason: "startup" });
+await fire("agent_start");
 check(ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "Calm-off setup did not show the banner");
 reset();
 writeFileSync(`${process.env.FM_HOME}/config/calm`, "off\n");
@@ -4761,6 +4770,12 @@ check(
   liveTimers === 0 && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
   "a Calm-off session restored the spaceship banner",
 );
+await fire("agent_start");
+check(
+  liveTimers === 0 && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
+  "a Calm-off run installed the spaceship banner",
+);
+await fire("agent_settled");
 writeFileSync(`${process.env.FM_HOME}/config/calm`, "on\n");
 
 // Anything other than "spaceship" in config/calm-ship keeps the boat, and a fresh
@@ -4776,11 +4791,30 @@ check(!ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "a non-spaceship selec
 await fire("agent_settled");
 check(liveTimers === 0 && ui.widgets.size === 0, "boat cycle after selection switch did not clean up");
 
-// An absent config/calm-ship keeps the boat default too.
+// Re-selecting spaceship installs the banner for the next run, and a mid-run switch
+// replaces the installed banner with the boat instead of leaving it behind.
 reset();
 writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "spaceship\n");
 await fire("session_start", { reason: "new" });
-check(ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "re-selecting spaceship did not restore the banner");
+check(liveTimers === 0 && ui.widgets.size === 0, "an idle spaceship session installed a banner");
+await fire("agent_start");
+check(ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY), "re-selecting spaceship did not install the banner for the run");
+writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "yacht\n");
+reset();
+await calmCommand.handler("", ctx);
+check(
+  liveTimers === 0 && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
+  "a mid-run selection switch left the spaceship banner installed",
+);
+await calmCommand.handler("", ctx);
+check(
+  ui.widgets.has(boatKey) && !ui.widgets.has(CALM_WORKING_SPACESHIP_WIDGET_KEY),
+  "a mid-run selection switch did not install the boat",
+);
+await fire("agent_settled");
+check(liveTimers === 0 && ui.widgets.size === 0, "default-boat cycle did not clean up");
+
+// An absent config/calm-ship keeps the boat default too.
 reset();
 writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "");
 await fire("session_start", { reason: "new" });
@@ -4798,7 +4832,7 @@ JS
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-spaceship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-spaceship test printed output: $out"
-  pass "Pi Calm spaceship variant drifts slowly left to right across the banner in the two-row rest pose, the three-cell (|) saucer directly over the three-cell |^| hull with a ~1.3s idle twinkle (the asymmetric * and . unit slides, so the stars move past the chasing ship) and a marquee wrap at the right edge, warps as the single-row compact =( * ) sprite sweeping continuously across the full span at the working cadence with a two-phase-per-tick streak field, never parking while thinking, eases back into the drift within its bounded settle window without teleporting, freezes and resumes across hide/show including mid-drift and mid-warp, clamps visible and hidden resizes, installs as a persistent banner only when config/calm-ship names spaceship, and keeps the boat default for every other value"
+  pass "Pi Calm spaceship variant drifts slowly left to right across the banner in the two-row rest pose, the three-cell (|) saucer directly over the three-cell |^| hull with a ~1.3s idle twinkle (the asymmetric * and . unit slides, so the stars move past the chasing ship) and a marquee wrap at the right edge, warps as the single-row compact =( * ) sprite sweeping continuously across the full span at the working cadence with a two-phase-per-tick streak field, never parking while thinking, eases back into the drift within its bounded settle window without teleporting, freezes and resumes across hide/show including mid-drift and mid-warp, clamps visible and hidden resizes, installs the banner only for the duration of one agent run when config/calm-ship names spaceship, removes it and restores Pi's stock working row when the run ends, and keeps the boat default for every other value"
 }
 
 # The rendered-DOM assertions below depend on a real browser, so the render step

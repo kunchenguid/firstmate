@@ -3,8 +3,9 @@
 // This module is the selectable spaceship counterpart of fm-calm-working-ship.ts and
 // follows the same contract shape the redesigned `.pi/extensions/fm-calm.ts` consumes:
 // a per-extension-lifetime animation, a temporary TUI widget bound to it, and one
-// widget key. Unlike the boat, the spaceship is a persistent banner while Calm is
-// active: the saucer is visible when idle, not only while a run is under way.
+// widget key. Like the boat, the banner is installed for the duration of one logical
+// agent run and removed when the run ends, so Pi's stock working row is untouched while
+// idle.
 // `.pi/extensions/fm-calm.ts` owns when either presentation is installed and removed,
 // drives setWorking() from the same run-visibility signals the boat consumes, and
 // stays the sole caller of setWorkingVisible(). docs/calm.md owns the captain-facing
@@ -12,13 +13,14 @@
 //
 // Two modes and one bounded transition:
 //
-// - IDLE: the saucer drifts slowly and continuously left to right across the banner
-//   in the two-row rest pose (the three-cell `(|)` saucer over the three-cell `|^|`
-//   hull, centered), one column every IDLE_TICKS_PER_MOVE ticks (~1.5 seconds),
-//   wrapping marquee-style back to the left edge when it crosses the right edge,
-//   while the hull row's asymmetric `*`/`.` starfield streams one column every
-//   IDLE_TICKS_PER_PHASE ticks (~1.3 seconds), so the stars visibly move left past
-//   the chasing ship instead of just twinkling in place.
+// - IDLE: the rest mode the settle transition below returns to; the saucer drifts
+//   slowly and continuously left to right across the banner in the two-row rest pose
+//   (the three-cell `(|)` saucer over the three-cell `|^|` hull, centered), one column
+//   every IDLE_TICKS_PER_MOVE ticks (~1.5 seconds), wrapping marquee-style back to the
+//   left edge when it crosses the right edge, while the hull row's asymmetric `*`/`.`
+//   starfield streams one column every IDLE_TICKS_PER_PHASE ticks (~1.3 seconds), so
+//   the stars visibly move left past the chasing ship instead of just twinkling in
+//   place.
 // - WORKING (a run is thinking): the sprite becomes the single-row compact `=( * )`
 //   saucer (yellow) on the banner row - the two-row pose is not rendered in warp - the
 //   saucer sweeps right one column every TICKS_PER_MOVE ticks (~880ms per column)
@@ -332,7 +334,7 @@ export function createCalmWorkingSpaceshipAnimation(): CalmWorkingSpaceshipAnima
 }
 
 /**
- * Build the persistent Calm banner widget bound to one caller-owned animation.
+ * Build the Calm banner widget bound to one caller-owned animation.
  * Pi disposes the previous component before installing a replacement under the same
  * key and when it clears extension widgets, so the single scheduler driving both
  * cadences cannot outlive the widget or duplicate. Disposing freezes the shared

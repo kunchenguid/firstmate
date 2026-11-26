@@ -225,27 +225,24 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  // The spaceship is a persistent banner: it is visible the whole time Calm is active,
-  // and the same run signals that show the boat drive its mode instead of its
-  // visibility. Its slot is Firstmate-only, so a Pi disposal of the banner means it is
-  // gone and is reinstated rather than stepped aside from.
+  // The spaceship follows the boat's run-scoped contract: the banner is installed for
+  // the duration of one logical agent run and removed when the run ends, so Pi's stock
+  // working row is untouched while idle. Its slot is Firstmate-only, so a Pi disposal of
+  // the banner means it is gone and is reinstated rather than stepped aside from.
   const applySpaceshipPresentation = (
     ui: ExtensionUIContext,
     animation: CalmWorkingSpaceshipAnimation,
     forceStockVisibility: boolean,
   ): void => {
-    const show = calmPresentationIsActive();
+    const show = agentRunActive && calmPresentationIsActive();
     const shown = spaceshipShown && !spaceshipWidgetDisposed;
     if (show === shown) {
-      if (show) {
-        animation.setWorking(agentRunActive);
-      } else if (forceStockVisibility) {
-        ui.setWorkingVisible(true);
-      }
+      if (!show && forceStockVisibility) ui.setWorkingVisible(true);
       return;
     }
     if (spaceshipShown) ui.setWidget(CALM_WORKING_SPACESHIP_WIDGET_KEY, undefined);
     spaceshipShown = show;
+    animation.setWorking(show);
     if (!show) {
       ui.setWorkingVisible(true);
       return;
@@ -261,7 +258,6 @@ export default function (pi: ExtensionAPI) {
       return widget;
     });
     ui.setWorkingVisible(false);
-    animation.setWorking(agentRunActive);
   };
 
   // Tears down the variant a selection switch just replaced, so neither presentation's
@@ -555,14 +551,11 @@ export default function (pi: ExtensionAPI) {
     agentRunActive = false;
     refreshWorkingKind();
     // A genuine new session lifetime starts the working presentation at its normal
-    // initial pose, and re-reads which variant config/calm-ship selects. Only the
-    // selected variant's shown state is reset here: a switch just replaced leaves the
-    // previous variant's widget for clearSwitchedPresentation to tear down.
-    if (working.kind === "boat") {
-      workingShipShown = false;
-    } else {
-      spaceshipShown = false;
-    }
+    // initial pose, and re-reads which variant config/calm-ship selects. A switch just
+    // replaced leaves the previous variant's shown state for clearSwitchedPresentation
+    // to tear down, and the spaceship's shown state is kept so a banner that outlived
+    // its session is cleared rather than stranded.
+    if (working.kind === "boat") workingShipShown = false;
     working.animation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
@@ -616,17 +609,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
-    if (working.kind === "spaceship") {
-      // The banner is session-scoped: clear the installed widget, stop its timer, and
-      // restore Pi's stock working row, so the next session_start starts clean.
-      if (spaceshipShown && !spaceshipWidgetDisposed) {
-        ctx.ui.setWidget(CALM_WORKING_SPACESHIP_WIDGET_KEY, undefined);
-        ctx.ui.setWorkingVisible(true);
-      }
-      spaceshipShown = false;
-      spaceshipWidgetDisposed = false;
-      return;
-    }
     applyWorkingPresentation(ctx.ui);
   });
 
