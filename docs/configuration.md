@@ -2059,7 +2059,7 @@ Only the agent command is wrapped, at one point after the launch template is fil
 The pane-side status reporter, the `FM_TASK_INBOX` export, the compact-adviser switch, and the [launch environment allowlist](#worker-launch-environment-configlaunch-env-allowlist) stay outside it and compose unchanged; the encoded launch brief is expanded by the pane shell before the wrapper starts.
 The binds name only the task's own files, never `state/` or `FM_HOME`: its status and turn-ended files (created if missing), its steering inbox and data directory (writable), git hooks, busy extension and the Firstmate code root's `bin/`, `.agents/` and `.omp/` (read-only), its private `/tmp/fm-<id>` root, and the busy relay spool below. The shared `state/operational-inbox` is never bound: it holds every task's launch records, and omp takes its brief on the command line.
 The code root itself is never bound, because with `FM_HOME` unset it is `FM_HOME`, and the read-only code binds come before the writable task binds so a wrapper that applies binds in order never shadows one.
-The wrapper is also passed `--env` for `COMPACT_ADVISER_DISABLE`, `FM_TASK_INBOX`, and, when set in the pane, `FM_TASK_ID`, `GOTMPDIR`, `TRACEPARENT`, `LAVISH_AXI_HOST` and `LAVISH_AXI_PORT`.
+The wrapper is also passed `--env` for `COMPACT_ADVISER_DISABLE`, `FM_TASK_INBOX`, `FM_TASK_ID`, `GOTMPDIR`, `TRACEPARENT`, `LAVISH_AXI_HOST` and `LAVISH_AXI_PORT`, as static words so the launch parses in any pane shell, fish included.
 `bin/fm-spawn.sh` (`task_channel_dirs`) is the single owner of the channel directories, shared with the Claude `--add-dir` grant.
 
 A profile that resolves is always enforced: the spawn refuses, before any endpoint, worktree, or record exists, and never launches the worker raw, when
@@ -2077,6 +2077,9 @@ A profile that resolves is always enforced: the spawn refuses, before any endpoi
 
 `--host-helper` takes one executable path with no arguments and runs it on the host as a child of the wrapper, ending with the worker even when the launcher is killed.
 Firstmate generates `state/<id>.sbx/relay-helper` for it, so the contract holds whichever way the wrapper parses the value.
+
+The wrapper passes the launch environment through to the command: the pane exports more than the worker's own variables, such as the `GIT_CONFIG_*` entries that set the git hooks path, and `FM_HOME`.
+Each `--env NAME` names a variable the worker needs at minimum, which a wrapper that otherwise filters the environment must still keep, and a name unset at launch is skipped.
 
 ### Busy relay
 

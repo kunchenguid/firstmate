@@ -40,7 +40,11 @@
 # the profile. --host-helper takes ONE executable path, no arguments, and runs
 # it as a child with the wrapper's own lifecycle (ends with the worker, also on
 # SIGKILL of the launcher). Passing a path rather than a command line holds
-# under either way the wrapper may parse it.
+# under either way the wrapper may parse it. The wrapper passes the launch
+# environment through to COMMAND: the pane exports more than the worker's own
+# variables (the GIT_CONFIG_* hooks path, FM_HOME). Each --env NAME is a name
+# the worker needs at minimum, kept even by a wrapper that otherwise filters the
+# environment, and skipped when unset at launch.
 
 # fm_sandbox_profile_valid <name>
 fm_sandbox_profile_valid() {

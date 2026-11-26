@@ -69,8 +69,9 @@ if [ "$profile" = unknown-profile ]; then
   exit 2
 fi
 [ "$dry" = 0 ] || exit 0
-# Like a bubblewrap --clearenv wrapper, the command sees only PATH, HOME, and the
-# names passed with --env.
+# Stricter than the contract, like a bubblewrap --clearenv wrapper: the command
+# sees only PATH, HOME, and the --env names set at launch, so a test proves those
+# names alone carry the task variables.
 keep=("PATH=$PATH" "HOME=$HOME")
 prev=
 while [ $# -gt 0 ] && [ "$1" != -- ]; do
@@ -722,11 +723,12 @@ test_sandboxed_extension_reports_through_the_relay() {
   pass "fm-spawn: the sandboxed omp extension spools its edges and the relay applies them to the busy record"
 }
 
-# The pane shell may be zsh, which does not word-split an unquoted expansion:
-# run the generated wrapper prefix under every available shell and require the
-# optional env names to reach the wrapper as separate argv words (or not at all).
-test_optional_env_words_survive_zsh_and_bash() {
-  local id=sbx-shell-a1 out status launch prefix sh calls ran=0
+# The launch file is sourced by the pane's own shell, which may be bash, zsh, or
+# fish (fish rejects `${NAME+word}`): run the generated wrapper prefix under every
+# available shell and require each env name to reach the wrapper as its own
+# `--env NAME` argv pair, unset ones included, since skipping them is the wrapper's.
+test_env_words_parse_in_every_pane_shell() {
+  local id=sbx-shell-a1 out status launch prefix sh calls name ran=0
   read_case "$(make_case shell "$id")"
   write_sandbox_config 'project:project=strict'
   out=$(run_spawn "$id" "$PROJ_DIR" --scout --harness omp)
@@ -736,23 +738,21 @@ test_optional_env_words_survive_zsh_and_bash() {
   prefix="${launch%% -- env -u*}"
   prefix="'$FAKEBIN_DIR/worker-sandbox'${prefix#*"'$FAKEBIN_DIR/worker-sandbox'"}"
   [ "$prefix" != "$launch" ] || fail "could not isolate the wrapper prefix: $launch"
-  for sh in bash zsh; do
+  for sh in bash zsh fish; do
     command -v "$sh" >/dev/null 2>&1 || { echo "skip: $sh not installed"; continue; }
     ran=$((ran + 1))
     : > "$SB_LOG"
-    FM_FAKE_SANDBOX_LOG="$SB_LOG" PATH="$FAKEBIN_DIR:$PATH" GOTMPDIR=/tmp/gt TRACEPARENT=00-x FM_TASK_ID="$id" LAVISH_AXI_PORT=4387 \
-      "$sh" -c "unset LAVISH_AXI_HOST; $prefix -- true" \
+    env -u LAVISH_AXI_HOST -u LAVISH_AXI_PORT -u TRACEPARENT FM_FAKE_SANDBOX_LOG="$SB_LOG" PATH="$FAKEBIN_DIR:$PATH" \
+      "$sh" -c "$prefix -- true" \
       || fail "$sh: the wrapper prefix failed to run"
     calls=$(tail -n 1 "$SB_LOG")
-    assert_contains "$calls" "[--env] [GOTMPDIR]" "$sh: GOTMPDIR must be two argv words"
-    assert_contains "$calls" "[--env] [TRACEPARENT]" "$sh: TRACEPARENT must be two argv words"
-    assert_contains "$calls" "[--env] [FM_TASK_ID]" "$sh: the task marker must reach the sandbox"
-    assert_contains "$calls" "[--env] [LAVISH_AXI_PORT]" "$sh: the lavish port must travel with its host"
-    assert_not_contains "$calls" "LAVISH_AXI_HOST" "$sh: an unset name must not be passed"
+    for name in COMPACT_ADVISER_DISABLE FM_TASK_INBOX FM_TASK_ID GOTMPDIR TRACEPARENT LAVISH_AXI_HOST LAVISH_AXI_PORT; do
+      assert_contains "$calls" "[--env] [$name]" "$sh: $name must reach the wrapper as its own --env pair"
+    done
     assert_not_contains "$calls" "[--env GOTMPDIR]" "$sh: the pair must never be one word"
   done
-  [ "$ran" -gt 0 ] || fail "neither bash nor zsh was available to run the wrapper prefix"
-  pass "fm-spawn: optional env names reach the wrapper as separate words under bash and zsh"
+  [ "$ran" -gt 0 ] || fail "no pane shell was available to run the wrapper prefix"
+  pass "fm-spawn: the wrapper's env names parse as static --env pairs in every pane shell"
 }
 
 # observed_launch <case-dir> <id>: everything the seam could touch, with the
@@ -809,6 +809,6 @@ test_home_at_the_code_root_is_never_bound
 test_other_tasks_launch_record_is_never_bound
 test_sandboxed_extension_reports_through_the_relay
 test_default_launch_is_byte_identical
-test_optional_env_words_survive_zsh_and_bash
+test_env_words_parse_in_every_pane_shell
 
 echo "all fm-spawn-sandbox tests passed"

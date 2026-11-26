@@ -4220,9 +4220,9 @@ spawn_sandbox_resolve() {
 # binds in order never shadows a writable task bind. Never state/ and never
 # FM_HOME: a writable state/ would let a worker rewrite other workers' inboxes and
 # extensions, which run unsandboxed (the reason the busy edge goes through
-# bin/fm-sandbox-relay.sh instead). Names that may be unset in the pane expand
-# at launch (`${NAME+--env} ${NAME+NAME}`, two words: zsh does not word-split a
-# single unquoted expansion), so an unset one is never named.
+# bin/fm-sandbox-relay.sh instead). The --env names are static words, so the
+# launch text parses in any pane shell, fish included; the wrapper skips a name
+# unset at launch.
 spawn_sandbox_wrap() {
   local root_real dirs role path word prefix
   local binds=()
@@ -4246,13 +4246,12 @@ EOF
   [ "$GIT_HOOKS_INSTALLED" != 1 ] || binds+=(--ro "$GIT_HOOKS_DIR")
   binds+=(--ro "$STATE_REAL/$ID.omp-ext.ts" --rw "$TASK_TMP"
     --rw "$(fm_sandbox_events_dir "$STATE_REAL" "$ID")"
-    --env COMPACT_ADVISER_DISABLE --env FM_TASK_INBOX --host-helper "$SANDBOX_HELPER")
+    --env COMPACT_ADVISER_DISABLE --env FM_TASK_INBOX --env FM_TASK_ID --env GOTMPDIR
+    --env TRACEPARENT --env LAVISH_AXI_HOST --env LAVISH_AXI_PORT --host-helper "$SANDBOX_HELPER")
   prefix=$(shell_quote "$SANDBOX_BIN")
   for word in "${binds[@]}"; do
     prefix="$prefix $(shell_quote "$word")"
   done
-  # shellcheck disable=SC2016 # expanded by the pane shell at launch, by design
-  prefix="$prefix"' ${FM_TASK_ID+--env} ${FM_TASK_ID+FM_TASK_ID} ${GOTMPDIR+--env} ${GOTMPDIR+GOTMPDIR} ${TRACEPARENT+--env} ${TRACEPARENT+TRACEPARENT} ${LAVISH_AXI_HOST+--env} ${LAVISH_AXI_HOST+LAVISH_AXI_HOST} ${LAVISH_AXI_PORT+--env} ${LAVISH_AXI_PORT+LAVISH_AXI_PORT}'
   LAUNCH="$prefix -- $LAUNCH"
 }
 
