@@ -120,6 +120,11 @@ Use e.g. `--setup`; etc. works, vs. a fresh fetch. See https://example.com/docs 
 ```
 code fence
 ```
+
+Only split when x < 10 and y > 5 here.
+Run `cmd <in >out` to convert the file.
+<b>bold</b> and <https://example.com/x> here.
+<div class="x">text</div>
 MD
   IFS= read -r -d '' expected <<'TXT' || true
 Release notes.
@@ -129,6 +134,10 @@ Use for example, --setup; et cetera, works, versus a fresh fetch.
 See for without pain.
 First item with emphasis and bold and underscores.
 Second item to third item, 3 by 4 sizes, 50 percent faster.
+Only split when x < 10 and y > 5 here.
+Run cmd <in >out to convert the file.
+bold and here.
+text
 TXT
   expected=${expected%$'\n'}
   out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
@@ -400,6 +409,33 @@ test_setup_reports_missing_curl_before_downloading() {
   pass "setup: a missing curl is named with its install line before any download"
 }
 
+# docs/audio-briefings.md: a missing prerequisite is reported with how to install
+# it, so python3 gets the same install line curl gets.
+test_setup_reports_missing_python3_with_an_install_hint() {
+  local root fakebin kokoro out rc
+  root=$TMP_ROOT/setup-no-python3
+  kokoro=$root/kokoro
+  fakebin=$(fm_fakebin "$root")
+  printf '%s\n' '#!/bin/sh' 'printf "%s\\n" Darwin' > "$fakebin/uname"
+  chmod +x "$fakebin/uname"
+  ln -s "$(command -v mkdir)" "$fakebin/mkdir"
+  fake_curl "$fakebin"
+
+  out=$(PATH="$fakebin" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    "$BASH" "$SPEAK" --setup 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "--setup must fail when python3 is missing and a venv must be built"
+  assert_contains "$out" "python3 is needed to build the Kokoro venv" \
+    "a missing python3 must be reported as the missing tool"
+  assert_contains "$out" "install python3 3.10 to 3.13" \
+    "the missing-python3 line must say which python3 to install"
+  assert_contains "$out" "python3-venv" \
+    "the missing-python3 line must name the venv module Debian and Ubuntu users need"
+  assert_not_contains "$out" "command not found" \
+    "setup must not let the shell report the missing python3"
+  pass "setup: a missing python3 is named with its install line"
+}
+
 # docs/audio-briefings.md: the C++ runtime is a Linux cause. Off Linux a venv
 # that cannot import its packages is rebuilt, never blamed on a runtime the
 # platform does not use.
@@ -593,6 +629,7 @@ fm_test_run \
   test_setup_on_macos_does_not_require_libstdcxx \
   test_unusable_cpp_runtime_is_reported_as_the_cause \
   test_setup_reports_missing_curl_before_downloading \
+  test_setup_reports_missing_python3_with_an_install_hint \
   test_setup_repairs_an_unimportable_venv_off_linux \
   test_failed_later_part_still_leaves_earlier_parts_indexed \
   test_setup_repairs_a_venv_that_cannot_import \

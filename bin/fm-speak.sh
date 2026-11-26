@@ -303,7 +303,7 @@ cmd_setup() {
     die "$(kokoro_runtime_hint)"
   else
     command -v python3 >/dev/null 2>&1 ||
-      die "python3 is needed to build the Kokoro venv and is not on PATH"
+      die "python3 is needed to build the Kokoro venv and is not on PATH (install python3 3.10 to 3.13 and its venv module with your package manager, for example apt install python3 python3-venv or brew install python)"
     if [ -x "$KOKORO_VENV/bin/python" ]; then
       printf 'venv: repairing %s\n' "$KOKORO_VENV"
       rm -rf "$KOKORO_VENV" || die "could not replace the unusable venv at $KOKORO_VENV"
@@ -519,7 +519,7 @@ awk '
     sub(/^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]+/, "", line)
     sub(/\[[ xX]\][[:space:]]+/, "", line)
     gsub(/<!--.*-->/, "", line)
-    gsub(/<[^>]*>/, "", line)
+    gsub(/<\/?[A-Za-z]([^>]*[^[:space:]>])?>/, "", line)
     if (line ~ /^[[:space:]]*$/) { next }
     print line
   }
