@@ -145,7 +145,8 @@
 # generated check, as it does FM_CONTRIBUTIONS_BUDGET, so the watcher honors it.
 # arm also resolves FM_CONFIG_OVERRIDE against its working directory and embeds
 # the absolute effective config directory, so later polls keep the same bot
-# allowlist regardless of their working directory or ambient override.
+# allowlist and movement setting regardless of their working directory or
+# ambient override.
 # With it set, acknowledging a signal never ends tracking of its thread. On an
 # open pull request, each admitted inline review comment and each admitted
 # review in state CHANGES_REQUESTED is an unanswered thread until the
