@@ -5,11 +5,15 @@
 # CONTRACT (this header is the one owner of the store's format).
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
-#     "verdict":"routine"|"captain","summary":"...","silent":true|false,
+#     "verdict":"routine"|"captain"|"notice","summary":"...","silent":true|false,
 #     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
 #     or status provenance remain valid and are treated as visible. A silent
 #     row must have verdict `routine`; the branch prompt and delivery consumers
 #     own the additional no-change eligibility rule.
+#     A notice is a deterministic followed-PR outcome, rendered directly without
+#     a processing turn. Its nonempty wake is an idempotency key: appending the
+#     same notice returns its existing sequence. A different summary for that
+#     key refuses. Notice creation requires config/pr-follow.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -44,6 +48,12 @@
 #     before the marker existed or switched between Pi and the host, presents
 #     its delivered captain rows again, dated and check-first, until main
 #     acknowledges them. A marker ahead of the read cursor fails closed.
+#   - Notice cursor: $STATE/.branch-notices-cursor holds the highest notice
+#     displayed by the active primary. It is separate from the model-facing
+#     read/processed markers, so a drain can never consume an unseen notice.
+#     Pi uses notices/mark-notices under this script's lock. Claude's existing
+#     display-only mod writes it after $.ui.log, under its single active-owner
+#     session check. A malformed cursor refuses rather than skipping a notice.
 #   - Outcome index: $STATE/.<task>.branch-outcome-index stores one bounded
 #     cache of the latest outcome's status provenance. The authoritative copy
 #     is in the append-only row. $STATE/.branch-outcome-index-ready is removed
@@ -76,9 +86,13 @@
 #     conversation memory.
 #
 # Usage:
-#   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
+#   fm-branch-outcome.sh append --task <id> --verdict routine|captain|notice \
 #       --summary <text> [--wake <text>] [--silent true|false]
 #     Append one outcome record; prints the assigned seq.
+#   fm-branch-outcome.sh notices
+#     Print notices not yet displayed, independently of model-facing cursors.
+#   fm-branch-outcome.sh mark-notices --through <seq>
+#     Advance the notice cursor after direct display, never after model delivery.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -144,6 +158,7 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
+NOTICE_CURSOR="$STATE/.branch-notices-cursor"
 PROCESSED="$STATE/.branch-outcomes-processed"
 LOCK="$STATE/.branch-outcomes.lock"
 MAX_SAFE_SEQ=9007199254740991
@@ -163,7 +178,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain|notice --summary <text> [--wake <text>] [--silent true|false] | notices | mark-notices --through <seq> | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -249,7 +264,7 @@ last_seq() { # [<file> [<first expected seq, or null for a bounded suffix>]]
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
-      and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
+      and ((.summary | type) == "string" and (.verdict | IN("routine", "captain", "notice")))
       and (.silent != true or .verdict == "routine");
     if endswith("\n") then split("\n")[:-1]
     else error("unterminated outcome store")
@@ -516,7 +531,10 @@ case "$CMD" in
     [ -n "$TASK" ] || usage
     outcome_index_path "$TASK" >/dev/null || usage
     [ -n "$SUMMARY" ] || usage
-    case "$VERDICT" in routine|captain) ;; *) usage ;; esac
+    case "$VERDICT" in routine|captain|notice) ;; *) usage ;; esac
+    if [ "$VERDICT" = notice ]; then
+      [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-follow" ] && [ -n "$WAKE" ] || usage
+    fi
     case "$SILENT" in true|false) ;; *) usage ;; esac
     if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
       echo "error: silent outcomes must have the routine verdict" >&2
@@ -532,6 +550,20 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome cursor is invalid or ahead of the store" >&2
       exit 1
+    fi
+    if [ "$VERDICT" = notice ] && [ -s "$STORE" ]; then
+      EXISTING=$(jq -cs --arg wake "$WAKE" '[.[] | select(.verdict == "notice" and .wake == $wake)] | first // empty' "$STORE")
+      if [ -n "$EXISTING" ]; then
+        if ! printf '%s' "$EXISTING" | jq -e --arg task "$TASK" --arg summary "$SUMMARY" '.task == $task and .summary == $summary' >/dev/null; then
+          fm_lock_release "$LOCK"
+          echo 'error: conflicting notice for an existing event key' >&2
+          exit 1
+        fi
+        write_outcome_tail || { fm_lock_release "$LOCK"; exit 1; }
+        fm_lock_release "$LOCK"
+        printf '%s' "$EXISTING" | jq -r '.seq'
+        exit 0
+      fi
     fi
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
@@ -558,6 +590,30 @@ case "$CMD" in
     fi
     fm_lock_release "$LOCK"
     printf '%s\n' "$SEQ"
+    ;;
+  notices|mark-notices)
+    fm_lock_acquire_wait "$LOCK"
+    CURSOR=$NOTICE_CURSOR
+    LAST_SEQ=$(last_seq) || { fm_lock_release "$LOCK"; exit 1; }
+    CURSOR_SEQ=$(read_cursor) || { fm_lock_release "$LOCK"; exit 1; }
+    [ "$CURSOR_SEQ" -le "$LAST_SEQ" ] || { fm_lock_release "$LOCK"; exit 1; }
+    if [ "$CMD" = notices ]; then
+      [ "$#" -eq 0 ] || usage
+      [ ! -s "$STORE" ] || jq -c --argjson cursor "$CURSOR_SEQ" 'select(.verdict == "notice" and .seq > $cursor)' "$STORE"
+    else
+      if [ "$#" -ne 2 ] || [ "$1" != --through ] || ! bounded_uint "$2"; then usage; fi
+      THROUGH=$2
+      if [ "$THROUGH" -gt "$CURSOR_SEQ" ]; then
+        if [ "$THROUGH" -gt "$LAST_SEQ" ] || ! jq -e --argjson seq "$THROUGH" -s 'any(.[]; .seq == $seq and .verdict == "notice")' "$STORE" >/dev/null; then
+          fm_lock_release "$LOCK"
+          exit 1
+        fi
+        TMP=$(mktemp "$STATE/.branch-notices-cursor.XXXXXX")
+        printf '%s\n' "$THROUGH" > "$TMP"
+        mv -f -- "$TMP" "$NOTICE_CURSOR"
+      fi
+    fi
+    fm_lock_release "$LOCK"
     ;;
   unread)
     [ "$#" -eq 0 ] || usage
@@ -615,7 +671,7 @@ case "$CMD" in
     fi
     if [ -s "$STORE" ] && ! jq -c --argjson cursor "$CURSOR_SEQ" --argjson processed "$PROCESSED_SEQ" \
         --argjson now "$(date +%s)" "$RECORDED_AGO_JQ"'
-        select(.seq > $cursor or (.verdict == "captain" and .seq > $processed))
+        select(.verdict != "notice" and (.seq > $cursor or (.verdict == "captain" and .seq > $processed)))
         | . + {unread: (.seq > $cursor)}
         | if .verdict == "captain" then . + {recordedAgo: recorded_ago} else . end' "$STORE"; then
       fm_lock_release "$LOCK"
@@ -756,7 +812,7 @@ case "$CMD" in
     if [ -n "$UNREAD" ]; then
       REPLAYABLE=$(printf '%s\n' "$UNREAD" | jq -sc '
         map(.verdict) as $verdicts
-        | ($verdicts | index("captain")) as $captain
+        | ($verdicts | map(. != "routine") | index(true)) as $captain
         | .[0:($captain // length)][]
       ')
       VISIBLE=$(printf '%s\n' "$REPLAYABLE" | jq -c 'select(.silent != true)')

@@ -63,7 +63,9 @@
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
 #                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
+#                       always safe, always runs. With config/pr-follow
+#                       present, one line then points to the follow rules
+#                       in docs/configuration.md.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -1057,6 +1059,9 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+if [ -e "$CONFIG/pr-follow" ]; then
+  printf 'PR following is enabled: for follow or unfollow requests, read %s/docs/configuration.md (Explicit PR follows).\n' "$FM_ROOT"
+fi
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step

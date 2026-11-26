@@ -512,6 +512,8 @@ fm_watcher_supervision_verdict() {
   FM_WATCHER_VERDICT_REASON=stale-beacon
   beat="$state/.last-watcher-beat"
   age=$(fm_path_age "$beat")
+  # A beacon stamped slightly ahead of this clock read is fresh, as in fm_watcher_healthy.
+  case "$age" in -[0-9]*) age=0 ;; esac
   case "$age" in
     ''|*[!0-9]*) ;;
     *) [ "$age" -lt "$grace" ] && fresh=true ;;
