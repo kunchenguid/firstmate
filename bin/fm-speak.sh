@@ -555,58 +555,71 @@ sed -E \
   -e 's/[[:space:]]+([.,;:!?])/\1/g' \
   "$text" >"$workdir/inline.txt" || die "could not normalise the input text"
 
-# Emphasis pass: markdown's flanking rules decide what is a marker, so an
-# intraword `_` inside an identifier and a `*` followed by a space are left
-# alone, while real markers of any delimiter run length are removed in full.
+# Emphasis pass: markdown's flanking rules decide which delimiter runs open and
+# close emphasis, and a run is matched against the openers still awaiting a
+# closer, so nesting of any depth and any mix of run lengths resolves the way
+# markdown resolves it. An intraword `_` inside an identifier and a `*` followed
+# by a space open and close nothing, so they stay literal.
 awk '
   function space_char(c) { return c == "" || c ~ /^[[:space:]]$/ }
-  function word_char(c) { return c != "" && c ~ /^[[:alnum:]_]$/ }
-  function strip(s, ch,   out, n, i, k, run, nxt, prv, j, m) {
-    out = ""
+  function punct_char(c) { return c != "" && c ~ /^[[:punct:]]$/ }
+  function emphasis_strip(s,   n, i, k, c, prv, nxt, left, right,
+                            count, ch, at, width, left_chars, opens, closes,
+                            stack, top, r, t, o, use, out, rest) {
     n = length(s)
+    count = 0
     i = 1
     while (i <= n) {
-      if (substr(s, i, 1) != ch) { out = out substr(s, i, 1); i++; continue }
+      c = substr(s, i, 1)
+      if (c != "*" && c != "_") { i++; continue }
       k = i
-      while (k <= n && substr(s, k, 1) == ch) k++
-      run = k - i
-      nxt = substr(s, k, 1)
+      while (k <= n && substr(s, k, 1) == c) k++
       prv = (i > 1) ? substr(s, i - 1, 1) : ""
-      if (space_char(nxt) || (ch == "_" && word_char(prv))) {
-        out = out substr(s, i, run)
-        i = k
-        continue
+      nxt = substr(s, k, 1)
+      left = !space_char(nxt) && (!punct_char(nxt) || space_char(prv) || punct_char(prv))
+      right = !space_char(prv) && (!punct_char(prv) || space_char(nxt) || punct_char(nxt))
+      count++
+      ch[count] = c
+      at[count] = i
+      width[count] = k - i
+      left_chars[count] = k - i
+      if (c == "*") {
+        opens[count] = left
+        closes[count] = right
+      } else {
+        opens[count] = left && (!right || punct_char(prv))
+        closes[count] = right && (!left || punct_char(nxt))
       }
-      j = k
-      m = 0
-      while (j <= n) {
-        if (substr(s, j, 1) != ch) { j++; continue }
-        m = j
-        while (m <= n && substr(s, m, 1) == ch) m++
-        if (m - j >= run && j > k && !space_char(substr(s, j - 1, 1)) &&
-            !(ch == "_" && word_char(substr(s, m, 1)))) break
-        j = m
-        m = 0
-      }
-      if (m == 0) {
-        out = out substr(s, i, run)
-        i = k
-        continue
-      }
-      out = out substr(s, k, j - k)
-      i = j + run
+      i = k
     }
-    return out
+    top = 0
+    for (r = 1; r <= count; r++) {
+      while (closes[r] && left_chars[r] > 0) {
+        o = 0
+        for (t = top; t > 0; t--) {
+          if (ch[stack[t]] == ch[r] && left_chars[stack[t]] > 0) { o = t; break }
+        }
+        if (o == 0) break
+        use = (left_chars[stack[o]] < left_chars[r]) ? left_chars[stack[o]] : left_chars[r]
+        left_chars[stack[o]] -= use
+        left_chars[r] -= use
+        if (left_chars[stack[o]] == 0) {
+          for (t = o; t < top; t++) stack[t] = stack[t + 1]
+          top--
+        }
+      }
+      if (opens[r] && left_chars[r] > 0) { top++; stack[top] = r }
+    }
+    out = ""
+    rest = 1
+    for (r = 1; r <= count; r++) {
+      out = out substr(s, rest, at[r] - rest)
+      for (t = 0; t < left_chars[r]; t++) out = out ch[r]
+      rest = at[r] + width[r]
+    }
+    return out substr(s, rest)
   }
-  {
-    line = $0
-    do {
-      before = line
-      line = strip(line, "*")
-      line = strip(line, "_")
-    } while (line != before)
-    print line
-  }
+  { print emphasis_strip($0) }
 ' "$workdir/inline.txt" >"$workdir/emphasis.txt" || die "could not strip emphasis"
 
 # Abbreviation pass. The scan steps over the expansion, never over the boundary

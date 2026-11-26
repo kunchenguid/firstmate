@@ -193,12 +193,14 @@ Set `FM_TTS_KOKORO_DIR` and `kokoro_venv_ready` or leave _emphasis_ alone.
 The range 2 * 3 * 4 stays, and *real*, **strong**, __solid__ and _under_ markers go.
 Use ***bold italic***, ___both___ and ****x**** here.
 Nested **bold *em*** and _ital **bold**_ and *italic with **bold*** lose theirs too.
+*see **this** note* and _a __b__ c_ and **bold with *emphasis*** are emphasis too.
 MD
   IFS= read -r -d '' expected <<'TXT' || true
 Set FM_TTS_KOKORO_DIR and kokoro_venv_ready or leave emphasis alone.
 The range 2 * 3 * 4 stays, and real, strong, solid and under markers go.
 Use bold italic, both and x here.
 Nested bold em and ital bold and italic with bold lose theirs too.
+see this note and a b c and bold with emphasis are emphasis too.
 TXT
   expected=${expected%$'\n'}
   out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
