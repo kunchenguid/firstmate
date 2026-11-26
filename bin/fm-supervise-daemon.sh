@@ -218,8 +218,16 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # harness-verification discipline. Selecting one refuses loudly at startup
 # instead of silently running tmux primitives against a pane that is not a tmux
 # pane. t3code injects through the adapter's t3_thread_send, with its
-# thread status table as the busy verdict.
-FM_SUPERVISOR_SUPPORTED_BACKENDS="tmux herdr rex t3code"
+# thread status table as the busy verdict. The supervisor capability
+# (fm_backend_capability) answers which backends those are; this list, in
+# FM_BACKEND_KNOWN order, is what the startup refusal prints.
+FM_SUPERVISOR_SUPPORTED_BACKENDS=
+for _fm_supervisor_backend in $FM_BACKEND_KNOWN; do
+  if fm_backend_capable "$_fm_supervisor_backend" supervisor; then
+    FM_SUPERVISOR_SUPPORTED_BACKENDS="${FM_SUPERVISOR_SUPPORTED_BACKENDS:+$FM_SUPERVISOR_SUPPORTED_BACKENDS }$_fm_supervisor_backend"
+  fi
+done
+unset _fm_supervisor_backend
 INJECT_SKIP_DEFAULT="heartbeat"
 STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
@@ -2142,7 +2150,7 @@ fm_super_main() {
   # AGENTS.md section 4 harness-verification discipline). This is the clear
   # refusal the task calls for, instead of a confusing "does not resolve to a
   # tmux pane" error.
-  if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
+  if ! fm_backend_capable "$BACKEND" supervisor; then
     echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
     fm_lock_release "$LOCK" 2>/dev/null || true

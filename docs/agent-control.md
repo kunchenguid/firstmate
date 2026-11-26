@@ -13,7 +13,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 ## What the control plane owns
 
-`bin/fm-control-lib.sh` is the single executable owner of three capability tables, which have no side effects, so they can be read as a contract:
+`bin/fm-control-lib.sh` is the single executable owner of two capability tables and reads a third, all without side effects, so they can be read as a contract:
 
 - The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
@@ -22,6 +22,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
   These were previously carried only in the [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) skill's tool references, which now point here.
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
+  These are the backend's answers in the capability table that `fm_backend_capability` in `bin/fm-backend.sh` owns.
 
 The [endpoint-absence proof](#reclaiming-a-task-whose-endpoint-is-gone) below is the only function here that runs backend reads; sourcing the file is still free.
 

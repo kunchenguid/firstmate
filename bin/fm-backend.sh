@@ -521,11 +521,176 @@ fm_backend_validate_spawn() {  # <name>
   return 1
 }
 
+# --- capability question -----------------------------------------------------
+#
+# fm_backend_capability is the one question core asks about what a backend can
+# do, in place of matching backend names at each call site. Every built-in
+# backend answers from the table below, one row per backend, so each backend
+# states what it can and cannot do in one place. Answers are static: none
+# depends on runtime state, so a restart cannot change one.
+#
+# A flag answers exactly `yes` or `no`, and every flag is phrased so that `no`
+# is the cautious answer. A list answers one or more words. The capabilities,
+# each named after the code that asks it:
+#   visible-capture    flag: a verified viewport-only read
+#                      (fm_backend_visible_capture_supported says why each is).
+#   push               flag: a native transition push stream the watcher waits
+#                      on instead of sleeping (fm_backend_has_push).
+#   keys               list: the named keys the adapter can deliver
+#                      (bin/fm-control-lib.sh's fm_control_backend_supports_key).
+#   state-verified     flag: a recovery-grade agent-state classifier able to
+#                      prove an agent stopped (fm_control_backend_state_verified).
+#   exit               flag: the control plane can stop the agent for `exit`
+#                      (fm_control_backend_exit_supported).
+#   relaunch           flag: a replacement agent can be launched into the
+#                      task's endpoint (fm_control_backend_relaunch_supported).
+#   secondmate         flag: bin/fm-spawn.sh accepts a --secondmate spawn.
+#   remote-secondmate  flag: a remote secondmate's endpoint can run on it
+#                      (bin/fm-remote-secondmate-control.sh says why).
+#   supervisor         flag: the away-mode daemon can supervise a firstmate
+#                      pane on it (bin/fm-supervise-daemon.sh says why).
+#   required-tools     list: the backend-specific CLI tools a home on it needs
+#                      (fm_backend_required_tools says why each is).
+#
+# A backend with no row, a capability outside this list, and a missing or
+# malformed answer are each refused: an error on stderr, nothing on stdout,
+# and return 1. There is no default answer.
+fm_backend_capability() {  # <backend> <cap>
+  local backend=${1-} cap=${2-} kind answer
+  local cap_visible_capture cap_push cap_keys cap_state_verified cap_exit cap_relaunch
+  local cap_secondmate cap_remote_secondmate cap_supervisor cap_required_tools
+  case "$backend" in
+    tmux)
+      cap_visible_capture=yes cap_push=no cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=yes cap_exit=yes cap_relaunch=yes
+      cap_secondmate=yes cap_remote_secondmate=no cap_supervisor=yes
+      cap_required_tools='tmux treehouse'
+      ;;
+    herdr)
+      cap_visible_capture=yes cap_push=yes cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=yes cap_exit=yes cap_relaunch=yes
+      cap_secondmate=yes cap_remote_secondmate=yes cap_supervisor=yes
+      cap_required_tools='herdr jq treehouse'
+      ;;
+    zellij)
+      cap_visible_capture=yes cap_push=no cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=no cap_exit=yes cap_relaunch=no
+      cap_secondmate=yes cap_remote_secondmate=no cap_supervisor=no
+      cap_required_tools='zellij jq treehouse'
+      ;;
+    orca)
+      cap_visible_capture=no cap_push=no cap_keys='Enter C-c'
+      cap_state_verified=no cap_exit=yes cap_relaunch=no
+      cap_secondmate=no cap_remote_secondmate=no cap_supervisor=no
+      cap_required_tools='orca'
+      ;;
+    cmux)
+      cap_visible_capture=no cap_push=no cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=no cap_exit=yes cap_relaunch=no
+      cap_secondmate=no cap_remote_secondmate=no cap_supervisor=no
+      cap_required_tools='cmux jq treehouse'
+      ;;
+    paseo)
+      cap_visible_capture=no cap_push=no cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=no cap_exit=yes cap_relaunch=no
+      cap_secondmate=no cap_remote_secondmate=no cap_supervisor=no
+      cap_required_tools='paseo jq treehouse'
+      ;;
+    rex)
+      cap_visible_capture=yes cap_push=yes cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=yes cap_exit=yes cap_relaunch=yes
+      cap_secondmate=yes cap_remote_secondmate=yes cap_supervisor=yes
+      cap_required_tools='rex jq treehouse'
+      ;;
+    t3code)
+      cap_visible_capture=no cap_push=yes cap_keys='Escape Enter C-c'
+      cap_state_verified=yes cap_exit=no cap_relaunch=no
+      cap_secondmate=yes cap_remote_secondmate=no cap_supervisor=yes
+      cap_required_tools='node treehouse'
+      ;;
+    tern)
+      cap_visible_capture=yes cap_push=no cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=no cap_exit=yes cap_relaunch=no
+      cap_secondmate=no cap_remote_secondmate=no cap_supervisor=no
+      cap_required_tools='tern jq treehouse'
+      ;;
+    hc)
+      cap_visible_capture=yes cap_push=no cap_keys='Escape Enter C-c C-u'
+      cap_state_verified=no cap_exit=yes cap_relaunch=no
+      cap_secondmate=no cap_remote_secondmate=no cap_supervisor=no
+      cap_required_tools='hc jq treehouse'
+      ;;
+    *)
+      echo "error: backend '$backend' has no capability answers (known: $FM_BACKEND_KNOWN)" >&2
+      return 1
+      ;;
+  esac
+  case "$cap" in
+    visible-capture) kind=flag answer=$cap_visible_capture ;;
+    push) kind=flag answer=$cap_push ;;
+    keys) kind=list answer=$cap_keys ;;
+    state-verified) kind=flag answer=$cap_state_verified ;;
+    exit) kind=flag answer=$cap_exit ;;
+    relaunch) kind=flag answer=$cap_relaunch ;;
+    secondmate) kind=flag answer=$cap_secondmate ;;
+    remote-secondmate) kind=flag answer=$cap_remote_secondmate ;;
+    supervisor) kind=flag answer=$cap_supervisor ;;
+    required-tools) kind=list answer=$cap_required_tools ;;
+    *)
+      echo "error: unknown backend capability '$cap' (asked of backend '$backend')" >&2
+      return 1
+      ;;
+  esac
+  if ! fm_backend_capability_answer_valid "$kind" "$answer"; then
+    echo "error: backend '$backend' has a missing or malformed '$cap' answer '$answer'; refusing rather than guessing" >&2
+    return 1
+  fi
+  printf '%s' "$answer"
+}
+
+# A flag answer is exactly yes or no. A list answer is one or more words of
+# letters, digits, and . _ + - separated by single spaces.
+fm_backend_capability_answer_valid() {  # <flag|list> <answer>
+  case "$1" in
+    flag)
+      case "$2" in yes|no) return 0 ;; esac
+      ;;
+    list)
+      case "$2" in
+        ''|' '*|*' '|*'  '*|*[!A-Za-z0-9._+\ -]*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# fm_backend_capable: 0 when <backend>'s <cap> flag is `yes`, or when its <cap>
+# list holds <word>; 1 when it does not; 2 when the question was refused, with
+# fm_backend_capability's error on stderr. Because every flag's `no` is the
+# cautious answer, a caller testing this with `if` or `||` takes its refusing
+# branch on a refusal as well.
+fm_backend_capable() {  # <backend> <cap> [word]
+  local answer
+  answer=$(fm_backend_capability "${1-}" "${2-}") || return 2
+  if [ "$#" -ge 3 ]; then
+    fm_backend_list_contains "$answer" "$3"
+    return
+  fi
+  case "$answer" in
+    yes) return 0 ;;
+    no) return 1 ;;
+  esac
+  echo "error: backend capability '$2' is a list; name the word to look for" >&2
+  return 2
+}
+
 # fm_backend_required_tools: the backend-SPECIFIC CLI tools a firstmate home on
 # <backend> genuinely requires, beyond firstmate's universal toolchain (owned by
-# docs/configuration.md "Toolchain" and bootstrap's COMMON list). This is the
-# single owner of the per-backend dependency delta, so bootstrap follows the
-# RESOLVED backend instead of demanding an inactive backend's tools. Each set is:
+# docs/configuration.md "Toolchain" and bootstrap's COMMON list). The sets are
+# the required-tools answers in fm_backend_capability's table, the single owner
+# of the per-backend dependency delta, so bootstrap follows the RESOLVED
+# backend instead of demanding an inactive backend's tools. Each set is:
 #   - the session-provider CLI itself (tmux/herdr/zellij/orca/cmux/paseo/rex/tern);
 #   - jq, for the JSON-emitting adapters (herdr, zellij, cmux, paseo, rex, tern) whose spawn/liveness
 #     paths parse the backend's JSON output (see each adapter's
@@ -535,22 +700,10 @@ fm_backend_validate_spawn() {  # <name>
 #     terminal, so it drops both treehouse and any other backend's session CLI;
 #   - node for t3code, whose adapter speaks MCP to the T3 server through
 #     bin/fm-t3-mcp.mjs.
-# Prints a single space-separated line and returns 0 for a known backend; returns
-# 1 and prints nothing for an unknown backend.
+# Prints a single space-separated line and returns 0 for a known backend; an
+# unknown backend is refused there, printing nothing on stdout and returning 1.
 fm_backend_required_tools() {  # <backend>
-  case "$1" in
-    tmux)   printf '%s' 'tmux treehouse' ;;
-    herdr)  printf '%s' 'herdr jq treehouse' ;;
-    zellij) printf '%s' 'zellij jq treehouse' ;;
-    cmux)   printf '%s' 'cmux jq treehouse' ;;
-    paseo)  printf '%s' 'paseo jq treehouse' ;;
-    rex)    printf '%s' 'rex jq treehouse' ;;
-    tern)   printf '%s' 'tern jq treehouse' ;;
-    hc)     printf '%s' 'hc jq treehouse' ;;
-    orca)   printf '%s' 'orca' ;;
-    t3code) printf '%s' 'node treehouse' ;;
-    *) return 1 ;;
-  esac
+  fm_backend_capability "${1-}" required-tools
 }
 
 fm_backend_required_tool_available() {  # <backend> <tool>
@@ -1220,9 +1373,13 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
-# FM_BACKEND_VISIBLE_CAPTURE: backends with a verified viewport-only read, each
-# implementing fm_backend_<name>_visible_capture. This one list answers both the
-# capability question and the dispatch, so they cannot disagree. cmux is absent
+# fm_backend_visible_capture_supported: whether <backend> can read the visible
+# viewport WITHOUT scrollback. Callers that must not mistake a scrolled-away
+# frame for the live screen ask this first and fail closed on a no.
+# The visible-capture answer in fm_backend_capability's table names the backends
+# with a verified viewport-only read, each implementing
+# fm_backend_<name>_visible_capture. That one answer gates both the capability
+# question and the dispatch, so they cannot disagree. cmux answers no
 # pending live verification: its `read-screen` without `--scrollback` plausibly
 # reads only the viewport, but that has not been observed on a real cmux, and
 # the adapter's own capture opts into history with `--scrollback`. orca's
@@ -1233,17 +1390,12 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 # tern reads the viewport with `tern capture --surfaces` and no `--scrollback`
 # (trimmed to the block's rows); its own capture opts into history with the flag.
 # hc reads the screen alone with `hc read --lines 0`.
-FM_BACKEND_VISIBLE_CAPTURE="tmux herdr zellij rex tern hc"
-
-# fm_backend_visible_capture_supported: whether <backend> can read the visible
-# viewport WITHOUT scrollback. Callers that must not mistake a scrolled-away
-# frame for the live screen ask this first and fail closed on a no.
 fm_backend_visible_capture_supported() {  # <backend>
-  fm_backend_list_contains "$FM_BACKEND_VISIBLE_CAPTURE" "$1"
+  fm_backend_capable "${1-}" visible-capture
 }
 
 # fm_backend_visible_capture: the visible viewport, never scrollback. A backend
-# outside FM_BACKEND_VISIBLE_CAPTURE declines here rather than answering with a
+# whose visible-capture answer is no declines here rather than answering with a
 # history-backed capture the caller would read as the live screen.
 fm_backend_visible_capture() {  # <backend> <target> [expected-label]
   local backend=$1
@@ -1577,12 +1729,10 @@ fm_backend_agent_alive() {  # <backend> <target>
 # reports has-push false and returns 2 from the dispatchers below, so the
 # watcher falls back to its poll loop - the permanent fail-closed backstop.
 
-# fm_backend_has_push: 0 if <backend> exposes a native transition push stream.
+# fm_backend_has_push: 0 if <backend> exposes a native transition push stream
+# (the push answer in fm_backend_capability's table).
 fm_backend_has_push() {  # <backend>
-  case "$1" in
-    herdr|rex|t3code) return 0 ;;
-    *) return 1 ;;
-  esac
+  fm_backend_capable "${1-}" push
 }
 
 # fm_backend_events_capable: 0 if <backend>'s push path is usable for <session>

@@ -928,6 +928,112 @@ test_backend_validate_refuses_unknown() {
   pass "fm_backend_validate: implemented adapters accepted, unknown and blocked codex-app backends refused loudly"
 }
 
+# The capability table must give every built-in backend exactly the answer the
+# per-name lists it replaced gave. Each expected set below is one of those
+# lists, copied from the call site that used to hold it.
+test_backend_capability_table_matches_prior_name_lists() {
+  local backend cap yes_list want got rc keys tools
+  local flag_caps="visible-capture push state-verified exit relaunch secondmate remote-secondmate supervisor"
+  for backend in $FM_BACKEND_KNOWN; do
+    for cap in $flag_caps; do
+      case "$cap" in
+        visible-capture) yes_list="tmux herdr zellij rex tern hc" ;;
+        push) yes_list="herdr rex t3code" ;;
+        state-verified) yes_list="tmux herdr rex t3code" ;;
+        exit) yes_list="tmux herdr zellij orca cmux paseo rex tern hc" ;;
+        relaunch) yes_list="tmux herdr rex" ;;
+        secondmate) yes_list="tmux herdr zellij rex t3code" ;;
+        remote-secondmate) yes_list="herdr rex" ;;
+        supervisor) yes_list="tmux herdr rex t3code" ;;
+      esac
+      want=no
+      fm_backend_list_contains "$yes_list" "$backend" && want=yes
+      got=$(fm_backend_capability "$backend" "$cap") || fail "fm_backend_capability refused $backend $cap"
+      [ "$got" = "$want" ] || fail "$backend $cap should answer '$want', got '$got'"
+      rc=0
+      fm_backend_capable "$backend" "$cap" || rc=$?
+      if [ "$want" = yes ]; then expect_code 0 "$rc" "fm_backend_capable $backend $cap"; else expect_code 1 "$rc" "fm_backend_capable $backend $cap"; fi
+    done
+    case "$backend" in
+      tmux|herdr|zellij|cmux|paseo|rex|tern|hc) keys='Escape Enter C-c C-u' ;;
+      orca) keys='Enter C-c' ;;
+      t3code) keys='Escape Enter C-c' ;;
+      *) fail "no prior key list for known backend $backend" ;;
+    esac
+    case "$backend" in
+      tmux) tools='tmux treehouse' ;;
+      herdr) tools='herdr jq treehouse' ;;
+      zellij) tools='zellij jq treehouse' ;;
+      cmux) tools='cmux jq treehouse' ;;
+      paseo) tools='paseo jq treehouse' ;;
+      rex) tools='rex jq treehouse' ;;
+      tern) tools='tern jq treehouse' ;;
+      hc) tools='hc jq treehouse' ;;
+      orca) tools='orca' ;;
+      t3code) tools='node treehouse' ;;
+      *) fail "no prior required-tools set for known backend $backend" ;;
+    esac
+    got=$(fm_backend_capability "$backend" keys) || fail "fm_backend_capability refused $backend keys"
+    [ "$got" = "$keys" ] || fail "$backend keys should be '$keys', got '$got'"
+    for cap in Escape Enter C-c C-u; do
+      rc=0
+      fm_backend_capable "$backend" keys "$cap" || rc=$?
+      if fm_backend_list_contains "$keys" "$cap"; then expect_code 0 "$rc" "$backend keys $cap"; else expect_code 1 "$rc" "$backend keys $cap"; fi
+    done
+    got=$(fm_backend_capability "$backend" required-tools) || fail "fm_backend_capability refused $backend required-tools"
+    [ "$got" = "$tools" ] || fail "$backend required-tools should be '$tools', got '$got'"
+  done
+  pass "fm_backend_capability: every built-in backend answers every capability exactly as the name lists it replaced did"
+}
+
+test_backend_capability_refuses_unknown_names() {
+  local out err rc name
+  for name in bogus codex-app '' 'tmux herdr'; do
+    rc=0
+    out=$(fm_backend_capability "$name" push 2>"$TMP_ROOT/capability.err") || rc=$?
+    err=$(cat "$TMP_ROOT/capability.err")
+    expect_code 1 "$rc" "fm_backend_capability '$name' push"
+    [ -z "$out" ] || fail "a refused backend '$name' must print no answer, got '$out'"
+    assert_contains "$err" "error: backend '$name' has no capability answers" "the refusal must name backend '$name'"
+    rc=0
+    fm_backend_capable "$name" push 2>/dev/null || rc=$?
+    expect_code 2 "$rc" "fm_backend_capable '$name' push"
+  done
+  for name in bogus '' pane Push; do
+    rc=0
+    out=$(fm_backend_capability tmux "$name" 2>"$TMP_ROOT/capability.err") || rc=$?
+    err=$(cat "$TMP_ROOT/capability.err")
+    expect_code 1 "$rc" "fm_backend_capability tmux '$name'"
+    [ -z "$out" ] || fail "a refused capability '$name' must print no answer, got '$out'"
+    assert_contains "$err" "error: unknown backend capability '$name'" "the refusal must name capability '$name'"
+    rc=0
+    fm_backend_capable tmux "$name" 2>/dev/null || rc=$?
+    expect_code 2 "$rc" "fm_backend_capable tmux '$name'"
+  done
+  # A list asked as a yes-or-no flag is refused too, never read as yes or no.
+  rc=0
+  err=$(fm_backend_capable tmux keys 2>&1) || rc=$?
+  expect_code 2 "$rc" "fm_backend_capable tmux keys with no word"
+  assert_contains "$err" "is a list" "a list asked as a flag must say why it was refused"
+  # The answer check the table goes through: a missing or malformed answer
+  # fails it, so it can never reach a caller.
+  fm_backend_capability_answer_valid flag yes || fail "yes is a flag answer"
+  fm_backend_capability_answer_valid flag no || fail "no is a flag answer"
+  for name in '' maybe YES 'yes no'; do
+    fm_backend_capability_answer_valid flag "$name" && fail "'$name' must not pass as a flag answer"
+  done
+  fm_backend_capability_answer_valid list 'tmux treehouse' || fail "a word list is a list answer"
+  for name in '' ' tmux' 'tmux ' 'tmux  jq' 'tmux;jq' "tmux"$'\n'"jq"; do
+    fm_backend_capability_answer_valid list "$name" && fail "'$name' must not pass as a list answer"
+  done
+  if command -v zsh >/dev/null 2>&1; then
+    out=$(zsh -c "source '$ROOT/bin/fm-backend.sh' && fm_backend_capability orca keys && fm_backend_capable herdr push && ! fm_backend_capable tmux push" 2>&1) \
+      || fail "fm_backend_capability must answer under zsh too: $out"
+    [ "$out" = 'Enter C-c' ] || fail "zsh should read orca keys as 'Enter C-c', got '$out'"
+  fi
+  pass "fm_backend_capability: unknown backends, unknown capabilities, and malformed answers are refused with an error, never answered by default"
+}
+
 test_backend_source_shell_portable() {
   local out status stub probe
   # zsh does not word-split unquoted expansions; sourcing fm-backend.sh from
@@ -1764,6 +1870,8 @@ test_backend_tern_is_never_autodetected
 test_backend_dispatch_tables_include_tern
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
+test_backend_capability_table_matches_prior_name_lists
+test_backend_capability_refuses_unknown_names
 test_backend_source_shell_portable
 test_backend_source_requires_missing_adapter_file
 test_backend_source_requires_unreadable_adapter_file

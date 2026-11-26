@@ -2454,7 +2454,7 @@ Lavish is a presentation-only dependency for visual decisions and reports; nonvi
 **Backend requirements**
 
 The per-backend delta is required only for the backend resolved from `FM_BACKEND`, then `config/backend`, then runtime auto-detection, then default `tmux`, so a home is never told to install a tool an inactive backend or feature would need.
-`fm_backend_required_tools` in `bin/fm-backend.sh` owns the backend additions:
+The `required-tools` answers in `bin/fm-backend.sh`'s `fm_backend_capability` table, read through `fm_backend_required_tools`, own the backend additions:
 
 | Resolved backend | Additional tools |
 | --- | --- |

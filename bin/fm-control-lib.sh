@@ -12,12 +12,12 @@
 # verbs addressed to an exact task id, with the per-harness mechanics owned
 # here rather than improvised per harness in agent prose.
 #
-# This file owns three capability tables plus their pure artifact-path tables,
-# and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
-# the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads. Everything else has no side effects, runs no backend command,
-# and reads no state, so sourcing this file is still free and the tables can be
-# read by a test as a pure contract:
+# This file owns two capability tables, reads a third, and owns their pure
+# artifact-path tables, plus ONE named exception to that purity -
+# fm_control_endpoint_absence_verdict, the single owner of the per-backend
+# endpoint-absence proof, which does run backend reads. Everything else has no
+# side effects, runs no backend command, and reads no state, so sourcing this
+# file is still free and the tables can be read by a test as a pure contract:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -32,10 +32,12 @@
 #      bin/fm-send.sh's --key path reads the same table rather than a second
 #      copy of it.
 #   3. Per-backend capability: which named keys a runtime backend can deliver,
-#      and whether the backend has a recovery-grade agent-state classifier
+#      whether the backend has a recovery-grade agent-state classifier
 #      (bin/fm-backend.sh's fm_backend_agent_state) able to PROVE that an agent
-#      stopped. A verb whose postcondition cannot be proven on the recorded
-#      backend is refused rather than performed blind.
+#      stopped, and whether it supports exit and relaunch. These read the
+#      backend's answers in bin/fm-backend.sh's capability table
+#      (fm_backend_capability). A verb whose postcondition cannot be proven on
+#      the recorded backend is refused rather than performed blind.
 #
 # `resume` is deliberately NOT a verb: it is not deterministic across the
 # verified adapters (docs/agent-control.md owns the per-adapter resume facts).
@@ -333,67 +335,62 @@ fm_control_relaunch_resume_flag() {  # <harness> <registered-agent>
   return 0
 }
 
-# Which named keys a backend adapter can deliver. Every session provider
-# normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
-# exposes only an interrupt and an Enter, so it can deliver neither Escape nor
-# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key). T3 has no composer
-# to clear, so Ctrl+U has nothing to do there; Escape and Ctrl+C are both a
-# turn interrupt (bin/backends/t3code.sh's fm_backend_t3code_send_key).
-fm_control_backend_supports_key() {  # <backend> <key>
-  local backend=${1-} key=${2-}
-  case "$backend" in
-    tmux|herdr|zellij|cmux|paseo|rex|tern|hc)
-      case "$key" in Escape|Enter|C-c|C-u) return 0 ;; esac
-      ;;
-    orca)
-      case "$key" in Enter|C-c) return 0 ;; esac
-      ;;
-    t3code)
-      case "$key" in Escape|Enter|C-c) return 0 ;; esac
-      ;;
-  esac
-  return 1
+# fm_control_backend_capable: fm_backend_capable (bin/fm-backend.sh), which
+# every production caller of this file has already sourced. A caller that has
+# not, such as a test reading these tables on their own, gets fm-backend.sh
+# loaded from this file's directory on first use, so sourcing this file stays
+# free. Returns 0 yes, 1 no, 2 refused; each predicate below treats a refusal
+# as its cautious no.
+fm_control_backend_capable() {  # <backend> <cap> [word]
+  if ! declare -F fm_backend_capable >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    . "$(dirname "${BASH_SOURCE[0]}")/fm-backend.sh" || return 2
+  fi
+  fm_backend_capable "$@"
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
-# rex, and t3code implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
-# `unverified`, and tern's `tern process` classifier answers for display but is
-# not promoted to this list, so no reading of theirs can prove an agent stopped.
+# Which named keys a backend adapter can deliver (its keys answer). Every
+# session provider normalizes Enter, Ctrl+C, and the Ctrl+U composer clear;
+# Orca's terminal API exposes only an interrupt and an Enter, so it can deliver
+# neither Escape nor Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
+# T3 has no composer to clear, so Ctrl+U has nothing to do there; Escape and
+# Ctrl+C are both a turn interrupt (bin/backends/t3code.sh's
+# fm_backend_t3code_send_key).
+fm_control_backend_supports_key() {  # <backend> <key>
+  fm_control_backend_capable "${1-}" keys "${2-}"
+}
+
+# Whether <backend> has a recovery-grade agent-state classifier (its
+# state-verified answer). tmux, herdr, rex, and t3code implement
+# fm_backend_agent_state; zellij, orca, cmux, and paseo report `unverified`,
+# and tern's `tern process` and hc's `hc get` classifiers answer for display
+# but are not promoted, so no reading of theirs can prove an agent stopped.
 # The control plane refuses a stop-proving verb there instead of reporting an
 # unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
-  case "${1-}" in
-    tmux|herdr|rex|t3code) return 0 ;;
-  esac
-  return 1
+  fm_control_backend_capable "${1-}" state-verified
 }
 
-# Whether <backend> can stop an agent for `exit`. T3 Code cannot: it has no
-# composer for the harness exit command, and its Orchestrator V2 `/mcp` tools
-# offer no session stop, only a turn interrupt that leaves the thread idle and
-# alive, so no stop could be proven and `exit` refuses before anything is
-# sent (docs/t3code-backend.md "Active limits").
+# Whether <backend> can stop an agent for `exit` (its exit answer). T3 Code
+# cannot: it has no composer for the harness exit command, and its
+# Orchestrator V2 `/mcp` tools offer no session stop, only a turn interrupt
+# that leaves the thread idle and alive, so no stop could be proven and `exit`
+# refuses before anything is sent (docs/t3code-backend.md "Active limits").
 fm_control_backend_exit_supported() {  # <backend>
-  case "${1-}" in
-    t3code) return 1 ;;
-  esac
-  return 0
+  fm_control_backend_capable "${1-}" exit
 }
 
 # Whether <backend> can launch a REPLACEMENT agent into an existing task's
-# endpoint. A T3 thread keeps its conversation: a new turn continues the same
-# agent with its transcript, and a provider or model change through
-# t3_thread_configure is a context handoff on the same thread (T3 main; older
-# nightlies refused a driver change outright), never the fresh agent a
-# relaunch promises. So t3code has no replacement to launch and a relaunch
+# endpoint (its relaunch answer). A T3 thread keeps its conversation: a new
+# turn continues the same agent with its transcript, and a provider or model
+# change through t3_thread_configure is a context handoff on the same thread
+# (T3 main; older nightlies refused a driver change outright), never the fresh
+# agent a relaunch promises. So t3code has no replacement to launch and a relaunch
 # is refused before anything is stopped (docs/t3code-backend.md "Active
-# limits"). zellij, orca, cmux, and paseo never reach this table: they fail
+# limits"). zellij, orca, cmux, and paseo never reach this answer: they fail
 # fm_control_backend_state_verified first.
 fm_control_backend_relaunch_supported() {  # <backend>
-  case "${1-}" in
-    tmux|herdr|rex) return 0 ;;
-  esac
-  return 1
+  fm_control_backend_capable "${1-}" relaunch
 }
 
 # Whether a raw fm_backend_agent_state reading on <backend> goes through

@@ -1471,14 +1471,13 @@ spawn_remote_secondmate() {
   fi
   case "${backend:--}" in
   -) backend=herdr ;;
-  herdr | rex) ;;
-  *)
+  esac
+  if ! fm_backend_capable "$backend" remote-secondmate; then
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: a remote secondmate runs only on the herdr or rex backend, not '$backend'" >&2
     return 1
-    ;;
-  esac
+  fi
   # Gate the host before anything is published or transferred, so a host that
   # cannot hold a durable endpoint refuses here rather than half-way
   # through a launch. This is also the readiness gate every liveness relaunch
@@ -2400,24 +2399,8 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=orca does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=cmux does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = paseo ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=paseo does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = tern ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=tern does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
-  if [ "$BACKEND" = hc ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=hc does not support --secondmate spawns yet" >&2
+  if [ "$KIND" = secondmate ] && ! fm_backend_capable "$BACKEND" secondmate; then
+    echo "error: backend=$BACKEND does not support --secondmate spawns yet" >&2
     exit 1
   fi
   fm_backend_runtime_check "$BACKEND" || exit 1
@@ -2497,7 +2480,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
   # one into the same endpoint, and only a backend with a recovery-grade
-  # classifier can (bin/fm-control-lib.sh owns that capability table).
+  # classifier can (its state-verified answer in bin/fm-backend.sh's
+  # capability table).
   fm_control_backend_state_verified "$BACKEND" || {
     echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
     exit 1
