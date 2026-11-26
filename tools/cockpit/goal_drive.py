@@ -56,6 +56,13 @@ span.fm-goal-item-status[data-fm-goal-status] { display:inline-block; color:#f2f
     border:1px solid var(--fm-goal-color); border-inline-start-width:4px; border-radius:4px;
     padding:0 4px; font-size:.75rem; font-weight:700; }
 text.fm-goal-item-status[data-fm-goal-status] { fill:var(--fm-goal-color); font-weight:700; }
+.fm-goal-steps { margin-block-start:4px; }
+.fm-goal-steps > summary { cursor:pointer; }
+.fm-goal-steps > .fm-goal-items { padding:8px; margin:4px 0; }
+.fm-goal-steps .fm-goal-ring { inline-size:4rem; block-size:4rem; }
+.fm-goal-steps .fm-goal-ring > span { inline-size:3.1rem; block-size:3.1rem; }
+.fm-goal-steps .fm-goal-ring strong { font-size:.95rem; }
+.fm-goal-steps > ul { margin:4px 0 0; padding-inline-start:1.25rem; overflow-wrap:anywhere; }
 .fm-goal-box { border:1px solid #465369; border-radius:6px; padding:4px 8px; margin:4px 0; }
 ''' + '\n'.join(f'[data-fm-goal-status="{state}"] {{ --fm-goal-color:{color}; }}'
                 for state, (_, color) in STATUSES.items()) + '</style>'
@@ -169,6 +176,7 @@ class Node:
         self.classes = set((self.attrs.get('class') or '').split())
         self.id = self.attrs.get('id')
         self.key = self.attrs.get('data-fm-goal-item')
+        # Closed details are still rendered and reachable; hidden content is not.
         self.visible = (not parent or parent.visible) and 'hidden' not in self.attrs and tag not in {
             'template', 'script', 'style', 'title', 'desc', 'noscript'}
 
@@ -182,7 +190,7 @@ class Node:
         return ''.join(p if isinstance(p, str) else p.text() for p in self.parts) if self.visible else ''
 
     def signature(self):
-        # Compare generated KPIs as parsed markup, not against HTML serialization details.
+        # Compare generated views as parsed markup, not against HTML serialization details.
         return (self.tag, self.attrs, [p.signature() if isinstance(p, Node) else p.strip()
                                        for p in self.parts if isinstance(p, Node) or p.strip()])
 
@@ -288,6 +296,24 @@ def ring_id(goal):
     return 'doel-ring-' + goal['id']
 
 
+def steps_id(goal):
+    return 'fm-goal-steps-' + goal['id']
+
+
+def goal_item_title(item):
+    override = item.get('goal_item_title')
+    return (override.strip() if isinstance(override, str) else '') or item['title'].partition(' - ')[0].strip()
+
+
+def goal_steps(goal, ring):
+    gid, items = goal['id'], goal['items']
+    rows = ''.join(f'<li>{html.escape(goal_item_title(i))} {label_slot(gid + "/" + i["id"], i["status"])}</li>'
+                   for i in items)
+    return (f'<details class="fm-goal-steps" id="{steps_id(goal)}">'
+            f'<summary class="small mute">Alle stappen ({len(items)})</summary>'
+            f'{ring}<ul>{rows}</ul></details>')
+
+
 def render_truth(page, goals):
     base = base_page(page)
     parsed = GoalPage(base)
@@ -318,18 +344,20 @@ def render_truth(page, goals):
     overview = STYLE + drive_kpi(goals) + items_kpi([i['status'] for i in items.values()])
     for goal in goals:
         gid = goal['id']
-        rows = ''.join(f'<li>{html.escape(i["title"])} {label_slot(gid + "/" + i["id"], i["status"])}</li>'
-                       for i in goal['items'])
-        content = (drive_switch(goal) + items_kpi([i['status'] for i in goal['items']], ring_id(goal))
-                   + f'<ul>{rows}</ul>')
+        switch = drive_switch(goal)
+        steps = goal_steps(goal, items_kpi([i['status'] for i in goal['items']], ring_id(goal)))
         drive = 'on' if goal['driven'] else 'off'
         cards = goal_cards(parsed, goal)
         if cards:
-            end = cards[0].end
-            patches.extend([(end - 1, f' data-fm-goal-drive="{drive}"'), (end, generated(content))])
+            card = cards[0]
+            if card.close is None:
+                raise ValueError(f'expected a closed cockpit card #doel-{gid}')
+            # The switch stays first, even if the host card is empty and both offsets coincide.
+            patches.extend([(card.close, generated(steps)), (card.end - 1, f' data-fm-goal-drive="{drive}"'),
+                            (card.end, generated(switch))])
         else:
             overview += (f'<article id="doel-{gid}" data-fm-goal-drive="{drive}">'
-                         f'<h3>{html.escape(goal["title"])}</h3>{content}</article>')
+                         f'<h3>{html.escape(goal["title"])}</h3>{switch}{steps}</article>')
 
     for view, ids, css, heading in [('WBS box', ('wbs-blok', 'wbs'), 'fm-goal-box', 'WBS'),
                                     ('Kanban card', ('kanban',), 'kb-card fm-goal-box', 'Kanban')]:
@@ -360,11 +388,14 @@ def verify_goal_views(page, goals):
     problems, covered = [], Counter()
     expected_cards = {f'doel-{g["id"]}' for g in goals}
     expected_rings = {ring_id(g) for g in goals}
+    expected_steps = {steps_id(g) for g in goals}
     for node in parsed.nodes:
         if 'data-fm-goal-drive' in node.attrs and node.id not in expected_cards:
             problems.append(f'out-of-scope goal card: {node.id}')
         if node.id and node.id.startswith('doel-ring-') and node.id not in expected_rings:
             problems.append(f'out-of-scope goal ring: {node.id}')
+        if node.id and node.id.startswith('fm-goal-steps-') and node.id not in expected_steps:
+            problems.append(f'out-of-scope goal steps: {node.id}')
 
     def check_markup(expected, parent=None):
         model = GoalPage(expected).nodes[0]
@@ -385,7 +416,9 @@ def verify_goal_views(page, goals):
             problems.append(f'missing or stale goal card: {card_id}')
         else:
             card = cards[0]
-            check_markup(items_kpi([i['status'] for i in goal['items']], ring_id(goal)), card)
+            ring = items_kpi([i['status'] for i in goal['items']], ring_id(goal))
+            check_markup(ring, card)
+            check_markup(goal_steps(goal, ring), card)
             switch = GoalPage(drive_switch(goal)).nodes[0].signature()
             switches = [n.signature() for n in parsed.nodes if 'fm-goal-drive' in n.classes
                         and n.visible and n.ancestor(lambda parent: parent is card)]

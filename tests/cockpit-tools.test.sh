@@ -432,8 +432,8 @@ printf 'state: %s · source: none · fixture\n' "$(cat "$FM_HOME/state/$1.fake")
 EOF
 chmod +x "$SYNC_BIN/gh" "$SYNC_BIN/crew-state"
 printf '%s\n' \
-  'item [id=build] [owner=main] [task=demo-build]: Build it' \
-  'item [id=ship] [owner=main] [task=demo-ship]: Ship it' \
+  'item [id=build] [owner=main] [task=demo-build]: Build it - Record context stays in the WBS and Kanban' \
+  'item [id=ship] [owner=main] [task=demo-ship]: Ship it - Full delivery notes' \
   'item [id=follow] [owner=main] [after=ship]: Follow up' \
   'item [id=parked] [owner=main] [task=demo-parked]: Parked worker' \
   'item [id=blocked] [owner=main] [task=demo-blocked] [after=ship]: Blocked worker after ship' \
@@ -448,7 +448,8 @@ in_sync_home bash "$ROOT/bin/fm-goal.sh" start gamma --title 'Doel gamma' --done
 in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma build running -- 'worker started' >/dev/null || fail 'mark build'
 in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma ship waiting -- 'waiting for merge' >/dev/null || fail 'mark ship'
 in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma drop dropped -- 'not needed' >/dev/null || fail 'mark dropped'
-printf 'kind=ship\npr=https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.meta"
+printf '%s\n' 'kind=ship' 'pr=https://github.com/demo/repo/pull/7' 'goal_item_title=Release <demo> & verify' \
+  > "$SYNC_HOME/state/demo-ship.meta"
 printf 'done [at=1]: PR https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.status"
 printf 'done\n' > "$SYNC_HOME/state/demo-ship.fake"
 for task in parked blocked resolved; do
@@ -546,9 +547,31 @@ sync_page() { # sync_page <section-inner>
 verify() { sync --verify-page "$SYNC_PAGE" > "$TMP_ROOT/verify.out" 2>&1; }
 good='<div data-cockpit-captain="gamma.sign">Sign</div><form data-lavish-question="demo-colour"></form>'
 sync_page "$good"
+python3 -I - "$SYNC_PAGE" <<'PY' || fail 'goal list is not compact and closed by default'
+import html
+from pathlib import Path
+import re
+import sys
+
+page = Path(sys.argv[1]).read_text()
+steps = re.search(r'<details\b([^>]*\bid="fm-goal-steps-gamma"[^>]*)>(.*?)</details>', page, re.S)
+assert steps, 'no goal step disclosure'
+attrs, body = steps.groups()
+assert not re.search(r'\sopen\b', attrs), attrs
+assert re.search(r'<summary\b[^>]*>Alle stappen \(11\)</summary>', body)
+assert 'id="doel-ring-gamma"' in body
+rows = {key: html.unescape(title).strip() for title, key in
+        re.findall(r'<li>([^<]+)<span [^>]*data-fm-goal-item="([^"]+)"', body)}
+assert len(rows) == 11 and rows['gamma/drop'] == 'Dropped step', rows
+assert rows['gamma/build'] == 'Build it' and rows['gamma/ship'] == 'Release <demo> & verify', rows
+assert page.count('Build it - Record context stays in the WBS and Kanban') == 2
+assert page.count('Ship it - Full delivery notes') == 2
+PY
 verify || fail "a correct page was rejected: $(cat "$TMP_ROOT/verify.out")"
+pass 'cockpit goal list: closed disclosure, complete counts and short/overridden titles; WBS and Kanban unchanged'
 cp "$SYNC_PAGE" "$TMP_ROOT/complete.html"
-for defect in 'goal item' 'WBS box' 'Kanban card' 'aggregate ring' 'goal ring' 'visible label' 'foreign item'; do
+for defect in 'goal item' 'WBS box' 'Kanban card' 'aggregate ring' 'goal ring' 'visible label' 'foreign item' \
+  'open steps' 'stale step count' 'raw step title'; do
   python3 -I - "$TMP_ROOT/complete.html" "$SYNC_PAGE" "$defect" <<'PY' || fail 'fixture mutation failed'
 from pathlib import Path
 import re
@@ -566,6 +589,12 @@ elif defect in ('aggregate ring', 'goal ring'):
     start = page.index(f'id="{ident}"')
     at = page.index('<strong>11</strong>', start)
     page = page[:at] + page[at:].replace('<strong>11</strong>', '<strong>10</strong>', 1)
+elif defect == 'open steps':
+    page = page.replace('id="fm-goal-steps-gamma">', 'id="fm-goal-steps-gamma" open>', 1)
+elif defect == 'stale step count':
+    page = page.replace('Alle stappen (11)', 'Alle stappen (10)', 1)
+elif defect == 'raw step title':
+    page = page.replace('<li>Build it <span', '<li>Build it - Record context stays in the WBS and Kanban <span', 1)
 elif defect == 'visible label':
     page = page.replace('data-fm-goal-item="gamma/ship" data-fm-goal-status="done">Klaar',
                         'data-fm-goal-item="gamma/ship" data-fm-goal-status="done">Wacht', 1)
@@ -578,13 +607,14 @@ PY
   case "$defect" in
     'aggregate ring') expected='missing or stale goal rendering: doel-item-kpi' ;;
     'goal ring') expected='missing or stale goal rendering: doel-ring-gamma' ;;
+    'open steps'|'stale step count'|'raw step title') expected='missing or stale goal rendering: fm-goal-steps-gamma' ;;
     'visible label') expected='stale status of gamma/ship' ;;
     'foreign item') expected='out-of-scope or unknown goal item: other/check' ;;
     *) expected="missing $defect: gamma/drop" ;;
   esac
   grep -Fq "$expected" "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
 done
-pass 'cockpit verify: requires each item, dropped WBS box, keyed Kanban card, and complete rings; rejects wrong labels and scope'
+pass 'cockpit verify: requires dropped items in all views, complete rings and closed steps; rejects stale labels, titles, counts and scope'
 sync_page "$good<form data-lavish-question=\"demo-answered\"></form>"
 verify && fail 'an answered question still listed passed'
 grep -q 'still listed: demo-answered' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"

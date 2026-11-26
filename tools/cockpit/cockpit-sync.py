@@ -34,6 +34,7 @@ truth JSON (schema fm-cockpit-truth.v1; no timestamps, so an unchanged world wri
     items[]    {id, title, owner, class, task, mark, status, task_state, last_line, flags[],
                 pr: null | {url, state: merged|open|closed|unknown, draft, checks: passing|failing|pending|conflict|none}}
                status: done|running|startable|waiting|open-captain|dropped
+               optional goal_item_title: goal-list label override from the item or its linked task metadata
   mismatches[] {key, kind, text}
                a needs-decision status key reaches section1 only through a captain hold or an open captain
                goal item; any other open key is listed here for firstmate to hold or resolve
@@ -46,7 +47,9 @@ Page contract checked by --verify-page:
   - every must and can entry appears in the section as data-lavish-question="<key or alias>" or
     data-cockpit-captain="<key or alias> ..."
   - every such value in the section belongs to an entry that is still open, and no entry appears twice
-  - the goal cards, drive KPI, aggregate and per-goal rings match the scoped truth
+  - the goal cards, drive KPI, and all ring counts match the scoped truth. Each card has a closed
+    "Alle stappen (N)" disclosure with its compact per-goal ring and every item, using goal_item_title
+    if set or the text before the first " - " in title. The closed contents count as rendered.
   - every item, including dropped, has a status in its goal list, WBS box and Kanban card
   - span or SVG text slots with class fm-goal-item-status and data-fm-goal-item="GOAL/ITEM"
     show the verified status and label. WBS slots belong in a g[data-id] or .fm-goal-box
@@ -384,6 +387,9 @@ def build_goals(goals, homes, deciding_tasks):
                           'task': item.get('task'), 'after': item.get('after') or [], 'mark': item['state'],
                           'status': status, 'task_state': task_state,
                           'last_line': plain(lines[-1]) if lines else '', 'pr': pr, 'flags': [f[0] for f in flags]})
+            override = item.get('goal_item_title') or (meta or {}).get('goal_item_title')
+            if override:
+                items[-1]['goal_item_title'] = override
             mismatches += [{'key': f'{goal["id"]}/{item["id"]}', 'kind': kind, 'text': text} for kind, text in flags]
         # reality may have closed a dependency the record still shows open
         closed = {i['id'] for i in items if i['status'] in CLOSED}
