@@ -96,6 +96,26 @@ test_two_accounts_print_their_own_rows() {
   pass "each declared account prints its own quota row, read under its own root"
 }
 
+test_keychain_entries_measure_and_label_the_bare_account() {
+  local out rc
+  new_case keychain
+  account "$CASE/a" 70 0.2
+  account "$CASE/user-home/.claude" 50 0.3
+  printf '%s\t%s\n' "$CASE/a" claude-account-credential-source-first.json \
+    ordinary claude-account-credential-source-ordinary.json \
+    "$CASE/unread" claude-account-credential-source-unread.json > "$HOME_DIR/config/claude-accounts"
+  out=$(run_tool); rc=$?
+  expect_code 0 "$rc" "Keychain-sourced entries should remain measurable: $out"
+  assert_contains "$out" "row: $CASE/a  root=$CASE/a  scope=all_models  status=known  remaining=70%  spendPriority=0.2" "the pool syntax must preserve the account's identity and quota"
+  assert_contains "$out" "row: ordinary  root=$CASE/user-home/.claude  scope=all_models  status=known  remaining=50%" "a Keychain-sourced ordinary entry must use the default root"
+  assert_contains "$out" "row: $CASE/unread  root=$CASE/unread  uncertainty: quota-axi could not read this account" "unmeasured entries must also retain their bare account identity"
+  assert_not_contains "$out" 'credential-source-' "source filenames must never become dispatch account names"
+  assert_equals "$(printf '%s unset --provider claude --profile-only --json\n' "$CASE/a" "$CASE/user-home/.claude" "$CASE/unread")" \
+    "$(cat "$CASE/reads")" "each quota read must receive only the account's directory"
+  assert_no_choice "$out"
+  pass "Keychain pool metadata never changes quota roots or account labels"
+}
+
 test_the_model_scope_is_printed() {
   local out
   new_case model
@@ -178,12 +198,13 @@ test_absent_or_malformed_lists_refuse() {
   printf 'relative\n' > "$HOME_DIR/config/claude-accounts"
   out=$(run_tool); rc=$?
   expect_code 2 "$rc" "a malformed list must refuse"
-  assert_contains "$out" "config/claude-accounts must hold one account per line" "the refusal should name the format"
+  assert_contains "$out" "config/claude-accounts must hold one 'ordinary' or absolute-path account per line" "the refusal should name the format"
   assert_absent "$CASE/reads" "a refused list must not read any quota"
   pass "an absent or malformed list refuses before any quota read"
 }
 
 test_two_accounts_print_their_own_rows
+test_keychain_entries_measure_and_label_the_bare_account
 test_the_model_scope_is_printed
 test_exhausted_and_unreadable_accounts_print_facts
 test_projected_runway_prints_its_seconds

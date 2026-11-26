@@ -9,10 +9,13 @@
 #   CLAUDE_CONFIG_DIR=<root> quota-axi --provider claude --profile-only --json
 # where <root> is the entry's own directory, or ~/.claude for `ordinary`.
 # --profile-only reads only that root's credential file (no Keychain, refresh,
-# fallback, or cache), so each row is that account's own quota and never the
-# ambient account's; a root quota-axi cannot read there, such as an `ordinary`
+# fallback, or cache), so each row measures the selected root's stored login;
+# a root quota-axi cannot read there, such as an `ordinary`
 # login kept in the macOS Keychain, is reported unmeasured. QUOTA_AXI_SNAPSHOT
 # is removed from each read so a fixture for one account cannot answer for all.
+# An optional tab-separated token-source filename is excluded from the root
+# and output account label; see docs/configuration.md "Several Claude accounts"
+# for the relationship between a token source and the measured login.
 # quota-axi exits nonzero when it cannot measure a provider, for example when
 # the vendor rate-limits the quota endpoint, yet still prints a valid snapshot
 # naming that state; such a snapshot is kept, so the account is reported
@@ -100,8 +103,9 @@ trap 'rm -rf "$WORK"' EXIT
 # Every entry becomes {account, root, snapshot} or {account, root, error}.
 : > "$WORK/accounts.jsonl"
 while IFS= read -r entry; do
-  root=$entry
-  [ "$entry" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.claude"
+  account=${entry%%$'\t'*}
+  root=$account
+  [ "$account" != ordinary ] || root="${HOME:?HOME is required to measure the ordinary account}/.claude"
   error=
   if fm_run_timed "$FM_CLAUDE_ACCOUNT_QUOTA_SECONDS" env -u QUOTA_AXI_SNAPSHOT CLAUDE_CONFIG_DIR="$root" \
       quota-axi --provider claude --profile-only --json > "$WORK/snapshot.json" 2>/dev/null </dev/null; then
@@ -110,10 +114,10 @@ while IFS= read -r entry; do
     error="quota-axi could not read this account"
   fi
   if [ -n "$error" ]; then
-    jq -cn --arg account "$entry" --arg root "$root" --arg error "$error" '{account: $account, root: $root, error: $error}'
+    jq -cn --arg account "$account" --arg root "$root" --arg error "$error" '{account: $account, root: $root, error: $error}'
   else
-    jq -c --arg account "$entry" --arg root "$root" '{account: $account, root: $root, snapshot: .}' "$WORK/snapshot.json"
-  fi >> "$WORK/accounts.jsonl" || die "cannot record the quota reading for $entry"
+    jq -c --arg account "$account" --arg root "$root" '{account: $account, root: $root, snapshot: .}' "$WORK/snapshot.json"
+  fi >> "$WORK/accounts.jsonl" || die "cannot record the quota reading for $account"
 done <<< "$LISTED"
 
 jq -rs --arg model "$MODEL" '
