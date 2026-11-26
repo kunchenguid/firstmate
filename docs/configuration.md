@@ -261,7 +261,8 @@ While the away-posture record `state/.afk-contract` exists:
 - The branch takes every actionable row.
 - No processing turn opens on the parked main.
 - Main's standing authority moves to the branch through the guarded scripts, each retaining its own gate.
-- Every active goal drives, whether or not `/afk --drive-goal` named it, and the drain's GOAL section is its live state; `bin/fm-afk-contract.sh` owns the `drive_goals` field and the spend cap, which defaults to 50 and drops lower only on the captain's own quoted words.
+- The drain's GOAL section shows the live drive state regardless of what `/afk --drive-goal` names; `bin/fm-goal.sh --help` owns the goal switch.
+  `bin/fm-afk-contract.sh` owns the `drive_goals` field and the spend cap, which defaults to 50 and drops lower only on the captain's own quoted words.
 
 [docs/pi-supervision-branch.md](pi-supervision-branch.md#postures) defines that posture.
 

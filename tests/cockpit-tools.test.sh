@@ -202,6 +202,81 @@ cmp -s "$TMP_ROOT/out-a.html" "$TMP_ROOT/out-b.html" || fail "two COCKPIT_OUT ru
 cmp -s "$TMP_ROOT/card-before.json" "$DATA/card-data.json" || fail "COCKPIT_OUT run rewrote card-data.json"
 pass "refresh-cockpit: COCKPIT_OUT leaves the installed page alone and is repeatable"
 
+# ---- existing Doelen cards get one keyed switch each, and round-trip through the real answer reader ----
+GOAL_HOME="$TMP_ROOT/goals-home"
+mkdir -p "$GOAL_HOME/state" "$GOAL_HOME/data"
+goal() { env -i PATH="$PATH" HOME="$TMP_ROOT/home" FM_HOME="$GOAL_HOME" bash "$ROOT/bin/fm-goal.sh" "$@"; }
+printf 'item [id=check] [owner=main]: Demo step\n' > "$TMP_ROOT/items"
+for id in alpha beta; do
+  goal start "$id" --title "Doel $id" --done-when 'demo complete' --named-by 'do this' \
+    --plan plan.md --items-file "$TMP_ROOT/items" >/dev/null || fail "could not start $id"
+done
+goal pause beta >/dev/null || fail 'could not pause beta'
+python3 - "$DATA/cockpit-2.html" <<'PY'
+from pathlib import Path
+import sys
+page = Path(sys.argv[1])
+page.write_text(page.read_text().replace('</body>', '''
+<section><h2 id="doelen">Doelen</h2>
+<div id="doel-alpha"><details><summary>Alpha</summary>Alpha steps</details></div>
+<div id="doel-beta"><details><summary>Beta</summary>Beta steps</details></div>
+</section></body>'''))
+PY
+preview="$TMP_ROOT/goals.html"
+run_refresh COCKPIT_GOAL_HOME="$GOAL_HOME" COCKPIT_OUT="$preview" >/dev/null || fail 'goal-drive refresh failed'
+python3 - "$preview" "$TMP_ROOT/toggles.result" <<'PY' || fail 'wrong goal-drive rendering'
+import csv
+from html.parser import HTMLParser
+import json
+from pathlib import Path
+import sys
+
+page = Path(sys.argv[1]).read_text()
+assert '1 van 2 doelen actief gedreven' in page
+assert '[data-fm-goal-drive="off"] { filter: grayscale(1); }' in page
+assert 'wordt gedreven' in page and '>uit</span>' in page
+assert 'Alpha steps' in page and 'Beta steps' in page
+
+class Switches(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.states, self.answers = {}, {}
+        self.key = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == 'div' and a.get('id') in ('doel-alpha', 'doel-beta'):
+            self.states[a['id']] = a['data-fm-goal-drive']
+        if tag == 'form':
+            self.key = a.get('data-lavish-question')
+            if self.key and self.key.startswith('goal.drive.'):
+                assert a['onsubmit'] == f"return mikoSend(event,'{self.key}')"
+        if tag == 'input' and a.get('name') == 'a' and self.key and self.key.startswith('goal.drive.'):
+            self.answers[self.key] = a['value']
+
+    def handle_endtag(self, tag):
+        if tag == 'form':
+            self.key = None
+
+switches = Switches()
+switches.feed(page)
+assert switches.states == {'doel-alpha': 'on', 'doel-beta': 'off'}
+assert set(switches.answers.values()) == {'pause alpha', 'resume beta'}
+# Lavish TOON preserves quoted context JSON with backslash escapes, not doubled quotes.
+with open(sys.argv[2], 'w') as result:
+    result.write('session:\n  file: /cockpit.html\n  status: feedback\nprompts[2]{tag,text,prompt}:\n')
+    writer = csv.writer(result, quoting=csv.QUOTE_ALL, escapechar='\\', doublequote=False, lineterminator='\n')
+    for key, answer in switches.answers.items():
+        result.write('  ')
+        writer.writerow(['choice', answer, 'Context data: ' + json.dumps({'question': key, 'answer': answer})])
+PY
+cp "$preview" "$TMP_ROOT/goals-before.html"
+python3 -I "$TOOLS/goal_drive.py" --goal-home "$GOAL_HOME" --page "$preview" || fail 'standalone rebuild failed'
+cmp -s "$preview" "$TMP_ROOT/goals-before.html" || fail 'rebuild duplicated or changed goal controls'
+goal apply-drive-answer "$TMP_ROOT/toggles.result" >/dev/null || fail 'apply rejected cockpit answer capture'
+goal export | jq -e '([.goals[] | select(.driven) | .id] == ["beta"])' >/dev/null || fail 'both keyed answers were not applied'
+pass 'cockpit goal switches: grey off card, 1-of-2 KPI, stable rebuild and both keyed answers applied'
+
 # ---- paths come from the environment: no MIKO_WORKTREE is a clear failure, not a stray path ----
 if env -i PATH="$FAKEBIN:$PATH" HOME="$TMP_ROOT/home" TMPDIR="$SCRATCH" FM_HOME="$FM_FIX" COCKPIT_DATA_DIR="$DATA" \
   bash "$TOOLS/refresh-cockpit.sh" > "$TMP_ROOT/nowt.out" 2>&1; then

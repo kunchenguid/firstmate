@@ -138,7 +138,7 @@ The engine turn runs beside a captain who is present, so its guarded actions tak
 ### Away
 
 Every close goes to the engine; captain outcomes remain in the store until the return drain presents them (see [Captain outcomes](#captain-outcomes)).
-Every active goal drives while away, named by the record (`drive goals:` in its read-back) or not: the drain's GOAL section is its live state and each open item's next step is named by reference, and the engine drives the startable ones through the same guarded scripts, never past the never-set.
+The engine follows the drain's live GOAL section and drives the startable items it lists through the same guarded scripts, never past the never-set.
 Every turn that starts attended meets the attended rule again at its start, and the offer's scan is the scope the turn claims: a close accepted away whose turn starts attended, because the captain returned in between, or an attended close whose task turned main-only (a decision appeared) while the successor started, reaches main unchanged and leaves that successor cycle running, with the handoff that turn had confirmed handed back to downtime as already announced, so that successor does not announce the same close again.
 A captain who leaves while an attended turn runs turns its captain outcomes into away outcomes: they wait for the return too.
 

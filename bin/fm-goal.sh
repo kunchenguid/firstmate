@@ -17,7 +17,7 @@
 # written by exactly one script: this one.
 #
 # THE RECORD (state/goals/<id>.goal; written only by this script):
-#   version: 1 (or 2: see SCHEMA V2 below)
+#   version: 1 (or 2 with the fields below, or 3 with drive marks)
 #   id: I1
 #   title: <one line>
 #   state: active
@@ -46,8 +46,8 @@
 #
 # SCHEMA V2. The four trailing item fields are optional and independent of
 # version 1 items: a record whose items use none of them is written as version
-# 1 and stays readable by a version 1 reader, and every version 1 record this
-# script reads keeps working unchanged. project names the project the item's
+# 1 unless it has a drive mark, and old records without drive marks keep working.
+# project names the project the item's
 # work lands in; target is the stage (a rung of that project's ladder, see
 # bin/fm-stage-ladder-lib.sh) the drive carries the item to, and needs a
 # project; until is an epoch after which the item stops being startable;
@@ -83,8 +83,8 @@
 # shown by `show` and excluded from the projection.
 #
 # PROJECTION. Derived state per item: the item's fields, the folded mark
-# state, since (the winning mark's epoch), startable (state open, or the
-# orphaned-running state below, in both cases class drive and every after id
+# state, since (the winning mark's epoch), startable (driven goal, state open or
+# the orphaned-running state below, in both cases class drive and every after id
 # done or dropped), waiting_on (the unmet after ids), and a landing hint (the
 # item's task merged with no newer goal update: for a task with a
 # state/<task>.meta record, the merge-notified marker bin/fm-pr-lib.sh
@@ -102,7 +102,7 @@
 # goals collapsed to one line); `window` renders the since-epoch view a
 # return brief needs. The brief also reads drive_goals
 # from state/.afk-contract when that field is present (bin/fm-afk-contract.sh
-# owns it): named goals come first, and every active goal is labeled as driven
+# owns it): named goals come first, and every driven goal is labeled as driven
 # while away, named or not (the captain's goal-drive-always decision).
 #
 # CLOSE. `close --done` archives the record and marks to state/goals/closed/
@@ -135,10 +135,12 @@
 #   fm-goal.sh mark <id> <item> stage=<stage> [--task <task-id>] -- <note>
 #   fm-goal.sh evidence <id> <item> -- <evidence>
 #   fm-goal.sh probe [<id> [<item>]] [--dry-run]
+#   fm-goal.sh pause|resume <id>
+#   fm-goal.sh apply-drive-answer <lavish-result-file>
 #   fm-goal.sh close <id> --done | --captain --words <text>
 #   fm-goal.sh show [<id>]
 #   fm-goal.sh brief
-#   fm-goal.sh active
+#   fm-goal.sh active [--driven]
 #   fm-goal.sh startable
 #   fm-goal.sh export [<id>]
 #   fm-goal.sh exists <id>
@@ -169,11 +171,23 @@
 # default 60), and records the highest rung reached as a stage mark whose note
 # carries the probe's first output line. It marks nothing when no probe passes,
 # prints one line per probed item, takes no goal lock while a probe runs, and
-# is main or supervision-branch only. With no id it probes every active goal;
+# is main or supervision-branch only. With no id it probes every driven goal;
 # --dry-run prints what it would mark. bin/fm-goal-probe-pr-merged.sh is the
 # shared probe for a "PR merged" rung.
 #
-# `startable` prints one tab-separated row per startable item of every active
+# `pause` and `resume` are main-only, idempotent switches on an active goal.
+# Its record keeps ordered `drive_mark: <off|driven> <epoch>` lines before
+# `items:`; the last mark wins, absence means driven. Off suppresses automatic
+# drive, never item marks or existing work. `active` still lists off goals;
+# `active --driven` is the drive-only inventory.
+#
+# On an ordinary cockpit board wake, main runs `apply-drive-answer` on the
+# captured Lavish result. The key is `goal.drive.<sha256 of goal id>` so
+# the intake can keep one answer per goal even for long ids. The answer is
+# exactly `pause <id>` or `resume <id>`. Other keys are ignored; only use a fresh
+# captain result for the cockpit's goal-owning home, never replay an old round.
+#
+# `startable` prints one tab-separated row per startable item of every driven
 # goal - goal, item, owner, task (- when none), since (the folded mark epoch, or
 # the goal's started epoch for an item no mark touched) - and nothing when no
 # item is startable; it is the machine read the watcher's goal-stall tick uses
@@ -186,7 +200,7 @@
 # bash (bin/fm-drive-board.sh, the Miko cockpit panel). It prints one compact
 # object {schema: "fm-goal-export.v1", goals: [...]} for every active goal, or
 # for the one named id (rc 1 when that id is not active), and an empty goals
-# array when none is active. A goal carries id, title, state, named_by, plan,
+# array when none is active. A goal carries id, title, state, driven (boolean), named_by, plan,
 # done_when, started_epoch, last_progress_epoch (null when no mark exists),
 # progress {total, closed, at_target, with_target} and items. An item carries
 # id, owner, class, title, state (the folded mark state), task, pr (the PR a
@@ -555,6 +569,7 @@ _fm_goal_load_record() {  # <path>
   local seen_items=0 seen_closed=0 seen_projection=0 have_closed_epoch=0 have_closed_reason=0 have_closed_words=0
   local version='' id='' state='' started='' started_epoch='' title=''
   local named_by='' plan='' done_when='' closed='' closed_epoch='' closed_reason='' closed_words=''
+  local drive=driven drive_epoch='' drive_marks=''
   local have_version=0 have_id=0 have_state=0 have_started=0 have_started_epoch=0
   local have_title=0 have_named_by=0 have_plan=0 have_done_when=0
   _fm_goal_items_reset
@@ -618,6 +633,14 @@ _fm_goal_load_record() {  # <path>
           [ "$have_done_when" -eq 0 ] || { _fm_goal_read_error "duplicate done_when"; return 1; }
           have_done_when=1; done_when=$value
           ;;
+        drive_mark)
+          drive=${value%% *}
+          drive_epoch=${value#* }
+          case "$drive" in off|driven) ;; *) _fm_goal_read_error 'invalid drive mark'; return 1 ;; esac
+          case "$drive_epoch" in ''|*[!0-9]*|0[0-9]*) _fm_goal_read_error 'invalid drive mark epoch'; return 1 ;; esac
+          [ "${#drive_epoch}" -le 12 ] || { _fm_goal_read_error 'oversized drive mark epoch'; return 1; }
+          drive_marks+="drive_mark: $value"$'\n'
+          ;;
         items)
           seen_items=1
           ;;
@@ -662,9 +685,14 @@ _fm_goal_load_record() {  # <path>
   done < "$path"
   [ "$have_version" -eq 1 ] || { _FM_GOAL_READ_ERROR='no version'; return 1; }
   case "$version" in
-    1|2) ;;
+    1|2|3) ;;
     *) _FM_GOAL_READ_ERROR="unsupported version: $version"; return 1 ;;
   esac
+  if [ "$version" = 3 ]; then
+    [ -n "$drive_marks" ] || { _fm_goal_read_error 'version 3 requires a drive mark'; return 1; }
+  else
+    [ -z "$drive_marks" ] || { _fm_goal_read_error 'drive marks require version 3'; return 1; }
+  fi
   [ "$have_id" -eq 1 ] || { _FM_GOAL_READ_ERROR='no id'; return 1; }
   fm_goal_id_valid "$id" || { _FM_GOAL_READ_ERROR="unsafe id: $id"; return 1; }
   [ "$have_title" -eq 1 ] && [ -n "$title" ] || { _FM_GOAL_READ_ERROR='no title'; return 1; }
@@ -706,6 +734,9 @@ _fm_goal_load_record() {  # <path>
   FM_GOAL_REC_NAMED_BY=$named_by
   FM_GOAL_REC_PLAN=$plan
   FM_GOAL_REC_DONE_WHEN=$done_when
+  FM_GOAL_REC_DRIVE=$drive
+  FM_GOAL_REC_DRIVE_EPOCH=$drive_epoch
+  FM_GOAL_REC_DRIVE_MARKS=$drive_marks
   FM_GOAL_REC_CLOSED=$closed
   FM_GOAL_REC_CLOSED_EPOCH=$closed_epoch
   FM_GOAL_REC_CLOSED_REASON=$closed_reason
@@ -714,7 +745,7 @@ _fm_goal_load_record() {  # <path>
 }
 
 # fm_goal_validate <path> [<expected-id>]: 0 iff the record at <path> parses
-# as a valid version 1 or 2 record; with <expected-id>, its id field must match and
+# as a valid record; with <expected-id>, its id field must match and
 # its file name must be <id>.goal or <id>-<epoch>.goal.
 fm_goal_validate() {  # <path> [expected-id]
   local path=$1 expected=${2-} base
@@ -1236,6 +1267,7 @@ _fm_goal_item_orphaned_running() {  # <idx> [state-dir]
 # startable, an item past its until never is, and an item with unmet after ids
 # waits.
 _fm_goal_item_startable() {  # <idx> [state-dir]
+  [ "$FM_GOAL_REC_DRIVE" = driven ] || return 1
   [ "${FM_GOAL_ITEMS_CLASSES[$1]}" = drive ] || return 1
   case "${FM_GOAL_M_STATES[$1]}" in
     open) ;;
@@ -1380,7 +1412,7 @@ _fm_goal_newest_closed() {  # <id> [state-dir]
 # Every active goal record path, printed in start order (started_epoch, then
 # id); rc 1 with none. Damaged records are logged and skipped: an unreadable
 # record must not hide the readable ones behind it.
-fm_goal_active_records() {  # [state-dir]
+fm_goal_active_records() {  # [state-dir] [--driven]
   local state=${1:-$FM_GOAL_STATE} dir path rows=''
   dir=$(fm_goal_dir "$state")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
@@ -1391,6 +1423,7 @@ fm_goal_active_records() {  # [state-dir]
       continue
     fi
     [ "$FM_GOAL_REC_STATE" = active ] || continue
+    [ "${2-}" != --driven ] || [ "$FM_GOAL_REC_DRIVE" = driven ] || continue
     rows="$rows$(printf '%010d\t%s\t%s' "$FM_GOAL_REC_STARTED_EPOCH" "$FM_GOAL_REC_ID" "$path")"$'\n'
   done
   [ -n "$rows" ] || return 1
@@ -1399,14 +1432,13 @@ fm_goal_active_records() {  # [state-dir]
 }
 
 # Every active goal id, printed in start order; rc 1 with none.
-fm_goal_active_ids() {  # [state-dir]
+fm_goal_active_ids() {  # [state-dir] [--driven]
   local rows path
-  rows=$(fm_goal_active_records "${1:-$FM_GOAL_STATE}") || return 1
-  printf '%s\n' "$rows" | while IFS= read -r path; do
+  rows=$(fm_goal_active_records "${1:-$FM_GOAL_STATE}" "${2-}") || return 1
+  while IFS= read -r path; do
     path=${path##*/}
     printf '%s\n' "${path%.goal}"
-  done
-  return 0
+  done <<< "$rows"
 }
 
 # --- the away record's named goals (bin/fm-afk-contract.sh owns the field) ---
@@ -1466,6 +1498,9 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
   printf '  state: %s, started %s (%s ago), named by %s\n' \
     "$FM_GOAL_REC_STATE" "$FM_GOAL_REC_STARTED" \
     "$(fm_goal_age $((now - FM_GOAL_REC_STARTED_EPOCH)))" "$FM_GOAL_REC_NAMED_BY"
+  printf '  drive: %s' "$FM_GOAL_REC_DRIVE"
+  [ -z "$FM_GOAL_REC_DRIVE_EPOCH" ] || printf ' since %s' "$(fm_goal_epoch_iso "$FM_GOAL_REC_DRIVE_EPOCH")"
+  printf '\n'
   printf '  plan: %s\n' "$FM_GOAL_REC_PLAN"
   printf '  done when: %s\n' "$FM_GOAL_REC_DONE_WHEN"
   printf '  progress: %s/%s items done or dropped; last goal update %s\n' \
@@ -1534,6 +1569,11 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
   now=$(date +%s)
   _fm_goal_open_record "$id" "$state" || return 1
   fm_goal_fold "$id" "$state" "$data" "$now"
+  if [ "$FM_GOAL_REC_DRIVE" = off ]; then
+    fm_cap_line_var "GOAL $id (active, drive off): $FM_GOAL_REC_TITLE"
+    printf '%s\n' "$FM_LINE_CAP_LINE"
+    return 0
+  fi
   line="GOAL $id (active since $FM_GOAL_REC_STARTED"
   case "$away" in
     named) line="$line; driven while away: yes, named)" ;;
@@ -1629,6 +1669,11 @@ _fm_goal_brief_block_mate() {  # <id> <state> <data> <mate> <away>
     i=$((i + 1))
   done
   [ "$mine" -ge 1 ] || return 2
+  if [ "$FM_GOAL_REC_DRIVE" = off ]; then
+    fm_cap_line_var "PARENT GOAL $id (active, drive off): $FM_GOAL_REC_TITLE"
+    printf '%s\n' "$FM_LINE_CAP_LINE"
+    return 0
+  fi
   fm_cap_line_var "PARENT GOAL $id (your items; the parent firstmate owns the record): $FM_GOAL_REC_TITLE"
   printf '%s\n' "$FM_LINE_CAP_LINE"
   fm_cap_line_var "  done when: $FM_GOAL_REC_DONE_WHEN"; printf '%s\n' "$FM_LINE_CAP_LINE"
@@ -1695,8 +1740,8 @@ _fm_goal_brief_block_mate() {  # <id> <state> <data> <mate> <away>
 fm_goal_render_brief() {
   local home=$FM_GOAL_HOME state=$FM_GOAL_STATE data=$FM_GOAL_DATA
   local rc=0 id block out='' used=0 named='' away_kind='' mate away
-  local block_len path paths duty invalid=0
-  duty='GOAL DUTY: start every startable item now (steer its owner or dispatch it); record with bin/fm-goal.sh mark <goal> <item> <state> -- <note>; full view: bin/fm-goal.sh show <goal>'
+  local block_len path paths duty invalid=0 drive_duty=0
+  duty='GOAL DUTY: start every startable item now, in driven goals only (steer its owner or dispatch it); record with bin/fm-goal.sh mark <goal> <item> <state> -- <note>; full view: bin/fm-goal.sh show <goal>'
   local -a order=()
   fm_parent_channel_destination "$home" "$state" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -1763,6 +1808,7 @@ fm_goal_render_brief() {
       block="GOAL $id: named by the away record but no goal record exists"
     fi
     [ -n "$block" ] || continue
+    case "$block" in "GOAL $id (active, drive off):"*) ;; *) drive_duty=1 ;; esac
     block_len=$(printf '%s' "$block" | wc -c | tr -d ' ')
     if [ "$block_len" -gt "$FM_GOAL_BRIEF_PER_GOAL_BYTES" ]; then
       block=$(printf '%s' "$block" | head -c "$((FM_GOAL_BRIEF_PER_GOAL_BYTES - 40))")$'\n  (more items in the full goal view)'
@@ -1773,7 +1819,7 @@ fm_goal_render_brief() {
 "
       used=$((used + block_len + 1))
     else
-      fm_cap_line_var "GOAL $id (active; collapsed): run bin/fm-goal.sh show $id"
+      fm_cap_line_var "${block%%$'\n'*} (collapsed; full view: bin/fm-goal.sh show $id)"
       if [ $((used + ${#FM_LINE_CAP_LINE} + ${#duty} + 2)) -le "$FM_GOAL_BRIEF_TOTAL_BYTES" ]; then
         out="$out$FM_LINE_CAP_LINE
 "
@@ -1782,7 +1828,8 @@ fm_goal_render_brief() {
     fi
   done
   [ -n "$out" ] || return 0
-  printf '%s%s\n' "$out" "$duty"
+  printf '%s' "$out"
+  if [ -n "${mate:-}" ] || [ "$drive_duty" -eq 1 ]; then printf '%s\n' "$duty"; fi
   return 0
 }
 
@@ -1882,11 +1929,10 @@ _fm_goal_load_items_file() {  # <path>
   return 0
 }
 
-# The version a record is written at: 2 when any loaded item carries a schema
-# v2 field (project, target, until, stop-on), else 1, so a goal that uses none
-# stays byte-compatible with a v1 reader.
+# Write the oldest record version supporting the fields in use.
 _fm_goal_record_version() {
   local i=0
+  if [ -n "$FM_GOAL_REC_DRIVE_MARKS" ]; then printf 3; return 0; fi
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     if [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}${FM_GOAL_ITEMS_TARGETS[$i]}${FM_GOAL_ITEMS_UNTILS[$i]}${FM_GOAL_ITEMS_STOPONS[$i]}" ]; then
       printf 2
@@ -1909,6 +1955,7 @@ _fm_goal_render_record() {
   printf 'named_by: %s\n' "$FM_GOAL_REC_NAMED_BY"
   printf 'plan: %s\n' "$FM_GOAL_REC_PLAN"
   printf 'done_when: %s\n' "$FM_GOAL_REC_DONE_WHEN"
+  printf '%s' "$FM_GOAL_REC_DRIVE_MARKS"
   printf 'items:\n'
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     printf '  %s\n' "$(_fm_goal_item_line "$i")"
@@ -1972,6 +2019,7 @@ cmd_start() {
   now=$(date +%s)
   started=$(fm_goal_epoch_iso "$now")
   FM_GOAL_REC_ID=$id
+  FM_GOAL_REC_DRIVE_MARKS=''
   FM_GOAL_REC_TITLE=$(_fm_goal_clean_field "$title")
   FM_GOAL_REC_STATE=active
   FM_GOAL_REC_STARTED=$started
@@ -2366,8 +2414,8 @@ cmd_probe() {
     id=${path##*/}
     id=${id%.goal}
     _fm_goal_probe_goal "$id" '' "$dry" || rc=1
-  done < <(fm_goal_active_records 2>/dev/null)
-  [ "$any" -eq 1 ] || _fm_goal_die 1 'no active goal records'
+  done < <(fm_goal_active_records "$FM_GOAL_STATE" --driven 2>/dev/null)
+  [ "$any" -eq 1 ] || _fm_goal_die 1 'no driven goal records'
   [ "$rc" -eq 0 ] || exit 1
   return 0
 }
@@ -2396,9 +2444,67 @@ cmd_brief() {
 }
 
 cmd_active() {
-  [ "$#" -eq 0 ] || _fm_goal_usage_error 'active takes no arguments'
-  fm_goal_active_ids || _fm_goal_die 1 'no active goal records'
-  return 0
+  if [ "$#" -eq 1 ] && [ "$1" = --driven ]; then
+    fm_goal_active_ids "$FM_GOAL_STATE" --driven
+  else
+    [ "$#" -eq 0 ] || _fm_goal_usage_error 'active only accepts --driven'
+    fm_goal_active_ids || _fm_goal_die 1 'no active goal records'
+  fi
+}
+
+_fm_goal_switch() {  # <off|driven> <id>
+  local drive=$1 id=$2 epoch
+  fm_goal_id_valid "$id" || _fm_goal_usage_error "unsafe goal id: '$id'"
+  _fm_goal_parent_home && _fm_goal_require_actor main || return 1
+  _fm_goal_open_record "$id" && fm_goal_lock_hold || return 1
+  if ! _fm_goal_open_record "$id"; then
+    fm_goal_lock_release
+    return 1
+  fi
+  if [ "$FM_GOAL_REC_DRIVE" != "$drive" ]; then
+    epoch=$(date +%s) || { fm_goal_lock_release; return 1; }
+    FM_GOAL_REC_DRIVE_MARKS+="drive_mark: $drive $epoch"$'\n'
+    if ! _fm_goal_render_record | _fm_goal_write_atomic "$(fm_goal_path "$id")"; then
+      fm_goal_lock_release
+      _fm_goal_die 1 'could not save the goal drive mark'
+    fi
+  fi
+  fm_goal_lock_release
+  printf 'goal %s: %s\n' "$id" "$drive"
+}
+
+cmd_pause() {
+  [ "$#" -eq 1 ] || _fm_goal_usage_error 'pause needs one goal id'
+  _fm_goal_switch off "$1"
+}
+
+cmd_resume() {
+  [ "$#" -eq 1 ] || _fm_goal_usage_error 'resume needs one goal id'
+  _fm_goal_switch driven "$1"
+}
+
+cmd_apply_drive_answer() {
+  local rows row key answer action id digest rc=0
+  [ "$#" -eq 1 ] || _fm_goal_usage_error 'apply-drive-answer needs one Lavish result file'
+  _fm_goal_parent_home && _fm_goal_require_actor main || return 1
+  rows=$("$FM_GOAL_DIR/fm-procevent-lavish.sh" answers "$1") || return 1
+  while IFS= read -r row; do
+    key=${row%%$'\t'*}
+    case "$key" in goal.drive.*) ;; *) continue ;; esac
+    answer=${row#*$'\t'}; answer=${answer%%$'\t'*}
+    action=${answer%% *}; id=${answer#* }
+    case "$answer" in
+      'pause '*|'resume '*) ;;
+      *) fm_goal_log 'invalid goal.drive answer'; rc=1; continue ;;
+    esac
+    digest=$(perl -MDigest::SHA=sha256_hex -e 'print sha256_hex($ARGV[0])' -- "$id") || return 1
+    if [ "$key" != "goal.drive.$digest" ]; then
+      fm_goal_log 'goal.drive answer does not match its key'
+      rc=1; continue
+    fi
+    ("cmd_$action" "$id") || rc=1
+  done <<< "$rows"
+  return "$rc"
 }
 
 cmd_startable() {
@@ -2408,6 +2514,7 @@ cmd_startable() {
     id=${path##*/}
     id=${id%.goal}
     _fm_goal_open_record "$id" >/dev/null 2>&1 || continue
+    [ "$FM_GOAL_REC_DRIVE" = driven ] || continue
     fm_goal_fold "$id" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$(date +%s)"
     i=0
     while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
@@ -2464,10 +2571,11 @@ _fm_goal_export_one() {  # <id>
   done
   printf '%s' "$items" | jq -cs \
     --arg id "$FM_GOAL_REC_ID" --arg title "$FM_GOAL_REC_TITLE" --arg state "$FM_GOAL_REC_STATE" \
+    --arg drive "$FM_GOAL_REC_DRIVE" \
     --arg named_by "$FM_GOAL_REC_NAMED_BY" --arg plan "$FM_GOAL_REC_PLAN" \
     --arg done_when "$FM_GOAL_REC_DONE_WHEN" --argjson started "$FM_GOAL_REC_STARTED_EPOCH" \
     --arg last "${FM_GOAL_FOLD_LAST_AT:-}" '
-    {id: $id, title: $title, state: $state, named_by: $named_by, plan: $plan,
+    {id: $id, title: $title, state: $state, driven: ($drive == "driven"), named_by: $named_by, plan: $plan,
      done_when: $done_when, started_epoch: $started,
      last_progress_epoch: (if $last == "" then null else ($last | tonumber) end),
      progress: {total: length, closed: ([.[] | select(.state == "done" or .state == "dropped")] | length),
@@ -2976,7 +3084,8 @@ main() {
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'needs a subcommand'
   shift
   case "$cmd" in
-    start|edit|mark|evidence|probe|show|brief|active|startable|export|exists|window|driven|close) ;;
+    start|edit|mark|evidence|probe|show|brief|active|startable|export|exists|window|driven|close|pause|resume) ;;
+    apply-drive-answer) cmd_apply_drive_answer "$@"; return ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;
   esac

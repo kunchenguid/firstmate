@@ -86,10 +86,49 @@ test_startable_command_lists_only_startable_items() {
     fail "a running item with no task record behind it was not listed as orphaned startable" ;; esac
   lane t-build "$WORKING"
   [ -z "$("$GOAL" startable)" ] || fail "a running item with a live task stayed startable"
-  "$GOAL" mark G1 build "done" -- 'landed' >/dev/null
+  "$GOAL" mark G1 build "done" -- 'landed https://github.com/example/example/pull/1' >/dev/null
   out=$("$GOAL" startable)
   case "$out" in "G1"$'\t'"verify"$'\t'*) ;; *) fail "finishing build did not unlock verify: $out" ;; esac
   pass "fm-goal.sh startable prints one row per startable item, an orphaned-running row included, and follows marks"
+}
+
+test_drive_switch_preserves_items_and_clears_stall() {
+  reset_case
+  floor 1
+  lane t-live "$WORKING"
+  start_goal G1 'item [id=live] [owner=main] [task=t-live]: finish existing work' \
+    'item [id=open] [owner=main]: do not start automatically' \
+    'item [id=manual] [owner=main]: captain can start this'
+  "$GOAL" mark G1 live running -- 'already running' >/dev/null
+  "$GOAL" export G1 | jq -e '.goals[0].driven == true' >/dev/null || fail 'legacy default is not driven'
+  drive_floor_tick 1000
+  [ -f "$STATE/.goal-stall" ] || fail 'no initial stall episode'
+
+  "$GOAL" pause G1 >/dev/null
+  [ "$("$GOAL" active)" = G1 ] || fail 'paused goal disappeared from active inventory'
+  [ -z "$("$GOAL" active --driven)" ] || fail 'paused goal leaked into driven inventory'
+  [ -z "$("$GOAL" startable)" ] || fail 'paused goal leaked into startable'
+  out=$("$GOAL" brief)
+  assert_contains "$out" 'GOAL G1 (active, drive off)' 'brief shows the goal is off'
+  case "$out" in *'GOAL DUTY:'*|*'startable, nobody on it:'*) fail 'brief asks to drive a paused goal' ;; esac
+  assert_contains "$("$GOAL" show G1)" 'drive: off since ' 'show exposes timestamped off state'
+  "$GOAL" mark G1 manual running -- 'captain started this manually' >/dev/null
+  "$GOAL" export G1 | jq -e '.goals[0] | .driven == false and
+    ([.items[] | .state] == ["running","open","running"]) and
+    ([.items[] | .startable] | all(. == false))' >/dev/null || fail 'off altered item state or manual marks'
+  drive_floor_tick 1900
+  [ ! -e "$STATE/.goal-stall" ] && [ "$(count_wakes)" = 0 ] || fail 'paused item kept its stall episode'
+
+  "$GOAL" edit G1 --items-file "$TMP_ROOT/items.G1" --title 'Edited while off' >/dev/null
+  "$GOAL" export G1 | jq -e '.goals[0].driven == false' >/dev/null || fail 'edit lost the drive switch'
+  "$GOAL" resume G1 >/dev/null
+  "$GOAL" export G1 | jq -e '.goals[0].driven == true' >/dev/null || fail 'resume did not restore drive'
+  assert_contains "$("$GOAL" startable)" $'G1\topen\tmain' 'resume restored the open item'
+  drive_floor_tick 2000
+  [ "$(count_wakes)" = 0 ] || fail 'resume reused the old stall timer'
+  drive_floor_tick 2900
+  [ "$(count_wakes)" = 1 ] || fail 'resumed item did not open a fresh stall episode'
+  pass 'pause suppresses automatic drive and stall, preserves manual work, and resume restores drive'
 }
 
 test_idle_startable_item_wakes_after_the_hold() {
@@ -280,6 +319,7 @@ test_slow_cycle_probes_stages() {
 }
 
 fm_test_run test_slow_cycle_probes_stages test_startable_command_lists_only_startable_items \
+  test_drive_switch_preserves_items_and_clears_stall \
   test_idle_startable_item_wakes_after_the_hold \
   test_an_item_with_a_working_task_or_a_mark_is_not_stalled \
   test_an_orphaned_running_item_is_stalled_like_an_open_one \

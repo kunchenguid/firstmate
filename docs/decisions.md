@@ -39,7 +39,7 @@ One start per tick is the hysteresis: each start raises the load the next verdic
 
 ## 2026-11-17 - every active goal drives while the captain is away
 
-**Decision.** While an away record stands, every active goal drives until it is done or closed, whether or not `/afk` named it.
+**Decision.** Away driving no longer depends on whether `/afk` named a goal.
 Naming a goal with `--drive-goal` still records the captain's emphasis and orders it first in the GOAL section, but it is no longer the switch that turns driving on.
 The away spend cap defaults to 50 and a lower value is accepted only when the call quotes the captain's own away words that set it.
 [`configuration.md`](configuration.md#attended-and-away-authority) owns the resulting contract, and the [`drive-goal`](../.agents/skills/drive-goal/SKILL.md) skill owns the driving judgment.

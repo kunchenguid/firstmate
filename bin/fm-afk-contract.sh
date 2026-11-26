@@ -173,7 +173,7 @@
 # would refuse as unsafe (fm_goal_id_valid) refuses the entry (exit 2). The goal
 # need not have a record yet: the entry turn may write it right after. Naming is
 # the captain's emphasis and provenance, not the driving switch: while an away
-# record stands every active goal drives (bin/fm-branch-prompt.sh "Drive goals").
+# record stands every driven goal drives (bin/fm-branch-prompt.sh "Drive goals").
 # Only an away record carries the field; a quiet entry refuses --drive-goal.
 #
 # Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
@@ -479,9 +479,9 @@ fm_afk_contract_render_readback() {  # <path>
     printf '  spend cap: %s concurrent workers\n' "$spend"
     drive=$(fm_afk_contract_read_field "$path" drive_goals)
     if [ -n "$drive" ]; then
-      printf '  drive goals: %s (named at entry; every active goal drives while away)\n' "${drive// /, }"
+      printf '  drive goals: %s (named at entry; only driven goals drive while away)\n' "${drive// /, }"
     else
-      printf '  drive goals: none named (every active goal drives while away)\n'
+      printf '  drive goals: none named (only driven goals drive while away)\n'
     fi
     printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
   fi

@@ -595,7 +595,7 @@ A leftover `state/.afk` flag declines nothing.
   Supervision continuity is the safety property, and the return brief's health section reads any gap.
 - The wake message ends with a fixed `POSTURE: AWAY` tail plus the record's read-back verbatim (`bin/fm-afk-contract.sh readback`).
   The branch therefore has the captain's away words, the spend cap, the expected return, and the reach line in front of it at execution time, without any prefix change.
-  Every active goal drives while away, named by the record (`drive goals:` in its read-back) or not: the drain's GOAL section is its live state and each open item's next step is named by reference, and the branch drives the startable ones through the same guarded scripts, never past the never-set.
+  The branch follows the drain's live GOAL section and drives the startable items it lists through the same guarded scripts, never past the never-set.
 - Captain-verdict outcomes accumulate unprocessed in the outcome store.
   Their visible entries still persist, but no processing turn opens on the parked main.
   The request is re-checked against the record immediately before it would open and at every run boundary, so a request pending when the record appears is cancelled rather than delivered.

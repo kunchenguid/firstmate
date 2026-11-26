@@ -1,7 +1,7 @@
 ---
 name: drive-goal
 description: >-
-  Load when the captain names a goal to keep driving, on "show goal" or "close goal", when /afk words name a goal, when writing or editing a goal's items from its plan, and when steering an owner's marks or closing a goal through bin/fm-goal.sh.
+  Load when the captain names a goal to keep driving, on "show goal" or "close goal", when /afk words name a goal, when writing or editing a goal's items from its plan, and when steering an owner's marks, closing a goal, or applying a cockpit goal-drive answer through bin/fm-goal.sh.
 user-invocable: false
 metadata:
   internal: true
@@ -35,7 +35,8 @@ When the plan changes later, `bin/fm-goal.sh edit <id> --items-file <path>` keep
 Attended or away, the drain's GOAL section is the live state and its GOAL DUTY line is the standing duty: start or advance every startable item nobody is on.
 An item listed as `orphaned running, no live task` is such an item: its `running` mark has nothing live behind it, so dispatch a fresh task for it or re-mark it honestly, and never leave the mark standing.
 Steer the owning second mate with `bin/fm-send.sh`, or, for an item this home owns, dispatch it within the spend cap from a backlog item filed for exactly that step.
-When `/afk` words name a goal, the afk skill's entry carries the id through `--drive-goal`; every active goal drives while away whether or not the record names it, and the entry output lists the goals that will drive.
+Before acting on a goal as standing drive duty, use the current GOAL section rather than an older instruction; a goal labeled drive off is not a drive mandate.
+The afk skill owns how `/afk` passes named goals; `bin/fm-goal.sh --help` owns their switch semantics.
 
 A merged PR is not the end of an item with a target: the GOAL section lists it as short of target until its stage mark reaches the target.
 At each drive turn run `bin/fm-goal.sh probe <id>` so the stage marks follow the world; a probe marks only what its ladder proves, and a rung no probe can prove (a captain-only click) stays for the captain.
@@ -56,6 +57,11 @@ The runner announces that answer as an ordinary board wake, because the keyed-an
 On that wake run `bin/fm-drive-board.sh apply --result <result-file>` as main: it starts or edits the goal through `fm-goal.sh` and, when the captain ticked the box, enters `/afk` through `fm-afk-launch.sh enter --drive-goal`.
 Then finish the `/afk` entry as the afk skill says, rebuild the board so it shows the new state, and echo every action in chat.
 A refusal names its reason and leaves the goal and the away record untouched, so relay it instead of forcing the answer.
+
+## Cockpit goal-drive answers
+
+On a cockpit board wake carrying a goal-drive answer, main runs `bin/fm-goal.sh apply-drive-answer` on the fresh captured result for this home, then has the cockpit rebuilt so the captain sees the applied state.
+The command's `--help` owns the answer grammar; this is a board action, not a held-task closure.
 
 ## Showing and closing
 

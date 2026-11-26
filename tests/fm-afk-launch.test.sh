@@ -65,9 +65,8 @@ enter_posture() {  # <home>
 # ---------------------------------------------------------------------------
 # UNIT 0b: `enter --drive-goal` (away autonomy S1, G3). The away record names
 # the goals the captain asked to keep driving in the header field bin/fm-goal.sh
-# reads, the read-back says so, and the entry output lists every active goal
-# that will drive, because every active goal drives while away. A named goal
-# with no record yet is called out, and an unsafe id refuses the entry.
+# reads, the read-back says so, and the entry output lists driven goals only.
+# Named goals with drive off or no record are called out; an unsafe id refuses.
 # ---------------------------------------------------------------------------
 unit_enter_names_drive_goals_and_says_which_goals_drive() {
   local st out rc items env_
@@ -85,10 +84,10 @@ unit_enter_names_drive_goals_and_says_which_goals_drive() {
   if [ "$rc" -eq 0 ] \
     && [ "$(labenv "$CONTRACT" field drive_goals)" = 'I2 Later' ] \
     && [ "$(labenv "$CONTRACT" words)" = 'keep I2 moving' ] \
-    && printf '%s' "$out" | grep -F '  drive goals: I2, Later (named at entry; every active goal drives while away)' >/dev/null \
+    && printf '%s' "$out" | grep -F '  drive goals: I2, Later (named at entry; only driven goals drive while away)' >/dev/null \
     && printf '%s' "$out" | grep -F 'Goals driven while away: I1, I2' >/dev/null \
     && printf '%s' "$out" | grep -F 'Named goal with no active record: Later' >/dev/null; then
-    pass "enter --drive-goal: the record names the goals once each, the read-back and entry output say every active goal drives, and a goal with no record is called out"
+    pass "enter --drive-goal: the record names the goals once each, the entry output lists both driven goals, and a goal with no record is called out"
   else
     fail "enter --drive-goal: record, read-back, or goal note wrong (rc=$rc): $out"
   fi
@@ -106,11 +105,19 @@ unit_enter_names_drive_goals_and_says_which_goals_drive() {
   else
     fail "enter --drive-goal: an unsafe id was not refused cleanly (rc=$rc): $out"
   fi
+  labenv "$ROOT/bin/fm-goal.sh" pause I2 >/dev/null || fail 'could not pause goal I2'
+  out=$(labenv "$LAUNCH" enter --words 'I2 is still important' --drive-goal I2 2>&1)
+  if printf '%s' "$out" | grep -F 'Goals driven while away: I1 (' >/dev/null \
+    && printf '%s' "$out" | grep -F 'Named goal with drive off: I2' >/dev/null; then
+    pass 'naming an off goal during away entry does not resume it'
+  else
+    fail "enter with off --drive-goal: wrong goal note: $out"
+  fi
   out=$(labenv "$LAUNCH" enter --words 'no goals named' 2>&1)
-  if printf '%s' "$out" | grep -F '  drive goals: none named (every active goal drives while away)' >/dev/null \
-    && printf '%s' "$out" | grep -F 'Goals driven while away: I1, I2' >/dev/null \
+  if printf '%s' "$out" | grep -F '  drive goals: none named (only driven goals drive while away)' >/dev/null \
+    && printf '%s' "$out" | grep -F 'Goals driven while away: I1 (' >/dev/null \
     && [ -z "$(labenv "$CONTRACT" field drive_goals)" ]; then
-    pass "enter without --drive-goal records no field and still drives every active goal"
+    pass "enter without --drive-goal records no field and still lists driven goals only"
   else
     fail "enter without --drive-goal: wrong read-back or goal note: $out"
   fi

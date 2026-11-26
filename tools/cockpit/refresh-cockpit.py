@@ -11,7 +11,8 @@ Paths come from the environment (see tools/cockpit/README.md):
   COCKPIT_DATA_DIR   directory holding cockpit-2.html, card-data.json and .refresh.lock
                      (default $FM_HOME/data/miko-all-in-one-lavish)
   MIKO_WORKTREE      git worktree of the Miko repo with an origin remote; required, no default
-  COCKPIT_OUT        optional: write the page here instead of replacing cockpit-2.html in place"""
+  COCKPIT_OUT        optional: write the page here instead of replacing cockpit-2.html in place
+  COCKPIT_GOAL_HOME  optional: add drive state from this goal-owning Firstmate home"""
 import os,re,sys,json,html,subprocess,time,fcntl,tempfile,collections
 FM=os.environ.get('FM_HOME') or os.path.expanduser('~/.firstmate')
 D=os.environ.get('COCKPIT_DATA_DIR') or os.path.join(FM,'data','miko-all-in-one-lavish')
@@ -412,6 +413,14 @@ def main():
     ids=re.findall(r'\sid="([^"]+)"',s)
     assert len(ids)==len(set(ids)),'duplicate ids'
     assert 'id="kanban"' in s and 'id="wbs-blok"' in s and 'id="captain-door"' in s
+    goal_home=os.environ.get('COCKPIT_GOAL_HOME')
+    if goal_home:
+        with tempfile.TemporaryDirectory(prefix='cockpit-goal-drive-') as d:
+            staged=os.path.join(d,'cockpit.html')
+            with open(staged,'w',encoding='utf-8') as f: f.write(s)
+            subprocess.run([sys.executable,'-I',os.path.join(BIN,'goal_drive.py'),
+                            '--goal-home',goal_home,'--page',staged],check=True)
+            with open(staged,encoding='utf-8') as f: s=f.read()
     out=os.environ.get('COCKPIT_OUT')
     if out: open(out,'w').write(s)
     else:
@@ -455,6 +464,7 @@ def main():
                 extra_probs.append('WBS %s: PR %s staat al op main'%(bm.group(1),pn))
     # captain cards whose question is no longer held
     for fk in re.findall(r'data-lavish-question="([^"]+)"',s[s.find('id="captain-door"'):s.find('id="kanban"')]):
+        if fk.startswith('goal.drive.'): continue  # board action, not a task hold
         try:
             out=subprocess.run(['tasks-axi','show',fk],cwd=FM,env=dict(os.environ,FM_HOME=FM),capture_output=True,text=True,timeout=20).stdout
         except Exception: continue

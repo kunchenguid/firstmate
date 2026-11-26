@@ -25,7 +25,7 @@ Hold-for-return is the default and the only reach profile this release records: 
    It writes `state/.afk-contract` at once, with no separate confirmation step, then prints the entry announcement and the record's read-back.
    The words are the whole mandate: `bin/fm-afk-contract.sh` records them exactly as given, with no clause fields, verbs, ids, or merge-grant list, and by the captain's mandate no parser, tokenizer, classifier, or grammar reads them anywhere.
    Read `bin/fm-afk-contract.sh --help` for the flags rather than memorizing them.
-   Pass each goal the captain names as `--drive-goal <id>`; every active goal drives while away either way, and the entry output lists them.
+   Pass each goal the captain names as `--drive-goal <id>`; the entry output lists the goals that will drive.
    The spend cap is the captain's standing 50 and holds while away: pass `--spend` below 50 only when the captain's own away words set it, with those exact words quoted through `--spend-words`, and never choose a lower cap yourself.
    Plain `/afk` with no words is a valid entry with no mandate; the announcement says no instructions were recorded.
    Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate at once, preserve the original session entry, and archive the superseded words for the return brief.
