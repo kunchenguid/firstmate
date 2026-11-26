@@ -1846,6 +1846,10 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     "$SCRIPT_DIR/fm-pr-health.sh" arm >/dev/null \
       || echo "MISSING: the PR health monitor could not be armed; owned PRs are not watched"
   fi
+  if local_phase && [ -e "$CONFIG/pr-follow" ] && [ -f "$DATA/pr-follows.json" ] && command -v jq >/dev/null 2>&1; then
+    "$SCRIPT_DIR/fm-pr-follow.sh" arm >/dev/null \
+      || echo "MISSING: explicitly followed PRs could not be armed"
+  fi
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"

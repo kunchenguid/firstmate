@@ -76,7 +76,7 @@
 // its deliberate limits.
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
@@ -201,7 +201,7 @@ const PROCESSING_INSTRUCTION =
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
-type Verdict = "routine" | "captain";
+type Verdict = "routine" | "captain" | "notice";
 type LockOwnership = "owned" | "other" | "missing";
 type OutcomeRow = {
   seq: number;
@@ -508,7 +508,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   const row = value as Record<string, unknown>;
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return null;
   if (typeof row.task !== "string" || !row.task) return null;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return null;
+  if (row.verdict !== "routine" && row.verdict !== "captain" && row.verdict !== "notice") return null;
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
@@ -994,7 +994,7 @@ export default function (pi: ExtensionAPI) {
   // mark-read finds the same record and advances the cursor without appending
   // a duplicate. A conflicting record for one sequence fails closed.
   function ensureVisibleCaptainOutcome(row: OutcomeRow): boolean {
-    if (!currentMainSession || row.verdict !== "captain") return false;
+    if (!currentMainSession || row.verdict === "routine") return false;
     let matching = false;
     for (const entry of currentMainSession.getEntries()) {
       if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) continue;
@@ -1160,6 +1160,17 @@ export default function (pi: ExtensionAPI) {
       if (!(await runOutcomeScript(["processed-init"])).ok) return false;
       processedInitializedGeneration = expectedGeneration;
     }
+    if (noticeSurface && existsSync(join(config, "pr-follow"))) {
+      const notices = await runOutcomeScript(["notices"]);
+      if (!notices.ok) return false;
+      for (const line of notices.stdout.split("\n").filter(Boolean)) {
+        let row: OutcomeRow | null = null;
+        try { row = parseOutcomeRow(JSON.parse(line)); } catch { return false; }
+        if (!row || row.verdict !== "notice" || !(await generationOwnsLock(expectedGeneration))) return false;
+        if (!ensureVisibleCaptainOutcome(row)) return false;
+        if (!(await runOutcomeScript(["mark-notices", "--through", String(row.seq)])).ok) return false;
+      }
+    }
     const unread = await runOutcomeScript(["unread"]);
     if (!unread.ok) return false;
     if (unread.stdout) {
@@ -1194,7 +1205,7 @@ export default function (pi: ExtensionAPI) {
         // here.
         if (row.verdict === "captain") {
           if (!ensureVisibleCaptainOutcome(row)) return false;
-        } else {
+        } else if (row.verdict === "routine") {
           deliverRoutineOutcome(row);
         }
         if (!(await runOutcomeScript(["mark-read", "--through", String(row.seq)])).ok) return false;
@@ -1202,6 +1213,42 @@ export default function (pi: ExtensionAPI) {
     }
     if (!present) return true;
     return presentUnprocessedOutcomes(expectedGeneration);
+  }
+
+  let noticeTimer: ReturnType<typeof setInterval> | undefined;
+  let noticeSurface = false;
+  let noticePolling = false;
+  let noticeStamp = "";
+
+  async function followNotices(expectedGeneration: number): Promise<void> {
+    if (noticePolling || !existsSync(join(config, "pr-follow"))) return;
+    noticePolling = true;
+    try {
+      await enqueueDelivery(async () => {
+        if (!(await actingAsOwner(expectedGeneration))) return;
+        let stamp = "";
+        try {
+          const stat = statSync(join(state, "branch-outcomes.jsonl"));
+          stamp = `${stat.size}:${stat.mtimeMs}`;
+        } catch { /* No outcomes yet. */ }
+        if (stamp !== noticeStamp) {
+          if (!(await reconcileUnreadOutcomes(expectedGeneration, false))) return;
+          noticeStamp = stamp;
+        }
+        if (!(await generationOwnsLock(expectedGeneration))) return;
+        const marker = join(state, ".pr-follow-surface");
+        const staged = `${marker}.${process.pid}`;
+        writeFileSync(staged, JSON.stringify({
+          surface: "pi", owner: ownedLockPid,
+          epoch: Math.floor(Date.now() / 1000),
+        }), { mode: 0o600 });
+        renameSync(staged, marker);
+      });
+    } catch {
+      // No readiness heartbeat means enrollment refuses and observation pauses.
+    } finally {
+      noticePolling = false;
+    }
   }
 
   function wakeScopeRefusal(task: string): string {
@@ -1856,6 +1903,15 @@ ${context.command}
     mirrorCollection.stagedCaptain = null;
     mirrorCollection.reanchor = true;
     const startedGeneration = generation;
+    if (noticeTimer) clearInterval(noticeTimer);
+    noticeTimer = undefined;
+    noticeStamp = "";
+    noticeSurface = ctx?.mode === "tui" && Boolean(pi.registerEntryRenderer);
+    if (noticeSurface && existsSync(join(config, "pr-follow"))) {
+      noticeTimer = setInterval(() => { void followNotices(startedGeneration); }, 3000);
+      noticeTimer.unref();
+      void followNotices(startedGeneration);
+    }
     const failed = await enqueueDelivery(
       async () =>
         (await actingAsOwner(startedGeneration)) && !(await reconcileUnreadOutcomes(startedGeneration)),
@@ -1896,6 +1952,9 @@ ${context.command}
     // closing: setting shuttingDown before the await is what stops anything
     // new from being accepted while the release runs.
     const closingGeneration = generation;
+    noticeSurface = false;
+    if (noticeTimer) clearInterval(noticeTimer);
+    noticeTimer = undefined;
     shuttingDown = true;
     generation += 1;
     processing = null;
@@ -2443,9 +2502,9 @@ ${context.command}
   // acknowledge it.
   pi.registerEntryRenderer?.(VISIBLE_OUTCOME_ENTRY_TYPE, (entry, _options, theme) => {
     const record = parseVisibleOutcomeRecord(entry.data);
-    if (!record || record.verdict !== "captain") return undefined;
+    if (!record || record.verdict === "routine") return undefined;
     return new Text(
-      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
+      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", record.verdict === "notice" ? ` ${record.summary}` : ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
       1,
       0,
     );
