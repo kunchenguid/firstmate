@@ -4069,7 +4069,7 @@ test_dialog_name_survives_away_self_handle() {
   printf 'idle on the picker\n' > "$pane"
   fm_write_meta "$state/picker-ship.meta" "window=$win" "backend=tmux"
   printf 'working: parked between turns\n' > "$state/picker-ship.status"
-  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  reason="stale: $win (task=picker-ship, blocked-on-prompt: Claude background-task exit picker)"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   key=$(printf '%s' picker-ship | tr ':/.' '___')
   [ "$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)" = 'Claude background-task exit picker' ] \
@@ -4135,7 +4135,7 @@ test_seen_terminal_dialog_stale_clears_like_a_plain_stale() {
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   [ ! -e "$state/.subsuper-stale-$key" ] \
     || fail "a seen terminal stale with no dialog recorded a wedge marker"
-  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  reason="stale: $win (task=picker-done, blocked-on-prompt: Claude background-task exit picker)"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   grep -F 'stale + terminal (already escalated by signal)' "$dir/daemon.log" >/dev/null \
     || fail "the fixture did not take the seen terminal self-handle path: $(cat "$dir/daemon.log")"
@@ -4158,7 +4158,7 @@ test_dialog_name_joins_unseen_status_escalation() {
   fm_write_meta "$state/picker-new.meta" "window=$win" "backend=tmux"
   printf 'done: shipped the change\n' > "$state/picker-new.status"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
-    handle_wake "stale: $win (blocked-on-prompt: Claude background-task exit picker)" "$state"
+    handle_wake "stale: $win (task=picker-new, blocked-on-prompt: Claude background-task exit picker)" "$state"
   grep -F 'done: shipped the change' "$state/.subsuper-escalations" \
     | grep -F 'blocked-on-prompt: Claude background-task exit picker' >/dev/null \
     || fail "an unseen status escalation dropped the dialog name: $(cat "$state/.subsuper-escalations" 2>/dev/null)"

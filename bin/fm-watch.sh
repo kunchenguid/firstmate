@@ -50,8 +50,10 @@
 #                          exit picker, that same parenthetical ends with
 #                          "blocked-on-prompt:" and the picker's name, after the
 #                          demand-deep-inspection clause when that clause is
-#                          present; a plain stale reason gains the parenthetical
-#                          to carry the name, and no other reason carries it: the
+#                          present; a plain stale reason carries the name in its
+#                          own parenthetical, after the task id, as "stale:
+#                          <window> (task=<id>, blocked-on-prompt: <name>)", and
+#                          no other reason carries it: the
 #                          deferral, dead-record and declared-wait recheck
 #                          reasons below keep their wording.
 #                          Unless afk is active. A pane about to escalate
