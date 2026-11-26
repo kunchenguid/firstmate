@@ -4166,6 +4166,12 @@ elif [ "$BACKEND" != orca ] && [ "$BACKEND" != t3code ] && [ "$BACKEND" != herdr
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
+# An hc task's no-mistakes pipeline monitor is a view, not work: closing it never
+# gates cleanup, but a monitor that could not be closed is reported, not left silent.
+if [ "$BACKEND" = hc ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-hc-pipeline-monitor.sh" close "$ID" \
+    || echo "warning: $ID's no-mistakes pipeline monitor terminal could not be closed; close it in Herdr desktop" >&2
+fi
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then

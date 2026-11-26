@@ -119,6 +119,8 @@ An input, capture, or close that carries the task label refuses a terminal whose
   The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden), verified against a real window: [`verification/runtime-backends.md`](verification/runtime-backends.md#hc) records the live exercise.
 - hc has no event stream this adapter consumes; supervision polls like tmux.
 
+The optional no-mistakes pipeline monitor tab is opt-in; see [`config/hc-pipeline-monitor`](configuration.md#no-mistakes-pipeline-monitor-for-hc-tasks-confighc-pipeline-monitor).
+
 ## Tests
 
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
