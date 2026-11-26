@@ -70,7 +70,7 @@ While a run is thinking, the sprite becomes the single-row compact `=( * )` sauc
 When the run settles, the sprite relaxes back to the two-row resting pose, the stars return to the idle cadence immediately, and the movement pace eases back into the slow drift over a bounded handful of graduated moves, one column per move and never teleporting, before the marquee sweep continues indefinitely.
 The banner's lifetime is the session's: turning Calm off clears it and restores Pi's stock working row, and a session shutdown clears it so nothing outlives the session that owns it.
 Freeze/resume continuity, resize clamping, and fresh-session reset follow the boat's contract.
-A terminal too narrow for the six-cell sprite keeps the bare streak field with no sprite.
+When the terminal is too narrow for a mode's sprite, that mode falls back to a single sprite-free row: the idle banner to the bare starfield below three cells, the thinking row to the bare streak field below the warp saucer's six.
 [`configuration.md`](configuration.md#working-presentation-variant-configcalm-ship) owns the `config/calm-ship` schema and re-read points.
 
 The spaceship claims that same shared Pi working-row widget slot, so the shared-slot rule above applies to whichever presentation `config/calm-ship` selects.
