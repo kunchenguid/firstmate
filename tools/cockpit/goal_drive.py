@@ -144,7 +144,15 @@ def items_kpi(statuses):
             f'<ul role="list" aria-label="Status van doeltaken">{"".join(legend)}</ul></div></div>')
 
 
-def render(page, goals, allow=None):
+def verified_statuses(path):
+    """Item statuses cockpit-sync.py checked against reality; they win over the goal marks."""
+    truth = json.loads(path.read_text(encoding='utf-8'))
+    if truth['schema'] != 'fm-cockpit-truth.v1':
+        raise ValueError('unsupported cockpit truth schema')
+    return {f"{g['id']}/{i['id']}": i['status'] for g in truth['goals'] for i in g['items']}
+
+
+def render(page, goals, allow=None, verified=None):
     base = ATTRIBUTE.sub('', GENERATED.sub('', page))
     anchors = GoalAnchors(base)
     if anchors.heading is None:
@@ -153,6 +161,7 @@ def render(page, goals, allow=None):
         goals = [g for g in goals if g['id'] in allow]
     driven = sum(g['driven'] for g in goals)
     statuses = {f"{g['id']}/{item['id']}": item_status(item) for g in goals for item in g['items']}
+    statuses.update({key: state for key, state in (verified or {}).items() if key in statuses})
     patches = [(anchors.heading, generated(STYLE + '<p class="small mute" id="doel-drive-kpi">'
                 f'{driven} van {len(goals)} doelen actief gedreven</p>' + items_kpi(list(statuses.values()))))]
     for item, end in anchors.items:
@@ -186,11 +195,13 @@ def main():
     parser.add_argument('--goal-id', action='append', help='limit goal controls and status rendering to this goal ID (repeatable)')
     parser.add_argument('--page', type=Path, required=True, help='already generated cockpit HTML; updated atomically')
     parser.add_argument('--output', type=Path, help='write a preview instead of changing --page')
+    parser.add_argument('--truth', type=Path, help='cockpit-sync.py truth JSON; its verified statuses replace the marks')
     args = parser.parse_args()
     target = args.output or args.page
     try:
         page = args.page.read_text(encoding='utf-8')
-        updated = render(page, goals_from(args.goal_home), args.goal_id)
+        verified = verified_statuses(args.truth) if args.truth else None
+        updated = render(page, goals_from(args.goal_home), args.goal_id, verified)
         if target == args.page and updated == page:
             return
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent, delete=False) as f:
@@ -202,7 +213,7 @@ def main():
                 pending.replace(target)
             finally:
                 pending.unlink(missing_ok=True)
-    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+    except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as exc:
         parser.exit(1, f'goal-drive: {exc}\n')
 
 

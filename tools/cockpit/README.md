@@ -2,10 +2,11 @@
 
 Tracked copy of the scripts that refresh the Miko cockpit page.
 They moved here from an untracked secondmate data directory so the tooling lives in one repository.
-[VERVERS-REGELS.md](VERVERS-REGELS.md) states what every refresh updates and checks; it is the rules owner.
+The [cockpit-refresh skill](../../.agents/skills/cockpit-refresh/SKILL.md) owns what every refresh updates and checks and the step order; [VERVERS-REGELS.md](VERVERS-REGELS.md) is its short Dutch pointer.
 
 | File | Purpose |
 |------|---------|
+| `cockpit-sync.sh`, `cockpit-sync.py` | The shared first step of every refresh on every cockpit: verifies each goal item, builds the captain's list, and checks a built page; `--help` owns flags, environment, JSON shape and page contract. |
 | `refresh-cockpit.sh` | One real-status pass; runs `refresh-cockpit.py` beside it. Read-only on GitHub, safe on a short timer. |
 | `refresh-cockpit.py` | The refresh itself: lane status files, PR state and production state into the page and `card-data.json`. |
 | `kanban-from-wbs.py` | Regenerates the kanban grid from the WBS boxes; `refresh-cockpit.py` calls it. |
@@ -26,7 +27,7 @@ Every path comes from the environment.
 | `COCKPIT_SCOREBOARD_CONFIG` | unset | Enable the hourly secondmate scoreboard using an explicit input-path JSON config; `bin/fm-secondmate-scoreboard.py --help` owns its format and limits. |
 
 The scripts find each other through their own location, so the directory can be called from any working directory.
-`gh` must be authenticated for the Miko repository, and `tasks-axi` is optional.
+`gh` must be authenticated for the Miko repository, and `tasks-axi` is required by the sync step for any home that has a backlog; Azure DevOps pull requests are read with a signed-in `az`.
 
 ## Run
 
@@ -47,9 +48,10 @@ The ring and item labels use the same palette and the same `fm-goal.sh export` s
 An open captain item shows as Aan jou; other non-startable open items and blocked items show as Wacht.
 
 ```bash
-python3 -I tools/cockpit/goal_drive.py --goal-home "$GOAL_HOME" --page "$COCKPIT_PAGE"
+python3 -I tools/cockpit/goal_drive.py --goal-home "$GOAL_HOME" --page "$COCKPIT_PAGE" --truth "$COCKPIT_TRUTH"
 ```
 
+`--truth` takes the file `cockpit-sync.sh` wrote and makes the ring and labels show its verified statuses instead of the raw marks.
 Repeat `--goal-id <id>` to limit the switches, both KPIs, and item labels to selected goals from a shared home (for example, on the Geris cockpit).
 Omit `--goal-id` to include every goal in the home.
 Use `--output "$PREVIEW_PAGE"` to leave the installed page untouched.

@@ -154,6 +154,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/cockpit-refresh/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/diagnostic-reasoning/SKILL.md",
       "audience": "agent-runtime"
     },

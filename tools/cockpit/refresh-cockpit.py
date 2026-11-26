@@ -12,7 +12,12 @@ Paths come from the environment (see tools/cockpit/README.md):
                      (default $FM_HOME/data/miko-all-in-one-lavish)
   MIKO_WORKTREE      git worktree of the Miko repo with an origin remote; required, no default
   COCKPIT_OUT        optional: write the page here instead of replacing cockpit-2.html in place
-  COCKPIT_GOAL_HOME  optional: add drive state from this goal-owning Firstmate home"""
+  COCKPIT_GOAL_HOME  optional: add drive state from this goal-owning Firstmate home
+
+Every run starts with cockpit-sync.py (goal home COCKPIT_GOAL_HOME, else FM_HOME; its --help owns the
+other COCKPIT_* scope variables). The truth JSON lands in $COCKPIT_TRUTH, else cockpit-truth.json beside
+the page (COCKPIT_OUT.truth.json for a preview). A failed run puts a banner on the installed page and
+exits non-zero."""
 import os,re,sys,json,html,subprocess,time,fcntl,tempfile,collections
 FM=os.environ.get('FM_HOME') or os.path.expanduser('~/.firstmate')
 D=os.environ.get('COCKPIT_DATA_DIR') or os.path.join(FM,'data','miko-all-in-one-lavish')
@@ -23,8 +28,26 @@ BIN=os.path.dirname(os.path.abspath(__file__)); TMP=tempfile.mkdtemp(prefix='coc
 TE,BL,YE,GN,OR,RE='#2dd4bf','#60a5fa','#ffcc66','#7fe0a5','#ffa94d','#ff4d4d'
 LAB={'niet':('· nog niet aan de beurt','#9aa4b2'),'later':('· later','#6f6880'),'auto':('⟳ gaat vanzelf door',TE),'fm':('⏸ wacht op firstmate',BL),'werk':('⚙ werker bezig',YE),'vast':('⚠ vast',OR),'klaar':('✓ klaar',GN)}
 def run(cmd,**k): return subprocess.run(cmd,check=True,capture_output=True,text=True,**k).stdout
+def sync(args):
+    return subprocess.run([sys.executable,'-I',os.path.join(BIN,'cockpit-sync.py'),*args]).returncode
 def main():
     lock=open(os.path.join(D,'.refresh.lock'),'w'); fcntl.flock(lock,fcntl.LOCK_EX)
+    truth_path=verify()
+    try: refresh(truth_path)
+    except BaseException as e:
+        if not os.environ.get('COCKPIT_OUT') and os.path.exists(PAGE): sync(['--banner-only','%s: %s'%(type(e).__name__,e),'--page',PAGE])
+        raise
+def verify():
+    # reality first: nothing is rendered from marks that were not checked
+    preview=os.environ.get('COCKPIT_OUT')
+    truth_path=os.environ.get('COCKPIT_TRUTH') or (preview+'.truth.json' if preview else os.path.join(D,'cockpit-truth.json'))
+    sys.stdout.flush()
+    if sync(['--goal-home',os.environ.get('COCKPIT_GOAL_HOME') or FM,'--out',truth_path]+([] if preview else ['--page',PAGE])):
+        sys.exit('refresh-cockpit: the cockpit sync failed; the page was not refreshed')
+    return truth_path
+def refresh(truth_path):
+    preview=os.environ.get('COCKPIT_OUT')
+    truth=json.load(open(truth_path))
     now=time.strftime('%H:%M',time.localtime())
     os.environ['TZ']='Europe/Amsterdam'; time.tzset(); now=time.strftime('%H:%M')
     run(['git','-C',W,'fetch','-q','origin','main'])
@@ -419,7 +442,7 @@ def main():
             staged=os.path.join(d,'cockpit.html')
             with open(staged,'w',encoding='utf-8') as f: f.write(s)
             subprocess.run([sys.executable,'-I',os.path.join(BIN,'goal_drive.py'),
-                            '--goal-home',goal_home,'--page',staged],check=True)
+                            '--goal-home',goal_home,'--page',staged,'--truth',truth_path],check=True)
             with open(staged,encoding='utf-8') as f: s=f.read()
     out=os.environ.get('COCKPIT_OUT')
     if out: open(out,'w').write(s)
@@ -449,7 +472,7 @@ def main():
         if want!=here[-1] and '✓ klaar' not in cm.group(2): colaudit.append('%s (kolom %s, WBS zegt %s)'%(re.search(r'<b>([^<]*)',cm.group(2)).group(1) if re.search(r'<b>([^<]*)',cm.group(2)) else cm.group(1),here[-1],want))
     if colaudit: print('COLUMN-AUDIT: '+'; '.join(colaudit))
     # --- more checks so a refresh catches everything that can go stale ---
-    extra_probs=[]; arch_note=''
+    extra_probs=['%s: %s'%(m['key'],m['text']) for m in truth['mismatches']]; arch_note=''
     # notes and WBS status lines that still say a merged PR is waiting
     for cm in re.finditer(r'<div class="kb-card"(?:(?!kb-mini)[^>])*>(.*?)</div>',s,re.S):
         body=cm.group(1); note=html.unescape((re.search(r'font-size:11\.5px">([^<]*)',body) or [0,''])[1])

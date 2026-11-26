@@ -60,7 +60,7 @@ A refusal names its reason and leaves the goal and the away record untouched, so
 
 ## Cockpit goal-drive answers
 
-On a cockpit board wake carrying a goal-drive answer, main runs `bin/fm-goal.sh apply-drive-answer` on the fresh captured result for this home, then has the cockpit rebuilt so the captain sees the applied state.
+On a cockpit board wake carrying a goal-drive answer, main runs `bin/fm-goal.sh apply-drive-answer` on the fresh captured result for this home, then has the cockpit rebuilt (load `cockpit-refresh`) so the captain sees the applied state.
 The command's `--help` owns the answer grammar; this is a board action, not a held-task closure.
 
 ## Showing and closing

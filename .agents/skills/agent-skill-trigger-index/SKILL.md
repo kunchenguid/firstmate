@@ -28,6 +28,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `secondmate-provisioning` - load before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a secondmate home, and before editing `data/secondmates.md`.
 - `captain-hold-lifecycle` - load before treating an investigation or visual review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any `RECORD DIVERGENCE` line from the wake drain.
 - `away-quiet-supervision` - load whenever /afk or /quiet is invoked, an away or quiet record exists, or a marked away-supervisor message arrives.
+- `cockpit-refresh` - load before refreshing, changing, or verifying a cockpit page or its refresh button, or when the captain says a page is stale or misses one of his questions or to-dos.
 - `drive-goal` - load when the captain names a goal to keep driving, on "show goal" or "close goal", when /afk names a goal, when writing or editing a goal's items from its plan, and when steering marks or closes through `bin/fm-goal.sh`.
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), on any `procevent <adapter> <source-id> <sequence>` check wake, and on any `process-event source stranded` or `process-event source failed to start` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.

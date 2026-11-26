@@ -396,4 +396,124 @@ run_refresh COCKPIT_SCOREBOARD_CONFIG="$TMP_ROOT/score-config.json" > "$TMP_ROOT
 grep -q 'id="secondmate-scoreboard"' "$DATA/cockpit-2.html" || fail "scoreboard table not rendered"
 pass "refresh-cockpit: publishes configured hourly scoreboard"
 
+# ---- cockpit-sync.py: reality beats marks, the captain's list is exact, and a built page is checked ----
+if ! command -v tasks-axi >/dev/null 2>&1; then
+  echo "skip: cockpit-sync needs tasks-axi"
+  echo "all cockpit-tools tests passed"
+  exit 0
+fi
+SYNC_HOME="$TMP_ROOT/sync-home"
+SYNC_BIN="$TMP_ROOT/syncbin"
+TRUTH="$TMP_ROOT/truth.json"
+mkdir -p "$SYNC_HOME/state" "$SYNC_HOME/data" "$SYNC_BIN"
+printf '## In flight\n\n## Queued\n\n## Done\n' > "$SYNC_HOME/data/backlog.md"
+in_sync_home() { env -u FM_TASK_ID -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE -u FM_CONFIG_OVERRIDE FM_HOME="$SYNC_HOME" "$@"; }
+cat > "$SYNC_BIN/gh" <<'EOF'
+#!/usr/bin/env bash
+[ -z "${FAKE_GH_DOWN:-}" ] || { echo "fake gh: offline" >&2; exit 1; }
+printf '%s\n' '{"data":{"p0":{"pullRequest":{"state":"MERGED","isDraft":false,"mergeable":"UNKNOWN","commits":{"nodes":[]}}}}}'
+EOF
+# the fake crew state answers from state/<task>.fake
+cat > "$SYNC_BIN/crew-state" <<'EOF'
+#!/usr/bin/env bash
+printf 'state: %s · source: none · fixture\n' "$(cat "$FM_HOME/state/$1.fake")"
+EOF
+chmod +x "$SYNC_BIN/gh" "$SYNC_BIN/crew-state"
+printf '%s\n' \
+  'item [id=build] [owner=main] [task=demo-build]: Build it' \
+  'item [id=ship] [owner=main] [task=demo-ship]: Ship it' \
+  'item [id=follow] [owner=main] [after=ship]: Follow up' \
+  'item [id=sign] [owner=captain] [class=captain]: Sign the demo form' \
+  'item [id=signed] [owner=main] [after=sign]: After signing' \
+  'item [id=asked] [owner=captain] [class=captain] [task=demo-answered]: Answered already' > "$TMP_ROOT/items-sync"
+in_sync_home bash "$ROOT/bin/fm-goal.sh" start gamma --title 'Doel gamma' --done-when 'demo complete' \
+  --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-sync" >/dev/null || fail 'could not start gamma'
+in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma build running -- 'worker started' >/dev/null || fail 'mark build'
+in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma ship waiting -- 'waiting for merge' >/dev/null || fail 'mark ship'
+printf 'kind=ship\npr=https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.meta"
+printf 'done [at=1]: PR https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.status"
+printf 'done\n' > "$SYNC_HOME/state/demo-ship.fake"
+printf '%s\n' '{"schema":"fm-captain-question.v1","close":"done","about":"The demo needs one colour.","purpose":"The page can then be finished.","question":"Which colour?","options":[{"value":"blue","label":"Blue","detail":"The page turns blue."},{"value":"green","label":"Green","detail":"The page turns green."}],"recommendation":"blue"}' > "$TMP_ROOT/ctx.json"
+in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" hold demo-colour --title 'Pick a colour' --category captain-only-fact \
+  --reason 'Pick a colour.' --context-file "$TMP_ROOT/ctx.json" >/dev/null || fail 'could not hold demo-colour'
+in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" hold demo-answered --title 'Answered call' --category captain-only-fact \
+  --reason 'Already decided.' >/dev/null || fail 'could not hold demo-answered'
+printf 'yes\n' > "$TMP_ROOT/decision.txt"
+in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" answer demo-answered --decision-file "$TMP_ROOT/decision.txt" >/dev/null \
+  || fail 'could not answer demo-answered'
+# one open key relayed for the answered call, one resolved key, one internal ask, one echo of the open hold
+printf 'kind=ship\n' > "$SYNC_HOME/state/demo-asker.meta"
+printf '%s\n' 'needs-decision [key=captain-hold-demo-answered-1] [at=1]: still logged as open' \
+  'needs-decision [key=demo-old] [at=2]: old question' 'resolved [key=demo-old] [at=3]: answered' \
+  'needs-decision [key=plan-review-ready] [at=4]: internal ask' \
+  'needs-decision [key=captain-hold-demo-colour-1] [at=5]: relayed colour question' \
+  > "$SYNC_HOME/state/demo-asker.status"
+
+sync() { # sync [extra args]
+  in_sync_home env PATH="$SYNC_BIN:$PATH" COCKPIT_CREW_STATE_BIN="$SYNC_BIN/crew-state" \
+    bash "$TOOLS/cockpit-sync.sh" --goal-home "$SYNC_HOME" --out "$TRUTH" "$@"
+}
+sync > "$TMP_ROOT/sync1.out" 2>&1 || fail "sync failed: $(cat "$TMP_ROOT/sync1.out")"
+python3 -I - "$TRUTH" <<'PY' || fail "truth is wrong: $(cat "$TRUTH")"
+import json, sys
+t = json.load(open(sys.argv[1]))
+items = {i['id']: i for i in t['goals'][0]['items']}
+assert items['build']['status'] == 'startable' and items['build']['mark'] == 'running'
+assert items['ship']['status'] == 'done' and items['ship']['pr']['state'] == 'merged'
+assert items['follow']['status'] == 'startable', items['follow']
+kinds = {(m['key'], m['kind']) for m in t['mismatches']}
+assert ('gamma/build', 'running-no-live-task') in kinds, kinds
+assert ('gamma/ship', 'pr-merged-not-marked') in kinds, kinds
+assert ('captain-hold-demo-answered-1', 'stale-decision-key') in kinds, kinds
+must = {e['key']: e for e in t['section1']['must']}
+can = {e['key']: e for e in t['section1']['can']}
+assert set(must) == {'gamma/sign'}, must
+assert set(can) == {'demo-colour'}, can
+assert can['demo-colour']['recommendation'] == 'blue' and len(can['demo-colour']['options']) == 2
+assert can['demo-colour']['question'] == 'Which colour?'
+assert t['section1']['later'] == []
+assert ('gamma/asked', 'answered-not-marked') in kinds, kinds
+assert ('plan-review-ready', 'unrouted-decision-key') in kinds, kinds
+assert 'captain-hold-demo-colour-1' in can['demo-colour']['aliases']
+assert not any(key.startswith('demo-old') for key, _ in kinds), kinds
+PY
+pass 'cockpit sync: stale running mark, merged PR still waiting, answered question and open captain items are all found'
+cp "$TRUTH" "$TMP_ROOT/truth.first"
+sync > "$TMP_ROOT/sync2.out" 2>&1 || fail "second sync failed: $(cat "$TMP_ROOT/sync2.out")"
+cmp -s "$TMP_ROOT/truth.first" "$TRUTH" || fail 'second sync changed the truth file'
+grep -q 'truth unchanged' "$TMP_ROOT/sync2.out" || fail "second sync did not report unchanged: $(cat "$TMP_ROOT/sync2.out")"
+pass 'cockpit sync: a second run changes nothing'
+
+SYNC_PAGE="$TMP_ROOT/sync-page.html"
+sync_page() { # sync_page <ship-status> <section-inner>
+  printf '<html><body><section id="captain-door">%s<form data-lavish-question="goal.drive.abc"></form></section><span class="fm-goal-item-status" data-fm-goal-item="gamma/ship" data-fm-goal-status="%s">x</span></body></html>\n' \
+    "$2" "$1" > "$SYNC_PAGE"
+}
+verify() { sync --verify-page "$SYNC_PAGE" > "$TMP_ROOT/verify.out" 2>&1; }
+good='<div data-cockpit-captain="gamma.sign">Sign</div><form data-lavish-question="demo-colour"></form>'
+sync_page 'done' "$good"
+verify || fail "a correct page was rejected: $(cat "$TMP_ROOT/verify.out")"
+sync_page waiting "$good"
+verify && fail 'a merged PR still shown as waiting passed'
+grep -q 'stale status of gamma/ship' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
+sync_page 'done' "$good<form data-lavish-question=\"demo-answered\"></form>"
+verify && fail 'an answered question still listed passed'
+grep -q 'still listed: demo-answered' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
+sync_page 'done' '<form data-lavish-question="demo-colour"></form>'
+verify && fail 'a missing captain item passed'
+grep -q 'missing captain item (must): gamma/sign' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
+sync_page 'done' "$good<form data-lavish-question=\"demo-colour\"></form>"
+verify && fail 'a question listed twice passed'
+pass 'cockpit verify: stale status, answered question, missing captain item and duplicate are all rejected'
+
+sync_page 'done' "$good"
+cp "$SYNC_PAGE" "$TMP_ROOT/sync-page.clean"
+if FAKE_GH_DOWN=1 sync --page "$SYNC_PAGE" > "$TMP_ROOT/sync-fail.out" 2>&1; then fail 'sync succeeded without the forge'; fi
+grep -q 'id="cockpit-sync-banner"' "$SYNC_PAGE" || fail 'failed sync left no banner'
+cmp -s "$TMP_ROOT/truth.first" "$TRUTH" || fail 'failed sync touched the truth file'
+verify && fail 'a page with a failure banner passed'
+sync --page "$SYNC_PAGE" > /dev/null 2>&1 || fail 'recovery sync failed'
+cmp -s "$TMP_ROOT/sync-page.clean" "$SYNC_PAGE" || fail 'recovery did not remove exactly the banner'
+pass 'cockpit sync failure: non-zero exit, visible banner, truth kept, banner removed on recovery'
+
 echo "all cockpit-tools tests passed"

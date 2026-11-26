@@ -74,7 +74,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-wait-pretool-check.sh` | Task-worker PreToolUse advisory that flags a sleep-then-check Bash turn and points at the one-call wait (header owns modes) |
 | `fm-captain-pending-pretool-check.sh` | Primary PreToolUse advisory that surfaces a mid-turn captain-relevant fleet signal so the primary ends the turn early (docs/captain-pending-guard.md) |
 | `tools/quota-weekly-report.py` | Read-only weekly Claude usage report from the local transcripts; the header owns how to schedule it |
-| [`tools/cockpit/`](../tools/cockpit/README.md) | Miko cockpit refresh tooling; paths come from `FM_HOME`, `COCKPIT_DATA_DIR` and `MIKO_WORKTREE` |
+| [`tools/cockpit/`](../tools/cockpit/README.md) | Cockpit refresh tooling: the shared sync and page-check step plus the Miko page tools |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block, its current-state summary for a context re-emit, or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a local secondmate home and maintain `data/secondmates.md` |
 | `fm-remote-home-seed.sh` | Register and provision a whole secondmate home on an SSH-reachable host              |
