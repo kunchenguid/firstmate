@@ -459,15 +459,16 @@ SH
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
   assert_present "$FAKE_STATE/$name.gated" "timed-out provision never launched its server"
-  if kill -0 "$(cat "$FAKE_STATE/$name.gated")" 2>/dev/null; then
-    kill -KILL "$(cat "$FAKE_STATE/$name.gated")" 2>/dev/null || true
-    fail "timed-out provision left its late-starting server launch running"
-  fi
   assert_present "$TRIPWIRES/$name.fleet-state.json" \
     "timed-out provision must retain its tripwire until teardown"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after timed-out provision failed"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" \
     "teardown after timed-out provision did not remove its tripwire"
+  if [ -f "$FAKE_STATE/$name" ] && [ "$(cat "$FAKE_STATE/$name")" = running ]; then
+    fail "timed-out provision left a late-starting lab session after teardown"
+  fi
+  # The gate never opens, so the launch cannot reach running; reap it if it outlived the cancel.
+  kill -KILL "$(cat "$FAKE_STATE/$name.gated")" 2>/dev/null || true
   pass "fm-herdr-lab: timed-out provisioning cancels the launch before teardown"
 }
 
