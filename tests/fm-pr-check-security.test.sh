@@ -259,6 +259,10 @@ case " $* " in
       printf '%s\n' "$probe" >> "$FM_TEST_GLAB_LOG.probe"
     fi
     [ -z "${FM_TEST_GLAB_STATE_AFTER:-}" ] || [ ! -e "$FM_TEST_GLAB_LOG.train" ] || FM_TEST_GLAB_STATE=$FM_TEST_GLAB_STATE_AFTER
+    if [ -n "${FM_TEST_GLAB_MR_JSON:-}" ]; then
+      printf '%s\n' "$FM_TEST_GLAB_MR_JSON"
+      exit 0
+    fi
     printf '%s\n' "{\"state\":\"${FM_TEST_GLAB_STATE:-opened}\",\"detailed_merge_status\":\"${FM_TEST_GLAB_DETAIL:-mergeable}\",\"sha\":\"11568153bd75a30fd956da9ba7c1172ae556ada7\",\"head_pipeline\":{\"id\":${FM_TEST_GLAB_PIPELINE_ID:-941},\"status\":\"${FM_TEST_GLAB_PIPELINE:-success}\",\"sha\":\"37cf1cd139d2810616986b103feb45fead258fe4\"}}"
     ;;
   *" api "*)
@@ -267,6 +271,14 @@ case " $* " in
     # so only a real kill can cut it.
     case "${FM_TEST_GLAB_DETAIL_HANG:-0}:$*" in
       1:*pipelines/*) printf '%s\n' "$$" > "$FM_TEST_GLAB_LOG.hangpid"; trap '' ALRM; exec sleep 60 ;;
+    esac
+    case "$*" in
+      "api projects/"*/*) ;;
+      "api projects/"*)
+        # The project settings read: merge trains are off unless a case sets them.
+        printf '%s\n' "${FM_TEST_GLAB_PROJECT:-{\"merge_trains_enabled\":false,\"merge_method\":\"merge\"\}}"
+        exit 0
+        ;;
     esac
     case "$*" in
       *merge_trains/merge_requests/*)
@@ -3788,6 +3800,31 @@ group/subgroup/project
   done
   out=$(FM_TEST_GLAB_STATE=merged run_poll "$dir")
   [ "$out" = merged ] || fail "GitLab poll did not emit exactly one merged line"
+
+  # On a merge-train project, merged alone is not proof of the landing: the poll
+  # stays silent until the merge, squash, or fast-forward commit is recorded.
+  local sha=0123456789abcdef0123456789abcdef01234567
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"merge"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","merge_commit_sha":null,"squash_commit_sha":null,"sha":"'$sha'"}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab train poll emitted merged with no landed commit recorded"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"ff"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","merge_commit_sha":null,"squash_commit_sha":null,"sha":"'$sha'"}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "GitLab train poll did not emit merged once the fast-forward commit was recorded"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"merge"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","merge_commit_sha":"'$sha'"}' run_poll "$dir")
+  [ "$out" = merged ] || fail "GitLab train poll did not emit merged once the merge commit was recorded"
+  # The same proof binds the merged-only watch read when the degraded watch is off.
+  rm -f "$dir/home/config/pr-degraded-watch"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"merge"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","merge_commit_sha":null,"squash_commit_sha":null,"sha":"'$sha'"}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "GitLab merged-only train poll emitted merged with no landed commit recorded"
+  out=$(FM_TEST_GLAB_STATE=merged FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"merge"}' \
+    FM_TEST_GLAB_MR_JSON='{"state":"merged","squash_commit_sha":"'$sha'"}' run_poll "$dir")
+  [ "$out" = merged ] || fail "GitLab merged-only train poll did not emit merged once the squash commit was recorded"
+  : > "$dir/home/config/pr-degraded-watch"
   out=$(FM_TEST_GLAB_FAIL=1 run_poll "$dir")
   [ -z "$out" ] || fail "GitLab poll emitted after a glab failure"
 
@@ -3969,6 +4006,14 @@ EOF
   [ "$out" = merged ] || fail "a merge between the initial MR read and a missing train car was not reported as merged: $out"
   [ "$(grep -F -c 'api projects/group%2Fsubgroup%2Fproject/merge_requests/7' "$dir/glab.log")" -eq 1 ] \
     || fail "the missing-car path did not make exactly one bounded MR-state recheck"
+  rm -f "$dir/glab.log.train"
+  # On a merge-train project the merged re-read also needs the landed commit.
+  : > "$dir/glab.log"
+  out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=merged FM_TEST_GLAB_TRAIN=gone \
+    FM_TEST_GLAB_PROJECT='{"merge_trains_enabled":true,"merge_method":"merge"}' run_poll "$dir")
+  [ -z "$out" ] || fail "a merged recheck with no landed commit recorded was reported on a merge-train project: $out"
+  [ "$(grep -F -c 'api projects/group%2Fsubgroup%2Fproject/merge_requests/7' "$dir/glab.log")" -eq 1 ] \
+    || fail "the merge-train landed-commit case did not reach the MR-state recheck"
   rm -f "$dir/glab.log.train"
   out=$(FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_STATE_AFTER=closed FM_TEST_GLAB_TRAIN=gone run_poll "$dir")
   [ -z "$out" ] || fail "a closed MR recheck was reported as a train drop: $out"

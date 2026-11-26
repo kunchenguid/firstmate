@@ -54,6 +54,7 @@ First, plain `glab` has no field selector.
 `gh` reads one field with `--json state -q .state`; `glab mr view` offers only `-F, --output string  Format output as: text, json`.
 The merged check therefore reads glab's own field output, which needs no JSON processor; the poll's degraded read (head pipeline, merge-train car) is JSON-only and needs `jq`, and without `jq` the poll falls back to this field read so merged wakes keep working.
 Only an exact `merged` wakes firstmate, so a changed output format produces no wake rather than a false merge.
+With `jq` available, a merged reading on a project whose live settings enable merge trains also needs the landed merge, squash, or fast-forward commit recorded; until then the poll stays silent and armed, and the bounded train wait in `bin/fm-pr-merge.sh` reads this same check.
 
 Second, `glab` cannot take a merge request URL the way `gh pr view` can.
 That form shells out to git for the current repository, and the watcher runs in no repository:
@@ -277,3 +278,50 @@ It is optional by design, and the other consumers already treat it that way: `bi
 The merge path does not record one either, and deliberately does not depend on one.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
 Reading the head live at merge time, reporting a recorded value that disagrees, and binding the merge to what was actually verified is what closes that gap.
+
+## Merge trains
+
+The merge-train path in `bin/fm-pr-merge.sh` depends on four GitLab API shapes, read on 2026-11-06 with `glab 1.116.0` against the public `gitlab-org/gitlab` project, which runs merge trains.
+Every call was a read; nothing was added to any train.
+
+A merge-train project runs merged results pipelines, so a merge request's head pipeline runs on `refs/merge-requests/<iid>/merge` at a commit that is not the source head:
+
+```
+$ glab api --hostname gitlab.com 'projects/gitlab-org%2Fgitlab' | jq '{merge_trains_enabled, merge_method, merge_pipelines_enabled, only_allow_merge_if_pipeline_succeeds}'
+{
+  "merge_trains_enabled": true,
+  "merge_method": "merge",
+  "merge_pipelines_enabled": true,
+  "only_allow_merge_if_pipeline_succeeds": true
+}
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fgitlab/merge_requests/268942 | jq -c '{iid, sha, detailed_merge_status, hp: (.head_pipeline|{sha,ref,status,source})}'
+{"iid":268942,"sha":"e1de49ac86226fc5fea3ac5949cf70c019b6d339","detailed_merge_status":"mergeable","hp":{"sha":"924b3c0450c21279153a1c3a1e9dac46e97b07b9","ref":"refs/merge-requests/268942/merge","status":"success","source":"merge_request_event"}}
+```
+
+That merged-result commit's second parent is the source head, which is how the merge path binds such a pipeline to the verified head:
+
+```
+$ glab api --hostname gitlab.com 'projects/gitlab-org%2Fgitlab/repository/commits/924b3c0450c21279153a1c3a1e9dac46e97b07b9' | jq -c '{id, parent_ids}'
+{"id":"924b3c0450c21279153a1c3a1e9dac46e97b07b9","parent_ids":["c56c9220f839dd4baa9620c50dabcb8640053312","e1de49ac86226fc5fea3ac5949cf70c019b6d339"]}
+```
+
+A merge request in the train reads with auto-merge set and a car whose pipeline runs on the train ref, and a merge request with no car reads as a 404 with a non-zero exit:
+
+```
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fgitlab/merge_requests/268937 | jq -c '{iid, state, merge_when_pipeline_succeeds, sha, head_pipeline: (.head_pipeline|{sha,ref,status})}'
+{"iid":268937,"state":"opened","merge_when_pipeline_succeeds":true,"sha":"2e1c973482adab31e10ee555af6ac81f63bac5ad","head_pipeline":{"sha":"77bc931a857517704d8ac1417c972b15278e063e","ref":"refs/merge-requests/268937/train","status":"running"}}
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fgitlab/merge_trains/merge_requests/268937 | jq -c '{status, pipeline: (.pipeline|{id,sha,ref,status,web_url})}'
+{"status":"fresh","pipeline":{"id":3038492709,"sha":"77bc931a857517704d8ac1417c972b15278e063e","ref":"refs/merge-requests/268937/train","status":"running","web_url":"https://gitlab.com/gitlab-org/gitlab/-/pipelines/3038492709"}}
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fgitlab/merge_trains/merge_requests/266996; echo "rc=$?"
+{"message":"404 Merge Train Merge Request Not Found"}glab: 404 Merge Train Merge Request Not Found (HTTP 404)
+rc=1
+```
+
+Completed cars keep only the `merged` status, so a car the train drops is deleted rather than kept:
+
+```
+$ glab api --hostname gitlab.com 'projects/gitlab-org%2Fgitlab/merge_trains?per_page=100&scope=complete' | jq -r '.[].status' | sort | uniq -c
+    100 merged
+```
+
+The train entry itself, the bounded wait, and the queued and dropped outcomes are covered against fixtures by `tests/fm-pr-merge.test.sh`.
