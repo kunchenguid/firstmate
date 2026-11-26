@@ -173,7 +173,6 @@ steer_check() {  # <dir>
     FM_TASK_INBOX_GRACE_SECS="${2:-90}" \
     bash -c '
       . "$1" || exit 1
-      fm_task_job_reconcile "$STATE" t1 || exit 1
       task_job_check sess:fm-t1 t1 || exit 1
       inbox_steer_check sess:fm-t1 t1
       [ -z "$TASK_JOB_WAKE_REASON" ] || wake "$TASK_JOB_WAKE_REASON"
@@ -848,15 +847,19 @@ SH
   rec=$(records "$dir")
   [ -f "$rec" ] && [ ! -e "$jobdir/delivered" ] || fail "the fault did not isolate the delivered-record write"
   diagnostic="delivery bookkeeping could not write $jobdir/delivered"
-  assert_grep "$diagnostic" "$dir/state/t1.status" "the task status must identify the failed record"
+  assert_grep "$(printf 'stale\tsess:fm-t1\tstale: sess:fm-t1 (task job %s: %s' "${jobdir##*/}" "$diagnostic")" \
+    "$dir/state/.wake-queue" "the watcher must queue a stale wake for the failed record"
   [ ! -s "$dir/send.log" ] || fail "the watcher rang without a persisted delivery record"
   FM_REAL_MV="$real_mv" FM_JOB_RECORD_FAULT="$jobdir/delivered" steer_check "$dir" || fail "second faulted poll failed"
-  [ "$(grep -cF "$diagnostic" "$dir/state/t1.status")" = 1 ] || fail "the same write failure was reported twice"
+  [ "$(grep -cF "$diagnostic" "$dir/state/.wake-queue")" = 1 ] || fail "the same write failure was reported twice"
+  : > "$dir/state/.wake-queue"
+  FM_REAL_MV="$real_mv" FM_JOB_RECORD_FAULT="$jobdir/delivered" steer_check "$dir" || fail "poll after acknowledgement failed"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "a subsequent watcher requeued the acknowledged write failure"
 
   FM_REAL_MV="$real_mv" steer_check "$dir" || fail "the watcher did not recover after the fault cleared"
   [ "$(records "$dir")" = "$rec" ] || fail "delivery recovery duplicated the completion"
   assert_grep "$DOORBELL" "$dir/send.log" "the watcher must ring the recovered completion"
-  pass "watcher: a failed delivered-record write is reported once and retries the same completion"
+  pass "watcher: a failed delivered-record write queues one stale wake and preserves the completion"
 }
 
 watch_bg() {  # <dir> <out>
@@ -1045,7 +1048,7 @@ test_removed_inbox_is_never_recreated() {
 }
 
 test_delivery_serializes_with_retirement() {
-  local dir out jobdir runner delivery retirement rc=0
+  local dir out jobdir runner delivery poll retirement rc=0
   dir=$(setup_case retiring-race)
   out=$(job_start "$dir" --timeout 60 -- true) || fail "start failed: $out"
   jobdir=$(job_dir_of "$dir" "$out")
@@ -1075,6 +1078,16 @@ SH
   delivery=$!
   wait_for_file "$dir/message-ready" || fail "delivery did not reach its enqueue boundary"
   [ -e "$dir/state/.meta-t1.lock" ] || fail "delivery reached enqueue without holding the task lock"
+  steer_check "$dir" &
+  poll=$!
+  if ! wait_gone "$poll"; then
+    touch "$dir/deliver-release"
+    wait "$delivery" || true
+    wait "$poll" || true
+    fail "the watcher waited for the task lock instead of deferring delivery"
+  fi
+  wait "$poll" || fail "lock contention failed the watcher poll"
+  [ "$(record_count "$dir")" = 0 ] || fail "the watcher bypassed the held task lock"
   case_command "$dir" bash "$dir/retire.sh" "$ROOT" > "$dir/retire.out" 2> "$dir/retire.err" &
   retirement=$!
   wait_for_file "$dir/retire-started" || fail "retirement did not start"
@@ -1086,7 +1099,7 @@ SH
   [ "$rc" -ne 0 ] || fail "a retired task accepted a stale completion"
   [ ! -e "$dir/state/t1.inbox" ] || fail "delivery recreated a retired inbox"
   [ ! -s "$dir/send.log" ] || fail "delivery rang a retired endpoint"
-  pass "task job: enqueue and retirement serialize and stale redelivery cannot recreate the inbox"
+  pass "task job: delivery defers on lock contention and cannot recreate a retired inbox"
 }
 
 test_startup_failure_preserves_recovery_records() {

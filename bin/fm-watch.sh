@@ -724,6 +724,7 @@ task_job_check() {  # <window> <task>
   TASK_JOB_WAKE_REASON=
   root=$(fm_task_job_root "$STATE" "$task")
   [ -d "$root" ] || return 0
+  TASK_JOB_WAKE_REASON=$(fm_task_job_reconcile "$STATE" "$task" "$w") || return 1
   for dir in "$root"/*; do
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
     action=$(fm_task_job_due_action "$dir") || continue
@@ -4657,7 +4658,6 @@ EOF
     # exemption below, because a mate's steers land in an inbox too. Task-job
     # recovery runs first, then completions and steers advance independently.
     if [ -n "$task" ]; then
-      fm_task_job_reconcile "$STATE" "$task" || true
       task_job_check "$w" "$task" || exit 1
       inbox_steer_check "$w" "$task"
       [ -z "$TASK_JOB_WAKE_REASON" ] || wake "$TASK_JOB_WAKE_REASON"

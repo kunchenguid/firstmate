@@ -49,7 +49,7 @@
 #
 # Watcher-owned delivery: fm_task_job_reconcile enqueues a hold-aware record
 # through fm_task_job_deliver (bin/fm-task-inbox-lib.sh owns its format), and
-# bin/fm-watch.sh's task_job_check owns its doorbell attempts and stale wakes.
+# bin/fm-watch.sh's task_job_check advances its doorbell ladder.
 # fm_task_job_task_held reads the task's own open status decisions, its declared
 # captain-held wait, and its backlog captain hold through fm-captain-hold.sh,
 # in the watcher's own home and data context, never the runner's environment.
@@ -82,10 +82,9 @@
 # Cleanup of a missing runner without an exit record uses the lost-job check
 # above and refuses unless it can confirm the recorded groups and command
 # are gone.
-# Concurrent retirement is quiet at watcher bookkeeping boundaries. A failed
-# delivered-record write is reported in task status. Failed ring bookkeeping
-# for a surviving job surfaces as a task-specific stale wake. The lifecycle
-# and delivery regressions are in tests/fm-task-job.test.sh.
+# Concurrent retirement is quiet at watcher bookkeeping boundaries. Failed
+# delivery or ring bookkeeping surfaces as a task-specific stale wake. The
+# lifecycle and delivery regressions are in tests/fm-task-job.test.sh.
 #
 # Tunables (env):
 #   FM_TASK_JOB_START_GRACE_SECS  default 30; how long a job may lack its runner
@@ -346,17 +345,18 @@ fm_task_job_task_held() {
 # Deliver one finished job into its task's steering inbox, at most once per
 # completion. The watcher owns delivery and each job's ringing ladder.
 # Fails without writing when the task or job is gone.
-fm_task_job_deliver() (
-  local state=$1 task=$2 dir=$3 meta inbox msg rec lock status_file line
+fm_task_job_deliver() (  # <state-dir> <task-id> <job-dir> [watcher-window]
+  local state=$1 task=$2 dir=$3 window=${4:-} meta inbox msg rec lock status_file line reason
   meta="$state/$task.meta"
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock" || return 1
+  fm_lock_try_acquire "$lock" || return 1
   trap 'fm_lock_release "$lock"' EXIT
   trap 'exit 143' TERM INT
   inbox=$(fm_task_inbox_dir "$state" "$task")
   [ -d "$dir" ] || return 1
   [ "$(fm_meta_get "$dir/job" stopped)" != 1 ] || return 1
   [ -f "$meta" ] && [ ! -L "$meta" ] && [ -d "$inbox" ] || return 1
+  [ ! -f "$dir/delivered" ] || return 0
   if [ ! -f "$dir/exit" ]; then
     fm_task_job_runner_state "$dir" && return 1
     fm_task_job_recover_lost "$dir" "$(fm_meta_get "$dir/runner" pid)" || return 1
@@ -366,14 +366,19 @@ fm_task_job_deliver() (
   if fm_task_job_write_record "$dir/delivered" "record=${rec##*/}" 2>/dev/null; then
     return 0
   fi
+  [ -n "$window" ] && [ "${rec%/*}" = "$inbox" ] && [ -f "$rec" ] || return 1
   status_file="$state/$task.status"
-  line="# task-job: delivery bookkeeping could not write $dir/delivered for completion ${rec##*/}"
-  if [ -d "$dir" ] && ! status_event_recorded "$status_file" "$line"; then
-    printf '%s\n' "$line" >&2
-    if [ -f "$status_file" ]; then
-      printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file"
-    fi
+  line="# task-job: queued stale wake for unwritable $dir/delivered (completion ${rec##*/})"
+  status_event_recorded "$status_file" "$line" && return 1
+  fm_task_job_task_held "$state" "$task" && return 1
+  [ -d "$dir" ] && [ -f "$rec" ] || return 1
+  reason="stale: $window (task job ${dir##*/}: delivery bookkeeping could not write $dir/delivered for completion $rec)"
+  if ! fm_wake_append stale "$window" "$reason"; then
+    printf 'error: cannot queue escalation for task job %s\n' "${dir##*/}" >&2
+    return 2
   fi
+  printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file"
+  printf '%s\n' "$reason"
   return 1
 )
 
@@ -399,8 +404,8 @@ fm_task_job_due_action() {  # <job-dir>
 
 # The watcher's per-poll recovery for one task (see the header). Cheap when the
 # task has no job directory.
-fm_task_job_reconcile() {  # <state-dir> <task-id>
-  local root dir rc grace
+fm_task_job_reconcile() {  # <state-dir> <task-id> [watcher-window]
+  local root dir rc grace notice reason=
   root=$(fm_task_job_root "$1" "$2")
   [ -d "$root" ] || return 0
   grace=$(fm_task_job_secs "${FM_TASK_JOB_START_GRACE_SECS:-}" "$FM_TASK_JOB_START_GRACE_DEFAULT")
@@ -414,9 +419,12 @@ fm_task_job_reconcile() {  # <state-dir> <task-id>
     if [ "$rc" -eq 2 ] && [ ! -f "$dir/exit" ]; then
       [ -f "$dir/job" ] && [ "$(fm_path_age "$dir/job")" -ge "$grace" ] || continue
     fi
-    fm_task_job_deliver "$1" "$2" "$dir" || true
+    rc=0
+    notice=$(fm_task_job_deliver "$1" "$2" "$dir" "${3:-}") || rc=$?
+    [ "$rc" -ne 2 ] || return 1
+    [ -z "$notice" ] || reason=$notice
   done
-  return 0
+  printf '%s' "$reason"
 }
 
 # Stop every live job of a task without delivering anything through its runner.
