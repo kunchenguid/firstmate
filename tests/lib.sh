@@ -654,6 +654,49 @@ fm_fakebin() {
   printf '%s\n' "$fakebin"
 }
 
+# fm_fake_gnu_stat <fakebin>
+# Drops a `stat` that answers GNU `-c FORMAT` on a BSD host. A fixture that fakes
+# a non-Darwin uname steers product mtime readers to GNU `stat -c`, which BSD
+# stat rejects; on a GNU host the shim simply runs the real stat.
+fm_fake_gnu_stat() {
+  local fakebin=$1 real
+  real=$(command -v stat) || return 1
+  cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+real='$real'
+SH
+  cat >> "$fakebin/stat" <<'SH'
+"$real" -c %Y / >/dev/null 2>&1 && exec "$real" "$@"
+args=()
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -c ] && [ "$#" -ge 2 ]; then
+    gnu=$2 bsd= i=0
+    while [ "$i" -lt "${#gnu}" ]; do
+      c=${gnu:i:1}
+      if [ "$c" = % ]; then
+        i=$((i + 1))
+        case ${gnu:i:1} in
+          Y) bsd+=%m ;; s) bsd+=%z ;;
+          d) bsd+=%d ;; i) bsd+=%i ;;
+          *) printf 'unsupported stat specifier: %%%s\n' "${gnu:i:1}" >&2; exit 1 ;;
+        esac
+      else
+        bsd+=$c
+      fi
+      i=$((i + 1))
+    done
+    args+=(-f "$bsd")
+    shift 2
+  else
+    args+=("$1")
+    shift
+  fi
+done
+exec "$real" "${args[@]}"
+SH
+  chmod +x "$fakebin/stat"
+}
+
 fm_fake_exit0() {
   local fakebin=$1 tool
   shift
