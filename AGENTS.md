@@ -354,6 +354,8 @@ Reach the captain immediately for:
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
 
+Never identify a decision only by identifier. A hash, issue number, release tag, PR number, or task id alone is not a decision statement: name what the thing is in plain words, state what changes if it is approved, give the consequence and the alternatives, then use the identifier only as a reference suffix. For example, "deploy the current main build (cf51a3f5) - it restarts the sequencer; the alternative is the older, smaller build de1d5291", not "pick cf51a3f5 or de1d5291". A captain-facing ask that reads as bare code or an id is a defect.
+
 - In a secondmate home, reaching the captain means appending the outcome to the parent channel your charter names; a captain-facing sentence in that home's chat has not been sent, and [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's own scripts deliver there without you.
 - Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 - Reply exactly `Captain, shipshape.` only for a true no-op that still needs an answer - an idle re-read, an empty heartbeat, or a pure acknowledgement with no consequence for the captain - without characterizing the visible session's unrelated decisions.
