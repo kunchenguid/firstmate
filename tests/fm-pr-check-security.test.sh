@@ -163,7 +163,7 @@ case "${1:-} ${2:-}" in
             [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
             [ -n "${FM_TEST_JQ:-}" ] || exit 1
             rollup=${FM_TEST_GH_ROLLUP:-'[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]'}
-            printf '%s' "{\"state\":\"${FM_TEST_GH_POLL_STATE:-${FM_TEST_GH_STATE:-OPEN}}\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"statusCheckRollup\":$rollup}" \
+            printf '%s' "{\"state\":\"${FM_TEST_GH_POLL_STATE:-${FM_TEST_GH_STATE:-OPEN}}\",\"isDraft\":${FM_TEST_GH_POLL_DRAFT:-false},\"mergeable\":\"${FM_TEST_GH_POLL_MERGEABLE:-MERGEABLE}\",\"mergeStateStatus\":\"${FM_TEST_GH_POLL_MERGE_STATE:-CLEAN}\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"statusCheckRollup\":$rollup}" \
               | "$FM_TEST_JQ" -r "${@: -1}"
             ;;
           *)
@@ -2181,6 +2181,234 @@ test_github_degraded_poll() {
   pass "GitHub poll emits one degraded line per failing rollup and stays silent otherwise"
 }
 
+# Prints the forge-style UTC timestamp <seconds> seconds ago, read through jq
+# so the case needs no platform-specific date flags.
+iso_seconds_ago() {  # <seconds>
+  # shellcheck disable=SC2016 # $ago is a jq variable, expanded by jq.
+  "$REAL_JQ" -nr --argjson ago "$1" '(now - $ago) | floor | todate'
+}
+
+test_github_green_poll() {
+  local dir out head since rollup
+  head=0123456789abcdef0123456789abcdef01234567
+  dir=$(make_case github-green-poll)
+  rm -f "$dir/home/config/pr-degraded-watch"
+  make_poll_fixture "$dir"
+
+  # Without the flag the poll keeps its merged-only read and says nothing.
+  : > "$dir/gh.log"
+  out=$(run_poll "$dir")
+  [ -z "$out" ] || fail "flag-absent GitHub poll emitted for a green PR: $out"
+  ! grep -q 'statusCheckRollup' "$dir/gh.log" || fail "flag-absent GitHub poll requested rollup data"
+
+  : > "$dir/home/config/pr-merge-on-green"
+  # The newest completion time is the green-since time.
+  since=$("$REAL_JQ" -nr '"2026-11-19T20:05:00Z" | fromdateiso8601')
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:58:00Z","completedAt":"2026-11-19T20:01:30.5Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:58:00Z","completedAt":"2026-11-19T20:05:00Z"},{"__typename":"StatusContext","context":"deploy","state":"SUCCESS","startedAt":"2026-11-19T19:59:00Z"}]' run_poll "$dir")
+  [ "$out" = "green head=$head since=$since state=CLEAN" ] || fail "GitHub poll did not report a green PR with its newest completion: $out"
+
+  # A cancelled run that a passing re-run replaced does not hide green, and a
+  # start time stands in for a missing completion time.
+  since=$("$REAL_JQ" -nr '"2026-11-19T19:10:00Z" | fromdateiso8601')
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:10:00Z"}]' run_poll "$dir")
+  [ "$out" = "green head=$head since=$since state=CLEAN" ] || fail "GitHub poll did not read a replaced cancelled run as green: $out"
+  # A failed run that a passing re-run replaced at the same head does not hide
+  # green either, even with the degraded flag present.
+  : > "$dir/home/config/pr-degraded-watch"
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:10:00Z"}]' run_poll "$dir")
+  [ "$out" = "green head=$head since=$since state=CLEAN" ] || fail "GitHub poll did not read a replaced failed run as green: $out"
+  rm -f "$dir/home/config/pr-degraded-watch"
+  # A neutral or skipped run is green, and no readable time reports since=0.
+  out=$(FM_TEST_GH_ROLLUP='[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"NEUTRAL"},{"__typename":"CheckRun","name":"docs","status":"COMPLETED","conclusion":"SKIPPED"}]' run_poll "$dir")
+  [ "$out" = "green head=$head since=0 state=CLEAN" ] || fail "GitHub poll did not read neutral and skipped runs as green: $out"
+
+  # Anything short of green stays silent, including a failing check while only
+  # the green flag is present.
+  for rollup in \
+    '[]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"IN_PROGRESS","conclusion":null}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"CANCELLED","startedAt":"2026-11-19T19:10:00Z"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"QUEUED","conclusion":null,"startedAt":"0001-01-01T00:00:00Z"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"QUEUED","conclusion":null,"startedAt":null}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-19T19:00:00Z"},{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-11-19T19:00:00Z"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"StatusContext","context":"deploy","state":"PENDING"}]' \
+    '[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]'; do
+    out=$(FM_TEST_GH_ROLLUP="$rollup" run_poll "$dir")
+    [ -z "$out" ] || fail "GitHub poll emitted for not-green rollup $rollup: $out"
+  done
+  # A green PR in any merge state is reported with that state, and an
+  # unmergeable one with its mergeability.
+  for state in BLOCKED BEHIND DIRTY UNKNOWN UNSTABLE HAS_HOOKS; do
+    out=$(FM_TEST_GH_POLL_MERGE_STATE=$state run_poll "$dir")
+    [ "$out" = "green head=$head since=0 state=$state" ] || fail "GitHub poll did not report green with merge state $state: $out"
+  done
+  out=$(FM_TEST_GH_POLL_MERGEABLE=CONFLICTING run_poll "$dir")
+  [ "$out" = "green head=$head since=0 state=CONFLICTING" ] || fail "GitHub poll did not report a conflicting green PR's mergeability: $out"
+  out=$(FM_TEST_GH_POLL_DRAFT=true run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll reported green for a draft PR: $out"
+  out=$(FM_TEST_GH_HEAD=not-a-head run_poll "$dir")
+  [ -z "$out" ] || fail "GitHub poll reported green for an unreadable head: $out"
+  out=$(FM_TEST_GH_POLL_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "GitHub poll did not keep the merged wake with the green flag present"
+  pass "GitHub green poll reports an open PR whose newest check runs are green, with its merge state"
+}
+
+# Arms task-a's GitHub merge poll in a home with config/pr-merge-on-green and
+# the given extra metadata lines, ready for a bounded watcher run.
+arm_green_case() {  # <name> [<meta line>...]
+  local name=$1 dir
+  shift
+  dir=$(make_case "$name")
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  : > "$dir/home/config/pr-merge-on-green"
+  write_task_meta "$dir" task-a
+  for line in "$@"; do
+    printf '%s\n' "$line" >> "$dir/home/state/task-a.meta"
+  done
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2> "$dir/seed.err" \
+    || fail "$name: could not arm the merge poll: $(cat "$dir/seed.err")"
+  retire_contributions_observer "$dir"
+  printf '%s\n' "$dir"
+}
+
+# One watcher check sweep that must stay silent: it ends at the bound once the
+# sweep has run. The long check interval keeps that the only sweep: a second
+# back-to-back sweep could read the poll while the detached merge attempt is
+# re-recording it and report a spurious rejected check.
+green_sweep_silent() {  # <dir> <label>
+  local dir=$1 label=$2 rc=0
+  rm -f "$dir/home/state/.last-check"
+  set +e
+  FM_TEST_CHECK_INTERVAL=3600 FM_TEST_WATCH_STOP_WHEN="$dir/home/state/.last-check" \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err" || rc=$?
+  set -e
+  [ "$rc" -eq 124 ] || fail "$label: watcher ended before its bound on a sweep meant to stay silent: rc=$rc $(cat "$dir/$label.out")"
+}
+
+wait_for_grep() {  # <pattern> <file> <seconds>
+  local pattern=$1 file=$2 left=$(($3 * 10))
+  while [ "$left" -gt 0 ]; do
+    grep -q -- "$pattern" "$file" 2>/dev/null && return 0
+    sleep 0.1
+    left=$((left - 1))
+  done
+  return 1
+}
+
+test_green_watch_merges_a_yolo_pr_once() {
+  local dir state url head
+  url=https://github.com/o/r/pull/1
+  head=0123456789abcdef0123456789abcdef01234567
+
+  # A yolo=on ship task: the sweep that sees it green starts one merge through
+  # bin/fm-pr-merge.sh bound to the green head, and its landing is reported
+  # through the ordinary merge outcome.
+  dir=$(arm_green_case green-yolo-merge yolo=on)
+  state="$dir/home/state"
+  : > "$dir/gh.log"
+  green_sweep_silent "$dir" sweep-1
+  wait_for_grep "check: merge landed: task-a $url" "$state/.wake-queue" 30 \
+    || fail "the automatic merge did not land: $(cat "$state/task-a.pr-poll-green.log" 2>/dev/null)"
+  [ "$(grep -c '^pr merge' "$dir/gh.log")" -eq 1 ] || fail "the green sweep did not run exactly one forge merge"
+  grep -q "^pr merge .*--match-head-commit $head" "$dir/gh.log" \
+    || fail "the automatic merge was not bound to the green head: $(grep '^pr merge' "$dir/gh.log")"
+  ack_watcher_cycle "$state" || fail "merge outcome acknowledgement failed"
+
+  # A later sweep that still reads the same head green starts no second merge.
+  green_sweep_silent "$dir" sweep-2
+  sleep 1
+  [ "$(grep -c '^pr merge' "$dir/gh.log")" -eq 1 ] || fail "a later green sweep merged the same head again"
+
+  # A task without yolo is never merged automatically, and neither is a
+  # yolo task in a home without the flag.
+  dir=$(arm_green_case green-no-yolo)
+  : > "$dir/gh.log"
+  green_sweep_silent "$dir" sweep-1
+  sleep 1
+  ! grep -q '^pr merge' "$dir/gh.log" || fail "a task without yolo was merged automatically"
+  dir=$(arm_green_case green-flag-absent yolo=on)
+  rm -f "$dir/home/config/pr-merge-on-green" "$dir/home/config/pr-degraded-watch"
+  : > "$dir/gh.log"
+  green_sweep_silent "$dir" sweep-1
+  sleep 1
+  ! grep -q '^pr merge' "$dir/gh.log" || fail "a yolo task was merged automatically without the flag"
+  ! grep -q 'statusCheckRollup' "$dir/gh.log" || fail "flag-absent sweep requested rollup data"
+  [ ! -e "$dir/home/state/task-a.pr-poll-green" ] || fail "flag-absent sweep wrote a green marker"
+  pass "a green yolo PR is merged once through the guarded merge path, and nothing else is"
+}
+
+test_green_watch_alarms_once_per_head() {
+  local dir state url rollup other rc
+  url=https://github.com/o/r/pull/1
+  other=89abcdef0123456789abcdef0123456789abcdef
+  rollup="[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"completedAt\":\"$(iso_seconds_ago 1200)\"}]"
+
+  # A PR the forge has reported green for 20 minutes wakes once, naming it.
+  dir=$(arm_green_case green-alarm)
+  state="$dir/home/state"
+  rm -f "$state/.last-check"
+  FM_TEST_GH_ROLLUP=$rollup run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/alarm-1.out" 2> "$dir/alarm-1.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the green alarm sweep did not wake: rc=$rc $(cat "$dir/alarm-1.err")"
+  grep -q "check: PR $url green but still unmerged after 20m: head=0123456789abcdef0123456789abcdef01234567 merge_state=CLEAN" "$dir/alarm-1.out" \
+    || fail "the alarm did not name the PR and its green age: $(cat "$dir/alarm-1.out")"
+  grep -q "green but still unmerged" "$state/.wake-queue" || fail "the alarm was not queued durably"
+  ! grep -q '^pr merge' "$dir/gh.log" || fail "the alarm sweep merged a task without yolo"
+  ack_watcher_cycle "$state" || fail "alarm acknowledgement failed"
+
+  # The same head stays silent; a new head that is just as old wakes again.
+  FM_TEST_GH_ROLLUP=$rollup green_sweep_silent "$dir" alarm-2
+  ack_watcher_cycle "$state" || fail "silent sweep acknowledgement failed"
+  rm -f "$state/.last-check"
+  FM_TEST_GH_HEAD=$other FM_TEST_GH_ROLLUP=$rollup \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/alarm-3.out" 2> "$dir/alarm-3.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a new green head did not wake: rc=$rc"
+  [ "$(grep -c "head=$other" "$dir/alarm-3.out")" -eq 1 ] || fail "a new green head did not wake exactly once"
+  ack_watcher_cycle "$state" || fail "new-head acknowledgement failed"
+
+  # A freshly green PR is not yet overdue.
+  dir=$(arm_green_case green-alarm-fresh)
+  FM_TEST_GH_ROLLUP="[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\",\"completedAt\":\"$(iso_seconds_ago 30)\"}]" \
+    green_sweep_silent "$dir" fresh-1
+
+  # A yolo PR's merge attempt gets the alarm window itself before the alarm,
+  # which then says the attempt did not land.
+  dir=$(arm_green_case green-alarm-refused yolo=on)
+  state="$dir/home/state"
+  FM_PR_GREEN_ALARM_SECS=2 FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+    FM_TEST_GH_ROLLUP=$rollup green_sweep_silent "$dir" refused-1
+  wait_for_grep 'pr merge' "$dir/gh.log" 30 || fail "the yolo sweep started no merge"
+  ack_watcher_cycle "$state" || fail "refused-merge sweep acknowledgement failed"
+  sleep 3
+  rm -f "$state/.last-check"
+  FM_PR_GREEN_ALARM_SECS=2 FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false FM_TEST_GH_ROLLUP=$rollup \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/refused-2.out" 2> "$dir/refused-2.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "an unlanded automatic merge did not wake: rc=$rc"
+  grep -q "automatic merge attempt did not land (log $state/task-a.pr-poll-green.log)" "$dir/refused-2.out" \
+    || fail "the alarm did not say the automatic merge did not land: $(cat "$dir/refused-2.out")"
+  [ "$(grep -c '^pr merge' "$dir/gh.log")" -eq 1 ] || fail "a refused automatic merge was retried"
+
+  # A green yolo PR that is BEHIND is never merged or updated automatically,
+  # yet still wakes past the alarm window, naming its merge state.
+  dir=$(arm_green_case green-alarm-behind yolo=on)
+  state="$dir/home/state"
+  : > "$dir/gh.log"
+  rm -f "$state/.last-check"
+  FM_TEST_GH_POLL_MERGE_STATE=BEHIND FM_TEST_GH_ROLLUP=$rollup \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/behind-1.out" 2> "$dir/behind-1.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a green BEHIND PR did not wake: rc=$rc $(cat "$dir/behind-1.err")"
+  grep -q "check: PR $url green but still unmerged after 20m: head=0123456789abcdef0123456789abcdef01234567 merge_state=BEHIND" "$dir/behind-1.out" \
+    || fail "the BEHIND alarm did not name the merge state: $(cat "$dir/behind-1.out")"
+  sleep 1
+  ! grep -q '^pr merge\|update-branch' "$dir/gh.log" || fail "a green BEHIND PR was merged or updated automatically"
+  [ ! -e "$state/task-a.pr-poll-green.log" ] || fail "a green BEHIND PR started an automatic merge attempt"
+  pass "a green PR left unmerged past the alarm window wakes once per head"
+}
+
 test_degraded_poll_wakes_once_per_transition() {
   local dir state out rc url
   dir=$(make_case degraded-dedupe)
@@ -3078,6 +3306,8 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'degraded\n' > "$dir/home/state/task-a.pr-poll-degraded"
+  printf 'green\n' > "$dir/home/state/task-a.pr-poll-green"
+  printf 'merge attempt\n' > "$dir/home/state/task-a.pr-poll-green.log"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
   printf 'https://github.com/o/r/pull/9\n' > "$dir/home/state/task-a.pr-register-refused"
   printf 'https://github.com/o/r/pull/9\n' > "$dir/home/state/task-a.pr-register-timed-out"
@@ -3095,6 +3325,8 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.pr-poll-degraded" ] || fail "teardown left the degraded dedupe marker"
+  [ ! -e "$dir/home/state/task-a.pr-poll-green" ] || fail "teardown left the green PR marker"
+  [ ! -e "$dir/home/state/task-a.pr-poll-green.log" ] || fail "teardown left the automatic merge log"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
   [ ! -e "$dir/home/state/task-a.pr-register-refused" ] || fail "teardown left the PR registration refusal marker"
   [ ! -e "$dir/home/state/task-a.pr-register-timed-out" ] || fail "teardown left the PR registration timeout marker"
@@ -5729,6 +5961,9 @@ test_degraded_watch_opt_in_absent_preserves_merged_only_behavior
 test_degraded_watch_flag_refreshes_each_sweep
 test_degraded_watch_flag_in_an_overridden_home
 test_github_degraded_poll
+test_github_green_poll
+test_green_watch_merges_a_yolo_pr_once
+test_green_watch_alarms_once_per_head
 test_degraded_poll_wakes_once_per_transition
 test_degraded_wake_survives_an_unsaved_marker
 test_rearm_failure_after_partial_publish_restores_watch_identities

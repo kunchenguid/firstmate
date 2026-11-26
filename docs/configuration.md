@@ -864,6 +864,18 @@ With the flag present, registration records a degraded/train baseline and each p
 Without the flag, registration performs no baseline read, polls make no GitHub rollup or GitLab JSON, pipeline, or train reads, and the watcher ignores `degraded` and `ontrain` results while retaining the existing merged-PR wake.
 The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
 
+## Merge on green (config/pr-merge-on-green)
+
+The optional local, gitignored `config/pr-merge-on-green` presence flag lets the watcher act on a recorded task PR as soon as its merge poll sees it green, instead of waiting for a supervision turn.
+With the flag present, a GitHub task PR's poll also reads whether the pull request is open, not a draft, and green on the newest run of every check, and reports its merge state; a failed run that a passing re-run replaced at the same head does not hide green.
+For a ship task recorded `yolo=on`, the first sweep that sees a head green and cleanly mergeable (mergeable, with merge state CLEAN or HAS_HOOKS) starts one automatic merge of that head through `bin/fm-pr-merge.sh` with `--expected-head`, so every live merge guard, captain hold, and away-posture rule still decides, and a landed merge is reported through the ordinary merge outcome.
+A task without `yolo=on` is never merged automatically, a green PR in any other merge state (such as BEHIND or BLOCKED) is never merged or updated automatically, a refused or failed attempt is not retried, and the attempt's output stays in `state/<task-id>.pr-poll-green.log` until cleanup.
+For any task, once an open head has stayed green but unmerged for `FM_PR_GREEN_ALARM_SECS` seconds (default 600) in any merge state, and any automatic attempt on it is itself that old, the watcher queues one wake naming the PR and its merge state, so a BEHIND PR can be merged with `bin/fm-pr-merge.sh --update-branch`; the same head never wakes again, while a new head starts over.
+That green age is the forge's newest check completion time, so a watcher restarted after an outage alarms on its first sweep rather than ten minutes later.
+GitLab, Forgejo, and Gerrit polls are unchanged by the flag.
+Because yolo merges become automatic, a task whose merge must still escalate as destructive, irreversible, or security-sensitive is recorded with yolo off.
+The flag is home-local, is not inherited by secondmate homes, and takes effect on the next check sweep.
+
 ## Treehouse pool report (config/treehouse-pool-report)
 
 The optional local, gitignored `config/treehouse-pool-report` presence flag opts this home into a read-only Treehouse pool hygiene report at bootstrap.
@@ -3564,6 +3576,7 @@ FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may 
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_TASK_INBOX_BUSY_MAX=2      # consecutive busy-deferred due polls before a stuck-busy stale wake; 1..999999999, at most 9 decimal digits, otherwise 2; policy: bin/fm-task-inbox-lib.sh
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script; a cut check wakes with its output so far plus `timed out after <seconds>s`
+FM_PR_GREEN_ALARM_SECS=600   # seconds a task PR may stay green but unmerged before one wake names it; only with config/pr-merge-on-green; non-numeric values use 600
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
 FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20
