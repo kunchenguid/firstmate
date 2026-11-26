@@ -9,12 +9,12 @@
 # Usage:
 #   fm-install-treehouse.sh <destination-directory>
 #
-# Pins Treehouse v2.0.1, the version exercised by the local real-Herdr suite.
+# Pins Treehouse v3.1.8, the version exercised by the local real-Herdr suite.
 set -eu
 
-FM_TREEHOUSE_CI_VERSION=2.0.1
+FM_TREEHOUSE_CI_VERSION=3.1.8
 FM_TREEHOUSE_CI_TAG="v${FM_TREEHOUSE_CI_VERSION}"
-# Bounded download ceiling (bytes). Official 2.0.1 archives are under 8 MiB.
+# Bounded download ceiling (bytes). Official 3.1.8 archives are under 8 MiB.
 FM_TREEHOUSE_CI_MAX_BYTES=15000000
 FM_TREEHOUSE_CI_REPO=kunchenguid/treehouse
 
@@ -30,19 +30,19 @@ arch=$(uname -m)
 case "${os}-${arch}" in
   Linux-x86_64)
     ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-linux-amd64.tar.gz
-    SHA256=1d5a32751ab921670103fd201ddb2b91b47338cb13976f45642b827cf8976af2
+    SHA256=bd6227d909ba8046263ae5d4e072ccbcf43010cac9d7289b1262126510edfeed
     ;;
   Linux-aarch64|Linux-arm64)
     ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-linux-arm64.tar.gz
-    SHA256=eaccc9c5b98125df8bd77425598eeecee66cb0371db4eb1cf75f0d813c18fab9
+    SHA256=3d1c02c8ab13049709ace66be51d99b72fe7b6d0b73d0d0efd90f226e1aa87d1
     ;;
   Darwin-arm64)
     ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-darwin-arm64.tar.gz
-    SHA256=7ee5078f3d1f33c01196548797fce65408e459d53530b77d4ba56e074fa1c1a2
+    SHA256=007c55c26e0bd8b672b1a917465f06c3f89d93a66cd171364ffb65743d268601
     ;;
   Darwin-x86_64)
     ARCHIVE=treehouse-v${FM_TREEHOUSE_CI_VERSION}-darwin-amd64.tar.gz
-    SHA256=1cf44580a5837f995e1d3bb74f4fbd3112b642acd20406087d9735a8106112fd
+    SHA256=6be7f71cc8c6a1fbf40311af8ee3c45459c72afbab2c93dc2f80a183427bcbeb
     ;;
   *)
     die "unsupported platform ${os}-${arch}; official Treehouse assets are linux/darwin amd64 and arm64"
@@ -68,7 +68,7 @@ fi
 [ "$ACTUAL_SHA256" = "$SHA256" ] || die "checksum mismatch for $ARCHIVE (expected $SHA256, got $ACTUAL_SHA256)"
 
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
-# Archive layout: a single `treehouse` binary at the archive root (verified for v2.0.1).
+# Archive layout: a single `treehouse` binary at the archive root (verified for v3.1.8).
 if [ -f "$TMP/treehouse" ]; then
   BIN="$TMP/treehouse"
 elif [ -f "$TMP/treehouse-v${FM_TREEHOUSE_CI_VERSION}/treehouse" ]; then
@@ -82,7 +82,7 @@ mkdir -p "$DESTINATION"
 install -m 0755 "$BIN" "$DESTINATION/treehouse"
 
 installed_version=$("$DESTINATION/treehouse" --version 2>/dev/null | tr -d '[:space:]')
-# treehouse prints "v2.0.1" (leading v) on --version.
+# treehouse prints "v3.1.8" (leading v) on --version.
 case "$installed_version" in
   "v${FM_TREEHOUSE_CI_VERSION}"|"${FM_TREEHOUSE_CI_VERSION}") ;;
   *)

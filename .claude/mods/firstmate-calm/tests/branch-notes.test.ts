@@ -12,7 +12,7 @@ const PROCESSED = `${STATE}/.branch-outcomes-processed`;
 const HEALTH = `${STATE}/.supervision-host-health`;
 const POLL = 3000;
 
-type Row = { seq: number; task: string; verdict: "routine" | "captain"; summary: string; silent?: boolean; epoch?: number };
+type Row = { seq: number; task: string; verdict: "routine" | "captain" | "notice"; summary: string; silent?: boolean; epoch?: number };
 
 function tail(rows: readonly Row[]): string {
   return rows
@@ -46,6 +46,67 @@ const history: Row[] = [
 ];
 
 describe("supervision notes", () => {
+  test("direct notices use their own receipt across drains and session restarts", async ($, on) => {
+    const { clock, files, journal } = world(on);
+    files.set(`${HOME}/config/pr-follow`, "");
+    files.set(`${STATE}/.lock`, "123\n");
+    files.set(`${STATE}/.lock-session`, "session-1\n");
+    files.set(CURSOR, "1\n");
+    files.set(TAIL, tail([{ seq: 1, task: "fleet", verdict: "notice", summary: "MERGED: https://github.com/example/project/pull/1" }]));
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(["⚓ MERGED: https://github.com/example/project/pull/1"]);
+    expect(files.get(`${STATE}/.branch-notices-cursor`)).toBe("1\n");
+    expect(JSON.parse(files.get(`${STATE}/.pr-follow-surface`)!)).toMatchObject({ surface: "claude-calm", owner: "123", session: "session-1" });
+    await clock.advance(POLL);
+    await $.session.start(sessionStart);
+    expect(journal.logs).toHaveLength(1);
+  });
+
+  test("direct notices recover from full history after leaving the bounded display tail", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(`${HOME}/config/pr-follow`, "");
+    files.set(`${STATE}/.lock`, "123\n");
+    files.set(`${STATE}/.lock-session`, "session-1\n");
+    const notice: Row = { seq: 1, task: "fleet", verdict: "notice", summary: "CLOSED: https://github.com/example/project/pull/2" };
+    const latest: Row = { seq: 201, task: "fleet", verdict: "routine", summary: "unchanged", silent: true };
+    files.set(TAIL, tail([latest]));
+    files.set(`${STATE}/branch-outcomes.jsonl`, tail([notice, latest]));
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(["⚓ CLOSED: https://github.com/example/project/pull/2"]);
+    expect(files.get(`${STATE}/.branch-notices-cursor`)).toBe("1\n");
+  });
+
+  test("a resumed session does not replay an unprocessed outcome that a newer notice follows", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(`${HOME}/config/pr-follow`, "");
+    files.set(`${STATE}/.lock`, "123\n");
+    files.set(`${STATE}/.lock-session`, "session-1\n");
+    files.set(CURSOR, "4\n");
+    files.set(PROCESSED, "4\n");
+    const rows: Row[] = [
+      { seq: 5, task: "fm-b", verdict: "captain", summary: "decision waiting" },
+      { seq: 6, task: "fleet", verdict: "notice", summary: "MERGED: https://github.com/example/project/pull/1" },
+    ];
+    files.set(TAIL, tail(rows));
+    files.set(`${STATE}/branch-outcomes.jsonl`, tail(rows));
+    await $.session.start(sessionStart);
+    const first = ["⚓ [seq 5] fm-b: decision waiting", "⚓ MERGED: https://github.com/example/project/pull/1"];
+    expect(journal.logs).toEqual(first);
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual(first);
+  });
+
+  test("another session cannot display notices or advertise readiness", async ($, on) => {
+    const { files, journal } = world(on);
+    files.set(`${HOME}/config/pr-follow`, "");
+    files.set(`${STATE}/.lock-session`, "some-other-session\n");
+    files.set(TAIL, tail([{ seq: 1, task: "fleet", verdict: "notice", summary: "MERGED: https://github.com/example/project/pull/1" }]));
+    await $.session.start(sessionStart);
+    expect(journal.logs).toEqual([]);
+    expect(files.has(`${STATE}/.branch-notices-cursor`)).toBe(false);
+    expect(files.has(`${STATE}/.pr-follow-surface`)).toBe(false);
+  });
+
   test("session start replays unprocessed captain rows and unread visible routine rows with Calm off", async ($, on) => {
     const { files, journal } = world(on);
     files.set(TAIL, tail(history));
