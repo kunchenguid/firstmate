@@ -9,12 +9,13 @@
 # those contracts are pinned verbatim. An absent tool reports MISSING while a
 # present-but-below-floor tool reports OUTDATED instead. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
-# advertises --lease or treehouse is absent, which (if any) tasks-axi version is
-# on PATH, whether tasks-axi update advertises --archive-body, whether its mv help advertises
-# multi-ID moves, whether quota-axi is on PATH or which version it reports,
-# whether the local backend config opts out of tasks-axi backlog mutations,
-# which no-mistakes version is on PATH, which gh-axi version is on PATH, and
-# which lavish-axi version is on PATH.
+# advertises --lease and --root or treehouse is absent, which treehouse version
+# is on PATH, which (if any) tasks-axi version is on PATH, whether tasks-axi
+# update advertises --archive-body, whether its mv help advertises multi-ID
+# moves, whether quota-axi is on PATH or which version it reports, whether the
+# local backend config opts out of tasks-axi backlog mutations, which
+# no-mistakes version is on PATH, which gh-axi version is on PATH, and which
+# lavish-axi version is on PATH.
 # Dedicated fleet-sync cases pin the computed bootstrap timeout, explicit
 # override, blank-env defaulting, partial-output relay, and pre-launch timeout
 # scan.
@@ -51,7 +52,8 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH PAS
 # case keeps bare BASE_PATH.
 
 # A fake toolchain where every required tool is present and gh is authenticated.
-# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# treehouse's `get --help` advertises --lease and --root only when FM_FAKE_TREEHOUSE_LEASE_HELP=1,
+# and --lease alone when it is lease-only.
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -77,11 +79,13 @@ SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_TREEHOUSE_VERSION:-treehouse version v0.4.2 (fake)}"
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_VERSION:-treehouse version v3.1.8 (fake)}"
   exit 0
 fi
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
+    printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>] [--root <dir>]'
+  elif [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = lease-only ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
@@ -439,7 +443,7 @@ SH
 }
 
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
-#   <label>^<lease 1/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
+#   <label>^<lease 1/lease-only/0>^<tasks-axi version or ->^<quota 1/0>^<backend or ->^<mode>^<expect>^<notcontains>
 #   mode=empty -> output must be empty (expect/notcontains ignored)
 #   mode=exact -> output must equal <expect>
 #   mode=grep  -> output must contain <expect> (fixed string); <notcontains> must not appear
@@ -516,7 +520,8 @@ test_bootstrap_reporting() {
   done <<'ROWS'
 treehouse --lease support is accepted silently^1^0.2.6^1^manual^empty^^
 absent treehouse reports a missing tool^absent^0.2.6^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 0.4.2; requires --lease support; upgrade: treehouse update)^NEEDS_GH_AUTH
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 3.1.8; requires --lease and --root support; upgrade: treehouse update)^NEEDS_GH_AUTH
+treehouse with --lease but without --root reports an upgrade^lease-only^0.2.6^1^-^grep^OUTDATED: treehouse (installed: 3.1.8; requires --lease and --root support; upgrade: treehouse update)^NEEDS_GH_AUTH
 compatible tasks-axi is silent by default^1^0.2.6^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi reports an upgrade by default^1^0.1.0^1^-^exact^OUTDATED: tasks-axi (installed: 0.1.0; requires 0.2.6; upgrade: npm install -g tasks-axi)^
@@ -598,6 +603,39 @@ older no-mistakes patch reports an upgrade^no-mistakes version v1.45.4 (fake)^ou
 unparseable no-mistakes version reports an upgrade^no-mistakes development build^outdated^unparseable
 ROWS
   pass "bootstrap separates an absent no-mistakes from one below its version floor"
+}
+
+test_treehouse_min_version() {
+  local label version mode installed expect case_dir fakebin base out n
+  n=0
+  while IFS='^' read -r label version mode installed; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/treehouse-min-$n"
+    mkdir -p "$case_dir/home"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    base=$BASE_PATH
+    out=$(PATH="$fakebin:$base" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      outdated)
+        expect="OUTDATED: treehouse (installed: $installed; requires 3.0.1; upgrade: treehouse update)"
+        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+    esac
+  done <<'ROWS'
+minimum treehouse version is accepted^treehouse version v3.0.1 (fake)^empty^
+newer treehouse patch is accepted^treehouse version v3.1.8 (fake)^empty^
+newer treehouse major is accepted^treehouse version v4.0.0 (fake)^empty^
+older treehouse major reports an upgrade^treehouse version v2.3.0 (fake)^outdated^2.3.0
+older treehouse just below the floor reports an upgrade^treehouse version v2.9.9 (fake)^outdated^2.9.9
+treehouse 3.0.0 reports an upgrade^treehouse version v3.0.0 (fake)^outdated^3.0.0
+unparseable treehouse version reports an upgrade^treehouse development build^outdated^unparseable
+ROWS
+  pass "bootstrap separates a treehouse below 3.0.1 from one at or above its version floor"
 }
 
 test_gh_axi_min_version() {
@@ -1827,6 +1865,39 @@ JSON
   pass "bootstrap reports pool orphans, duplicate clones, old unowned slots, and test pools"
 }
 
+test_treehouse_pool_report_skips_secondmate_duplicate_clone() {
+  local case_dir home root fakebin clone_default clone_mate origin out
+  case_dir="$TMP_ROOT/pool-report-secondmate-dup"
+  home="$case_dir/home"
+  root="$case_dir/pools"
+  clone_default="$home/projects/default-clone"
+  clone_mate="$case_dir/mate-clone"
+  origin="$case_dir/origin.git"
+  mkdir -p "$home/config" "$home/projects" \
+    "$root/default-pool" "$root/fm-secondmate/mate-id/.treehouse/mate-pool"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  git init -q "$clone_default"
+  git -C "$clone_default" -c user.email=pool-test@example.invalid -c user.name=pool-test \
+    commit -q --allow-empty -m fixture
+  git init -q --bare "$origin"
+  git -C "$clone_default" remote add origin "$origin"
+  git -C "$clone_default" push -q -u origin HEAD
+  git clone -q "$origin" "$clone_mate"
+  cat > "$root/default-pool/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$clone_default","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  cat > "$root/fm-secondmate/mate-id/.treehouse/mate-pool/treehouse-state.json" <<JSON
+{"worktrees":[{"path":"$clone_mate","created_at":"2020-01-01T00:00:00Z"}]}
+JSON
+  : > "$home/config/treehouse-pool-report"
+  out=$(PATH="$fakebin:$BASE_PATH" TREEHOUSE_ROOT="$root" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_BOOTSTRAP_DETECT_ONLY=1 FM_BOOTSTRAP_NETWORK=skip \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "duplicate-clone" \
+    "a secondmate pool sharing the default pool's origin was reported as a duplicate clone"
+  pass "bootstrap does not report a secondmate pool as a duplicate of the default pool"
+}
+
 test_treehouse_pool_report_needs_its_flag() {
   local case_dir home root fakebin real_jq jq_log out baseline
   case_dir="$TMP_ROOT/pool-report-flag-absent"
@@ -1921,9 +1992,11 @@ test_record_hygiene_absent_flag_is_inert
 test_record_hygiene_watcher_absent_flag_is_inert
 test_bootstrap_reporting
 test_treehouse_pool_report_is_read_only_and_classifies_pools
+test_treehouse_pool_report_skips_secondmate_duplicate_clone
 test_treehouse_pool_report_needs_its_flag
 test_absent_tool_cases_hide_a_real_install_in_the_base_path
 test_no_mistakes_min_version
+test_treehouse_min_version
 test_gh_axi_min_version
 test_lavish_axi_min_version
 test_tasks_axi_min_version

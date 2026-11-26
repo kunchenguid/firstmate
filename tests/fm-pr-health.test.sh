@@ -62,7 +62,10 @@ case "$1 $2" in
       headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(if has("reviewDecision") then .reviewDecision else "APPROVED" end),
       reviewRequests:{pageInfo:{hasNextPage:(.requests > 100)},
         nodes:[range([.requests, 100] | min) | {requestedReviewer:{__typename:"User"}}]},
-      latestReviews:{nodes:[range(.reviews) | {author:{__typename:"User",login:"reviewer"}}]},
+      latestReviews:{nodes:(if (.change_requests | type) == "array" then
+          [.change_requests[] | {state:"CHANGES_REQUESTED",author:{login:.login},commit:{oid:.commit},submittedAt:.submitted_at}]
+        else [range(.reviews // 0) | {author:{__typename:"User",login:"reviewer"}}] end)},
+      timelineItems:{nodes:(if .closed_by != null then [{actor:{login:.closed_by}}] else [] end)},
       statusCheckRollup:(if (.checks | length) == 0 then null else {
         contexts:{pageInfo:{hasNextPage:false},nodes:[.checks[] | {__typename:"CheckRun",name,
           status:(if .conclusion == null then "IN_PROGRESS" else "COMPLETED" end),
@@ -94,6 +97,7 @@ case "$1 $2" in
       *) model "$rest" | jq '{state:(if .state == "open" then "open" else "closed" end),
            merged_at:(if .state == "merged" then "2026-10-21T00:00:00Z" else null end),
            user:{login:"author"},draft,mergeable,head:{sha:.head},
+           merged_by:(if .merged_by != null then {login:.merged_by} else null end),
            base:{sha:"0000000000000000000000000000000000000000"},labels:[(.labels // [])[] | {name:.}]}' ;;
     esac ;;
   'api -i')
@@ -153,9 +157,11 @@ pr() { # home number head base mergeable(true|false|null) draft(true|false)
     > "$1/forge/pr-$2.json"
 }
 
-set_pr() { # home number jq-update
-  jq "$3" "$1/forge/pr-$2.json" > "$1/forge/update.json" || fail 'fixture update failed'
-  mv "$1/forge/update.json" "$1/forge/pr-$2.json"
+set_pr() { # home number [jq options] filter
+  local home=$1 number=$2
+  shift 2
+  jq "$@" "$home/forge/pr-$number.json" > "$home/forge/update.json" || fail 'fixture update failed'
+  mv "$home/forge/update.json" "$home/forge/pr-$number.json"
 }
 
 task() { # home id [meta lines...]
@@ -167,6 +173,8 @@ task() { # home id [meta lines...]
 arm() {
   with_home "$1" "$ROOT/bin/fm-pr-health.sh" arm >/dev/null || fail 'could not arm the PR health monitor'
 }
+
+opt() { : > "$1/config/$2"; }
 
 pass_once() { # home -> the registered check's output
   with_home "$1" bash "$1/state/pr-health.check.sh" || fail 'the PR health check failed'
@@ -960,8 +968,279 @@ SH
   pass 'final contributions are not enrolled on a poll'
 }
 
+test_any_failure_off_still_reports_only_required_checks() {
+  local home
+  home=$(new_home any-off)
+  printf 'Full suite\tfull-ci\n' > "$home/config/pr-health-label-gated"
+  task "$home" ship1 pr=https://github.com/o/r/pull/80
+  pr "$home" 80 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 80 '.checks = [
+    {name:"CI Status",conclusion:"SUCCESS",required:true},
+    {name:"E2E",conclusion:"FAILURE",required:false},
+    {name:"Full suite",conclusion:"FAILURE",required:true}]'
+  arm "$home"
+  expect_one "$home" 'has failing required checks at latest commit aaaaaaa: Full suite \(task ship1\)$' \
+    'without any-failure, a required Full suite failure still wakes at once'
+  expect_silent "$home" 'that required failure must not repeat, and the optional failure stays silent'
+  pass 'any-failure off keeps today'"'"'s required-check rule'
+}
+
+test_any_failure_confirms_on_the_next_pass() {
+  local home n
+  home=$(new_home any-on)
+  opt "$home" pr-health-any-failure
+  printf 'Full suite\tfull-ci\n# comment\n' > "$home/config/pr-health-label-gated"
+  task "$home" ship1 pr=https://github.com/o/r/pull/81
+  pr "$home" 81 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 81 '.checks = [
+    {name:"CI Status",conclusion:"SUCCESS",required:true},
+    {name:"E2E",conclusion:"FAILURE",required:false},
+    {name:"Full suite",conclusion:"FAILURE",required:true},
+    {name:"Backend",conclusion:"FAILURE",required:true}]'
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'the first sight of a failure must not wake'
+  jq -e --arg head "$HEAD_A" '.prs["https://github.com/o/r/pull/81"].maintainer_gated | any(.[]; .head == $head and .name == "Full suite")' \
+    "$home/state/pr-health.json" >/dev/null || fail 'Full suite was not recorded as maintainer-gated'
+  n=$(reads "$home" 81)
+  expect_one "$home" 'has failing checks at latest commit aaaaaaa: Backend \(required\), E2E \(task ship1\)$' \
+    'the second pass must report the required and optional failures'
+  [ "$(reads "$home" 81)" = $((n + 1)) ] || fail 'the confirming pass did not read the PR'
+  n=$(reads "$home" 81)
+  expect_silent "$home" 'a confirmed failure must not repeat'
+  [ "$(reads "$home" 81)" = "$n" ] || fail 'a settled failure was read again without a new event'
+  set_pr "$home" 81 '.checks = [
+    {name:"CI Status",conclusion:"SUCCESS",required:true},
+    {name:"E2E",conclusion:"SUCCESS",required:false},
+    {name:"Full suite",conclusion:"FAILURE",required:true},
+    {name:"Backend",conclusion:"SUCCESS",required:true},
+    {name:"Lint",conclusion:"FAILURE",required:false}]'
+  notify "$home" o/r 81 2026-11-01T00:04:00Z review
+  expect_silent "$home" 'a new failure is silent on first sight'
+  expect_one "$home" 'has failing checks at latest commit aaaaaaa: Lint \(task ship1\)$' \
+    'a later failure at the same commit wakes on the confirming pass'
+  set_pr "$home" 81 '.labels = ["full-ci"] | .checks = [
+    {name:"CI Status",conclusion:"SUCCESS",required:true},
+    {name:"E2E",conclusion:"SUCCESS",required:false},
+    {name:"Full suite",conclusion:"FAILURE",required:true},
+    {name:"Backend",conclusion:"SUCCESS",required:true},
+    {name:"Lint",conclusion:"SUCCESS",required:false}]'
+  notify "$home" o/r 81 2026-11-01T00:05:00Z labeled
+  expect_silent "$home" 'a released label-gated check is silent on first sight'
+  expect_one "$home" 'has failing checks at latest commit aaaaaaa: Full suite \(required\) \(task ship1\)$' \
+    'Full suite wakes once the label is present and the failure holds'
+  pass 'any-failure confirms on the next pass and holds a label-gated check'
+}
+
+test_any_failure_clears_when_the_check_passes() {
+  local home
+  home=$(new_home any-flap)
+  opt "$home" pr-health-any-failure
+  task "$home" ship1 pr=https://github.com/o/r/pull/88
+  pr "$home" 88 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 88 '.checks = [{name:"E2E",conclusion:"FAILURE",required:false}]'
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'first sight must not wake'
+  set_pr "$home" 88 '.checks = [{name:"E2E",conclusion:"SUCCESS",required:false}]'
+  expect_silent "$home" 'a failure that passes before the next pass must stay silent'
+  set_pr "$home" 88 '.checks = [{name:"E2E",conclusion:"FAILURE",required:false}]'
+  notify "$home" o/r 88 2026-11-01T00:04:00Z review
+  expect_silent "$home" 'the return of the failure is a new first sight'
+  expect_one "$home" 'has failing checks at latest commit aaaaaaa: E2E \(task ship1\)$' \
+    'the failure wakes only after it is still failing on the next pass'
+  pass 'a failure that clears before the next pass does not wake'
+}
+
+test_approved_green_off_is_silent() {
+  local home
+  home=$(new_home green-off)
+  task "$home" ship1 pr=https://github.com/o/r/pull/82
+  pr "$home" 82 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 82 '.reviewDecision = "APPROVED" | .checks = [{name:"CI Status",conclusion:"SUCCESS",required:true}]'
+  arm "$home"
+  expect_silent "$home" 'approved and green must stay silent without its file'
+  expect_silent "$home" 'a second pass must stay silent without its file'
+  pass 'approved and green stays off without its file'
+}
+
+test_approved_green_reports_once_per_commit() {
+  local home out
+  home=$(new_home green-on)
+  opt "$home" pr-health-approved-green
+  task "$home" ship1 pr=https://github.com/o/r/pull/89
+  pr "$home" 89 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 89 '.reviewDecision = "APPROVED" | .checks = [{name:"CI Status",conclusion:"FAILURE",required:true}]'
+  arm "$home"
+  out=$(pass_once "$home")
+  printf '%s\n' "$out" | grep -q 'approved, checks green' && fail "a failing check reported green: $out"
+  printf '%s\n' "$out" | grep -q 'failing required checks' || fail "a failing check was not reported: $out"
+  set_pr "$home" 89 '.checks = [{name:"CI Status",conclusion:null,required:true}]'
+  expect_silent "$home" 'a running check must not report approved and green'
+  set_pr "$home" 89 '.checks = [{name:"CI Status",conclusion:"SUCCESS",required:true}] | .draft = true'
+  expect_silent "$home" 'a draft must not report approved and green'
+  set_pr "$home" 89 '.draft = false | .checks = []'
+  expect_silent "$home" 'a PR with no reported check must not report approved and green'
+  set_pr "$home" 89 '.checks = [{name:"CI Status",conclusion:"SUCCESS",required:true}] | .suites = [{name:"CI",conclusion:"ACTION_REQUIRED"}]'
+  expect_silent "$home" 'maintainer-gated CI must not report approved and green'
+  set_pr "$home" 89 '.suites = []'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/89 approved, checks green at latest commit aaaaaaa \(task ship1\)$' \
+    'approved and green must report once the checks pass'
+  expect_silent "$home" 'approved and green must not repeat at the same commit'
+  set_pr "$home" 89 ".head = \"$HEAD_B\""
+  expect_one "$home" 'approved, checks green at latest commit bbbbbbb' \
+    'a new commit must report approved and green again'
+  if grep -Eq 'pr merge|pulls/.*/merge' "$home/forge/calls.log"; then
+    fail 'approved and green called merge'
+  fi
+  pass 'approved and green reports once per commit and does not merge'
+}
+
+test_stale_review_off_stays_an_author_action() {
+  local home
+  home=$(new_home stale-off)
+  task "$home" ship1 pr=https://github.com/o/r/pull/83
+  pr "$home" 83 "$HEAD_A" "$BASE_1" true false
+  # shellcheck disable=SC2016 # $head is a jq variable from --arg.
+  set_pr "$home" 83 --arg head "$HEAD_B" '.reviewDecision = "CHANGES_REQUESTED"
+    | .change_requests = [{login:"pat",commit:$head,submitted_at:"2099-01-01T00:00:00Z"}]'
+  arm "$home"
+  expect_one "$home" 'author must act at latest commit aaaaaaa: changes requested \(task ship1\)$' \
+    'without the file, an older change request is still an author action'
+  pass 'stale-review off keeps the author-action line'
+}
+
+test_stale_review_waits_on_the_reviewer() {
+  local home
+  home=$(new_home stale-on)
+  opt "$home" pr-health-stale-review
+  task "$home" ship1 pr=https://github.com/o/r/pull/84
+  pr "$home" 84 "$HEAD_A" "$BASE_1" true false
+  # shellcheck disable=SC2016 # $head is a jq variable from --arg.
+  set_pr "$home" 84 --arg head "$HEAD_B" '.reviewDecision = "CHANGES_REQUESTED"
+    | .change_requests = [{login:"pat",commit:$head,submitted_at:"2099-01-01T00:00:00Z"}]'
+  arm "$home"
+  expect_one "$home" 'waiting on "pat" at latest commit aaaaaaa \(task ship1\)$' \
+    'a change request on an older commit waits on the reviewer'
+  expect_silent "$home" 'the same stale change request must not repeat'
+  # shellcheck disable=SC2016 # $head is a jq variable from --arg.
+  set_pr "$home" 84 --arg head "$HEAD_A" '.change_requests = [{login:"pat",commit:$head,submitted_at:"2000-01-01T00:00:00Z"}]'
+  expect_one "$home" 'author must act at latest commit aaaaaaa: changes requested \(task ship1\)$' \
+    'a change request on the latest commit is an author action even when its timestamp is old'
+  # shellcheck disable=SC2016 # $head and $old are jq variables from --arg.
+  set_pr "$home" 84 --arg head "$HEAD_B" --arg old "$HEAD_A" '.head = $head
+    | .change_requests = [
+        {login:"bea",commit:$old,submitted_at:"2099-01-01T00:00:00Z"},
+        {login:"ada",commit:$old,submitted_at:"2099-01-01T00:00:00Z"},
+        {login:"say \"merge\"",commit:$old,submitted_at:"2099-01-01T00:00:00Z"}]'
+  expect_one "$home" 'waiting on "ada", "bea", "say \\"merge\\"" at latest commit bbbbbbb' \
+    'reviewer names are quoted data'
+  pass 'a stale change request waits on the reviewer'
+}
+
+test_final_report_names_the_account_once() {
+  local home before gql
+  home=$(new_home final-on)
+  opt "$home" pr-health-final
+  task "$home" done1 pr=https://github.com/o/r/pull/85
+  pr "$home" 85 "$HEAD_A" "$BASE_1" true false
+  arm "$home"
+  expect_silent "$home" 'an open PR must stay silent'
+  set_pr "$home" 85 '.state = "merged" | .merged_by = "merger"'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/85 merged by "merger" \(task done1\)$' \
+    'a merge must name the account once'
+  before=$(reads "$home" 85)
+  gql=$(grep -Ec 'number=85([^0-9]|$)' "$home/forge/calls.log")
+  expect_silent "$home" 'a reported merge must stay silent'
+  [ "$(reads "$home" 85)" = "$before" ] || fail 'a merged PR was read again'
+  [ "$(grep -Ec 'number=85([^0-9]|$)' "$home/forge/calls.log")" = "$gql" ] || fail 'a merged PR was read again through GraphQL'
+  task "$home" done2 pr=https://github.com/o/r/pull/86
+  pr "$home" 86 "$HEAD_A" "$BASE_1" true false
+  expect_silent "$home" 'a second open PR must stay silent'
+  set_pr "$home" 86 '.state = "closed" | .closed_by = "closer"'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/86 closed by "closer" \(task done2\)$' \
+    'a close must name the account'
+  before=$(reads "$home" 86)
+  expect_silent "$home" 'a reported close must stay silent'
+  [ "$(reads "$home" 86)" = "$before" ] || fail 'a closed PR was read again'
+  task "$home" done3 pr=https://github.com/o/r/pull/87
+  pr "$home" 87 "$HEAD_A" "$BASE_1" true false
+  expect_silent "$home" 'a third open PR must stay silent'
+  set_pr "$home" 87 '.state = "merged"'
+  expect_one "$home" 'pull/87 merged by an unknown account' \
+    'a merge with no account must say so without quoting a forged name'
+  if grep -Eq 'pr merge|pulls/.*/merge' "$home/forge/calls.log"; then
+    fail 'the final report called merge'
+  fi
+  pass 'a merged or closed PR is named once and then not read again'
+}
+
+test_final_report_only_names_PRs_seen_open_with_the_flag_on() {
+  local home n before
+  home=$(new_home final-baseline)
+  for n in 1 2 3; do
+    task "$home" "old$n" "pr=https://github.com/o/r/pull/$n"
+    pr "$home" "$n" "$HEAD_A" "$BASE_1" true false
+  done
+  arm "$home"
+  expect_silent "$home" 'open PRs before the flag must stay silent'
+  for n in 1 2 3; do
+    set_pr "$home" "$n" '.state = "merged" | .merged_by = "merger"'
+  done
+  set_pr "$home" 3 '.state = "closed" | .closed_by = "closer"'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail 'could not make the PRs final'
+  opt "$home" pr-health-final
+  task "$home" new4 pr=https://github.com/o/r/pull/4
+  pr "$home" 4 "$HEAD_A" "$BASE_1" true false
+  expect_silent "$home" 'PRs final before the flag must not print'
+  [ "$(jq '[.prs | to_entries[] | select(.key | test("pull/[123]$")) | select(.value.final)] | length' "$home/state/pr-health.json")" = 3 ] \
+    || fail 'baseline PRs were not marked final'
+  before=$(reads "$home" 1)
+  expect_silent "$home" 'a baselined PR must stay silent'
+  [ "$(reads "$home" 1)" = "$before" ] || fail 'a baselined PR was read'
+  task "$home" new5 pr=https://github.com/o/r/pull/5
+  pr "$home" 5 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 5 '.state = "merged" | .merged_by = "late"'
+  expect_silent "$home" 'a PR first read already merged must stay silent'
+  [ "$(jq '.prs["https://github.com/o/r/pull/5"].final' "$home/state/pr-health.json")" = true ] \
+    || fail 'a PR first read merged was not marked final'
+  set_pr "$home" 4 '.state = "merged" | .merged_by = "later"'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail 'could not record the merge'
+  expect_one "$home" '^pr-health: https://github.com/o/r/pull/4 merged by "later" \(task new4\)$' \
+    'a PR seen open with the flag on names the account once, though the contribution record is final'
+  before=$(reads "$home" 4)
+  expect_silent "$home" 'a reported merge must stay silent'
+  [ "$(reads "$home" 4)" = "$before" ] || fail 'a merged PR was read again'
+  pass 'only a PR seen open with the flag on is named when it becomes final'
+}
+
+test_final_report_forgets_open_seen_when_the_flag_is_removed() {
+  local home
+  home=$(new_home final-flag-toggle)
+  opt "$home" pr-health-final
+  task "$home" tog1 pr=https://github.com/o/r/pull/9
+  pr "$home" 9 "$HEAD_A" "$BASE_1" true false
+  arm "$home"
+  expect_silent "$home" 'an open PR must stay silent'
+  rm "$home/config/pr-health-final"
+  set_pr "$home" 9 '.state = "merged" | .merged_by = "merger"'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail 'could not record the merge'
+  expect_silent "$home" 'a poll with the flag off must stay silent'
+  opt "$home" pr-health-final
+  expect_silent "$home" 'a merge recorded while the flag was off must not print'
+  [ "$(jq '.prs["https://github.com/o/r/pull/9"].final' "$home/state/pr-health.json")" = true ] \
+    || fail 'the PR was not marked final'
+  pass 'open_seen does not survive a poll with the flag off'
+}
+
 failures=0
-for test_name in test_maintainer_author_and_approval_states_are_distinct \
+for test_name in test_any_failure_off_still_reports_only_required_checks \
+  test_any_failure_confirms_on_the_next_pass test_any_failure_clears_when_the_check_passes \
+  test_approved_green_off_is_silent test_approved_green_reports_once_per_commit \
+  test_stale_review_off_stays_an_author_action test_stale_review_waits_on_the_reviewer \
+  test_final_report_names_the_account_once test_final_report_only_names_PRs_seen_open_with_the_flag_on \
+  test_final_report_forgets_open_seen_when_the_flag_is_removed \
+  test_maintainer_author_and_approval_states_are_distinct \
   test_pending_reviewer_without_review_decision_is_recorded test_more_than_a_page_of_review_requests_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
   test_failed_event_read_is_retried test_busy_feed_still_reads_only_events test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
   test_unknown_then_dirty_wakes_once test_dirty_again_at_same_commits_is_silent \

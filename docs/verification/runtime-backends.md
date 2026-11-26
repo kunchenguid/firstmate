@@ -1286,7 +1286,8 @@ Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-30
 =120000,ARo=600000;
 ```
 
-Pi's bash tool runs a command with no time limit unless the call passes `timeout`, so the brief asks for at most 2700 seconds, which stays under the watcher's 3600-second busy-turn bound.
+Pi's native bash tool has no default timeout, so the worker brief asks for at most 2700 seconds, which stays under the watcher's 3600-second busy-turn bound.
+For sessions loading Firstmate's primary extension, see the [opt-in Bash timeout cap](../configuration.md#pi-bash-timeout-cap).
 Codex yields a still-running command back to the model, and one empty `write_stdin` poll then waits up to 300000 ms.
 Claude Code's Bash tool defaults to 120000 ms and accepts at most 600000 ms; `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` override those two values.
 
@@ -3209,6 +3210,30 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 ```sh
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
+
+## Explicit PR-follow outcome display
+
+Verified on 2026-11-21 with Pi 1.5.2 and Claude Code 2.1.330 on Linux.
+[Explicit PR follows](../configuration.md#explicit-pr-follows-configpr-follow) owns the opt-in setup and supported presentation boundary.
+The guard opens real terminal sessions and substitutes only forge reads.
+It submits no prompt and changes no real PR.
+Each taskless merge, closure, and failing check on a new commit produces one URL-bearing transcript line.
+The guard also checks that no primary model turn or supervision wake starts.
+Pi's native skill discovery verifies that no follow trigger enters the unconditional skill index.
+`tests/fm-session-start.test.sh` checks that the flag adds only one guidance line and removing it restores the original digest bytes.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-pr-follow-live-e2e.test.sh
+```
+
+```text
+ok - pi 1.5.2: three taskless forge changes produced three visible lines, no primary turn or wake
+skip: pi-signed is not installed for the live PR-follow proof
+ok - claude 2.1.330 (Claude Code): three taskless forge changes produced three visible lines, no primary turn or wake
+```
+
+Pi-signed was not separately exercised in this run.
+Other primaries are outside this feature's supported presentation boundary, rather than silently using model-mediated notification.
 
 ## Pi supervision branch
 

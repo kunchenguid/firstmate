@@ -68,6 +68,7 @@ import {
   firstmateStateDirectory,
   hostHealthNote,
   newOutcomeNotes,
+  outcomeNoteLine,
   parseHostHealth,
   parseOutcomeMarker,
   parseOutcomeTail,
@@ -116,6 +117,7 @@ type NotesState = {
   tailStamp: string | undefined;
   healthStamp: string | undefined;
   lastSeen: number | undefined;
+  noticeScanned: number;
   cursor: number;
   processed: number;
   shown: number;
@@ -286,8 +288,10 @@ async function startNotes($: EngineInterface): Promise<void> {
     health: parseHostHealth(health?.text),
     sessionId,
     remembered: undefined,
+    noticeScanned: 0,
   };
   await followTail($, current);
+  await publishFollowSurface($, current).catch(() => undefined);
   notes = current;
   if (notesTimer === undefined) {
     notesTimer = $.clock.every(BRANCH_NOTES_POLL_MS, () => {
@@ -305,18 +309,41 @@ async function startNotes($: EngineInterface): Promise<void> {
 async function followTail($: EngineInterface, current: NotesState): Promise<void> {
   const tail = await readIfChanged($, `${current.state}/.branch-outcomes-tail.jsonl`, current.tailStamp);
   if (tail === undefined) return;
-  current.tailStamp = tail.stamp;
   const rows = parseOutcomeTail(tail.text);
+  const quietNotices = rows.map((row) => row.verdict === "notice" ? { ...row, silent: true } : row);
   let lines: string[];
   if (current.lastSeen === undefined) {
-    lines = replayOutcomeNotes(rows, current.cursor, current.processed, current.shown);
+    lines = replayOutcomeNotes(quietNotices, current.cursor, current.processed, current.shown);
     current.lastSeen = rows[rows.length - 1]?.seq;
   } else {
-    const fresh = newOutcomeNotes(rows, current.lastSeen);
+    const fresh = newOutcomeNotes(quietNotices, current.lastSeen);
     lines = fresh.lines;
     current.lastSeen = fresh.lastSeen;
   }
   for (const line of lines) $.ui.log(line);
+  const ownsNotices = await ownsFollowSurface($, current);
+  if (ownsNotices) {
+    const path = `${current.state}/.branch-notices-cursor`;
+    const raw = (await readText($, path))?.trim() ?? "0";
+    if (!/^(0|[1-9][0-9]*)$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new Error("Invalid notice cursor");
+    let cursor = Number(raw);
+    let noticeRows = rows;
+    if (rows.length === 0 || rows[0]!.seq > Math.max(cursor, current.noticeScanned) + 1) {
+      const store = await readText($, `${current.state}/branch-outcomes.jsonl`);
+      if (store === undefined && rows.length > 0) throw new Error("Notice history unavailable");
+      noticeRows = parseOutcomeTail(store ?? "");
+    }
+    for (const row of noticeRows) {
+      if (row.verdict !== "notice" || row.seq <= cursor) continue;
+      const line = outcomeNoteLine(row);
+      if (line === undefined) continue;
+      await $.ui.log(line);
+      cursor = row.seq;
+      await $.fs.write(path, `${cursor}\n`);
+    }
+    current.noticeScanned = noticeRows.at(-1)?.seq ?? current.noticeScanned;
+  }
+  if (ownsNotices || !rows.some((row) => row.verdict === "notice")) current.tailStamp = tail.stamp;
   await rememberShown($, current);
 }
 
@@ -342,6 +369,22 @@ async function rememberShown($: EngineInterface, current: NotesState): Promise<v
   }
 }
 
+async function ownsFollowSurface($: EngineInterface, current: NotesState): Promise<boolean> {
+  if (!preferencePath || !(await $.fs.exists(`${preferencePath.slice(0, -4)}pr-follow`))) return false;
+  const session = (await readText($, `${current.state}/.lock-session`))?.trim();
+  return Boolean(session && session === current.sessionId);
+}
+
+async function publishFollowSurface($: EngineInterface, current: NotesState): Promise<void> {
+  if (!(await ownsFollowSurface($, current))) return;
+  const session = current.sessionId;
+  const owner = (await readText($, `${current.state}/.lock`))?.trim();
+  if (!owner) return;
+  await $.fs.write(`${current.state}/.pr-follow-surface`, JSON.stringify({
+    surface: "claude-calm", owner, session, epoch: Math.floor((await $.clock.now()) / 1000),
+  }));
+}
+
 /** One slow tick: a line per outcome appended since the last, and a latch change's note. */
 async function pollNotes($: EngineInterface): Promise<void> {
   const current = notes;
@@ -349,6 +392,7 @@ async function pollNotes($: EngineInterface): Promise<void> {
   notesPolling = true;
   try {
     await followTail($, current);
+    await publishFollowSurface($, current).catch(() => undefined);
     const health = await readIfChanged($, `${current.state}/.supervision-host-health`, current.healthStamp);
     if (health !== undefined) {
       current.healthStamp = health.stamp;
