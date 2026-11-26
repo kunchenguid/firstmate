@@ -75,6 +75,9 @@ A terminal too narrow for the six-cell sprite keeps the bare streak field with n
 
 The spaceship claims that same shared Pi working-row widget slot, so the shared-slot rule above applies to whichever presentation `config/calm-ship` selects.
 The two lifetimes differ: the boat appears while an agent run is under way, and the spaceship, when selected, is an ambient presentation present for the session.
+In a home that loads both Firstmate Calm and the standalone Pi Calm extension, the shared working-row slot belongs to whichever extension is active during a run.
+The standalone boat takes the row during an agent run, so a selected spaceship returns at the next session start rather than mid-session.
+The banner is absent from that run's settle until the next session start.
 
 ### What Calm hides on Pi
 

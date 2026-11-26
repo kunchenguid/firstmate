@@ -158,8 +158,9 @@ Pi's documented custom working-indicator frames are static and width-blind, so t
 
 Within Firstmate Calm, `.pi/extensions/fm-calm.ts` remains the sole owner of its presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns the default boat's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
 `.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the same painting and widget duties for the selectable saucer, over its own warp geometry rather than that shared core.
-Visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
-Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the working presentation, while settle, abort, and failure all reach the same cleanup.
+The default boat's visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
+Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the default boat, while settle, abort, and failure all reach the same cleanup.
+The selected spaceship is installed for the session instead, and its settle only eases it back into the idle drift.
 Repeated `agent_start` events inside one run are idempotent, and both Calm extensions use the shared `calm-working-ship` widget key, so Pi disposes the previous component before installing a replacement under that key and when it clears extension widgets, while Firstmate Calm's disposal signal prevents its cleanup from clearing a standalone Calm widget that replaced its own widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the working presentation leaves no residual blank row.
 

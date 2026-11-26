@@ -4725,6 +4725,24 @@ check(
 );
 await fire("agent_settled");
 check(ui.widgets.size === 1, "the settle cleared the other extension's working widget");
+// The standalone boat's own settle clears the shared slot. The ambient spaceship does
+// not reclaim it mid-session, so the banner stays absent for the rest of the session.
+ui.setWidget(boatKey, undefined);
+check(
+  !ui.widgets.has(boatKey) && liveTimers === 0,
+  `the spaceship reclaimed the shared slot mid-session after the standalone boat settled: ${liveTimers} timers`,
+);
+reset();
+await fire("agent_start");
+check(
+  !ui.widgets.has(boatKey) && liveTimers === 0,
+  `a later run reinstated the spaceship after the standalone boat settled: ${liveTimers} timers`,
+);
+await fire("agent_settled");
+check(
+  !ui.widgets.has(boatKey) && liveTimers === 0,
+  `the later settle reinstated the spaceship after the standalone boat settled: ${liveTimers} timers`,
+);
 // A fresh session reinstates the selected presentation under that one slot.
 reset();
 await fire("session_start", { reason: "new" });
