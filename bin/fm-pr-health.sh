@@ -37,6 +37,28 @@
 # It prints one line per new author action, conflict, or failing check, so one
 # wake. Maintainer-gated CI and missing required reviews are recorded in
 # state/pr-health.json for fleet review, but never printed to the wake channel.
+# Four further reports stay off unless their own config file exists. None of
+# them is implied by config/pr-health-monitor. With all four absent, the lines
+# above are unchanged. Docs/configuration.md owns the file names.
+#   - config/pr-health-any-failure: any failing context on the latest commit,
+#     required or not. The first pass only records the name. A later pass
+#     prints it when that same commit still fails, so a check that fails and
+#     then passes stays silent. config/pr-health-label-gated is read only with
+#     this file. Each line is a check name, or a check name, a tab, and a label.
+#     A listed check is recorded like maintainer-gated CI, and not printed as a
+#     failure, until the PR carries that label. An empty label never releases.
+#   - config/pr-health-approved-green: reviewDecision APPROVED, the PR is not a
+#     draft, at least one check has reported, and every reported check has
+#     passed (not failing and not still running). Maintainer-gated CI, including
+#     a listed label-gated check, is not green. The line never merges or lands.
+#   - config/pr-health-final: one line when the PR is merged or closed, naming
+#     the account in JSON quotes (REST merged_by, or the ClosedEvent actor).
+#     That read sets final, and the PR is never read again.
+#   - config/pr-health-stale-review: reviewDecision CHANGES_REQUESTED, and every
+#     change-requesting review in the first latestReviews page has
+#     commit.oid different from the head. The line says the owner is waiting
+#     on those reviewers. It is not an author action. Commit timestamps are
+#     not read. Review bodies are not printed. Account names are JSON quotes.
 #   - conflict: REST mergeable is false. Null (UNKNOWN) is neither clean nor
 #     conflicting and never clears an already reported condition.
 #   - failing checks: a required context failed (a check run concluded other
@@ -45,6 +67,7 @@
 #     matching fm-pr-state.sh for unprotected stacked bases. Each name is judged
 #     by its newest run (latest_checks in fm-contributions.jq), because GitHub
 #     keeps a cancelled run beside the passing rerun that replaced it.
+#     config/pr-health-any-failure replaces this rule for that home.
 #   - maintainer must approve CI: a check suite on the head concluded
 #     ACTION_REQUIRED, GitHub's hold on an outside contributor's workflows.
 #     Nothing ran, so the PR is not green even when its rollup is.
@@ -53,14 +76,18 @@
 #   - author must act: reviewDecision CHANGES_REQUESTED, or an explicit
 #     maintainer label pending-contributor-action, waiting-on-author,
 #     waiting-for-author or awaiting-author, with any "namespace:" prefix.
+#     A stale change request uses the stale-review file instead of this line.
 # A conflict and an author action each wake once per latest commit, and a
 # missing approval is recorded once per latest commit. A failing check wakes
 # once per latest commit and check name, and a maintainer-gated suite is
 # recorded once per latest commit and workflow name: a check that newly fails
 # at an already reported commit wakes once more, a name already reported there
 # never repeats, and the line names only the new ones. The conditions have
-# independent histories.
-# A merged or closed PR is final and never read again. A failed or timed-out
+# independent histories. Approved-and-green and a stale change request also
+# wake once per latest commit.
+# Without config/pr-health-final, a merged or closed PR is final and never
+# read again, and it prints nothing. With that file, the final line is that
+# one read. A failed or timed-out
 # read, or a latest commit that differs between the two reads, leaves the PR's
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
 # outages for the same URLs. Forge reads stop FM_CHECK_TIMEOUT (default 30)
@@ -110,6 +137,35 @@ trap 'exit 1' HUP INT TERM
 
 flag_on() { [ -e "$CONFIG/pr-health-monitor" ]; }
 
+# The four report files are presence flags. The label list is read only while
+# any-failure is on, so a home that sets none of them keeps today's lines.
+load_health_opts() {
+  FM_PR_HEALTH_ANY_FAILURE=0
+  FM_PR_HEALTH_APPROVED_GREEN=0
+  FM_PR_HEALTH_FINAL=0
+  FM_PR_HEALTH_STALE_REVIEW=0
+  [ -e "$CONFIG/pr-health-any-failure" ] && FM_PR_HEALTH_ANY_FAILURE=1
+  [ -e "$CONFIG/pr-health-approved-green" ] && FM_PR_HEALTH_APPROVED_GREEN=1
+  [ -e "$CONFIG/pr-health-final" ] && FM_PR_HEALTH_FINAL=1
+  [ -e "$CONFIG/pr-health-stale-review" ] && FM_PR_HEALTH_STALE_REVIEW=1
+  FM_PR_HEALTH_LABEL_GATED='[]'
+  if [ "$FM_PR_HEALTH_ANY_FAILURE" = 1 ] && [ -f "$CONFIG/pr-health-label-gated" ]; then
+    FM_PR_HEALTH_LABEL_GATED=$(jq -Rsc '
+      split("\n")
+      | map(gsub("\r"; ""))
+      | map(sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; ""))
+      | map(select(length > 0 and (startswith("#") | not)))
+      | map(if index("\t") then
+            split("\t") as $p
+            | {name:($p[0] | sub("[[:space:]]+$"; "")),
+               label:($p[1:] | join("\t") | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; ""))}
+          else {name:., label:""} end)
+    ' "$CONFIG/pr-health-label-gated") || FM_PR_HEALTH_LABEL_GATED='[]'
+  fi
+  export FM_PR_HEALTH_ANY_FAILURE FM_PR_HEALTH_APPROVED_GREEN FM_PR_HEALTH_FINAL \
+    FM_PR_HEALTH_STALE_REVIEW FM_PR_HEALTH_LABEL_GATED
+}
+
 meta_value() { sed -n "s/^$2=//p" "$1" | tail -n 1; }
 
 live_tasks() { # id <TAB> worktree, for each task that is not a secondmate
@@ -147,6 +203,8 @@ gh_read() { # deadline args... : one bounded forge read
 PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 reviewDecision
+latestReviews(first:100){nodes{state author{login} commit{oid}}}
+timelineItems(last:1,itemTypes:[CLOSED_EVENT]){nodes{... on ClosedEvent{actor{login}}}}
 reviewRequests(first:100){nodes{requestedReviewer{__typename}}}
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
 ... on CheckRun{name status conclusion startedAt isRequired(pullRequestNumber:$number)}
@@ -165,17 +223,31 @@ SUITE_PAGES=10 # ponytail: 1000 suites per head; a longer list leaves the read u
 STEP='
   $rest[0] as $r | ($gql[0].data.repository.pullRequest // null) as $g
   | ($prev[0] // {}) as $p
-  | if $r.merged_at != null or $r.state == "closed" then {fp:($p + {final:true}),lines:[]}
+  | ($tasks | join(", ")) as $owners
+  | (env.FM_PR_HEALTH_ANY_FAILURE == "1") as $opt_any
+  | (env.FM_PR_HEALTH_APPROVED_GREEN == "1") as $opt_green
+  | (env.FM_PR_HEALTH_FINAL == "1") as $opt_final
+  | (env.FM_PR_HEALTH_STALE_REVIEW == "1") as $opt_stale
+  | ((env.FM_PR_HEALTH_LABEL_GATED // "[]") | fromjson) as $label_gated
+  | if $r.merged_at != null or $r.state == "closed" then
+      (if $r.merged_at != null then (($r.merged_by // {}).login // "")
+       else (((($g.timelineItems.nodes // [{}])[0] // {}) | .actor.login) // "") end
+       | if . == "" then "an unknown account" else @json end) as $actor
+      | {fp:($p + {final:true}),
+         lines:(if $opt_final and ($p.open_seen // false) then
+           ["pr-health: \($url) \(if $r.merged_at != null then "merged" else "closed" end) by \($actor) (task \($owners))"]
+         else [] end)}
     elif $g == null or $g.headRefOid != $r.head.sha
       or (($g.commits.nodes[0].commit.oid // $r.head.sha) != $r.head.sha) then null
     else
       $r.head.sha as $head
-      | ($tasks | join(", ")) as $owners
       | ($g.statusCheckRollup // null) as $roll
       | [$roll.contexts.nodes[]? | if .__typename == "CheckRun"
           then {name, started_at:.startedAt, required:(.isRequired == true),
+                pending:(.status != "COMPLETED"),
                 failing:(.status == "COMPLETED" and .conclusion != null and (.conclusion | IN("SUCCESS","NEUTRAL","SKIPPED") | not))}
           else {name:.context, started_at:.createdAt, required:(.isRequired == true),
+                pending:(.state | IN("PENDING","EXPECTED")),
                 failing:(.state | IN("FAILURE","ERROR"))} end]
         | latest_checks as $ctx
       | any($ctx[]; .required) as $has_required
@@ -187,26 +259,69 @@ STEP='
       | [$gated_now[] | select(. as $name | any($gated[]; .head == $head and .name == $name) | not)] as $new_gated
       | ([($r.labels // [])[] | .name | select(ascii_downcase | sub("^[^:]*:"; "")
           | IN("pending-contributor-action","waiting-on-author","waiting-for-author","awaiting-author"))]) as $author_labels
-      | ([if $g.reviewDecision == "CHANGES_REQUESTED" then "changes requested" else empty end]
+      | [($g.latestReviews.nodes // [])[] | select(.state == "CHANGES_REQUESTED")] as $requests
+      | ($opt_stale and $g.reviewDecision == "CHANGES_REQUESTED" and ($requests | length) > 0
+          and all($requests[]; (.commit.oid // $head) != $head)) as $request_stale
+      | ([$requests[] | .author.login // empty | select(. != "")] | unique | map(@json) | join(", ")
+          | if . == "" then "a reviewer" else . end) as $reviewer_quotes
+      | ([if $g.reviewDecision == "CHANGES_REQUESTED" and ($request_stale | not) then "changes requested" else empty end]
           + [$author_labels[] | "maintainer marked it \(.)"]) as $author_reasons
       | (($author_reasons | length) > 0 and (($p.author_action // []) | index($head) | not)) as $author_new
+      | ($request_stale and (($p.stale_review // []) | index($head) | not)) as $stale_new
       # Only whether any review request is pending matters, so the first page decides it.
       | (($g.reviewDecision == "REVIEW_REQUIRED" or (($g.reviewRequests.nodes // []) | length) > 0)
           and $r.draft != true and (($p.needs_approval // []) | index($head) | not)) as $approval_new
       | ($r.mergeable == false and ($conflicts | index($head) | not)) as $conflict_new
       | [$failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $new_failing
       | (($new_failing | length) > 0) as $checks_new
+      | (if $opt_any then
+          ([($r.labels // [])[] | .name]) as $label_names
+          | ([$label_gated[] | . as $rule
+              | select(any($ctx[]; .name == $rule.name and .failing)
+                  and ($rule.label == "" or ($label_names | index($rule.label) | not)))
+              | $rule.name] | unique) as $held
+          | ([$ctx[] | select(.failing) | .name] | unique
+              | [.[] | select(. as $n | $held | index($n) | not)]) as $any_failing
+          | [$any_failing[] | select(. as $name | any($checks[]; .head == $head and .name == $name) | not)] as $unreported
+          | ($p.suspect // []) as $prior
+          | [$unreported[] | select(. as $name | any($prior[]; .head == $head and .name == $name))] as $confirmed
+          | [$unreported[] | select(. as $name | $confirmed | index($name) | not)] as $first_seen
+          | {held:$held, confirmed:$confirmed, first_seen:$first_seen, checks_new:false,
+             named:([$confirmed[] | . as $name | {name:$name, required:any($ctx[]; .name == $name and .required)}]
+               | sort_by(.required | not)
+               | map(if .required then "\(.name) (required)" else .name end))}
+        else {held:[], confirmed:$new_failing, first_seen:[], checks_new:$checks_new, named:[]} end) as $failmode
+      | $failmode.confirmed as $new_failing
+      | $failmode.checks_new as $checks_new
+      | [$failmode.held[] | select(. as $name | any($gated[]; .head == $head and .name == $name) | not)] as $new_held
+      | ($opt_any and (($failmode.confirmed | length) > 0)) as $any_new
+      | ($opt_green and $g.reviewDecision == "APPROVED" and $r.draft != true
+          and ($ctx | length) > 0
+          and all($ctx[]; (.failing | not) and (.pending | not))
+          and ($gated_now | length) == 0 and ($failmode.held | length) == 0
+          and (($p.approved_green // []) | index($head) | not)) as $green_new
       | ("at latest commit " + $head[:7]) as $where
-      | {fp:{conflicts:($conflicts + if $conflict_new then [$head] else [] end),
+      | {fp:({conflicts:($conflicts + if $conflict_new then [$head] else [] end),
              checks:($checks + [$new_failing[] | {head:$head,name:.}]),
-             maintainer_gated:($gated + [$new_gated[] | {head:$head,name:.}]),
+             maintainer_gated:($gated + [$new_gated[] | {head:$head,name:.}] + [$new_held[] | {head:$head,name:.}]),
              needs_approval:(($p.needs_approval // []) + if $approval_new then [$head] else [] end),
-             author_action:(($p.author_action // []) + if $author_new then [$head] else [] end)},
+             author_action:(($p.author_action // []) + if $author_new then [$head] else [] end)}
+          + (if $opt_any then {suspect:[$failmode.first_seen[] | {head:$head,name:.}]} else {} end)
+          + (if $opt_stale then {stale_review:(($p.stale_review // []) + if $stale_new then [$head] else [] end)} else {} end)
+          + (if $opt_green then {approved_green:(($p.approved_green // []) + if $green_new then [$head] else [] end)} else {} end)
+          + (if $opt_final then {open_seen:true} else {} end)),
+         retry:(($failmode.first_seen | length) > 0),
          lines:([
            (select($author_new)
             | "pr-health: \($url) author must act \($where): \($author_reasons | join("; ")) (task \($owners))"),
            (select($conflict_new)
             | "pr-health: \($url) conflicts with its base \($where) (task \($owners))"),
+           (select($stale_new)
+            | "pr-health: \($url) waiting on \($reviewer_quotes) \($where) (task \($owners))"),
+           (select($green_new)
+            | "pr-health: \($url) approved, checks green \($where) (task \($owners))"),
+           (select($any_new)
+            | "pr-health: \($url) has failing checks \($where): \($failmode.named[:3] | join(", "))\(if ($failmode.named | length) > 3 then " and \(($failmode.named | length) - 3) more" else "" end) (task \($owners))"),
            (select($checks_new)
             | "pr-health: \($url) has failing \(if $has_required then "required " else "" end)checks \($where): \($new_failing[:3] | join(", "))\(if ($new_failing | length) > 3 then " and \(($new_failing | length) - 3) more" else "" end) (task \($owners))")])}
     end'
@@ -377,6 +492,7 @@ poll() {
   local deadline timeout url step pid index=0 read_dir now full
   local pids=()
   flag_on || exit 0
+  load_health_opts
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || fail 'state directory unavailable'
   timeout=${FM_CHECK_TIMEOUT:-30}
   case "$timeout" in ''|*[!0-9]*) timeout=30 ;; esac
@@ -415,8 +531,17 @@ poll() {
     | .branches |= with_entries(select(.key | IN($ids[])))' "$TMP/health.json" > "$TMP/next.json"
   save_health "$TMP/next.json"
   cp "$TMP/next.json" "$TMP/health.json"
+  if [ "${FM_PR_HEALTH_FINAL:-}" = 1 ]; then
+    jq --slurpfile owned "$TMP/owned.json" '
+      reduce ($owned[0][] | select(.final) | .url) as $u (.; if (.prs[$u].open_seen // false) then . else .prs[$u] = ((.prs[$u] // {}) + {final:true}) end)' \
+      "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
+  elif jq -e 'any(.prs[]; has("open_seen"))' "$TMP/health.json" > /dev/null; then
+    jq '.prs |= map_values(del(.open_seen))' "$TMP/health.json" > "$TMP/next.json" \
+      && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
+  fi
   jq -r --slurpfile health "$TMP/health.json" '
-    .[] | select(.final | not) | select(($health[0].prs[.url].final // false) | not) | .url' "$TMP/owned.json" > "$TMP/owned-urls"
+    .[] | select(($health[0].prs[.url].final // false) | not)
+    | select((.final | not) or env.FM_PR_HEALTH_FINAL == "1") | .url' "$TMP/owned.json" > "$TMP/owned-urls"
   # Event-driven reads: a notification, a PR never read, or one whose last read
   # did not settle. Every owned PR is read when the feed is unavailable or the
   # fallback sweep is due.
@@ -457,7 +582,10 @@ poll() {
     step=$(cat "$TMP/step.json")
     [ "$step" != null ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
     jq -r '.lines[]' "$TMP/step.json"
-    [ "$(jq -r '.mergeable == null' "$read_dir/rest.json")" != true ] || printf '%s\n' "$url" >> "$TMP/unsettled"
+    if [ "$(jq -r '.mergeable == null' "$read_dir/rest.json")" = true ] \
+      || [ "$(jq -r '.retry // false' "$TMP/step.json")" = true ]; then
+      printf '%s\n' "$url" >> "$TMP/unsettled"
+    fi
     jq --arg url "$url" --slurpfile step "$TMP/step.json" '.prs[$url] = $step[0].fp' "$TMP/health.json" > "$TMP/next.json"
     if ! cmp -s "$TMP/next.json" "$TMP/health.json"; then
       save_health "$TMP/next.json"

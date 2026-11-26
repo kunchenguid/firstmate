@@ -9,7 +9,10 @@
 # No case touches the network, and the absent-key case proves the tool makes
 # no call at all.
 set -u
-unset TYPESAFE_BASE
+# Each case supplies its own provider settings and credentials. Inherited keys
+# would override .env fixtures and invalidate absent-key and Keychain cases.
+unset TYPESAFE_BASE TYPESAFE_API_KEY OPENROUTER_API_KEY OPENAI_API_KEY \
+  FM_DISPATCH_API_KEY FM_DISPATCH_PROVIDER FM_DISPATCH_MODEL FM_DISPATCH_BASE_URL
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"

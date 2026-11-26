@@ -89,6 +89,10 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' "${FM_FAKE_TREEHOUSE_VERSION:-treehouse version v3.1.8 (fake)}"
+  exit 0
+fi
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'Usage: treehouse get [--lease] [--root <dir>]'
   exit 0
@@ -773,6 +777,35 @@ write_omp_loaded_markers() {
 }
 
 # --- context digest: absent vs empty vs present -----------------------------
+
+test_pr_follow_guidance_is_opt_in() {
+  local rec root home fakebin holder_pid disabled enabled restored guidance
+  rec=$(new_world pr-follow-guidance)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+
+  disabled=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  touch "$home/config/pr-follow"
+  enabled=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  rm "$home/config/pr-follow"
+  restored=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  guidance="PR following is enabled: for follow or unfollow requests, read $root/docs/configuration.md (Explicit PR follows)."
+  assert_not_contains "$disabled" "$guidance" "an unconfigured home gained follow instructions"
+  assert_contains "$enabled" "$guidance" "an opted-in home cannot discover follow instructions"
+  [ "$(printf '%s\n' "$enabled" | grep -Fxc "$guidance")" = 1 ] || fail 'follow guidance was repeated'
+  [ "$(printf '%s\n' "$enabled" | grep -Fxv "$guidance")" = "$disabled" ] || fail 'opting in changed unrelated digest bytes'
+  [ "$restored" = "$disabled" ] || fail 'removing the opt-in did not restore the original digest bytes'
+  pass 'follow instructions add exactly one digest line only while the home opts in'
+}
 
 test_context_digest_absent_empty_present() {
   local rec root home fakebin out
@@ -3094,6 +3127,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_pr_follow_guidance_is_opt_in
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path

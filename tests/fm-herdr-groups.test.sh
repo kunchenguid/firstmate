@@ -13,6 +13,9 @@ set -u
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
+# The adapter canonicalizes the socket directory, and /tmp is a symlink on macOS.
+GROUPS_SOCK="$(cd /tmp && pwd -P)/fm-groups-s1.sock"
+
 # A Herdr pane identity leaked in from the developer's own terminal must never
 # route a call anywhere; every call here goes to the scripted fake.
 herdr_forget_inherited_pane
@@ -246,7 +249,7 @@ test_sync_reports_only_differences_and_sets_the_view() {
   assert_equals "1" "$(printf '%s\n' "$ws_reports" | grep -c 'report-metadata')" "workspace reports"
   assert_contains "$ws_reports" "workspace report-metadata w2 --source firstmate --token fm_group=storefront --token fm_state=running --token fm_group_order=000.storefront" \
     "only the exactly bound projected workspace gets workspace tokens"
-  assert_equals "/tmp/fm-groups-s1.sock	set" "$(cat "$FAKE_VIEW_LOG")" "agents view set once for the session"
+  assert_equals "$GROUPS_SOCK	set" "$(cat "$FAKE_VIEW_LOG")" "agents view set once for the session"
 
   : > "$FAKE_HERDR_LOG"; : > "$FAKE_VIEW_LOG"
   rm -f "$HOME_DIR/state/flat-task.meta"
@@ -261,7 +264,7 @@ test_sync_reports_only_differences_and_sets_the_view() {
     "$(reports pane)" "a status change reports only the changed pane tokens"
   assert_contains "$(reports workspace)" "--token fm_state=needs-captain --session s1" "workspace status token follows"
   assert_not_contains "$(reports workspace)" "fm_group=" "unchanged workspace tokens are not re-reported"
-  assert_equals "/tmp/fm-groups-s1.sock	set" "$(cat "$FAKE_VIEW_LOG")" "agents view re-set after a pane change"
+  assert_equals "$GROUPS_SOCK	set" "$(cat "$FAKE_VIEW_LOG")" "agents view re-set after a pane change"
   assert_not_contains "$(cat "$FAKE_HERDR_LOG")" $'\x1fmove' "sync never moves anything"
   assert_not_contains "$(cat "$FAKE_HERDR_LOG")" $'\x1fclose' "sync never closes anything"
   assert_not_contains "$(cat "$FAKE_HERDR_LOG")" $'\x1ffocus' "sync never changes focus"
@@ -291,7 +294,7 @@ test_clear_removes_tokens_and_the_view_even_when_off() {
   add_v2_journal web-run w2
   write_live_lists 1
   out=$(groups clear 2>&1) || fail "clear failed: $out"
-  assert_equals "/tmp/fm-groups-s1.sock	clear" "$(cat "$FAKE_VIEW_LOG")" "agents view cleared"
+  assert_equals "$GROUPS_SOCK	clear" "$(cat "$FAKE_VIEW_LOG")" "agents view cleared"
   assert_contains "$(reports pane)" "pane report-metadata w2:p2 --source firstmate --clear-token fm_group --clear-token fm_state --clear-token fm_task --clear-token fm_sort" \
     "pane tokens cleared"
   assert_contains "$(reports workspace)" "workspace report-metadata w2 --source firstmate --clear-token fm_group --clear-token fm_state --clear-token fm_group_order" \
@@ -367,20 +370,39 @@ PY
 }
 
 test_watcher_poll_tags_tasks() {
-  local out
+  local watcher status deadline
   new_home watcher
   printf 'on\n' > "$HOME_DIR/config/herdr-project-groups"
   printf '%s\n' "$$" > "$HOME_DIR/state/.lock"
   touch "$HOME_DIR/state/.last-watcher-beat"
   add_task web-run ship /p/storefront w2 'working: go'
   write_live_lists 0
-  out=$(env FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+  fm_test_track_watcher_state "$HOME_DIR/state"
+  env FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
     FM_CONFIG_OVERRIDE="$HOME_DIR/config" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     PATH="$FAKEBIN:$PATH" FAKE_DIR="$FAKE_DIR" FAKE_HERDR_LOG="$FAKE_HERDR_LOG" \
     FAKE_VIEW_LOG="$FAKE_VIEW_LOG" FM_HERDR_GROUPS_AGENT_VIEW="$FAKEBIN/agent-view" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 2>&1)
-  case "$out" in *"checkpoint:"*|*"signal:"*|*"stale:"*) ;; *) fail "watcher checkpoint did not run: $out" ;; esac
+    "$ROOT/bin/fm-watch.sh" > "$FAKE_DIR/watcher.log" 2>&1 &
+  watcher=$!
+  # Reconciliation, not elapsed checkpoint time, proves that a poll completed.
+  # Keep a generous failure bound for loaded hosts and stop the owned watcher
+  # before asserting, including when reconciliation never arrives.
+  deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ] && kill -0 "$watcher" 2>/dev/null; do
+    if reports pane | grep -q 'pane report-metadata w2:p2 --source firstmate --token fm_group=storefront' \
+      && grep -q 'set' "$FAKE_VIEW_LOG"; then
+      break
+    fi
+    sleep 0.1
+  done
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-watch-arm.sh" --stop >/dev/null 2>&1
+  status=$?
+  [ "$status" -eq 0 ] || fail "could not stop fixture watcher ($status)"
+  wait "$watcher"
+  status=$?
+  case "$status" in 0|143) ;; *) fail "watcher failed ($status): $(cat "$FAKE_DIR/watcher.log")" ;; esac
   assert_contains "$(reports pane)" "pane report-metadata w2:p2 --source firstmate --token fm_group=storefront" \
     "the watcher poll tagged the task pane"
   assert_contains "$(cat "$FAKE_VIEW_LOG")" "set" "the watcher poll set the agents view"
