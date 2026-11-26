@@ -670,6 +670,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/captain-chat-translation/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/lavish-url/SKILL.md",
       "audience": "agent-runtime"
     },
