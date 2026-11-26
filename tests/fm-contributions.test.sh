@@ -362,7 +362,7 @@ test_malformed_record_cannot_prove_silence() {
 }
 
 test_issue_timeline_and_exact_ack() {
-  local home token
+  local home token empty
   home=$(new_home issue-timeline)
   forge_home "$home"
   printf -- '- [ ] filed - Filed https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
@@ -371,6 +371,11 @@ test_issue_timeline_and_exact_ack() {
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'timeline poll failed'
   token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[] | select(.type=="ready-for-pr") | .token') \
     || fail 'add/remove between polls lost ready-for-pr transition'
+  for empty in '' '  '; do
+    ! with_home "$home" "$ROOT/bin/fm-contributions.sh" ack filed https://github.com/o/r/issues/9 "$empty" >/dev/null 2>&1 \
+      || fail 'ack accepted a blank token'
+  done
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length > 0' >/dev/null || fail 'blank-token ack removed pending signals'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" ack filed https://github.com/o/r/issues/9 "$token" || fail 'exact ack failed'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'post-ack poll failed'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null || fail 'acknowledged timeline event replayed'
