@@ -145,6 +145,75 @@ TXT
   pass "abbreviations: repeated and adjacent forms all expand"
 }
 
+# docs/audio-briefings.md: --print-text "prints those cleaned sentences and
+# exits without touching a synthesiser, creates no output directory". A text-only
+# run is therefore judged by what it does not leave behind, and by the prose it
+# still prints.
+test_print_text_creates_no_output_directory() {
+  local home input out
+  home=$TMP_ROOT/text-only-home
+  input=$TMP_ROOT/text-only.md
+  mkdir -p "$home"
+  printf '%s\n' 'Only the words, nothing else.' > "$input"
+
+  out=$(HOME="$home" "$SPEAK" "$input" --print-text --out "$home/Dropbox/briefings") ||
+    fail "a text-only run must not fail on its output directory: $out"
+  [ "$out" = "Only the words, nothing else." ] ||
+    fail "--print-text must print the cleaned prose (got: $out)"
+  [ ! -e "$home/audio-briefings" ] ||
+    fail "--print-text created the default output directory"
+  [ ! -e "$home/Dropbox" ] ||
+    fail "--print-text created the directory named by --out"
+  pass "print-text: prints the prose and creates no output directory"
+}
+
+# CommonMark's flanking rules: an intraword underscore is not emphasis, and a
+# `*` followed by a space cannot open emphasis. docs/audio-briefings.md promises
+# that emphasis *markers* are removed, not that identifier or arithmetic
+# characters are.
+test_emphasis_keeps_identifiers_and_arithmetic() {
+  local input out expected
+  input=$TMP_ROOT/emphasis.md
+  cat > "$input" <<'MD'
+Set `FM_TTS_CACHE_DIR` and `kokoro_venv_ready` or leave _emphasis_ alone.
+The range 2 * 3 * 4 stays, and *real*, **strong**, __solid__ and _under_ markers go.
+MD
+  IFS= read -r -d '' expected <<'TXT' || true
+Set FM_TTS_CACHE_DIR and kokoro_venv_ready or leave emphasis alone.
+The range 2 * 3 * 4 stays, and real, strong, solid and under markers go.
+TXT
+  expected=${expected%$'\n'}
+  out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
+    fail "print-text failed: $out"
+  [ "$out" = "$expected" ] ||
+    fail "emphasis stripping must keep identifiers and asterisks"$'\n'"--- expected ---"$'\n'"$expected"$'\n'"--- got ---"$'\n'"$out"
+  pass "emphasis: identifiers and asterisks survive, real markers are removed"
+}
+
+# The removed URL is not the sentence: its terminal punctuation stays behind so
+# the sentence split still sees a boundary (docs/audio-briefings.md: "Long input
+# is split on sentence boundaries").
+test_removed_urls_keep_the_sentence_boundary() {
+  local input out expected
+  input=$TMP_ROOT/urls.md
+  cat > "$input" <<'MD'
+Read https://example.com/docs. Then open notes/report.md.
+Also see www.example.org/a. Next step done.
+MD
+  IFS= read -r -d '' expected <<'TXT' || true
+Read.
+Then open notes/report.md.
+Also see.
+Next step done.
+TXT
+  expected=${expected%$'\n'}
+  out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
+    fail "print-text failed: $out"
+  [ "$out" = "$expected" ] ||
+    fail "a removed URL must leave its sentence period in place"$'\n'"--- expected ---"$'\n'"$expected"$'\n'"--- got ---"$'\n'"$out"
+  pass "urls: a removed URL or www. host leaves the sentence period behind"
+}
+
 test_render_reports_the_mp3_size_and_indexes_it() {
   local root fakebin cache outdir input out mp3
   root=$TMP_ROOT/render
@@ -316,6 +385,9 @@ test_render_refuses_a_cache_that_cannot_import() {
 fm_test_run \
   test_print_text_reads_prose_not_markup \
   test_abbreviations_expand_every_occurrence \
+  test_print_text_creates_no_output_directory \
+  test_emphasis_keeps_identifiers_and_arithmetic \
+  test_removed_urls_keep_the_sentence_boundary \
   test_render_reports_the_mp3_size_and_indexes_it \
   test_setup_on_macos_does_not_require_libstdcxx \
   test_setup_repairs_a_venv_that_cannot_import \

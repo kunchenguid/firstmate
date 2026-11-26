@@ -549,9 +549,12 @@ fi
 
 # --- output directory --------------------------------------------------------
 
+# A text-only run writes no audio, so it neither creates nor needs out_dir.
+if [ "$print_text" -eq 0 ]; then
 mkdir -p "$out_dir" 2>/dev/null ||
   die "cannot create the output directory: $out_dir"
 [ -w "$out_dir" ] || die "output directory is not writable: $out_dir"
+fi
 
 # --- work area ---------------------------------------------------------------
 
@@ -598,10 +601,10 @@ awk '
   }
 ' "$input" >"$text" || die "could not read the input as text: $input"
 
-# Inline pass: unwrap links, images, inline code and emphasis; normalise
-# typography, HTML entities, bullets and abbreviations into spoken words. The
-# typographic single quotes are built from bytes so the shell never has to carry
-# a literal that reads as an unbalanced apostrophe.
+# Inline pass: unwrap links, images and inline code; normalise typography, HTML
+# entities and bullets into spoken words. The typographic single quotes are
+# built from bytes so the shell never has to carry a literal that reads as an
+# unbalanced apostrophe.
 rsquo=$(printf '\xe2\x80\x99')
 lsquo=$(printf '\xe2\x80\x98')
 sed -E \
@@ -613,10 +616,6 @@ sed -E \
   -e 's/\[\^[^]]*\]//g' \
   -e 's/\[[0-9]+\]//g' \
   -e 's/`+([^`]*)`+/\1/g' \
-  -e 's/\*\*([^*]+)\*\*/\1/g' \
-  -e 's/__([^_]+)__/\1/g' \
-  -e 's/\*([^*]+)\*/\1/g' \
-  -e 's/_([^_]+)_/\1/g' \
   -e 's/&nbsp;/ /g' \
   -e 's/&amp;/\&/g' \
   -e 's/&lt;/</g' \
@@ -637,11 +636,67 @@ sed -E \
   -e 's/•/ /g' \
   -e 's/ ?-> ?/ to /g' \
   -e 's/([0-9])x([0-9])/\1 by \2/g' \
-  -e 's#(https?|ftp)://[^ )>]*##g' \
-  -e 's#(^|[^[:alnum:]_])www\.[^ )>]*#\1#g' \
+  -e 's#(https?|ftp)://[^ )>]*[^ )>.,;:!?]##g' \
+  -e 's#(^|[^[:alnum:]_])www\.[^ )>]*[^ )>.,;:!?]#\1#g' \
   -e 's/§ ?/section /g' \
   -e 's/[[:space:]]+([.,;:!?])/\1/g' \
   "$text" >"$workdir/inline.txt" || die "could not normalise the input text"
+
+# Emphasis pass: markdown's flanking rules decide what is a marker, so an
+# intraword `_` inside an identifier and a `*` followed by a space are left
+# alone, while real emphasis and strong markers are removed in full.
+awk '
+  function space_char(c) { return c == "" || c ~ /^[[:space:]]$/ }
+  function word_char(c) { return c != "" && c ~ /^[[:alnum:]_]$/ }
+  function strip(s, ch, wide,   out, n, i, k, run, nxt, prv, j, m) {
+    out = ""
+    n = length(s)
+    i = 1
+    while (i <= n) {
+      if (substr(s, i, 1) != ch) { out = out substr(s, i, 1); i++; continue }
+      k = i
+      while (k <= n && substr(s, k, 1) == ch) k++
+      run = k - i
+      nxt = substr(s, k, 1)
+      prv = (i > 1) ? substr(s, i - 1, 1) : ""
+      if (run != wide || space_char(nxt) || (ch == "_" && word_char(prv))) {
+        out = out substr(s, i, run)
+        i = k
+        continue
+      }
+      j = k
+      m = 0
+      while (j <= n) {
+        if (substr(s, j, 1) != ch) { j++; continue }
+        m = j
+        while (m <= n && substr(s, m, 1) == ch) m++
+        if (m - j == wide && j > k && !space_char(substr(s, j - 1, 1)) &&
+            !(ch == "_" && word_char(substr(s, m, 1)))) break
+        j = m
+        m = 0
+      }
+      if (m == 0) {
+        out = out substr(s, i, run)
+        i = k
+        continue
+      }
+      out = out substr(s, k, j - k)
+      i = m
+    }
+    return out
+  }
+  {
+    line = $0
+    do {
+      before = line
+      line = strip(line, "*", 2)
+      line = strip(line, "_", 2)
+      line = strip(line, "*", 1)
+      line = strip(line, "_", 1)
+    } while (line != before)
+    print line
+  }
+' "$workdir/inline.txt" >"$workdir/emphasis.txt" || die "could not strip emphasis"
 
 # Abbreviation pass. The scan steps over the expansion, never over the boundary
 # character before it, so repeated or adjacent forms all expand: `w/o w/o` and
@@ -706,7 +761,7 @@ awk '
     if (start <= n) printf "%s", substr(line, start, n - start + 1)
     printf "\n"
   }
-' "$workdir/inline.txt" >"$workdir/abbrev.txt" || die "could not expand abbreviations"
+' "$workdir/emphasis.txt" >"$workdir/abbrev.txt" || die "could not expand abbreviations"
 
 # Transliterate to ASCII: accented names and emoji must not reach the phonemiser
 # raw. iconv drops what it cannot transliterate, which is exactly the intent.
@@ -730,10 +785,11 @@ tr -s ' \t' ' ' <"$workdir/ascii.txt" |
       if ($0 == "") next
       rest = $0
       while (match(rest, /[.!?] +[A-Z0-9"\047]/)) {
-        printf "%s\n", substr(rest, 1, RSTART)
+        sentence = substr(rest, 1, RSTART)
+        if (sentence ~ /[[:alnum:]]/) printf "%s\n", sentence
         rest = substr(rest, RSTART + RLENGTH - 1)
       }
-      if (rest != "") print rest
+      if (rest ~ /[[:alnum:]]/) print rest
     }
   ' >"$sentences" || die "could not split the input into sentences"
 

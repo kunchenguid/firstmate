@@ -94,7 +94,7 @@ bin/fm-speak.sh notes/report.md --print-text   # what it would read aloud, no au
 ```
 
 The tool speaks prose, not markup: code fences, tables, HTML, link and image syntax, bare URLs, footnotes, front matter and emphasis markers are removed, headings become their own sentence, abbreviations are expanded, and the text is transliterated to ASCII before synthesis.
-`--print-text` prints those cleaned sentences and exits without touching a synthesiser, needs no model cache, and is also how an alternate engine can reuse exactly the same words.
+`--print-text` prints those cleaned sentences and exits without touching a synthesiser, creates no output directory, needs no model cache, and is also how an alternate engine can reuse exactly the same words.
 
 Long input is split on sentence boundaries so every output file stays under `--max-minutes` (default 10).
 One part produces `<name>.mp3`; several produce `<name>-part1.mp3`, `<name>-part2.mp3` and so on, and each part is its own synthesis, so a long report takes proportionally longer to render.
