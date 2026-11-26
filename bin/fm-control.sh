@@ -94,6 +94,11 @@
 #              The same pre-stop refusal applies to this home's worker tool
 #              exclusions (bin/fm-exclude-tools-lib.sh): a malformed list, or a
 #              replacement runtime that cannot hide the listed tools.
+#              An external-marked task (bin/fm-external-sandbox-lib.sh), marked
+#              by its record or by its project's current trust=external
+#              registry entry, refuses there too when the replacement runtime
+#              cannot carry the sandbox, and a project entry whose trust
+#              binding the registry parser refuses refuses the same way.
 #              Refused on t3code before anything is stopped: a T3 thread
 #              keeps its conversation, so a new turn or a provider change on
 #              it continues the same agent rather than a fresh one
@@ -206,6 +211,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-omp-profile-lib.sh"
 # shellcheck source=bin/fm-exclude-tools-lib.sh
 . "$SCRIPT_DIR/fm-exclude-tools-lib.sh"
+# shellcheck source=bin/fm-external-sandbox-lib.sh
+. "$SCRIPT_DIR/fm-external-sandbox-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -1112,6 +1119,23 @@ resolve_relaunch_profile() {
   # agent stops. Secondmate agents are not covered.
   if [ "$KIND" != secondmate ]; then
     fm_exclude_tools_check "$TARGET_HARNESS" 0 "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" >/dev/null || return 1
+  fi
+  # Likewise an external-marked task (bin/fm-external-sandbox-lib.sh): the
+  # launch owner marks it from the task record or the project's current
+  # registry entry, so both are read here, and a trust binding the registry
+  # parser refuses, or a replacement runtime that cannot carry the sandbox,
+  # refuses here, before the old agent stops.
+  if [ "$KIND" != secondmate ]; then
+    local standing_trust trust_project
+    trust_project=$(basename "$(fm_meta_get "$META" project)")
+    standing_trust=$("$FM_ROOT/bin/fm-project-mode.sh" --trust "$trust_project" 2>/dev/null) || {
+      "$FM_ROOT/bin/fm-project-mode.sh" --trust "$trust_project" >/dev/null || true
+      echo "error: $ID cannot relaunch: its project's registry entry has a trust binding the parser refuses (see the refusal above); correct data/projects.md first" >&2
+      return 1
+    }
+    if [ "$(fm_meta_get "$META" trust)" = external ] || [ "$standing_trust" = external ]; then
+      fm_external_check "$TARGET_HARNESS" 0 "$(fm_meta_get "$META" backend)" || return 1
+    fi
   fi
 }
 

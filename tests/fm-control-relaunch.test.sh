@@ -1313,6 +1313,80 @@ test_exclude_tools_refusals_happen_before_the_agent_stops() {
   pass "fm-control relaunch: exclusion-list refusals happen before the running agent stops"
 }
 
+test_external_mark_follows_the_relaunch() {
+  local dir out rc id=rl-external state_real
+  dir=$(new_case external "$id")
+  add_ship_task "$dir" "$id" claude
+  echo "trust=external" >> "$dir/home/state/$id.meta"
+  printf claude > "$dir/fake/command"
+  printf claude > "$dir/fake/becomes"
+  out=$(run_control "$dir" "$id" relaunch --note "keep the sandbox"); rc=$?
+  expect_code 0 "$rc" "an external Claude relaunch should succeed"$'\n'"$out"
+  state_real=$(cd "$dir/home/state" && pwd -P)
+  assert_contains "$(cat "$dir/fake/literal")" "--settings '$state_real/$id.claude-settings.json' " \
+    "the relaunched external worker must launch on its sandbox settings file"
+  assert_contains "$(cat "$dir/fake/literal")" " --setting-sources user " \
+    "the relaunched external worker must not load the checkout's project or local settings"
+  jq -e '.sandbox.enabled == true and .sandbox.network.strictAllowlist == true' "$state_real/$id.claude-settings.json" >/dev/null \
+    || fail "the relaunched external worker's settings file lacks the sandbox"
+  jq -e '.hooks.UserPromptSubmit and .hooks.SessionEnd' "$state_real/$id.claude-settings.json" >/dev/null \
+    || fail "the relaunched external worker's busy hooks must ride its settings file"
+  [ ! -e "$dir/wt/.claude/settings.local.json" ] || fail "the relaunched external worker's hooks landed in a settings file it does not load"
+  [ "$(meta_field "$dir" "$id" trust)" = external ] || fail "a relaunch dropped the external mark"
+  pass "fm-control relaunch: an external task keeps its mark and its sandbox"
+}
+
+test_project_marked_after_spawn_contains_the_relaunch() {
+  local dir out rc id=rl-external-later state_real
+  dir=$(new_case external-later "$id")
+  add_ship_task "$dir" "$id" claude
+  printf -- '- proj [no-mistakes trust=external] - marked after spawn (added 2026-01-01)\n' > "$dir/home/data/projects.md"
+  printf claude > "$dir/fake/command"
+  printf claude > "$dir/fake/becomes"
+  out=$(run_control "$dir" "$id" relaunch --note "now external"); rc=$?
+  expect_code 0 "$rc" "a Claude relaunch of a task whose project is now external should succeed"$'\n'"$out"
+  state_real=$(cd "$dir/home/state" && pwd -P)
+  jq -e '.sandbox.enabled == true' "$state_real/$id.claude-settings.json" >/dev/null \
+    || fail "a task whose project was marked after spawn relaunched without the sandbox"
+  [ "$(meta_field "$dir" "$id" trust)" = external ] || fail "the relaunch did not record the project's new mark"
+  pass "fm-control relaunch: a project marked external after spawn contains the replacement worker"
+}
+
+test_external_refusals_happen_before_the_agent_stops() {
+  local dir out rc id=rl-external-refuse
+  dir=$(new_case external-refuse "$id")
+  add_ship_task "$dir" "$id" claude
+  echo "trust=external" >> "$dir/home/state/$id.meta"
+  printf claude > "$dir/fake/command"
+  printf claude > "$dir/fake/becomes"
+  out=$(run_control "$dir" "$id" relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 1 "$rc" "relaunching an external task onto a runtime without the sandbox must refuse"
+  assert_contains "$out" "marked external" "the refusal must name the external mark"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an external refusal stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch sent lifecycle input"
+
+  id=rl-external-later-refuse
+  dir=$(new_case external-later-refuse "$id")
+  add_ship_task "$dir" "$id" claude
+  printf -- '- proj [no-mistakes trust=external] - marked after spawn (added 2026-01-01)\n' > "$dir/home/data/projects.md"
+  out=$(run_control "$dir" "$id" relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 1 "$rc" "relaunching onto codex a task whose project is now external must refuse"
+  assert_contains "$out" "marked external" "the refusal for a project marked after spawn must name the external mark"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a project marked after spawn let the refusal stop the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch of a project marked after spawn sent lifecycle input"
+
+  id=rl-external-typo
+  dir=$(new_case external-typo "$id")
+  add_ship_task "$dir" "$id" claude
+  printf -- '- proj [no-mistakes trust=extrenal] - a typo (added 2026-01-01)\n' > "$dir/home/data/projects.md"
+  out=$(run_control "$dir" "$id" relaunch --note "typo"); rc=$?
+  expect_code 1 "$rc" "a malformed trust binding must refuse the relaunch"
+  assert_contains "$out" 'unknown trust binding "trust=extrenal"' "the refusal must name the malformed binding"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a malformed trust binding stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a malformed trust binding sent lifecycle input"
+  pass "fm-control relaunch: external-mark refusals happen before the running agent stops"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -3285,6 +3359,9 @@ test_secondmate_account_pin_follows_relaunch_and_refuses_before_stop
 test_pi_exclude_tools_follow_the_relaunch
 test_claude_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
+test_external_mark_follows_the_relaunch
+test_project_marked_after_spawn_contains_the_relaunch
+test_external_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared

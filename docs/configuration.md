@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [external workers](#external-workers-dataprojectsmd-trust-token-fm-spawnsh---external), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -1745,6 +1745,52 @@ Names present in the registry produce no report; unknown or unverified names do 
 Each relaunch installs a fresh worker extension with the home's current list, so the replacement performs the same check.
 
 [`bin/fm-exclude-tools-lib.sh`](../bin/fm-exclude-tools-lib.sh) implements parsing and pre-launch validation for this contract; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns the launch-flag mechanics.
+
+## External workers (data/projects.md trust= token, fm-spawn.sh --external)
+
+A ship or scout that works on untrusted or third-party code can launch inside a sandbox that limits what its commands and file tools can reach.
+Mark a whole project with the `trust=external` registry token, for example `- vendor-lib [no-mistakes trust=external] - upstream library (added 2026-11-16)`, or mark one ship or scout with `bin/fm-spawn.sh --external`.
+Either mark is enough, and a worker with neither mark launches exactly as before.
+`bin/fm-project-mode.sh --trust <name>` reads the token back as `own` or `external`; its header owns the grammar and refusals.
+
+### What a marked worker gets
+
+The spawn writes the worker's Claude settings to `state/<task-id>.claude-settings.json`, passes that file with `--settings`, and adds `--strict-mcp-config --setting-sources user`.
+
+| Surface | Behavior of a marked worker |
+| --- | --- |
+| Shell commands | Run only inside the Claude Code sandbox, with no way to ask to leave it; the launch fails instead of starting when the sandbox is unavailable on the host. |
+| Network from shell commands | Only `github.com`, `api.github.com`, and `*.githubusercontent.com`; every other host is refused without a prompt, and a direct connection that skips the sandbox proxy is refused too. |
+| Secret files | `.env` and `.env.*` files anywhere on disk, and the home files and folders that hold SSH keys, AWS, Google Cloud, Azure, and Kubernetes credentials, GPG keys, `.netrc`, Git credentials (`~/.git-credentials` and `~/.config/git/credentials`), the `gh` login (`~/.config/gh`), the Docker login (`~/.docker/config.json`), and `~/.npmrc` are unreadable by shell commands and by the Read tool. |
+| Project settings | The worktree's own `.claude/settings.json` and `.claude/settings.local.json` do not load, so hooks, a status line, or helper commands committed in the checkout never run; Firstmate's busy hooks ride the `--settings` file instead. |
+| Writes | Shell commands write only the worktree, the task's inbox, data directory, and the shared operational inbox, its status file, its task temp root under `/tmp`, the `objects`, `refs`, `logs`, `packed-refs`, and `packed-refs.lock` of its repository's shared git directory and of a local no-mistakes gate repository, and the worktree's own admin directory under the shared git directory's `worktrees`, so a commit and a push still work; the file tools write only the worktree, the task's inbox, data directory, and the shared operational inbox. |
+| Read-only paths | No tool writes Firstmate's skills directory, which the worker can still read, or the worktree's `.claude/settings.json` and `.claude/settings.local.json`, because Firstmate's own processes load them outside the sandbox. |
+| Git links and configuration | No tool writes the worktree's `.git` link file, the shared git directory's `commondir`, `config`, `config.worktree`, `hooks`, and `modules`, the worktree admin directory's `commondir`, `gitdir`, and `config.worktree`, any other worktree's admin directory, or a local gate repository's `commondir`, `config`, `hooks`, and `worktrees`, because later git commands on the project and the gate run outside the sandbox and would load them. |
+| Delivery pipeline | When the worktree's `no-mistakes` remote is a local gate repository, shell commands may push to it and connect to the no-mistakes daemon socket, so the worker can still drive its pipeline run. |
+| Connectors and MCP | Account connectors are off, and no MCP server loads, because a local MCP server runs outside the sandbox with its own network access. |
+| Web tools | WebFetch and WebSearch are denied. |
+
+[`bin/fm-external-sandbox-lib.sh`](../bin/fm-external-sandbox-lib.sh) owns the exact settings block.
+
+### Refusals and relaunch
+
+Only the `claude` runtime on a Firstmate-built command line carries the sandbox.
+A marked task on any other runtime, on a raw launch command, or on `backend=t3code`, which starts the agent itself, refuses before its endpoint, worktree, or task record exists.
+A registry entry with an empty or unknown `trust=` value refuses the spawn the same way, so a typo in the value never launches a worker uncontained.
+`--external` is refused on a secondmate, whose agent the sandbox does not cover.
+The task record keeps the mark as `trust=external`, and a relaunch keeps it.
+A relaunch also reads the project's current registry entry, so a project marked after the spawn contains the replacement worker.
+A relaunch onto a runtime that cannot carry the sandbox, or of a task whose project entry has an empty or unknown `trust=` value, refuses before the running worker stops.
+
+### Limits
+
+- The sandbox covers the worker's own commands and file tools; Claude Code's model traffic, the hooks from the user's own settings and from the `--settings` file, and the no-mistakes pipeline's own agents run outside it.
+- An allowed host stays fully reachable, so a worker that holds credentials for it can still send data there.
+- Go-based command-line tools such as `gh` cannot verify TLS certificates inside the macOS sandbox, so `gh` and `gh-axi` fail in a marked worker; publication through the no-mistakes daemon is not affected.
+- `.env.example` and similar templates are unreadable too, because the rule covers every `.env.*` name.
+- The mark does not change the permission mode: `config/claude-permission-mode` still selects `bypass` or `auto`, and the containment measured the same in both.
+
+The sandbox's guarantees depend on Claude Code's own behavior, so the token-free live guard `tests/fm-claude-external-sandbox-live.test.sh` re-proves them on every installed version; [`docs/verification/runtime-backends.md`](verification/runtime-backends.md#claude-external-worker-sandbox) records the measured results.
 
 ## Worker account pin (config/claude-account, config/pi-account)
 
