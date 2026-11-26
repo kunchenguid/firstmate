@@ -171,7 +171,9 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
 }
 
-# Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
+# Privacy-safe correlation id: 16 lowercase hex chars. openssl's rand supplies
+# 64 random bits; where it is absent or returns nothing, the id falls back to a
+# hash of pid, clock, and $RANDOM, so it stays unique rather than unguessable.
 fm_pending_reply_new_id() {
   local raw='' hex=''
   if command -v openssl >/dev/null 2>&1; then
