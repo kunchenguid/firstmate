@@ -136,8 +136,8 @@ MD
   IFS= read -r -d '' expected <<'TXT' || true
 x without without y.
 A versus versus B.
-Use for example,for example, done.
-Repeat et cetera, et cetera, and approximatelyapproximately end.
+Use for example, for example, done.
+Repeat et cetera, et cetera, and approximately approximately end.
 TXT
   expected=${expected%$'\n'}
   out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||

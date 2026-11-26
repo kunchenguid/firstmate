@@ -5,7 +5,7 @@
 # Usage:
 #   fm-speak.sh <input.md|txt> [--out <dir>] [--title <t>]
 #               [--max-minutes <n>] [--voice <id>] [--speed <n>]
-#               [--name <stem>] [--print-text]
+#               [--print-text]
 #   fm-speak.sh --setup
 #   fm-speak.sh --help
 #
@@ -45,11 +45,11 @@
 # produces `<name>.mp3`; several produce `<name>-part1.mp3`, `<name>-part2.mp3`...
 # Each part is its own synthesis, so render time grows with the part count.
 #
-# OUTPUT NAMING. By default `YYYY-MM-DD-<slug>.mp3`, where the slug comes from
-# --title or from the input filename, and a same-day collision gets a counter
-# suffix rather than overwriting the earlier briefing. --name <stem> writes
-# exactly that stem instead, which is what a fixed comparison set needs, and
-# replaces an existing render of the same stem.
+# OUTPUT NAMING. Every render is named `YYYY-MM-DD-<slug>.mp3`, where the slug
+# comes from --title or from the input filename, and a same-day collision gets a
+# counter suffix rather than overwriting the earlier briefing. Re-running into a
+# fixed file name is deliberately out of scope, so a render never overwrites or
+# deletes one.
 #
 # --voice names a Kokoro voice id (such as `af_heart` or `af_bella`), and
 # --speed scales the delivery rate: 1.0 is the voice's own pace, 0.9 is slower,
@@ -325,7 +325,6 @@ out_dir=$DEFAULT_OUT
 title=
 max_minutes=10
 speed=1.0
-name_stem=
 print_text=0
 
 while [ $# -gt 0 ]; do
@@ -361,11 +360,6 @@ while [ $# -gt 0 ]; do
     --speed)
       [ $# -ge 2 ] || die "--speed needs a number, for example 0.9 or 1.1"
       speed=$2
-      shift 2
-      ;;
-    --name)
-      [ $# -ge 2 ] || die "--name needs a file stem"
-      name_stem=$2
       shift 2
       ;;
     --print-text)
@@ -409,13 +403,6 @@ case $speed in
 esac
 awk -v s="$speed" 'BEGIN { exit !(s >= 0.5 && s <= 2.0) }' ||
   die "--speed must be between 0.5 and 2.0 (got: $speed)"
-
-if [ -n "$name_stem" ]; then
-  case $name_stem in
-    */*) die "--name must be a bare file stem, not a path: $name_stem" ;;
-  esac
-  [ -n "$(slugify "$name_stem")" ] || die "--name needs at least one letter or digit: $name_stem"
-fi
 
 [ -n "$input" ] || die "no input file (usage: $SCRIPT_NAME <input.md|txt> [options]; try --help)"
 [ -e "$input" ] || die "input file does not exist: $input"
@@ -607,7 +594,9 @@ awk '
 
 # Abbreviation pass. The scan steps over the expansion, never over the boundary
 # character before it, so repeated or adjacent forms all expand: `w/o w/o` and
-# `e.g.e.g.` become two spoken forms, not one.
+# `e.g.e.g.` become two spoken forms, not one, and an expansion that starts a
+# word right after a non-space character gets a separating space rather than
+# fusing with it.
 awk '
   function word_char(c) {
     return c != "" && c ~ /^[[:alnum:]_]$/
@@ -632,19 +621,29 @@ awk '
     if (substr(head, 1, 2) == "w/") { consumed = 2; return "with " }
     return ""
   }
+  function emit(s, word) {
+    if (s == "") return
+    if (word && last != "" && last !~ /[[:space:]]/ && substr(s, 1, 1) !~ /[[:space:]]/) {
+      printf " "
+      last = " "
+    }
+    printf "%s", s
+    last = substr(s, length(s), 1)
+  }
   {
     line = $0
     n = length(line)
     start = 1
     i = 1
+    last = ""
     while (i <= n) {
       c = substr(line, i, 1)
       expansion = ""
       if (c == "&") {
         end = i - 1
         while (end >= start && substr(line, end, 1) ~ /[[:space:]]/) end--
-        if (end >= start) printf "%s", substr(line, start, end - start + 1)
-        printf " and "
+        if (end >= start) emit(substr(line, start, end - start + 1))
+        emit(" and ")
         i++
         while (i <= n && substr(line, i, 1) ~ /[[:space:]]/) i++
         start = i
@@ -657,15 +656,15 @@ awk '
         expansion = expand(substr(line, i, 7))
       }
       if (expansion != "") {
-        if (i > start) printf "%s", substr(line, start, i - start)
-        printf "%s", expansion
+        if (i > start) emit(substr(line, start, i - start))
+        emit(expansion, 1)
         i += consumed
         start = i
         continue
       }
       i++
     }
-    if (start <= n) printf "%s", substr(line, start, n - start + 1)
+    if (start <= n) emit(substr(line, start, n - start + 1))
     printf "\n"
   }
 ' "$workdir/emphasis.txt" >"$workdir/abbrev.txt" || die "could not expand abbreviations"
@@ -779,20 +778,15 @@ input_stem=${input_stem%.*}
 name_seed=${title:-$input_stem}
 today=$(date +%Y-%m-%d)
 
-if [ -n "$name_stem" ]; then
-  candidate=$out_dir/$name_stem
-else
-  slug=$(slugify "$name_seed")
-  [ -n "$slug" ] || slug=briefing
-  base=$out_dir/$today-$slug
-  candidate=$base
-  suffix=2
-  while [ -e "$candidate.mp3" ] || [ -e "$candidate-part1.mp3" ]; do
-    [ "$suffix" -le 99 ] || die "too many briefings named '$today-$slug' in $out_dir"
-    candidate=$base-$suffix
-    suffix=$((suffix + 1))
-  done
-fi
+slug=$(slugify "$name_seed")
+[ -n "$slug" ] || slug=briefing
+candidate=$out_dir/$today-$slug
+suffix=2
+while [ -e "$candidate.mp3" ] || [ -e "$candidate-part1.mp3" ]; do
+  [ "$suffix" -le 99 ] || die "too many briefings named '$today-$slug' in $out_dir"
+  candidate=$out_dir/$today-$slug-$suffix
+  suffix=$((suffix + 1))
+done
 
 rows=$workdir/rows.md
 : >"$rows"

@@ -58,7 +58,7 @@ Nothing in it is needed to re-render a file you still have, and no audio is stor
 ```sh
 bin/fm-speak.sh <input.md|txt> [--out <dir>] [--title <t>]
                 [--max-minutes <n>] [--voice <id>] [--speed <n>]
-                [--name <stem>] [--print-text]
+                [--print-text]
 ```
 
 ```sh
@@ -81,8 +81,10 @@ The one-time setup download dominates the first run and is never repeated.
 ## Where the audio lands
 
 The default output directory is `$HOME/audio-briefings`, created if missing, and `--out` overrides it.
-`<out-dir>/index.md` records every rendered file with its date, title, duration, file name and source path, newest row on top, so the directory itself answers what has been spoken.
+`<out-dir>/index.md` records every rendered file with its date, title, duration, file name and source path, newest row on top, so the directory itself answers what has been spoken. It is append-only: one row per rendered file, and nothing rewrites or prunes it.
 The engine, voice and speed of each render are printed on the command line rather than stored in the index.
+Each render is named `YYYY-MM-DD-<slug>.mp3` from `--title` or the input filename, and a same-day collision gets a counter suffix instead of overwriting the earlier briefing.
+Re-running into a fixed file name is deliberately out of scope: overwrite semantics need their own file-deletion and index rules, so a maintainer who wants them can add them as their own change.
 
 Rendered audio stays on this machine.
 The tool refuses outright to write into any path that names a Dropbox folder, so a synced drive cannot become an accidental destination; moving a file elsewhere is a deliberate human action, not something the tool does.
@@ -91,6 +93,7 @@ The tool refuses outright to write into any path that names a Dropbox folder, so
 
 - **It never uploads anything:** a render makes no network call at all, because the voice models are already on disk and synthesis happens in a local process.
 - **It never renders on its own:** there is no daemon, scheduler, watcher, or queue, and one command renders exactly one named file.
+- **It never overwrites or deletes a render:** every run writes newly named files and appends its own index rows.
 - **It has no web surface and no feed:** audio and an index file are the whole output.
 - **It is not a conversion service:** every spoken file is one deliberate render of one input file on your machine, not a standing pipeline for other people's documents.
 - **It has no prosody controls beyond `--voice` and `--speed`:** the model's own defaults are the default.
