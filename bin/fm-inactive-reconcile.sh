@@ -302,10 +302,14 @@ queue_presentation() { # <record> <fingerprint> <payload>
   publish_actionable "inactive-outcome:$fingerprint" "$payload"
 }
 
-last_activity_age() { # <meta> <status> <turn-ended>
-  local meta=$1 status=$2 turn=$3 now m newest=0 file
+# <progress> is state/<id>.progress, the native-harness liveness marker a Pi or
+# omp worker refreshes on inner turns now that its turn-ended notification only
+# fires at the end of a whole run.
+last_activity_age() { # <meta> <status> <turn-ended> [<progress>]
+  local meta=$1 status=$2 turn=$3 progress=${4:-} now m newest=0 file
   now=$(reconcile_now)
-  for file in "$meta" "$status" "$turn"; do
+  for file in "$meta" "$status" "$turn" "$progress"; do
+    [ -n "$file" ] || continue
     [ -e "$file" ] || continue
     m=$(file_mtime "$file" 2>/dev/null || true)
     case "$m" in ''|*[!0-9]*) continue ;; esac
@@ -661,7 +665,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     child_terminal_ledger_line "$status" >/dev/null
     case "$?" in 0|2) return 0 ;; esac
   fi
-  age=$(last_activity_age "$meta" "$status" "$turn")
+  age=$(last_activity_age "$meta" "$status" "$turn" "$STATE/$id.progress")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
   started=$(date +%s)
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
