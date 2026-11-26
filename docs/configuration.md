@@ -15,6 +15,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
+| Disk reclaimed from a finished task's pool slot | [Pool slot reclaim](#pool-slot-reclaim-configkeep-pool-slots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -920,6 +921,17 @@ With the flag absent, no settlement or new closure notification occurs.
 The flag takes effect on the next contribution poll and is not inherited by secondmate homes.
 The observer's existing `bin/fm-contributions.sh arm` command enables polling when it is not already armed.
 The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) owns when a forge event may settle a question.
+
+## Pool slot reclaim (config/keep-pool-slots)
+
+Returning a Treehouse pool slot resets its tracked git state but leaves every git-ignored build artifact behind (`node_modules`, `.next`, `dist`, Electron builds, and the like), so a pool only ever grows across finished tasks.
+`bin/fm-teardown.sh` reclaims that disk by default: after a ship or scout task's own worktree slot is successfully returned, it runs `treehouse destroy <slot> --yes` on that same slot.
+Destroy is safe by default - it removes only a merged, clean, idle, unleased worktree and otherwise skips it - so teardown adds no extra landed-work check of its own, and a skip or failure only warns rather than failing an otherwise-successful teardown.
+The optional local, gitignored `config/keep-pool-slots` presence flag opts this home out of that destroy step, leaving every returned slot pre-warmed in the pool as before.
+Create an empty file to enable the opt-out.
+The trade-off: with the flag absent (the default), the next task dispatched into that project starts from a freshly created worktree and reinstalls its dependencies instead of reusing a pre-warmed slot.
+The flag is home-local and not inherited by secondmate homes.
+This never touches a secondmate home's own pool, a slot leased by another task, an Orca or plain-clone worktree, or any pool other than the one the finishing task's own slot came from.
 
 ## Park on review
 

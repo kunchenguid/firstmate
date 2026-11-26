@@ -2164,6 +2164,30 @@ teardown_note_dirty_return() {
   printf '%s\n' "$residue" | sed 's/^/  /' >&2
 }
 
+# Reclaim a returned pool slot's disk: `treehouse return` resets tracked state
+# but leaves every git-ignored build artifact (node_modules, .next, dist,
+# Electron builds) behind, so pools only ever grow across finished tasks. Runs
+# only after a successful return of a slot this task actually held
+# ($wt_pool_slot = 1 at the call site), never on a slot that was not a
+# Treehouse pool slot to begin with. `treehouse destroy` is safe by default -
+# it removes only a merged, clean, idle, unleased worktree and otherwise skips
+# with a nonzero exit - so no extra landed-work check is needed here; a skip or
+# failure is a warning, not a teardown failure, because the slot already made
+# it back to the pool. Opt out home-wide with the config/keep-pool-slots
+# presence flag (see docs/configuration.md "Pool slot reclaim").
+teardown_destroy_pool_slot() {  # <dir> <cd_dir> <label>
+  local dir=$1 cd_dir=$2 label=$3 out
+  [ -e "$CONFIG/keep-pool-slots" ] && return 0
+  command -v treehouse >/dev/null 2>&1 || return 0
+  if out=$( ( cd "$cd_dir" && treehouse destroy "$dir" --yes ) 2>&1 ); then
+    [ -n "$out" ] && printf '%s\n' "$out"
+    return 0
+  fi
+  echo "warning: treehouse destroy left pool slot for $label ($dir) in the pool; slot not removed:" >&2
+  [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/  /' >&2
+  return 0
+}
+
 # A worker may have pushed from another checkout, so tracking refs that do not
 # show the work prove nothing until they are refreshed. Runs at most once per
 # teardown, through bin/fm-dod-lib.sh's fm_dod_refresh_remote_refs, which owns
@@ -4144,7 +4168,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
-  [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
+  if [ "$wt_pool_slot" = 1 ]; then
+    teardown_note_dirty_return "$WT"
+    teardown_destroy_pool_slot "$WT" "$PROJ" "worktree"
+  fi
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
