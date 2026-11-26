@@ -79,7 +79,6 @@ const YELLOW = "\u001b[33m";
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
 
-export const CALM_WORKING_SPACESHIP_WIDGET_KEY = "firstmate-calm-working-spaceship";
 /** Scheduler period. One tick is the base unit for every clock below. */
 export const CALM_WORKING_SPACESHIP_TICK_MS = 220;
 /** Idle starfield cadence: one twinkle phase every Nth tick (~1.3s at 220ms). */
