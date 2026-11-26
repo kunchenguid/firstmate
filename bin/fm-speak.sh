@@ -644,11 +644,11 @@ sed -E \
 
 # Emphasis pass: markdown's flanking rules decide what is a marker, so an
 # intraword `_` inside an identifier and a `*` followed by a space are left
-# alone, while real emphasis and strong markers are removed in full.
+# alone, while real markers of any delimiter run length are removed in full.
 awk '
   function space_char(c) { return c == "" || c ~ /^[[:space:]]$/ }
   function word_char(c) { return c != "" && c ~ /^[[:alnum:]_]$/ }
-  function strip(s, ch, wide,   out, n, i, k, run, nxt, prv, j, m) {
+  function strip(s, ch,   out, n, i, k, run, nxt, prv, j, m) {
     out = ""
     n = length(s)
     i = 1
@@ -659,7 +659,7 @@ awk '
       run = k - i
       nxt = substr(s, k, 1)
       prv = (i > 1) ? substr(s, i - 1, 1) : ""
-      if (run != wide || space_char(nxt) || (ch == "_" && word_char(prv))) {
+      if (space_char(nxt) || (ch == "_" && word_char(prv))) {
         out = out substr(s, i, run)
         i = k
         continue
@@ -670,7 +670,7 @@ awk '
         if (substr(s, j, 1) != ch) { j++; continue }
         m = j
         while (m <= n && substr(s, m, 1) == ch) m++
-        if (m - j == wide && j > k && !space_char(substr(s, j - 1, 1)) &&
+        if (m - j == run && j > k && !space_char(substr(s, j - 1, 1)) &&
             !(ch == "_" && word_char(substr(s, m, 1)))) break
         j = m
         m = 0
@@ -689,10 +689,8 @@ awk '
     line = $0
     do {
       before = line
-      line = strip(line, "*", 2)
-      line = strip(line, "_", 2)
-      line = strip(line, "*", 1)
-      line = strip(line, "_", 1)
+      line = strip(line, "*")
+      line = strip(line, "_")
     } while (line != before)
     print line
   }

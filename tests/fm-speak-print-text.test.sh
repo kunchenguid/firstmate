@@ -177,10 +177,12 @@ test_emphasis_keeps_identifiers_and_arithmetic() {
   cat > "$input" <<'MD'
 Set `FM_TTS_CACHE_DIR` and `kokoro_venv_ready` or leave _emphasis_ alone.
 The range 2 * 3 * 4 stays, and *real*, **strong**, __solid__ and _under_ markers go.
+Use ***bold italic***, ___both___ and ****x**** here.
 MD
   IFS= read -r -d '' expected <<'TXT' || true
 Set FM_TTS_CACHE_DIR and kokoro_venv_ready or leave emphasis alone.
 The range 2 * 3 * 4 stays, and real, strong, solid and under markers go.
+Use bold italic, both and x here.
 TXT
   expected=${expected%$'\n'}
   out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
