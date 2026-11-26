@@ -224,8 +224,6 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--update-branch] [--expected-head <full-sha>] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
-#
 # Routed review (--routed-review): the one supported way a home merges a pull
 # request whose ship task another home dispatched, for a reviewing home such as
 # a review-and-merge secondmate. That home has no task record for the PR, and
