@@ -987,7 +987,7 @@ test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
     || fail "claude secondmate spawn failed: $out"
   state="$primary/state"
   settings="$state/$id.claude-settings.json"
-  launch=$(cat "$case_dir/launch.log")
+  launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$case_dir/launch.log")")")
   assert_present "$state/$id.busy-state" "claude secondmate spawn did not arm the busy contract"
   assert_present "$settings" "claude secondmate spawn did not write hook settings"
   assert_contains "$launch" "--settings '$settings'" \
@@ -1174,7 +1174,7 @@ test_secondmate_pi_extension_reports_busy_without_a_parent_turnend() {
     || fail "pi secondmate spawn failed: $out"
   state="$primary/state"
   ext="$state/$id.pi-ext.ts"
-  launch=$(cat "$case_dir/launch.log")
+  launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$case_dir/launch.log")")")
   assert_present "$ext" "pi secondmate spawn did not write the busy extension"
   assert_contains "$launch" "$ext" "pi secondmate launch did not load the busy extension"
   assert_contains "$launch" "fm-primary-turnend-guard.ts" "pi secondmate launch dropped its turn-end extension"
@@ -1198,7 +1198,7 @@ test_secondmate_omp_extension_reports_busy_without_a_parent_turnend() {
     || fail "omp secondmate spawn failed: $out"
   state="$primary/state"
   ext="$state/$id.omp-ext.ts"
-  launch=$(cat "$case_dir/launch.log")
+  launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$case_dir/launch.log")")")
   assert_present "$ext" "omp secondmate spawn did not write the busy extension"
   assert_contains "$launch" "$ext" "omp secondmate launch did not name the busy extension"
   assert_contains "$launch" "--cwd" "omp secondmate launch dropped its cwd pin"
@@ -1256,7 +1256,7 @@ test_raw_secondmate_launch_writes_no_busy_wiring() {
       || fail "raw $harness secondmate spawn must still succeed: $out"
     state="$case_dir/primary/state"
     sm="$case_dir/sm"
-    launch=$(cat "$case_dir/launch.log")
+    launch=$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$case_dir/launch.log")")")
     assert_contains "$launch" "$raw" "raw $harness secondmate did not launch the raw command"
     assert_absent "$state/$id.busy-gen" "raw $harness secondmate armed a busy generation"
     assert_absent "$state/$id.busy-state" "raw $harness secondmate seeded a busy record"
@@ -1283,7 +1283,7 @@ test_raw_secondmate_launch_writes_no_busy_wiring() {
   out=$(FM_BACKEND=tmux FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     fm_test_run_spawn "$case_dir/primary" "$sm" "$case_dir/fake/fakebin" "$id" "$sm" 'claude --fm-raw-flag' --secondmate) \
     || fail "raw claude respawn over an armed secondmate must succeed: $out"
-  assert_contains "$(cat "$case_dir/launch.log")" 'claude --fm-raw-flag' "raw respawn did not launch the raw command"
+  assert_contains "$(fm_test_launch_command "$(fm_test_launch_unframe "$(cat "$case_dir/launch.log")")")" 'claude --fm-raw-flag' "raw respawn did not launch the raw command"
   assert_absent "$state/$id.busy-gen" "raw respawn kept the earlier busy generation"
   assert_absent "$state/$id.busy-state" "raw respawn kept the earlier busy record"
   assert_absent "$sm/.fm-busy-stop" "raw respawn kept the earlier Stop pointer"
