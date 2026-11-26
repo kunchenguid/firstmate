@@ -34,7 +34,7 @@ unset CLAUDE_CONFIG_DIR PI_CODING_AGENT_DIR ANTHROPIC_API_KEY OPENAI_API_KEY FM_
 CHECKED=
 
 claude_live_cases() {
-  local version empty helper
+  local version empty helper token
   version=$(claude --version 2>/dev/null | head -1)
   empty="$TMP_ROOT/claude-empty"
   helper="$TMP_ROOT/claude-helper"
@@ -50,6 +50,18 @@ claude_live_cases() {
   fm_worker_account_check claude "$helper" "$helper" claude ||
     fail "claude $version: the pin check refused a root whose apiKeyHelper signs it in"
   pass "claude $version: the pin check accepts a signed-in root and refuses an empty one despite an ambient API key"
+
+  # A setup-token entry's check needs claude to name an environment token as
+  # oauth_token, a method an environment API key never reports.
+  token="$TMP_ROOT/claude-setup.token"
+  printf 'sk-ant-oat01-fm-live-synthetic\n' > "$token"
+  chmod 600 "$token"
+  [ "$(env -i HOME="$HOME" PATH="$PATH" ANTHROPIC_API_KEY=sk-ant-fm-live-synthetic \
+    claude auth status 2>/dev/null </dev/null | jq -r '.authMethod' 2>/dev/null)" != oauth_token ] ||
+    fail "claude $version: an environment API key is reported as oauth_token, so the setup-token check cannot tell a token from another credential"
+  fm_worker_account_check claude "token:$token" "token:$token" claude ||
+    fail "claude $version: the setup-token check refused a token claude reads as its signed-in credential"
+  pass "claude $version: the setup-token check accepts a token claude reports as oauth_token, a method an API key does not report"
   CHECKED="$CHECKED claude"
 }
 
