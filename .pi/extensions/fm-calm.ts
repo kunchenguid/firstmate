@@ -167,6 +167,9 @@ export default function (pi: ExtensionAPI) {
     kind: "boat" | "spaceship";
     animation: CalmWorkingShipAnimation | CalmWorkingSpaceshipAnimation;
     createWidget(tui: TUI): Component & { dispose(): void };
+    // Ambient presentations carry the run signal as their mode instead of their
+    // visibility; the boat has no such mode because it exists only during a run.
+    setWorking?: (working: boolean) => void;
   };
   // One working presentation and one animation instance per extension lifetime.
   // Hiding the working widget freezes this state; the next working period resumes it.
@@ -175,12 +178,26 @@ export default function (pi: ExtensionAPI) {
   const createWorkingPresentation = (kind: "boat" | "spaceship"): WorkingPresentation => {
     if (kind === "spaceship") {
       const animation = createCalmWorkingSpaceshipAnimation();
-      return { kind, animation, createWidget: (tui) => createCalmWorkingSpaceshipWidget(tui, animation) };
+      return {
+        kind,
+        animation,
+        createWidget: (tui) => createCalmWorkingSpaceshipWidget(tui, animation),
+        setWorking: (active) => animation.setWorking(active),
+      };
     }
     const animation = createCalmWorkingShipAnimation();
     return { kind, animation, createWidget: (tui) => createCalmWorkingShipWidget(tui, animation) };
   };
   let working = createWorkingPresentation(loadCalmShipSelection());
+
+  // Removes the installed presentation and restores Pi's stock working row. A widget
+  // another extension took over is left alone: its disposal is what recorded that.
+  const clearWorkingPresentation = (ui: ExtensionUIContext): void => {
+    if (!workingShown) return;
+    if (!workingWidgetDisposed) ui.setWidget(CALM_WORKING_SHIP_WIDGET_KEY, undefined);
+    workingShown = false;
+    ui.setWorkingVisible(true);
+  };
 
   // Single owner of Calm's working-row presentation choice, installing whichever
   // variant config/calm-ship selected under the one working-row slot shared with
@@ -191,7 +208,12 @@ export default function (pi: ExtensionAPI) {
     ui: ExtensionUIContext,
     forceStockVisibility = false,
   ): void => {
-    const showWorking = agentRunActive && calmPresentationIsActive();
+    // Two lifetimes meet here. The boat is a working row: it exists only while one
+    // logical agent run is under way. The spaceship is ambient: it is present the whole
+    // time Calm is active, and the same run signal drives its mode instead of its
+    // visibility. Either way Pi's stock working row is replaced only while one is shown.
+    const showWorking =
+      calmPresentationIsActive() && (working.kind === "spaceship" || agentRunActive);
     if (showWorking !== workingShown) {
       workingShown = showWorking;
       if (showWorking) {
@@ -213,6 +235,8 @@ export default function (pi: ExtensionAPI) {
     } else if (forceStockVisibility && !showWorking && !workingWidgetDisposed) {
       ui.setWorkingVisible(true);
     }
+    // Warp while the run is thinking, drift back to the resting pose when it settles.
+    if (showWorking) working.setWorking?.(agentRunActive);
   };
   // "max" is the legacy value written by the removed third presentation level, whose
   // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
@@ -472,7 +496,11 @@ export default function (pi: ExtensionAPI) {
     publishPresentationState();
     agentRunActive = false;
     // A genuine new session lifetime starts the working presentation at its normal
-    // initial pose, and re-reads which variant config/calm-ship selects.
+    // initial pose, and re-reads which variant config/calm-ship selects. The previous
+    // session's presentation is cleared first, so an ambient spaceship that outlived it
+    // cannot be left orphaned when the new session starts with Calm off or a different
+    // variant selected.
+    clearWorkingPresentation(ctx.ui);
     const selectedKind = loadCalmShipSelection();
     if (selectedKind !== working.kind) working = createWorkingPresentation(selectedKind);
     working.animation.reset();
@@ -529,6 +557,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
+    // An ambient spaceship belongs to the session, so shutdown ends it outright; the
+    // boat's own apply already removes it because its run has ended.
+    if (working.kind === "spaceship") {
+      clearWorkingPresentation(ctx.ui);
+      return;
+    }
     applyWorkingPresentation(ctx.ui);
   });
 

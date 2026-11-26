@@ -64,13 +64,17 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 
 Calm's Pi working presentation has one selectable variant, chosen by the gitignored `config/calm-ship` file under the effective Firstmate home (the same home and `FM_CONFIG_OVERRIDE` rules `config/calm` uses).
 Anything other than `spaceship` - including an absent file - keeps the boat as the default.
-With `spaceship`, Calm replaces the boat with a saucer banner installed for the duration of one logical agent run and removed when the run ends, so Pi's stock working row is untouched while idle.
-While a run is thinking, the sprite is the single-row compact `=( * )` saucer, yellow, facing right, on the banner row: the saucer sweeps right one column every 880ms continuously across the full banner width, wrapping marquee-style back to the left edge when it crosses the right edge so it never parks while thinking, the starfield advances two phases per 220ms tick, and the field renders as warp streaks streaming left past the sprite.
-Freeze/resume continuity, resize clamping, and fresh-session reset follow the boat's contract, and a run start or settle installs and removes the banner exactly as it shows and hides the boat.
+With `spaceship`, Calm replaces the boat with a saucer banner that is ambient rather than run-scoped: while Calm is active and the file selects the spaceship, the banner is present for the whole session, so Pi's stock working row is replaced for that whole time and the saucer is on screen to glance at while idle.
+While idle the saucer drifts slowly and continuously left to right across the banner in the two-row resting pose, the three-cell `(|)` saucer directly over the three-cell `|^|` hull, one column every ~1.5 seconds, wrapping marquee-style back to the left edge when it crosses the right edge, while the hull row's asymmetric `*`/`.` starfield streams one column every ~1.3 seconds, so the stars visibly move left past the chasing ship instead of just twinkling in place.
+While a run is thinking, the sprite becomes the single-row compact `=( * )` saucer, yellow, facing right, on the banner row: the saucer sweeps right one column every 880ms continuously across the full banner width, wrapping marquee-style back to the left edge when it crosses the right edge so it never parks while thinking, the starfield advances two phases per 220ms tick, and the field renders as warp streaks streaming left past the sprite.
+When the run settles, the sprite relaxes back to the two-row resting pose, the stars return to the idle cadence immediately, and the movement pace eases back into the slow drift over a bounded handful of graduated moves, one column per move and never teleporting, before the marquee sweep continues indefinitely.
+The banner's lifetime is the session's: turning Calm off clears it and restores Pi's stock working row, and a session shutdown clears it so nothing outlives the session that owns it.
+Freeze/resume continuity, resize clamping, and fresh-session reset follow the boat's contract.
 A terminal too narrow for the six-cell sprite keeps the bare streak field with no sprite.
 [`configuration.md`](configuration.md#working-presentation-variant-configcalm-ship) owns the `config/calm-ship` schema and re-read points.
 
 The spaceship claims that same shared Pi working-row widget slot, so the shared-slot rule above applies to whichever presentation `config/calm-ship` selects.
+The two lifetimes differ: the boat appears while an agent run is under way, and the spaceship, when selected, is an ambient presentation present for the session.
 
 ### What Calm hides on Pi
 
@@ -173,7 +177,7 @@ How Calm handles that shared slot depends on whether Calm was already on when th
 - `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
 - `.pi/extensions/lib/fm-calm-pending-operational-layout.ts` owns the queued-row adapter and its session capability check.
 - `.pi/extensions/lib/fm-calm-working-ship.ts` owns the default boat's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
-- `.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the selectable spaceship banner over its own warp geometry.
+- `.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the selectable ambient spaceship banner, its idle drift and settle, and its own warp geometry.
 
 ### Pi regression entry points
 
