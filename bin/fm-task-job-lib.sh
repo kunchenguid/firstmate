@@ -39,7 +39,6 @@
 #              job is over and no later writer can replace it
 #   delivered  the inbox record name the completion was delivered as
 #   delivery   key=value: count and last delivery attempt epoch
-#   busy       key=value: count of consecutive busy deferrals
 #   escalated  key=value: record already surfaced as stale
 #
 # Identity: a completion is keyed by its task, the spawn generation that started
@@ -57,10 +56,10 @@
 # A failed backlog hold lookup suppresses rings and escalation and appends a
 # status diagnostic once per distinct error; delivery can resume after recovery.
 # An unheld completion is due its first ring in the delivering poll, subject to
-# the endpoint and busy guards. While held it consumes no delivery attempts or
-# busy deferrals; after release its delivery resumes. Each job owns its count, spacing,
-# busy deferrals and escalation, independently of every steer and other job,
-# using the inbox grace and budget tunables until acknowledgement.
+# the endpoint and busy guards. A hold or busy pane defers the delivery
+# ladder without consuming attempts. Each job owns its count, spacing and
+# escalation, independently of every steer and other job, using the inbox
+# grace and ring budget until acknowledgement.
 # A deliberate hold therefore never
 # auto-resumes, while a worker's own `paused:` wait is woken.
 #
@@ -83,10 +82,10 @@
 # Cleanup of a missing runner without an exit record uses the lost-job check
 # above and refuses unless it can confirm the recorded groups and command
 # are gone.
-# Concurrent retirement is quiet at watcher bookkeeping boundaries. Busy or
-# delivery bookkeeping failures for surviving jobs surface as task-specific
-# stale wakes. The lifecycle and delivery regressions are in
-# tests/fm-task-job.test.sh.
+# Concurrent retirement is quiet at watcher bookkeeping boundaries. A failed
+# delivered-record write is reported in task status. Failed ring bookkeeping
+# for a surviving job surfaces as a task-specific stale wake. The lifecycle
+# and delivery regressions are in tests/fm-task-job.test.sh.
 #
 # Tunables (env):
 #   FM_TASK_JOB_START_GRACE_SECS  default 30; how long a job may lack its runner
@@ -348,7 +347,7 @@ fm_task_job_task_held() {
 # completion. The watcher owns delivery and each job's ringing ladder.
 # Fails without writing when the task or job is gone.
 fm_task_job_deliver() (
-  local state=$1 task=$2 dir=$3 meta inbox msg rec lock
+  local state=$1 task=$2 dir=$3 meta inbox msg rec lock status_file line
   meta="$state/$task.meta"
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock" || return 1
@@ -364,8 +363,18 @@ fm_task_job_deliver() (
   fi
   msg=$(fm_task_job_message "$dir") || return 1
   rec=$(fm_task_inbox_write_idempotent "$state" "$task" "$msg" hold-aware) || return 1
-  fm_task_job_write_record "$dir/delivered" "record=${rec##*/}" || true
-  return 0
+  if fm_task_job_write_record "$dir/delivered" "record=${rec##*/}" 2>/dev/null; then
+    return 0
+  fi
+  status_file="$state/$task.status"
+  line="# task-job: delivery bookkeeping could not write $dir/delivered for completion ${rec##*/}"
+  if [ -d "$dir" ] && ! status_event_recorded "$status_file" "$line"; then
+    printf '%s\n' "$line" >&2
+    if [ -f "$status_file" ]; then
+      printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file"
+    fi
+  fi
+  return 1
 )
 
 fm_task_job_due_action() {  # <job-dir>

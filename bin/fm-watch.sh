@@ -720,7 +720,7 @@ inbox_steer_check() {  # <window> <task>
 }
 
 task_job_check() {  # <window> <task>
-  local w=$1 task=$2 root dir action verb rec count busy backend tail40 reason ring_rc lock held=
+  local w=$1 task=$2 root dir action verb rec count backend reason ring_rc lock held=
   TASK_JOB_WAKE_REASON=
   root=$(fm_task_job_root "$STATE" "$task")
   [ -d "$root" ] || return 0
@@ -743,40 +743,26 @@ task_job_check() {  # <window> <task>
         reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled and the worker's agent has exited or its endpoint is missing; recover the worker)"
         verb=escalate
         ;;
-    esac
-    if [ "$verb" = ring ]; then
-      watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
-      tail40=$WATCHER_CAPTURE
-      if inbox_steer_busy "$w" "$backend" "$task" "$tail40"; then
-        busy=$(fm_meta_get "$dir/busy" count)
-        case "$busy" in ''|*[!0-9]*) busy=0 ;; esac
-        busy=$((busy + 1))
-        if ! fm_task_job_write_record "$dir/busy" "count=$busy" 2>/dev/null; then
-          [ -d "$dir" ] || continue
-          reason="stale: $w (task job ${dir##*/}: busy bookkeeping could not write $dir/busy for completion $rec)"
-        elif [ "$busy" -ge "$(fm_task_inbox_busy_max)" ]; then
-          reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled after $busy busy-deferred doorbells; inspect the worker)"
-        else
+      *)
+        watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
+        if inbox_steer_busy "$w" "$backend" "$task" "$WATCHER_CAPTURE"; then
           continue
         fi
+        ;;
+    esac
+    if [ "$verb" = ring ]; then
+      ring_rc=0
+      FM_COMPOSER_HARNESS=$(window_harness "$w") \
+        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      if [ "$ring_rc" -eq 3 ]; then
+        reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled and its endpoint is unavailable; recover the worker)"
         verb=escalate
-      elif ! rm -f "$dir/busy" 2>/dev/null; then
+      elif ! fm_task_job_write_record "$dir/delivery" "count=$((count + 1))" "last=$(date +%s)" 2>/dev/null; then
         [ -d "$dir" ] || continue
-        reason="stale: $w (task job ${dir##*/}: busy bookkeeping could not reset $dir/busy for completion $rec)"
+        reason="stale: $w (task job ${dir##*/}: delivery bookkeeping could not write $dir/delivery for completion $rec)"
         verb=escalate
       else
-        ring_rc=0
-        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
-        if [ "$ring_rc" -eq 3 ]; then
-          reason="stale: $w (task job ${dir##*/}: completion $rec is unhandled and its endpoint is unavailable; recover the worker)"
-          verb=escalate
-        elif ! fm_task_job_write_record "$dir/delivery" "count=$((count + 1))" "last=$(date +%s)" 2>/dev/null; then
-          [ -d "$dir" ] || continue
-          reason="stale: $w (task job ${dir##*/}: delivery bookkeeping could not write $dir/delivery for completion $rec)"
-          verb=escalate
-        else
-          triage_log "task-job delivery attempt: $task ${dir##*/} result=$ring_rc"
-        fi
+        triage_log "task-job delivery attempt: $task ${dir##*/} result=$ring_rc"
       fi
     fi
     if [ "$verb" = escalate ] && [ -f "$rec" ] && [ -d "$dir" ]; then

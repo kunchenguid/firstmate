@@ -643,6 +643,8 @@ test_failed_completion_has_its_own_retry_and_escalation() {
   FM_TASK_INBOX_RING_MAX=2 steer_check "$dir"
   [ ! -e "$jobdir/escalated" ] || fail "escalation bypassed spacing"
   sleep 1.1
+  FM_JOB_BUSY_TARGET=1 FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_RING_MAX=2 steer_check "$dir" 1
+  [ ! -e "$jobdir/escalated" ] || fail "delivery budget escalated while the worker was busy"
   FM_TASK_INBOX_RING_MAX=2 steer_check "$dir" 1
   assert_grep "$rec" "$dir/state/.wake-queue" "completion must have its own stale wake"
   assert_grep 'after 2 doorbell delivery attempts' "$dir/state/.wake-queue" "completion must exhaust its own budget"
@@ -805,6 +807,58 @@ test_watcher_rerings_until_acknowledged() {
   pass "task job: an unlanded doorbell is re-rung until the worker acknowledges the record"
 }
 
+test_busy_completion_rings_when_worker_goes_idle() {
+  local dir out jobdir poll
+  dir=$(setup_case busy-then-idle)
+  out=$(job_start "$dir" --timeout 60 -- true) || fail "start failed: $out"
+  jobdir=$(job_dir_of "$dir" "$out")
+  wait_for_file "$jobdir/exit" || fail "the job did not finish"
+  wait_gone "$(sed -n 's/^pid=//p' "$jobdir/runner")" || fail "the runner did not exit"
+
+  for poll in 1 2 3; do
+    FM_JOB_BUSY_TARGET=1 FM_BUSY_REGEX=BUSYTOKEN FM_TASK_INBOX_BUSY_MAX=2 steer_check "$dir" \
+      || fail "busy poll $poll failed"
+    [ "$(record_count "$dir")" = 1 ] || fail "busy poll $poll did not preserve the completion"
+    [ ! -s "$dir/send.log" ] || fail "busy poll $poll rang the worker"
+    [ ! -e "$jobdir/delivery" ] || fail "busy poll $poll consumed a delivery attempt"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "busy poll $poll queued a wake"
+  done
+
+  steer_check "$dir" || fail "idle poll failed"
+  assert_grep "$DOORBELL" "$dir/send.log" "the first idle poll must ring the waiting completion"
+  pass "task job: busy polls leave the completion pending until the worker goes idle"
+}
+
+test_watcher_reports_failed_delivered_record() {
+  local dir out jobdir real_mv diagnostic rec
+  dir=$(setup_case delivered-write-failure)
+  out=$(job_start "$dir" --timeout 60 -- true) || fail "start failed: $out"
+  jobdir=$(job_dir_of "$dir" "$out")
+  wait_for_file "$jobdir/exit" || fail "the job did not finish"
+  wait_gone "$(sed -n 's/^pid=//p' "$jobdir/runner")" || fail "the runner did not exit"
+  real_mv=$(command -v mv)
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+[ "${!#}" != "${FM_JOB_RECORD_FAULT:-}" ] || exit 1
+exec "$FM_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  FM_REAL_MV="$real_mv" FM_JOB_RECORD_FAULT="$jobdir/delivered" steer_check "$dir" || fail "first faulted poll failed"
+  rec=$(records "$dir")
+  [ -f "$rec" ] && [ ! -e "$jobdir/delivered" ] || fail "the fault did not isolate the delivered-record write"
+  diagnostic="delivery bookkeeping could not write $jobdir/delivered"
+  assert_grep "$diagnostic" "$dir/state/t1.status" "the task status must identify the failed record"
+  [ ! -s "$dir/send.log" ] || fail "the watcher rang without a persisted delivery record"
+  FM_REAL_MV="$real_mv" FM_JOB_RECORD_FAULT="$jobdir/delivered" steer_check "$dir" || fail "second faulted poll failed"
+  [ "$(grep -cF "$diagnostic" "$dir/state/t1.status")" = 1 ] || fail "the same write failure was reported twice"
+
+  FM_REAL_MV="$real_mv" steer_check "$dir" || fail "the watcher did not recover after the fault cleared"
+  [ "$(records "$dir")" = "$rec" ] || fail "delivery recovery duplicated the completion"
+  assert_grep "$DOORBELL" "$dir/send.log" "the watcher must ring the recovered completion"
+  pass "watcher: a failed delivered-record write is reported once and retries the same completion"
+}
+
 watch_bg() {  # <dir> <out>
   PATH="$1/fakebin:$PATH" FM_HOME="$1" FM_DATA_OVERRIDE="$1/owning-data" FM_CONFIG_OVERRIDE="$1/config" \
     FM_STATE_OVERRIDE="$1/state" FM_SEND_LOG="$1/send.log" \
@@ -816,12 +870,11 @@ watch_bg() {  # <dir> <out>
 }
 
 test_watcher_isolates_completion_bookkeeping_failures() {
-  local scenario boundary scope dir out jobdir other wpid i rc rec retire send_retire write_retire fault busy send_fail
-  local FM_REAL_MV FM_REAL_RM
+  local scenario boundary scope dir out jobdir other wpid i rc rec retire send_retire fault send_fail
+  local FM_REAL_MV
   FM_REAL_MV=$(command -v mv)
-  FM_REAL_RM=$(command -v rm)
-  export FM_REAL_MV FM_REAL_RM
-  for scenario in delivery-job delivery-inbox delivery-failed busy-job escalated-job delivery-surviving busy-surviving reset-surviving escalated-surviving; do
+  export FM_REAL_MV
+  for scenario in delivery-job delivery-inbox delivery-failed escalated-job delivery-surviving escalated-surviving; do
     boundary=${scenario%%-*}
     scope=${scenario#*-}
     dir=$(setup_case "bookkeeping-$scenario")
@@ -846,16 +899,14 @@ test_watcher_isolates_completion_bookkeeping_failures() {
     retire=$jobdir
     [ "$scope" != inbox ] || retire="$dir/state/t1.inbox"
     [ "$scope" != surviving ] || retire=
-    send_retire='' write_retire='' fault='' busy=0 send_fail=0
+    send_retire='' fault='' send_fail=0
     if [ "$boundary" = delivery ] && [ "$scope" != surviving ]; then
       send_retire=$retire
       [ "$scope" != failed ] || send_fail=1
-    else
-      write_retire=$retire
+    elif [ "$scope" = surviving ]; then
       fault="$jobdir/$boundary"
     fi
     if [ "$scenario" = escalated-job ]; then
-      write_retire='' fault=''
       cat > "$dir/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = show ]; then
@@ -865,29 +916,14 @@ exec "$FM_REAL_TASKS_AXI" "$@"
 SH
       chmod +x "$dir/fakebin/tasks-axi"
     fi
-    [ "$boundary" != busy ] || busy=1
-    if [ "$boundary" = reset ]; then
-      fault="$jobdir/busy"
-      job_lib "$dir" fm_task_job_write_record "$fault" count=1 || fail "could not seed busy bookkeeping"
-      cat > "$dir/fakebin/rm" <<'SH'
-#!/usr/bin/env bash
-[ "${!#}" != "${FM_JOB_RECORD_FAULT:-}" ] || exit 1
-exec "$FM_REAL_RM" "$@"
-SH
-      chmod +x "$dir/fakebin/rm"
-    fi
     cat > "$dir/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
-if [ "${!#}" = "${FM_JOB_RECORD_FAULT:-}" ]; then
-  [ -z "${FM_JOB_RETIRE_AT_WRITE:-}" ] || rm -rf -- "$FM_JOB_RETIRE_AT_WRITE"
-  exit 1
-fi
+[ "${!#}" != "${FM_JOB_RECORD_FAULT:-}" ] || exit 1
 exec "$FM_REAL_MV" "$@"
 SH
     chmod +x "$dir/fakebin/mv"
     FM_FAKE_TMUX_WINDOWS=$'fm-t1\nfm-t2' FM_JOB_RETIRE_ON_SEND="$send_retire" \
-      FM_JOB_RETIRE_SEND_FAIL="$send_fail" FM_JOB_RECORD_FAULT="$fault" FM_JOB_RETIRE_AT_WRITE="$write_retire" \
-      FM_JOB_BUSY_TARGET="$busy" FM_BUSY_REGEX=BUSYTOKEN \
+      FM_JOB_RETIRE_SEND_FAIL="$send_fail" FM_JOB_RECORD_FAULT="$fault" \
       FM_JOB_RETIRE_BEFORE_ESCALATION="$jobdir" FM_REAL_TASKS_AXI="$(command -v tasks-axi)" \
       watch_bg "$dir" "$dir/watch.out"
     wpid=$!
@@ -1248,6 +1284,8 @@ fm_test_run \
   test_secondmate_teardown_stops_child_job_without_delivery \
   test_finished_live_runner_is_owned_until_stopped \
   test_watcher_rerings_until_acknowledged \
+  test_busy_completion_rings_when_worker_goes_idle \
+  test_watcher_reports_failed_delivered_record \
   test_watcher_isolates_completion_bookkeeping_failures \
   test_watcher_reports_a_lost_runner_as_unrecoverable \
   test_stop_all_stops_without_delivering \
