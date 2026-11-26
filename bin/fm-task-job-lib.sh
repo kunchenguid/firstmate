@@ -57,15 +57,17 @@
 # status diagnostic once per distinct error; delivery can resume after recovery.
 # An unheld completion is due its first ring in the delivering poll, subject to
 # the endpoint and busy guards. A hold or busy pane defers the delivery
-# ladder without consuming attempts. Each job owns its count, spacing and
-# escalation, independently of every steer and other job, using the inbox
-# grace and ring budget until acknowledgement.
-# A deliberate hold therefore never
-# auto-resumes, while a worker's own `paused:` wait is woken.
+# ladder without consuming attempts. Each job uses the inbox grace and ring
+# budget independently of steers and other jobs. Acknowledgement ends retries.
+# A due, unheld completion queues a stale wake if the endpoint is dead or
+# missing, or if the attempt budget is exhausted and the busy guard allows
+# escalation. Once escalation is recorded, the watcher leaves the completion
+# in the inbox for recovery.
 #
 # Recovery (fm_task_job_reconcile) runs when bin/fm-watch.sh reaches the task
-# in its endpoint loop and delivers any captured completion. If a runner
-# died without an exit record, recovery records a lost job once its recorded
+# in its endpoint loop. Delivery tries the task metadata lock once and retries
+# on a later poll if another process holds it. If a runner died without an
+# exit record, recovery records a lost job once its recorded
 # process groups and direct command are gone. When it cannot confirm those
 # processes are gone, it reports the job as unrecoverable without signaling
 # unproven groups.
@@ -82,9 +84,12 @@
 # Cleanup of a missing runner without an exit record uses the lost-job check
 # above and refuses unless it can confirm the recorded groups and command
 # are gone.
-# Concurrent retirement is quiet at watcher bookkeeping boundaries. Failed
-# delivery or ring bookkeeping surfaces as a task-specific stale wake. The
-# lifecycle and delivery regressions are in tests/fm-task-job.test.sh.
+# Concurrent retirement is quiet at watcher bookkeeping boundaries. If
+# writing the delivered marker fails after the inbox record is queued, the
+# watcher queues a task-specific stale wake for an unheld, unhandled
+# completion. It uses a status marker to suppress repeats. A failure writing
+# the attempt record takes the normal per-job escalation path.
+# The lifecycle and delivery regressions are in tests/fm-task-job.test.sh.
 #
 # Tunables (env):
 #   FM_TASK_JOB_START_GRACE_SECS  default 30; how long a job may lack its runner
