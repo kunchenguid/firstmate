@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Refresh goal KPIs, drive switches and opted-in WBS/kanban status labels."""
+"""Render shared goal views from cockpit truth, or preview drive controls from goal export."""
 
 import argparse
+from collections import Counter, defaultdict
 import hashlib
 import html
 from html.parser import HTMLParser
@@ -14,6 +15,7 @@ import subprocess
 import tempfile
 
 
+TRUTH_SCHEMA = 'fm-cockpit-truth.v1'
 GOAL_BIN = Path(__file__).resolve().parents[2] / 'bin' / 'fm-goal.sh'
 GENERATED = re.compile(r'<!-- fm-goal-drive -->.*?<!-- /fm-goal-drive -->', re.S)
 STATUSES = {
@@ -54,44 +56,9 @@ span.fm-goal-item-status[data-fm-goal-status] { display:inline-block; color:#f2f
     border:1px solid var(--fm-goal-color); border-inline-start-width:4px; border-radius:4px;
     padding:0 4px; font-size:.75rem; font-weight:700; }
 text.fm-goal-item-status[data-fm-goal-status] { fill:var(--fm-goal-color); font-weight:700; }
+.fm-goal-box { border:1px solid #465369; border-radius:6px; padding:4px 8px; margin:4px 0; }
 ''' + '\n'.join(f'[data-fm-goal-status="{state}"] {{ --fm-goal-color:{color}; }}'
                 for state, (_, color) in STATUSES.items()) + '</style>'
-
-
-class GoalAnchors(HTMLParser):
-    """Collect insertion points without reserializing the host's HTML."""
-
-    def __init__(self, page):
-        super().__init__(convert_charrefs=False)
-        self.offsets = [0] + [m.end() for m in re.finditer('\n', page)]
-        self.heading = None
-        self.in_heading = False
-        self.cards = {}
-        self.items = []
-        self.feed(page)
-        self.close()
-
-    def absolute_offset(self):
-        line, col = self.getpos()
-        return self.offsets[line - 1] + col
-
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        element_id = attrs.get('id') or ''
-        item = attrs.get('data-fm-goal-item')
-        start_tag = self.get_starttag_text()
-        if (tag in ('span', 'text') and item and not start_tag.endswith('/>')
-                and 'fm-goal-item-status' in (attrs.get('class') or '').split()):
-            self.items.append((item, self.absolute_offset() + len(start_tag)))
-        if tag == 'h2' and element_id == 'doelen':
-            self.in_heading = True
-        if tag in ('article', 'div', 'section') and element_id.startswith('doel-'):
-            self.cards[element_id[5:]] = self.absolute_offset() + len(self.get_starttag_text())
-
-    def handle_endtag(self, tag):
-        if tag == 'h2' and self.in_heading:
-            self.heading = self.absolute_offset() + len('</h2>')
-            self.in_heading = False
 
 
 def goals_from(home):
@@ -124,7 +91,7 @@ def item_status(item):
     return state
 
 
-def items_kpi(statuses):
+def items_kpi(statuses, element_id='doel-item-kpi'):
     total = len(statuses)
     counts = dict.fromkeys(STATUSES, 0)
     for state in statuses:
@@ -138,70 +105,350 @@ def items_kpi(statuses):
             stops.append(f'{color} {seen / total:.8%} {(seen + count) / total:.8%}')
             seen += count
     ring = f' style="--fm-goal-ring:conic-gradient({", ".join(stops)})"' if stops else ''
-    return ('<div class="fm-goal-items" id="doel-item-kpi">'
+    return (f'<div class="fm-goal-items" id="{element_id}">'
             '<div class="fm-goal-items-body">'
             f'<div class="fm-goal-ring"{ring}><span><strong>{total}</strong> taken</span></div>'
             f'<ul role="list" aria-label="Status van doeltaken">{"".join(legend)}</ul></div></div>')
 
 
-def verified_statuses(path):
-    """Item statuses cockpit-sync.py checked against reality; they win over the goal marks."""
-    truth = json.loads(path.read_text(encoding='utf-8'))
-    if truth['schema'] != 'fm-cockpit-truth.v1':
-        raise ValueError('unsupported cockpit truth schema')
-    return {f"{g['id']}/{i['id']}": i['status'] for g in truth['goals'] for i in g['items']}
+def drive_kpi(goals):
+    return ('<p class="small mute" id="doel-drive-kpi">'
+            f'{sum(bool(g["driven"]) for g in goals)} van {len(goals)} doelen actief gedreven</p>')
 
 
-def render(page, goals, allow=None, verified=None):
-    base = ATTRIBUTE.sub('', GENERATED.sub('', page))
-    anchors = GoalAnchors(base)
-    if anchors.heading is None:
-        raise ValueError('missing cockpit goal heading <h2 id="doelen">')
-    if allow:
-        goals = [g for g in goals if g['id'] in allow]
-    driven = sum(g['driven'] for g in goals)
-    statuses = {f"{g['id']}/{item['id']}": item_status(item) for g in goals for item in g['items']}
-    statuses.update({key: state for key, state in (verified or {}).items() if key in statuses})
-    patches = [(anchors.heading, generated(STYLE + '<p class="small mute" id="doel-drive-kpi">'
-                f'{driven} van {len(goals)} doelen actief gedreven</p>' + items_kpi(list(statuses.values()))))]
-    for item, end in anchors.items:
-        if item in statuses:
-            state = statuses[item]
-            patches.append((end - 1, f' data-fm-goal-status="{state}"'))
-            patches.append((end, generated(STATUSES[state][0])))
-    for g in goals:
-        goal_id = g['id']
-        if goal_id not in anchors.cards:
-            raise ValueError(f'missing cockpit card #doel-{goal_id}; rebuild the Doelen section first')
-        end = anchors.cards[goal_id]
-        on = g['driven']
-        label = html.escape('Firstmate stuurt: ' + g['title'], quote=True)
-        answer = html.escape(f'{"pause" if on else "resume"} {goal_id}', quote=True)
-        key = 'goal.drive.' + hashlib.sha256(goal_id.encode('ascii')).hexdigest()
-        patches.append((end - 1, f' data-fm-goal-drive="{"on" if on else "off"}"'))
-        patches.append((end, generated(f'''<form class="fm-goal-drive small" data-lavish-question="{key}" onsubmit="return mikoSend(event,'{key}')">
+def drive_switch(goal):
+    goal_id, on = goal['id'], goal['driven']
+    label = html.escape('Firstmate stuurt: ' + goal['title'], quote=True)
+    answer = html.escape(f'{"pause" if on else "resume"} {goal_id}', quote=True)
+    key = 'goal.drive.' + hashlib.sha256(goal_id.encode('ascii')).hexdigest()
+    return f'''<form class="fm-goal-drive small" data-lavish-question="{key}" onsubmit="return mikoSend(event,'{key}')">
 <span class="fm-goal-drive-state">{'wordt gedreven' if on else 'uit'}</span>
 <input type="hidden" name="a" value="{answer}">
 <button type="submit" role="switch" aria-checked="{'true' if on else 'false'}" aria-label="{label}">{'Zet uit' if on else 'Zet aan'}</button>
-<span class="st mute small" role="status"></span></form>''')))
-    for offset, fragment in sorted(patches, reverse=True):
+<span class="st mute small" role="status"></span></form>'''
+
+
+def base_page(page):
+    return ATTRIBUTE.sub('', GENERATED.sub('', page))
+
+
+def render_preview(page, goals, allow=None):
+    base = base_page(page)
+    parsed = GoalPage(base)
+    heading = heading_end(base, parsed)
+    if allow:
+        goals = [g for g in goals if g['id'] in allow]
+    statuses = {key: item_status(item) for key, item in item_keys(goals).items()}
+    patches = [(heading, generated(STYLE + drive_kpi(goals) + items_kpi(list(statuses.values()))))]
+    for node in parsed.nodes:
+        if node.key in statuses and is_slot(node):
+            patches.extend(slot_patches(node, statuses[node.key]))
+    for g in goals:
+        cards = goal_cards(parsed, g)
+        if len(cards) != 1:
+            raise ValueError(f'expected one cockpit card #doel-{g["id"]}')
+        end = cards[0].end
+        patches.append((end - 1, f' data-fm-goal-drive="{"on" if g["driven"] else "off"}"'))
+        patches.append((end, generated(drive_switch(g))))
+    return apply_patches(base, patches)
+
+
+def apply_patches(base, patches):
+    for offset, fragment in sorted(patches, key=lambda patch: patch[0], reverse=True):
         base = base[:offset] + fragment + base[offset:]
     return base
 
 
+VOID = set('area base br col embed hr img input link meta param source track wbr'.split())
+
+
+class Node:
+    def __init__(self, tag, attrs, parent, end):
+        self.tag, self.attrs, self.parent, self.end = tag, dict(attrs), parent, end
+        self.parts, self.close = [], None
+        self.classes = set((self.attrs.get('class') or '').split())
+        self.id = self.attrs.get('id')
+        self.key = self.attrs.get('data-fm-goal-item')
+        self.visible = (not parent or parent.visible) and 'hidden' not in self.attrs and tag not in {
+            'template', 'script', 'style', 'title', 'desc', 'noscript'}
+
+    def ancestor(self, matches):
+        node = self.parent
+        while node and not matches(node):
+            node = node.parent
+        return node
+
+    def text(self):
+        return ''.join(p if isinstance(p, str) else p.text() for p in self.parts) if self.visible else ''
+
+    def signature(self):
+        # Compare generated KPIs as parsed markup, not against HTML serialization details.
+        return (self.tag, self.attrs, [p.signature() if isinstance(p, Node) else p.strip()
+                                       for p in self.parts if isinstance(p, Node) or p.strip()])
+
+
+class GoalPage(HTMLParser):
+    def __init__(self, page):
+        super().__init__()
+        self.offsets = [0] + [m.end() for m in re.finditer('\n', page)]
+        self.stack, self.nodes, self.by_id = [], [], defaultdict(list)
+        self.feed(page)
+        self.close()
+
+    def absolute_offset(self):
+        line, col = self.getpos()
+        return self.offsets[line - 1] + col
+
+    def start(self, tag, attrs, push):
+        parent = self.stack[-1] if self.stack else None
+        node = Node(tag, attrs, parent, self.absolute_offset() + len(self.get_starttag_text()))
+        self.nodes.append(node)
+        if node.id:
+            self.by_id[node.id].append(node)
+        if parent:
+            parent.parts.append(node)
+        if push:
+            self.stack.append(node)
+
+    def handle_starttag(self, tag, attrs):
+        self.start(tag, attrs, tag not in VOID)
+
+    def handle_startendtag(self, tag, attrs):
+        self.start(tag, attrs, False)
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i].tag == tag:
+                self.stack[i].close = self.absolute_offset()
+                del self.stack[i:]
+                break
+
+    def handle_data(self, data):
+        if self.stack:
+            self.stack[-1].parts.append(data)
+
+
+def heading_end(page, parsed):
+    headings = [n for n in parsed.by_id['doelen'] if n.tag == 'h2' and n.visible and n.close is not None]
+    if len(headings) != 1:
+        raise ValueError('expected one visible cockpit goal heading <h2 id="doelen">')
+    return page.index('>', headings[0].close) + 1
+
+
+def goal_cards(parsed, goal):
+    return [n for n in parsed.by_id['doel-' + goal['id']] if n.tag in ('article', 'div', 'section')]
+
+
+def is_slot(node):
+    return (node.tag in ('span', 'text') and node.close is not None
+            and 'fm-goal-item-status' in node.classes)
+
+
+def slot_patches(node, state):
+    return [(node.end - 1, f' data-fm-goal-status="{state}"'), (node.end, generated(STATUSES[state][0]))]
+
+
+WBS_IDS = {'wbs-blok', 'wbs'}
+
+
+def wbs_box(node):
+    return (node.tag == 'g' and 'data-id' in node.attrs) or 'fm-goal-box' in node.classes
+
+
+def kanban_card(node):
+    return 'kb-card' in node.classes
+
+
+def slot_view(node):
+    if not is_slot(node) or not node.visible:
+        return None, None
+    box = node.ancestor(wbs_box)
+    if box and box.ancestor(lambda n: n.id in WBS_IDS):
+        return 'WBS box', box
+    card = node.ancestor(kanban_card)
+    if card and card.ancestor(lambda n: n.id == 'kanban'):
+        return 'Kanban card', card
+    if node.parent and node.parent.tag == 'li':
+        goal = node.ancestor(lambda n: 'data-fm-goal-drive' in n.attrs)
+        if goal and goal.id == 'doel-' + (node.key or '').partition('/')[0]:
+            return 'goal item', node.parent
+    return None, None
+
+
+def item_keys(goals):
+    return {f"{g['id']}/{i['id']}": i for g in goals for i in g['items']}
+
+
+def label_slot(key, state):
+    return (f'<span class="fm-goal-item-status" data-fm-goal-item="{html.escape(key, quote=True)}"'
+            f' data-fm-goal-status="{state}">{STATUSES[state][0]}</span>')
+
+
+def ring_id(goal):
+    return 'doel-ring-' + goal['id']
+
+
+def render_truth(page, goals):
+    base = base_page(page)
+    parsed = GoalPage(base)
+    if not parsed.by_id['doelen'] and not goals:
+        return base
+    heading_at = heading_end(base, parsed)
+    items = item_keys(goals)
+    patches, covered, wbs_keys = [], defaultdict(set), {}
+    for node in parsed.nodes:
+        if not node.key or not is_slot(node):
+            continue
+        view, box = slot_view(node)
+        if view == 'WBS box' and box.attrs.get('data-id'):
+            wbs_keys[box.attrs['data-id']] = node.key
+        if node.key in items:
+            state = items[node.key]['status']
+            patches.extend(slot_patches(node, state))
+            covered[view].add(node.key)
+    # Rich cards can inherit identity from their linked SVG box, never from title or release stage.
+    keyed_cards = {node.ancestor(kanban_card) for node in parsed.nodes if node.key}
+    for card in parsed.nodes:
+        key = wbs_keys.get(card.attrs.get('data-wbs'))
+        if (key in items and kanban_card(card) and card not in keyed_cards and card.visible
+                and card.ancestor(lambda n: n.id == 'kanban')):
+            patches.append((card.end, generated(label_slot(key, items[key]['status']))))
+            covered['Kanban card'].add(key)
+
+    overview = STYLE + drive_kpi(goals) + items_kpi([i['status'] for i in items.values()])
+    for goal in goals:
+        gid = goal['id']
+        rows = ''.join(f'<li>{html.escape(i["title"])} {label_slot(gid + "/" + i["id"], i["status"])}</li>'
+                       for i in goal['items'])
+        content = (drive_switch(goal) + items_kpi([i['status'] for i in goal['items']], ring_id(goal))
+                   + f'<ul>{rows}</ul>')
+        drive = 'on' if goal['driven'] else 'off'
+        cards = goal_cards(parsed, goal)
+        if cards:
+            end = cards[0].end
+            patches.extend([(end - 1, f' data-fm-goal-drive="{drive}"'), (end, generated(content))])
+        else:
+            overview += (f'<article id="doel-{gid}" data-fm-goal-drive="{drive}">'
+                         f'<h3>{html.escape(goal["title"])}</h3>{content}</article>')
+
+    for view, ids, css, heading in [('WBS box', ('wbs-blok', 'wbs'), 'fm-goal-box', 'WBS'),
+                                    ('Kanban card', ('kanban',), 'kb-card fm-goal-box', 'Kanban')]:
+        missing = {key: i for key, i in items.items() if key not in covered[view]}
+        if not missing:
+            continue
+        groups = defaultdict(list)
+        for key, item in missing.items():
+            group = item['status'] if view == 'Kanban card' else key.split('/', 1)[0]
+            groups[group].append(f'<div class="{css}">{html.escape(item["title"])} '
+                                 f'{label_slot(key, item["status"])}</div>')
+        titles = {g['id']: g['title'] for g in goals}
+        titles = {k: v[0] for k, v in STATUSES.items()} if view == 'Kanban card' else titles
+        content = '<h3>Geverifieerde doeltaken</h3>' + ''.join(
+            f'<h4>{html.escape(titles[group])}</h4>{"".join(cards)}' for group, cards in groups.items())
+        sections = [n for ident in ids for n in parsed.by_id[ident] if n.visible and n.close is not None]
+        if sections:
+            patches.append((sections[0].close, generated(content)))
+        else:
+            overview += f'<section id="{ids[0]}"><h2>{heading}</h2>{content}</section>'
+    patches.append((heading_at, generated(overview)))
+    return apply_patches(base, patches)
+
+
+def verify_goal_views(page, goals):
+    parsed = GoalPage(page)
+    items = item_keys(goals)
+    problems, covered = [], Counter()
+    expected_cards = {f'doel-{g["id"]}' for g in goals}
+    expected_rings = {ring_id(g) for g in goals}
+    for node in parsed.nodes:
+        if 'data-fm-goal-drive' in node.attrs and node.id not in expected_cards:
+            problems.append(f'out-of-scope goal card: {node.id}')
+        if node.id and node.id.startswith('doel-ring-') and node.id not in expected_rings:
+            problems.append(f'out-of-scope goal ring: {node.id}')
+
+    def check_markup(expected, parent=None):
+        model = GoalPage(expected).nodes[0]
+        found = parsed.by_id[model.id]
+        if (len(found) != 1 or not found[0].visible or found[0].signature() != model.signature()
+                or (parent and not found[0].ancestor(lambda n: n is parent))):
+            problems.append(f'missing or stale goal rendering: {model.id}')
+
+    if goals or parsed.by_id['doelen'] or parsed.by_id['doel-item-kpi']:
+        check_markup(drive_kpi(goals))
+        check_markup(items_kpi([i['status'] for i in items.values()]))
+    for goal in goals:
+        card_id = f'doel-{goal["id"]}'
+        cards = goal_cards(parsed, goal)
+        drive = 'on' if goal['driven'] else 'off'
+        if (len(parsed.by_id[card_id]) != 1 or len(cards) != 1 or not cards[0].visible
+                or cards[0].attrs.get('data-fm-goal-drive') != drive):
+            problems.append(f'missing or stale goal card: {card_id}')
+        else:
+            card = cards[0]
+            check_markup(items_kpi([i['status'] for i in goal['items']], ring_id(goal)), card)
+            switch = GoalPage(drive_switch(goal)).nodes[0].signature()
+            switches = [n.signature() for n in parsed.nodes if 'fm-goal-drive' in n.classes
+                        and n.visible and n.ancestor(lambda parent: parent is card)]
+            if switches != [switch]:
+                problems.append(f'missing or stale goal switch: {card_id}')
+
+    box_keys = defaultdict(set)
+    for node in parsed.nodes:
+        if node.key is None:
+            continue
+        if node.key not in items:
+            problems.append(f'out-of-scope or unknown goal item: {node.key}')
+            continue
+        view, box = slot_view(node)
+        stated = node.attrs.get('data-fm-goal-status')
+        expected = items[node.key]['status']
+        if stated != expected or node.text().strip() != STATUSES[expected][0]:
+            problems.append(f'stale status of {node.key}: expected {STATUSES[expected][0]} ({expected})')
+        if view:
+            covered[view, node.key] += 1
+            box_keys[box].add(node.key)
+    wbs_keys = defaultdict(set)
+    for box, keys in box_keys.items():
+        if wbs_box(box) and box.attrs.get('data-id'):
+            wbs_keys[box.attrs['data-id']].update(keys)
+        if len(keys) != 1:
+            problems.append(f'goal rendering has multiple item keys: {", ".join(sorted(keys))}')
+    for node in parsed.nodes:
+        linked = wbs_keys.get(node.attrs.get('data-wbs'))
+        if linked and kanban_card(node) and node.visible and (len(linked) != 1 or box_keys.get(node) != linked):
+            problems.append(f'Kanban card does not match WBS box {node.attrs["data-wbs"]}')
+    for key in items:
+        for view in ('goal item', 'WBS box', 'Kanban card'):
+            if not covered[view, key]:
+                problems.append(f'missing {view}: {key}')
+        if covered['goal item', key] > 1:
+            problems.append(f'goal item listed more than once: {key}')
+    return problems
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--goal-home', type=Path, required=True, help='home that owns the goal records')
-    parser.add_argument('--goal-id', action='append', help='limit goal controls and status rendering to this goal ID (repeatable)')
+    parser.add_argument('--goal-home', type=Path, help='goal-record home for a standalone preview (not read with --truth)')
+    parser.add_argument('--goal-id', action='append',
+                        help='limit preview to this ID; with --truth only asserts its goals are allowed (repeatable)')
     parser.add_argument('--page', type=Path, required=True, help='already generated cockpit HTML; updated atomically')
     parser.add_argument('--output', type=Path, help='write a preview instead of changing --page')
-    parser.add_argument('--truth', type=Path, help='cockpit-sync.py truth JSON; its verified statuses replace the marks')
+    parser.add_argument('--truth', type=Path, help='scoped cockpit-sync.py truth JSON; the sole source of goal views')
     args = parser.parse_args()
+    if not (args.truth or args.goal_home):
+        parser.error('--truth or --goal-home is required')
     target = args.output or args.page
     try:
         page = args.page.read_text(encoding='utf-8')
-        verified = verified_statuses(args.truth) if args.truth else None
-        updated = render(page, goals_from(args.goal_home), args.goal_id, verified)
+        if args.truth:
+            truth = json.loads(args.truth.read_text(encoding='utf-8'))
+            if truth['schema'] != TRUTH_SCHEMA:
+                raise ValueError('unsupported cockpit truth schema')
+            if args.goal_id and {g['id'] for g in truth['goals']} - set(args.goal_id):
+                raise ValueError('truth contains goals outside --goal-id; select goals in cockpit-sync.py')
+            updated = render_truth(page, truth['goals'])
+        else:
+            updated = render_preview(page, goals_from(args.goal_home), args.goal_id)
         if target == args.page and updated == page:
             return
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent, delete=False) as f:

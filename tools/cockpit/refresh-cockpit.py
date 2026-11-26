@@ -12,13 +12,18 @@ Paths come from the environment (see tools/cockpit/README.md):
                      (default $FM_HOME/data/miko-all-in-one-lavish)
   MIKO_WORKTREE      git worktree of the Miko repo with an origin remote; required, no default
   COCKPIT_OUT        optional: write the page here instead of replacing cockpit-2.html in place
-  COCKPIT_GOAL_HOME  optional: add drive state from this goal-owning Firstmate home
+  COCKPIT_GOAL_HOME  optional: read the goals from this Firstmate home instead of FM_HOME
+  COCKPIT_SCOPE      optional: override this wrapper's miko-systems/miko scope
 
 Every run starts with cockpit-sync.py (goal home COCKPIT_GOAL_HOME, else FM_HOME; its --help owns the
 other COCKPIT_* scope variables). The truth JSON lands in $COCKPIT_TRUTH, else cockpit-truth.json beside
 the page (COCKPIT_OUT.truth.json for a preview). A failed run puts a banner on the installed page and
 exits non-zero."""
 import os,re,sys,json,html,subprocess,time,fcntl,tempfile,collections
+# Isolated mode omits the script directory, including the shared goal-view renderer.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
+from goal_drive import base_page, render_truth
+
 FM=os.environ.get('FM_HOME') or os.path.expanduser('~/.firstmate')
 D=os.environ.get('COCKPIT_DATA_DIR') or os.path.join(FM,'data','miko-all-in-one-lavish')
 PAGE=os.path.join(D,'cockpit-2.html'); CARD=os.path.join(D,'card-data.json')
@@ -42,7 +47,8 @@ def verify():
     preview=os.environ.get('COCKPIT_OUT')
     truth_path=os.environ.get('COCKPIT_TRUTH') or (preview+'.truth.json' if preview else os.path.join(D,'cockpit-truth.json'))
     sys.stdout.flush()
-    if sync(['--goal-home',os.environ.get('COCKPIT_GOAL_HOME') or FM,'--out',truth_path]+([] if preview else ['--page',PAGE])):
+    scope=[] if os.environ.get('COCKPIT_SCOPE','').strip() else ['--scope','miko-systems/miko']
+    if sync(['--goal-home',os.environ.get('COCKPIT_GOAL_HOME') or FM,'--out',truth_path]+scope+([] if preview else ['--page',PAGE])):
         sys.exit('refresh-cockpit: the cockpit sync failed; the page was not refreshed')
     return truth_path
 def refresh(truth_path):
@@ -73,7 +79,7 @@ def refresh(truth_path):
             # a lane whose status file has not moved for 24 hours is not running, whatever its last word says
             if st in ('working','milestone','ready','needs-decision','blocked','paused-run') and time.time()-os.path.getmtime(os.path.join(FM,'state',fn))>86400: st='stale'
             lanes[fn[:-7]]=st
-    data=json.load(open(CARD)); s=open(PAGE).read()
+    data=json.load(open(CARD)); s=base_page(open(PAGE).read())
     # live states on main: a screen whose register ids are all live belongs in column 8
     # live means deployed: the portal-deploy job of the newest main 'vercel' run says which main commit production serves
     # ("deployed: <sha> serves production" or "held: <sha> not deployed, production stays on <sha>"); a green job can be a hold
@@ -361,8 +367,6 @@ def refresh(truth_path):
     if depaudit: print('DEP-AUDIT (running while something before it is open): '+', '.join(depaudit))
     boxstat['deps']=depchanged
     s=s[:a]+w+s[e:]
-    if not os.environ.get('COCKPIT_OUT'):
-        tmpc=CARD+'.tmp'; json.dump(data,open(tmpc,'w'),ensure_ascii=False,indent=1); os.replace(tmpc,CARD)
     js=json.dumps(data,ensure_ascii=False).replace('</','<\\/')
     s=re.sub(r'(<script type="application/json" id="card-data">).*?(</script>)',lambda m:m.group(1)+js+m.group(2),s,flags=re.S)
     p1=os.path.join(TMP,'a.html'); p2=os.path.join(TMP,'b.html'); open(p1,'w').write(s)
@@ -436,18 +440,11 @@ def refresh(truth_path):
     ids=re.findall(r'\sid="([^"]+)"',s)
     assert len(ids)==len(set(ids)),'duplicate ids'
     assert 'id="kanban"' in s and 'id="wbs-blok"' in s and 'id="captain-door"' in s
-    goal_home=os.environ.get('COCKPIT_GOAL_HOME')
-    if goal_home:
-        with tempfile.TemporaryDirectory(prefix='cockpit-goal-drive-') as d:
-            staged=os.path.join(d,'cockpit.html')
-            with open(staged,'w',encoding='utf-8') as f: f.write(s)
-            subprocess.run([sys.executable,'-I',os.path.join(BIN,'goal_drive.py'),
-                            '--goal-home',goal_home,'--page',staged,'--truth',truth_path],check=True)
-            with open(staged,encoding='utf-8') as f: s=f.read()
-    out=os.environ.get('COCKPIT_OUT')
-    if out: open(out,'w').write(s)
-    else:
-        tmp=os.path.join(D,'.cockpit-2.html.tmp'); open(tmp,'w').write(s); os.replace(tmp,PAGE)
+    s=render_truth(s,truth['goals'])
+    staged=os.path.join(TMP,'verify.html')
+    with open(staged,'w',encoding='utf-8') as f: f.write(s)
+    if sync(['--verify-page',staged,'--out',truth_path]):
+        raise ValueError('built cockpit did not pass verification')
     # status audit: a coloured box whose own status text says it is not happening now
     audit=[]
     for m in re.finditer(r'<g data-id="([^"]+)" data-tip="([^"]*)"[^>]*>(.*?)</g>',s,re.S):
@@ -504,7 +501,7 @@ def refresh(truth_path):
     ctl=('<span id="bordcontrole" class="small" style="margin-left:6px;color:'+('#7fe0a5' if not probs else '#ffa94d')+'">'
          +('bordcontrole '+now+': alles klopt (werkers, PR\'s, live op main, afhankelijkheden, kolommen)' if not probs else 'bordcontrole '+now+': '+str(probs)+' afwijking(en), wordt rechtgezet')+'</span>')
     tgt=os.environ.get('COCKPIT_OUT') or PAGE
-    pg=open(tgt).read()
+    pg=s
     pg=re.sub(r'\((?:nagekeken|bijgewerkt) [a-z]{2} \d\d-\d\d(?: \d\d:\d\d)?\)','(bijgewerkt '+['ma','di','wo','do','vr','za','zo'][time.localtime().tm_wday]+' '+time.strftime('%d-%m %H:%M')+')',pg,1)
     if 'id="bordcontrole"' in pg: pg=re.sub(r'<span id="bordcontrole"[^>]*>[^<]*</span>',lambda m_:ctl,pg,1)
     else: pg=re.sub(r'(2\. Kanban <span class="small mute">\(stand [^)]*\)</span>)',lambda m_:m_.group(1)+ctl,pg,1)
@@ -512,6 +509,8 @@ def refresh(truth_path):
         an='<span id="archcheck" class="small" style="color:#ffa94d;margin-left:6px">('+arch_note+')</span>'
         if 'id="archcheck"' in pg: pg=re.sub(r'<span id="archcheck"[^>]*>[^<]*</span>',lambda m_:an,pg,1)
         else: pg=re.sub(r'(Hoofdtekening: stand [^(]*\([^)]*\))',lambda m_:m_.group(1)+an,pg,1)
+    if not preview:
+        tmpc=CARD+'.tmp'; json.dump(data,open(tmpc,'w'),ensure_ascii=False,indent=1); os.replace(tmpc,CARD)
     tmp2=tgt+'.tmp2'; open(tmp2,'w').write(pg); os.replace(tmp2,tgt)
     scoreboard_config=os.environ.get('COCKPIT_SCOREBOARD_CONFIG')
     if scoreboard_config:

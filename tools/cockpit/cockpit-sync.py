@@ -14,9 +14,12 @@ Scope (each flag has an environment fallback; lists in the environment are comma
   --exclude-goal RE    COCKPIT_GOAL_EXCLUDE  drop goals whose id matches this regular expression
   --home DIR           COCKPIT_HOMES      extra home read for tasks, holds and decisions (repeatable);
                                           the goal home and its registered local secondmate homes are always read
-  --scope NAME         COCKPIT_SCOPE      limit the captain's list to these repos or secondmate ids
-                                          (repeatable; default everything). A hold or decision tied to a
-                                          selected goal is always in scope.
+  --scope NAME         COCKPIT_SCOPE      select goals and captain entries for these projects or secondmates
+                                          (repeatable; default everything). A goal matches if any item names
+                                          a scoped project, or has no project and is owned by a scoped
+                                          secondmate (or one registered for the project). Verify all items
+                                          of matched goals. --goal-id explicitly selects goals instead;
+                                          --exclude-goal always applies. Linked decisions stay in scope.
   --out FILE           COCKPIT_TRUTH      the truth JSON
 Page options:
   --page FILE          sync: remove the failure banner on success, add it on failure
@@ -43,7 +46,12 @@ Page contract checked by --verify-page:
   - every must and can entry appears in the section as data-lavish-question="<key or alias>" or
     data-cockpit-captain="<key or alias> ..."
   - every such value in the section belongs to an entry that is still open, and no entry appears twice
-  - every element carrying data-fm-goal-item and data-fm-goal-status shows the verified status
+  - the goal cards, drive KPI, aggregate and per-goal rings match the scoped truth
+  - every item, including dropped, has a status in its goal list, WBS box and Kanban card
+  - span or SVG text slots with class fm-goal-item-status and data-fm-goal-item="GOAL/ITEM"
+    show the verified status and label. WBS slots belong in a g[data-id] or .fm-goal-box
+    under #wbs-blok or #wbs; Kanban slots belong in a .kb-card under #kanban. A Kanban card
+    linked to a keyed WBS box by data-wbs uses that box's goal item key.
   - no failure banner is left on the page
 
 Test seams: gh and az come from PATH; COCKPIT_CREW_STATE_BIN replaces bin/fm-crew-state.sh.
@@ -66,8 +74,13 @@ import sys
 import tempfile
 
 
+# The shell entry point uses Python isolated mode, which omits the script directory.
+sys.path.append(str(Path(__file__).resolve().parent))
+from goal_drive import TRUTH_SCHEMA, verify_goal_views
+
+
 ROOT = Path(__file__).resolve().parents[2]
-SCHEMA = 'fm-cockpit-truth.v1'
+SCHEMA = TRUTH_SCHEMA
 LIVE = {'working', 'parked', 'paused', 'blocked', 'unknown'}
 CLOSED = {'done', 'dropped'}
 BANNER = re.compile(r'<!-- fm-cockpit-sync -->.*?<!-- /fm-cockpit-sync -->', re.S)
@@ -248,16 +261,34 @@ def read_prs(urls):
 
 
 # ---------- goals ----------
-def export_goals(goal_home, ids, exclude):
+def project_names(names):
+    return {name.rstrip('/').rsplit('/', 1)[-1].casefold() for name in names if name}
+
+
+def export_goals(goal_home, ids, exclude, scope, mates):
     out = run(['bash', str(ROOT / 'bin' / 'fm-goal.sh'), 'export'], 'goal export', env=home_env(goal_home))
     try:
         snapshot = json.loads(out)
         assert snapshot['schema'] == 'fm-goal-export.v1'
     except (ValueError, KeyError, AssertionError) as exc:
         raise SyncError('goal export: unsupported answer') from exc
+    projects = project_names(scope)
+    selectors = {name.casefold() for name in scope}
+    for sm, _, names in mates:
+        if sm.casefold() in selectors:
+            projects |= project_names(names)
+    owners = {sm.casefold() for sm, _, names in mates if project_names(names) & projects}
+    owners |= (selectors | projects) - {'main', 'captain'}
+
+    def in_scope(item):
+        if item.get('project'):
+            return bool(project_names([item['project']]) & projects)
+        return item['owner'].casefold() in owners
+
     goals, dropped = [], []
     for goal in snapshot['goals']:
-        wanted = (not ids or goal['id'] in ids) and not (exclude and re.search(exclude, goal['id']))
+        selected = goal['id'] in ids if ids else not scope or any(map(in_scope, goal['items']))
+        wanted = selected and not (exclude and re.search(exclude, goal['id']))
         (goals if wanted else dropped).append(goal)
     return goals, dropped
 
@@ -615,7 +646,7 @@ def build_truth(args):
             raise SyncError(f'home {home} ({name}) has no state directory')
         if home not in [h for _, h in unique]:
             unique.append((name, home))
-    goals, dropped = export_goals(goal_home, set(args.goal_id), args.exclude_goal)
+    goals, dropped = export_goals(goal_home, set(args.goal_id), args.exclude_goal, args.scope, mates)
     decisions = {home: open_decisions(home) for _, home in unique}
     deciding_tasks = {(home, task) for home, (_, rows) in decisions.items() for task, _, _ in rows}
     verified, mismatches = build_goals(goals, unique, deciding_tasks)
@@ -660,7 +691,7 @@ class PageKeys(HTMLParser):
         super().__init__()
         self.sections, self.ignore = sections, ignore
         self.tag, self.depth, self.found = None, 0, False
-        self.questions, self.items, self.banner = [], [], False
+        self.questions, self.banner = [], False
         self.feed(page)
         self.close()
 
@@ -668,8 +699,6 @@ class PageKeys(HTMLParser):
         attrs = {k: v or '' for k, v in attrs}
         if attrs.get('id') == 'cockpit-sync-banner':
             self.banner = True
-        if attrs.get('data-fm-goal-item') and attrs.get('data-fm-goal-status'):
-            self.items.append((attrs['data-fm-goal-item'], attrs['data-fm-goal-status']))
         if self.tag is None and attrs.get('id') in self.sections:
             self.tag, self.depth, self.found = tag, 1, True
         elif tag == self.tag:
@@ -712,10 +741,7 @@ def verify_page(page, truth, sections, ignore):
             problems.append(f'missing captain item ({bucket}): {e["key"]} - {e["title"]}')
         if shown.get(n, 0) > 1:
             problems.append(f'question listed more than once: {e["key"]}')
-    status = {f'{g["id"]}/{i["id"]}': i['status'] for g in truth['goals'] for i in g['items']}
-    for key, value in seen.items:
-        if key in status and status[key] != value:
-            problems.append(f'stale status of {key}: page says {value}, reality is {status[key]}')
+    problems.extend(verify_goal_views(page, truth['goals']))
     return list(dict.fromkeys(problems))
 
 

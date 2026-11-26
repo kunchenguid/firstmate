@@ -25,8 +25,8 @@ The order is fixed:
 3. Build the page to a scratch file from the truth JSON of step 1.
    Item statuses come from `goals[]`, never from the raw goal marks.
    The decisions section holds exactly the entries of `section1`, and nothing from memory or an older page.
-4. Run the shared drive pass with that same truth file: `goal_drive.py --truth <truth.json>`.
-5. Verify the scratch page with `cockpit-sync.sh --verify-page`.
+4. Run the shared drive pass with that same truth file, not a second goal export.
+5. Verify the scratch page with `cockpit-sync.sh --verify-page`, which rejects missing or stale goal views.
 6. Publish only when step 5 reports no problem.
    Otherwise keep the old page and mark it with `--banner-only`.
 7. Route the findings: report every `MISMATCH` line to the owner of the record.
@@ -37,7 +37,8 @@ A page host may add its own sources and layout between steps 3 and 4, but may no
 
 - Every item of every goal on the page is re-checked each time: pull request state from the forge, the live task state, and the goal mark.
 - A status taken from a message is shown only after it is checked against the forge, the worker, or the deployment.
-- Every WBS box, kanban card, KPI, and popup says the same thing as the item it stands for.
+- Every goal item, including dropped items, appears consistently in its goal list, WBS box and keyed Kanban card, and counts in both rings.
+- Any popup about an item shows the same verified status.
 - "Live for customers" means deployed: the version production actually serves, not only merged on main.
 - Every active worker is on the board.
 - A coloured status never carries text saying it is not happening now, and nothing shows as running while something before it is still open.

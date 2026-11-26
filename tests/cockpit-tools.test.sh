@@ -207,7 +207,7 @@ GOAL_HOME="$TMP_ROOT/goals-home"
 mkdir -p "$GOAL_HOME/state" "$GOAL_HOME/data"
 goal() { env -i PATH="$PATH" HOME="$TMP_ROOT/home" FM_HOME="$GOAL_HOME" bash "$ROOT/bin/fm-goal.sh" "$@"; }
 printf '%s\n' \
-  'item [id=check] [owner=main]: Ready' \
+  'item [id=check] [owner=main] [project=miko]: Ready' \
   'item [id=orphan] [owner=main]: No live task' \
   'item [id=live] [owner=main] [task=demo-goal-task]: Live task' \
   'item [id=dep] [owner=main] [after=live]: Unmet dependency' \
@@ -216,7 +216,7 @@ printf '%s\n' \
   'item [id=landed] [owner=main]: Landed' \
   'item [id=removed] [owner=main]: Dropped' \
   'item [id=decision] [owner=captain] [class=captain]: Decision' > "$TMP_ROOT/items-alpha"
-printf 'item [id=check] [owner=main]: Paused goal step\n' > "$TMP_ROOT/items-beta"
+printf 'item [id=check] [owner=main] [project=miko]: Paused goal step\n' > "$TMP_ROOT/items-beta"
 for id in alpha beta; do
   goal start "$id" --title "Doel $id" --done-when 'demo complete' --named-by 'do this' \
     --plan plan.md --items-file "$TMP_ROOT/items-$id" >/dev/null || fail "could not start $id"
@@ -236,9 +236,8 @@ from pathlib import Path
 import sys
 page = Path(sys.argv[1])
 source = page.read_text()
-rich = source.index('</div>', source.index('class="kb-card" data-wbs="I2:DEMO"'))
-source = (source[:rich] + '<span class="fm-goal-item-status" data-fm-goal-item="alpha/check"></span>'
-          + source[rich:])
+source = source.replace('<p>Demo bovenaan</p>',
+                        '<p data-cockpit-captain="alpha/decision">Decision</p>')
 for wbs_id, item in [('I2:DEMO', 'check'), ('I5:EXTRA', 'orphan')]:
     end = source.index('</g>', source.index(f'<g data-id="{wbs_id}"'))
     slot = f'<text x="4" y="25" class="fm-goal-item-status" data-fm-goal-item="alpha/{item}"></text>'
@@ -293,7 +292,7 @@ class Switches(HTMLParser):
         if self.status and self.status[0] == tag:
             _, item, state = self.status
             if tag == 'li':
-                self.legend[state] = ''.join(self.text)
+                self.legend.setdefault(state, ''.join(self.text))
             else:
                 self.labels.append((tag, item, state, ''.join(self.text)))
             self.status = None
@@ -308,10 +307,9 @@ assert switches.legend == {
     'done': 'Klaar 1', 'running': 'Bezig 1', 'startable': 'Kan starten 2',
     'waiting': 'Wacht 4', 'open-captain': 'Aan jou 1', 'dropped': 'Vervallen 1',
 }, switches.legend
-assert sorted(switches.labels) == [
-    (tag, f'alpha/{item}', 'startable', 'Kan starten')
-    for tag in ('span', 'text') for item in ('check', 'orphan')
-], switches.labels
+for item in ('check', 'orphan'):
+    assert ('text', f'alpha/{item}', 'startable', 'Kan starten') in switches.labels
+    assert switches.labels.count(('span', f'alpha/{item}', 'startable', 'Kan starten')) == 2
 assert '<strong>10</strong> taken' in page and 'conic-gradient(' in page
 # Lavish TOON preserves quoted context JSON with backslash escapes, not doubled quotes.
 with open(sys.argv[2], 'w') as result:
@@ -322,11 +320,25 @@ with open(sys.argv[2], 'w') as result:
         writer.writerow(['choice', answer, 'Context data: ' + json.dumps({'question': key, 'answer': answer})])
 PY
 cp "$preview" "$TMP_ROOT/goals-before.html"
-python3 -I "$TOOLS/goal_drive.py" --goal-home "$GOAL_HOME" --page "$preview" || fail 'standalone rebuild failed'
+python3 -I "$TOOLS/goal_drive.py" --truth "$preview.truth.json" --page "$preview" || fail 'truth rebuild failed'
 cmp -s "$preview" "$TMP_ROOT/goals-before.html" || fail 'rebuild duplicated or changed goal controls'
 goal apply-drive-answer "$TMP_ROOT/toggles.result" >/dev/null || fail 'apply rejected cockpit answer capture'
 goal export | jq -e '([.goals[] | select(.driven) | .id] == ["beta"])' >/dev/null || fail 'both keyed answers were not applied'
-pass 'cockpit goal status: six legend counts and shared WBS/rich/mini labels from export, stable rebuild'
+python3 -I - "$preview" "$TMP_ROOT/swapped-link.html" <<'PY' || fail 'could not swap linked Kanban card'
+from pathlib import Path
+import sys
+src, out = map(Path, sys.argv[1:])
+page = original = src.read_text()
+page = page.replace('class="kb-card" data-wbs="I2:DEMO"', 'class="kb-card" data-wbs="I5:EXTRA"', 1)
+assert page != original
+out.write_text(page)
+PY
+if bash "$TOOLS/cockpit-sync.sh" --verify-page "$TMP_ROOT/swapped-link.html" --out "$preview.truth.json" > "$TMP_ROOT/swapped.out"; then
+  fail 'a Kanban card linked to the wrong WBS box passed'
+fi
+grep -q 'Kanban card does not match WBS box I5:EXTRA' "$TMP_ROOT/swapped.out" || fail "$(cat "$TMP_ROOT/swapped.out")"
+pass 'cockpit goal status: six aggregate counts and shared WBS/rich/mini labels from verified truth, stable rebuild'
+pass 'cockpit verify: a Kanban card cannot claim a different item from its linked WBS box'
 pass 'cockpit goal switches: grey off card, 1-of-2 KPI and both keyed answers applied'
 
 # ---- a page can show just one goal from the shared home ----
@@ -390,7 +402,7 @@ transcript.write_text('')
 PY
 printf '#!/usr/bin/env bash\nprintf "count\\t0\\n"\n' > "$FAKEBIN/gh-axi"
 chmod +x "$FAKEBIN/gh-axi"
-run_refresh COCKPIT_SCOREBOARD_CONFIG="$TMP_ROOT/score-config.json" > "$TMP_ROOT/score-refresh.out" 2>&1 \
+run_refresh COCKPIT_GOAL_HOME="$GOAL_HOME" COCKPIT_SCOREBOARD_CONFIG="$TMP_ROOT/score-config.json" > "$TMP_ROOT/score-refresh.out" 2>&1 \
   || fail "scoreboard refresh failed: $(cat "$TMP_ROOT/score-refresh.out")"
 [ -s "$DATA/secondmate-scoreboard.json" ] || fail "scoreboard snapshot missing"
 grep -q 'id="secondmate-scoreboard"' "$DATA/cockpit-2.html" || fail "scoreboard table not rendered"
@@ -429,11 +441,13 @@ printf '%s\n' \
   'item [id=resolved] [owner=main] [task=demo-resolved]: Decision resolved' \
   'item [id=sign] [owner=captain] [class=captain]: Sign the demo form' \
   'item [id=signed] [owner=main] [after=sign]: After signing' \
-  'item [id=asked] [owner=captain] [class=captain] [task=demo-answered]: Answered already' > "$TMP_ROOT/items-sync"
+  'item [id=asked] [owner=captain] [class=captain] [task=demo-answered]: Answered already' \
+  'item [id=drop] [owner=main]: Dropped step' > "$TMP_ROOT/items-sync"
 in_sync_home bash "$ROOT/bin/fm-goal.sh" start gamma --title 'Doel gamma' --done-when 'demo complete' \
   --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-sync" >/dev/null || fail 'could not start gamma'
 in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma build running -- 'worker started' >/dev/null || fail 'mark build'
 in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma ship waiting -- 'waiting for merge' >/dev/null || fail 'mark ship'
+in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma drop dropped -- 'not needed' >/dev/null || fail 'mark dropped'
 printf 'kind=ship\npr=https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.meta"
 printf 'done [at=1]: PR https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.status"
 printf 'done\n' > "$SYNC_HOME/state/demo-ship.fake"
@@ -502,35 +516,92 @@ cmp -s "$TMP_ROOT/truth.first" "$TRUTH" || fail 'second sync changed the truth f
 grep -q 'truth unchanged' "$TMP_ROOT/sync2.out" || fail "second sync did not report unchanged: $(cat "$TMP_ROOT/sync2.out")"
 pass 'cockpit sync: a second run changes nothing'
 
+# A shared home can contain project-tagged and owner-scoped goals, including one not yet on the page.
+printf '%s\n' 'item [id=check] [owner=miko]: New check' > "$TMP_ROOT/items-extra"
+in_sync_home bash "$ROOT/bin/fm-goal.sh" start extra --title 'Doel extra' --done-when 'demo complete' \
+  --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-extra" >/dev/null || fail 'could not start extra'
+printf '%s\n' 'item [id=check] [owner=miko] [project=geris]: Other check' > "$TMP_ROOT/items-other"
+in_sync_home bash "$ROOT/bin/fm-goal.sh" start other --title 'Doel other' --done-when 'demo complete' \
+  --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-other" >/dev/null || fail 'could not start other'
+sync --scope miko-systems/miko --out "$TMP_ROOT/miko-truth.json" > "$TMP_ROOT/scope.out" 2>&1 || fail 'project sync failed'
+jq -e '[.goals[].id] == ["extra"]' "$TMP_ROOT/miko-truth.json" >/dev/null || fail 'Miko truth contains foreign goals'
+sync --scope geris --out "$TMP_ROOT/geris-truth.json" > "$TMP_ROOT/scope.out" 2>&1 || fail 'project sync failed'
+jq -e '[.goals[].id] == ["other"]' "$TMP_ROOT/geris-truth.json" >/dev/null || fail 'Geris truth contains foreign goals'
+for project in miko geris; do
+  scoped="$TMP_ROOT/$project.html"
+  printf '%s\n' '<section id="captain-door"></section><h2 id="doelen">Doelen</h2>' > "$scoped"
+  python3 -I "$TOOLS/goal_drive.py" --truth "$TMP_ROOT/$project-truth.json" --page "$scoped" || fail 'scoped render failed'
+  sync --verify-page "$scoped" --out "$TMP_ROOT/$project-truth.json" > "$TMP_ROOT/scope.out" || fail "$(cat "$TMP_ROOT/scope.out")"
+  grep -Fq '1 van 1 doelen actief gedreven' "$scoped" || fail 'scoped page drive denominator is wrong'
+  grep -Fq '<strong>1</strong> taken' "$scoped" || fail 'scoped page ring total is wrong'
+done
+pass 'cockpit scope: per-project truths and rendered pages exclude foreign goals and add missing goal cards'
+
 SYNC_PAGE="$TMP_ROOT/sync-page.html"
-sync_page() { # sync_page <ship-status> <section-inner>
-  printf '<html><body><section id="captain-door">%s<form data-lavish-question="goal.drive.abc"></form></section><span class="fm-goal-item-status" data-fm-goal-item="gamma/ship" data-fm-goal-status="%s">x</span></body></html>\n' \
-    "$2" "$1" > "$SYNC_PAGE"
+sync_page() { # sync_page <section-inner>
+  printf '<html><body><section id="captain-door">%s</section><h2 id="doelen">Doelen</h2></body></html>\n' \
+    "$1" > "$SYNC_PAGE"
+  python3 -I "$TOOLS/goal_drive.py" --truth "$TRUTH" --page "$SYNC_PAGE" || fail 'render from truth failed'
 }
 verify() { sync --verify-page "$SYNC_PAGE" > "$TMP_ROOT/verify.out" 2>&1; }
 good='<div data-cockpit-captain="gamma.sign">Sign</div><form data-lavish-question="demo-colour"></form>'
-sync_page 'done' "$good"
+sync_page "$good"
 verify || fail "a correct page was rejected: $(cat "$TMP_ROOT/verify.out")"
-sync_page waiting "$good"
-verify && fail 'a merged PR still shown as waiting passed'
-grep -q 'stale status of gamma/ship' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
-sync_page 'done' "$good<form data-lavish-question=\"demo-answered\"></form>"
+cp "$SYNC_PAGE" "$TMP_ROOT/complete.html"
+for defect in 'goal item' 'WBS box' 'Kanban card' 'aggregate ring' 'goal ring' 'visible label' 'foreign item'; do
+  python3 -I - "$TMP_ROOT/complete.html" "$SYNC_PAGE" "$defect" <<'PY' || fail 'fixture mutation failed'
+from pathlib import Path
+import re
+import sys
+src, out, defect = sys.argv[1:]
+page = original = Path(src).read_text()
+if defect in ('goal item', 'WBS box', 'Kanban card'):
+    tag = 'li' if defect == 'goal item' else 'div'
+    cls = {'goal item': '', 'WBS box': ' class="fm-goal-box"', 'Kanban card': ' class="kb-card fm-goal-box"'}[defect]
+    pattern = fr'<{tag}{cls}>Dropped step <span [^>]*data-fm-goal-item="gamma/drop"[^>]*>Vervallen</span></{tag}>'
+    page, n = re.subn(pattern, '', page)
+    assert n == 1, defect
+elif defect in ('aggregate ring', 'goal ring'):
+    ident = 'doel-item-kpi' if defect == 'aggregate ring' else 'doel-ring-gamma'
+    start = page.index(f'id="{ident}"')
+    at = page.index('<strong>11</strong>', start)
+    page = page[:at] + page[at:].replace('<strong>11</strong>', '<strong>10</strong>', 1)
+elif defect == 'visible label':
+    page = page.replace('data-fm-goal-item="gamma/ship" data-fm-goal-status="done">Klaar',
+                        'data-fm-goal-item="gamma/ship" data-fm-goal-status="done">Wacht', 1)
+else:
+    page = page.replace('data-fm-goal-item="gamma/drop"', 'data-fm-goal-item="other/check"', 1)
+assert page != original, defect
+Path(out).write_text(page)
+PY
+  verify && fail "verify passed with $defect defect"
+  case "$defect" in
+    'aggregate ring') expected='missing or stale goal rendering: doel-item-kpi' ;;
+    'goal ring') expected='missing or stale goal rendering: doel-ring-gamma' ;;
+    'visible label') expected='stale status of gamma/ship' ;;
+    'foreign item') expected='out-of-scope or unknown goal item: other/check' ;;
+    *) expected="missing $defect: gamma/drop" ;;
+  esac
+  grep -Fq "$expected" "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
+done
+pass 'cockpit verify: requires each item, dropped WBS box, keyed Kanban card, and complete rings; rejects wrong labels and scope'
+sync_page "$good<form data-lavish-question=\"demo-answered\"></form>"
 verify && fail 'an answered question still listed passed'
 grep -q 'still listed: demo-answered' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
-sync_page 'done' '<form data-lavish-question="demo-colour"></form>'
+sync_page '<form data-lavish-question="demo-colour"></form>'
 verify && fail 'a missing captain item passed'
 grep -q 'missing captain item (must): gamma/sign' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
-sync_page 'done' "$good<form data-lavish-question=\"demo-colour\"></form>"
+sync_page "$good<form data-lavish-question=\"demo-colour\"></form>"
 verify && fail 'a question listed twice passed'
-pass 'cockpit verify: stale status, answered question, missing captain item and duplicate are all rejected'
+pass 'cockpit verify: answered question, missing captain item and duplicate are all rejected'
 
-sync_page 'done' "$good"
+sync_page "$good"
 cp "$SYNC_PAGE" "$TMP_ROOT/sync-page.clean"
-if FAKE_GH_DOWN=1 sync --page "$SYNC_PAGE" > "$TMP_ROOT/sync-fail.out" 2>&1; then fail 'sync succeeded without the forge'; fi
+if FAKE_GH_DOWN=1 sync --goal-id gamma --page "$SYNC_PAGE" > "$TMP_ROOT/sync-fail.out" 2>&1; then fail 'sync succeeded without the forge'; fi
 grep -q 'id="cockpit-sync-banner"' "$SYNC_PAGE" || fail 'failed sync left no banner'
 cmp -s "$TMP_ROOT/truth.first" "$TRUTH" || fail 'failed sync touched the truth file'
 verify && fail 'a page with a failure banner passed'
-sync --page "$SYNC_PAGE" > /dev/null 2>&1 || fail 'recovery sync failed'
+sync --goal-id gamma --page "$SYNC_PAGE" > /dev/null 2>&1 || fail 'recovery sync failed'
 cmp -s "$TMP_ROOT/sync-page.clean" "$SYNC_PAGE" || fail 'recovery did not remove exactly the banner'
 pass 'cockpit sync failure: non-zero exit, visible banner, truth kept, banner removed on recovery'
 
