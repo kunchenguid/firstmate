@@ -558,7 +558,8 @@ pass "--fix is idempotent once the host is ready"
 # A plist written before ProcessType=Interactive joined the contract must not
 # pass as matching, or its worker sessions keep launchd's coarse timers.
 strip_process_type() { # <plist>
-  python3 -c 'import plistlib,sys; p=sys.argv[1]; d=plistlib.load(open(p, "rb")); d.pop("ProcessType"); plistlib.dump(d, open(p, "wb"))' "$1"
+  python3 -c 'import plistlib,sys; p=sys.argv[1]; raw=open(p, "rb").read(); d=plistlib.loads(raw); assert d.pop("ProcessType") == "Interactive"; out=plistlib.dumps(d, sort_keys=False); squash=lambda b: b.translate(None, b" \t\r\n"); assert squash(out) == squash(raw).replace(b"<key>ProcessType</key><string>Interactive</string>", b"", 1); open(p, "wb").write(out)' "$1" \
+    || fail "stripping ProcessType=Interactive from $1 changed more than that key"
 }
 strip_process_type "$CASE_PLIST"
 strip_process_type "$CASE_JOB_PLIST"

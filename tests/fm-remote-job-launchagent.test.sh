@@ -202,8 +202,8 @@ fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could no
 # A plist written before ProcessType=Interactive joined the contract is stale.
 fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   || fail 'a freshly written LaunchAgent does not match its own contract'
-python3 -c 'import plistlib,sys; p=sys.argv[1]; d=plistlib.load(open(p, "rb")); assert d.pop("ProcessType") == "Interactive"; plistlib.dump(d, open(p, "wb"))' "$FM_TEST_PLIST" \
-  || fail 'the written LaunchAgent does not set ProcessType=Interactive'
+python3 -c 'import plistlib,sys; p=sys.argv[1]; raw=open(p, "rb").read(); d=plistlib.loads(raw); assert d.pop("ProcessType") == "Interactive"; out=plistlib.dumps(d, sort_keys=False); squash=lambda b: b.translate(None, b" \t\r\n"); assert squash(out) == squash(raw).replace(b"<key>ProcessType</key><string>Interactive</string>", b"", 1); open(p, "wb").write(out)' "$FM_TEST_PLIST" \
+  || fail 'stripping ProcessType=Interactive from the LaunchAgent changed more than that key'
 fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
   && fail 'a LaunchAgent without ProcessType was accepted as matching'
 fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not rewrite the LaunchAgent'

@@ -9,7 +9,8 @@
 #
 # bin/fm-remote-doctor.sh renders the launch agent as the account's login
 # shell running `exec <this script> <herdr> <session>` with
-# LimitLoadToSessionType=Aqua, RunAtLoad, KeepAlive={SuccessfulExit=false},
+# LimitLoadToSessionType=Aqua, ProcessType=Interactive, RunAtLoad,
+# KeepAlive={SuccessfulExit=false},
 # and ThrottleInterval=10, then bootstraps it into gui/<uid>. That domain, not
 # the login shell, is what gives this process and every server it execs the
 # Aqua audit session and login-keychain access; the login shell only gives the
