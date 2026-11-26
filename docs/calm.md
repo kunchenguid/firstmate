@@ -30,9 +30,9 @@ Streaming text and the genuine reply that ends a response remain visible.
 
 ### Working boat
 
-While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
+While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, unless `config/calm-ship` selects the [spaceship variant](#spaceship-variant-configcalm-ship) below.
 No separate Calm status row is added.
-The boat claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one boat rather than two, and turning Firstmate Calm off does not clear the standalone boat.
+Calm's working presentation claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one working animation rather than two, and turning Firstmate Calm off does not clear the standalone boat.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 
 The boat looks like this:
@@ -66,10 +66,11 @@ Calm's Pi working presentation has one selectable variant, chosen by the gitigno
 Anything other than `spaceship` - including an absent file - keeps the boat as the default.
 With `spaceship`, Calm replaces the boat with a saucer banner installed for the duration of one logical agent run and removed when the run ends, so Pi's stock working row is untouched while idle.
 While a run is thinking, the sprite is the single-row compact `=( * )` saucer, yellow, facing right, on the banner row: the saucer sweeps right one column every 880ms continuously across the full banner width, wrapping marquee-style back to the left edge when it crosses the right edge so it never parks while thinking, the starfield advances two phases per 220ms tick, and the field renders as warp streaks streaming left past the sprite.
-Freeze/resume continuity, resize clamping, fresh-session reset, and narrow fallbacks follow the boat's contract, and a run start or settle installs and removes the banner exactly as it shows and hides the boat.
+Freeze/resume continuity, resize clamping, and fresh-session reset follow the boat's contract, and a run start or settle installs and removes the banner exactly as it shows and hides the boat.
+A terminal too narrow for the six-cell sprite keeps the bare streak field with no sprite.
 [`configuration.md`](configuration.md#working-presentation-variant-configcalm-ship) owns the `config/calm-ship` schema and re-read points.
 
-The spaceship claims the same shared Pi working-row widget slot as the boat, so the shared-slot rule above applies to whichever presentation `config/calm-ship` selects: a session that loads both Calms shows one working animation rather than two.
+The spaceship claims that same shared Pi working-row widget slot, so the shared-slot rule above applies to whichever presentation `config/calm-ship` selects.
 
 ### What Calm hides on Pi
 
@@ -171,8 +172,8 @@ How Calm handles that shared slot depends on whether Calm was already on when th
 - `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule, which Pi imports through its tracked symlink.
 - `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
 - `.pi/extensions/lib/fm-calm-pending-operational-layout.ts` owns the queued-row adapter and its session capability check.
-- `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
-- `.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the selectable spaceship banner.
+- `.pi/extensions/lib/fm-calm-working-ship.ts` owns the default boat's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+- `.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the selectable spaceship banner over its own warp geometry.
 
 ### Pi regression entry points
 
