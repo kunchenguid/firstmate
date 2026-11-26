@@ -362,12 +362,14 @@ test_relaunch_rebuilds_the_switch() {
     } > "$home/state/$id.meta"
 
     mkdir -p "$dir/user-home"
-    out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake" \
-      HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
+    out=$(CODEX_HOME="$dir/ambient-codex" env PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake" \
+      HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' CODEX_HOME='' FM_SPAWN_NO_GUARD=1 \
       FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
       "$CONTROL" "$id" relaunch --note 'replacement continues the same task' 2>&1)
     status=$?
     expect_code 0 "$status" "relaunch with allowlist=$setting should succeed: $out"
+    assert_absent "$dir/ambient-codex" "relaunch wrote trust into the inherited Codex store"
+    assert_present "$dir/user-home/.codex/config.toml" "relaunch did not register trust in its disposable home"
 
     grep -qx 'export COMPACT_ADVISER_DISABLE=1' "$dir/fake/keys" \
       || fail "relaunch with allowlist=$setting did not re-export the compact-adviser switch into the pane"

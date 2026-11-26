@@ -35,6 +35,7 @@ set -u
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-parent-binding)
+export CODEX_HOME="$TMP_ROOT/codex-home"
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 PARENT="$TMP_ROOT/parent"

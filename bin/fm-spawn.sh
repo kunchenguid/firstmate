@@ -2458,6 +2458,8 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+RAW_CODEX_HOME=
+RAW_CODEX_HOME_SET=0
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -3231,7 +3233,10 @@ case "$ARG3" in
   LAUNCH=$ARG3
   HARNESS=""
   for word in $LAUNCH; do
-    case "$word" in [A-Za-z_]*=*) continue ;; *)
+    case "$word" in
+    CODEX_HOME=*) RAW_CODEX_HOME=${word#CODEX_HOME=} RAW_CODEX_HOME_SET=1 ;;
+    [A-Za-z_]*=*) continue ;;
+    *)
       HARNESS=$(basename "$word")
       break
       ;;
@@ -6253,6 +6258,7 @@ spawn_assert_agent_worktree
 # answers the dialog itself and, on a path that was not pre-registered, refuses
 # to count a busy turn as ready until it has done so.
 AGY_TRUST_PREREGISTERED=0
+SPAWN_CODEX_HOME=
 case "$HARNESS" in
 claude*)
   if [ "$KIND" = secondmate ]; then
@@ -6263,6 +6269,50 @@ claude*)
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
     exit 1
+  fi
+  ;;
+codex)
+  if [ "$BACKEND" != t3code ]; then
+    SPAWN_CODEX_HOME=${CODEX_HOME:-${HOME:+$HOME/.codex}}
+    if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
+      SPAWN_CODEX_HOME=$(
+        spawn_codex_store=
+        spawn_codex_user_home=${HOME:-}
+        if printf '%s\n' "$LAUNCH_ENV_NAMES" | grep -Fx HOME >/dev/null 2>&1; then
+          spawn_codex_user_home=
+        fi
+        eval "set -- $ORCA_LAUNCH_ENV_ARGS" || exit 1
+        for spawn_env_arg; do
+          if [ "${spawn_env_arg#CODEX_HOME=}" != "$spawn_env_arg" ]; then
+            spawn_codex_store=${spawn_env_arg#CODEX_HOME=}
+          elif [ "${spawn_env_arg#HOME=}" != "$spawn_env_arg" ]; then
+            spawn_codex_user_home=${spawn_env_arg#HOME=}
+          fi
+        done
+        printf '%s' "${spawn_codex_store:-${spawn_codex_user_home:+$spawn_codex_user_home/.codex}}"
+      ) || exit 1
+    fi
+    # Leading raw assignments take precedence over the inherited launch store.
+    if [ "$RAW_CODEX_HOME_SET" -eq 1 ]; then
+      [ -n "$RAW_CODEX_HOME" ] || {
+        echo 'error: raw CODEX_HOME= must name an absolute Codex home' >&2
+        exit 1
+      }
+      SPAWN_CODEX_HOME=$RAW_CODEX_HOME
+    fi
+    case "$SPAWN_CODEX_HOME" in
+      /*) ;;
+      *) echo "error: CODEX_HOME or HOME must resolve to an absolute Codex home" >&2; exit 1 ;;
+    esac
+    if [ "$KIND" = secondmate ]; then
+      spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    else
+      spawn_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if ! CODEX_HOME="$SPAWN_CODEX_HOME" "$FM_ROOT/bin/fm-codex-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register Codex workspace trust for $WT; refusing to launch a codex worker that would wedge on the trust dialog; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
   fi
   ;;
 agy)
@@ -7735,6 +7785,9 @@ if [ -n "$WORKER_ACCOUNT" ]; then
   esac
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ -n "$SPAWN_CODEX_HOME" ]; then
+  LAUNCH="CODEX_HOME=$(shell_quote "$SPAWN_CODEX_HOME") $LAUNCH"
 fi
 # Like CLAUDE_CONFIG_DIR above, FM_HOME cannot be left to pane inheritance:
 # every worker gets its home explicitly, or its bin/*.sh scripts fall back to

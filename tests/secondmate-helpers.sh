@@ -10,6 +10,9 @@
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+CODEX_HOME=$(fm_test_tmproot fm-codex-home) || fail "could not isolate Codex home"
+export CODEX_HOME
+
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
 # treehouse (durable lease of FM_FAKE_TREEHOUSE_HOME, recording the lease holder

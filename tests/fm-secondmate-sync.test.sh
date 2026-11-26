@@ -42,6 +42,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 fm_git_identity fmtest fmtest@example.com
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-sync)
+export CODEX_HOME="$TMP_ROOT/codex-home"
 export FM_BACKEND=tmux
 
 # --- world builders --------------------------------------------------------

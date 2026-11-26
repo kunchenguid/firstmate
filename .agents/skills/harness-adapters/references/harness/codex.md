@@ -19,9 +19,8 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 | Approval posture | See [`Codex automatic approval review`](../../../../../docs/configuration.md#codex-automatic-approval-review) and [`persistent failover`](../../../../../docs/configuration.md#persistent-managed-policy-failover). |
 | Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
-A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
-Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+[Codex workspace trust](../../../../../docs/configuration.md#codex-workspace-trust) owns spawn-time registration, configuration-store selection, and prerequisites.
+Direct Codex launches outside Firstmate can still show the directory trust dialog; accept it with Enter and verify the instructions begin processing.
 
 ## Hook trust
 
