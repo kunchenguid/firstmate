@@ -423,6 +423,10 @@ printf '%s\n' \
   'item [id=build] [owner=main] [task=demo-build]: Build it' \
   'item [id=ship] [owner=main] [task=demo-ship]: Ship it' \
   'item [id=follow] [owner=main] [after=ship]: Follow up' \
+  'item [id=parked] [owner=main] [task=demo-parked]: Parked worker' \
+  'item [id=blocked] [owner=main] [task=demo-blocked] [after=ship]: Blocked worker after ship' \
+  'item [id=deciding] [owner=main] [task=demo-asker]: Needs a decision' \
+  'item [id=resolved] [owner=main] [task=demo-resolved]: Decision resolved' \
   'item [id=sign] [owner=captain] [class=captain]: Sign the demo form' \
   'item [id=signed] [owner=main] [after=sign]: After signing' \
   'item [id=asked] [owner=captain] [class=captain] [task=demo-answered]: Answered already' > "$TMP_ROOT/items-sync"
@@ -433,6 +437,15 @@ in_sync_home bash "$ROOT/bin/fm-goal.sh" mark gamma ship waiting -- 'waiting for
 printf 'kind=ship\npr=https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.meta"
 printf 'done [at=1]: PR https://github.com/demo/repo/pull/7\n' > "$SYNC_HOME/state/demo-ship.status"
 printf 'done\n' > "$SYNC_HOME/state/demo-ship.fake"
+for task in parked blocked resolved; do
+  printf 'kind=ship\n' > "$SYNC_HOME/state/demo-$task.meta"
+done
+printf 'parked\n' > "$SYNC_HOME/state/demo-parked.fake"
+printf 'blocked\n' > "$SYNC_HOME/state/demo-blocked.fake"
+printf 'unknown\n' > "$SYNC_HOME/state/demo-asker.fake"
+printf 'unknown\n' > "$SYNC_HOME/state/demo-resolved.fake"
+printf '%s\n' 'needs-decision [key=demo-closed] [at=1]: question' \
+  'resolved [key=demo-closed] [at=2]: answered' > "$SYNC_HOME/state/demo-resolved.status"
 printf '%s\n' '{"schema":"fm-captain-question.v1","close":"done","about":"The demo needs one colour.","purpose":"The page can then be finished.","question":"Which colour?","options":[{"value":"blue","label":"Blue","detail":"The page turns blue."},{"value":"green","label":"Green","detail":"The page turns green."}],"recommendation":"blue"}' > "$TMP_ROOT/ctx.json"
 in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" hold demo-colour --title 'Pick a colour' --category captain-only-fact \
   --reason 'Pick a colour.' --context-file "$TMP_ROOT/ctx.json" >/dev/null || fail 'could not hold demo-colour'
@@ -447,6 +460,7 @@ printf '%s\n' 'needs-decision [key=captain-hold-demo-answered-1] [at=1]: still l
   'needs-decision [key=demo-old] [at=2]: old question' 'resolved [key=demo-old] [at=3]: answered' \
   'needs-decision [key=plan-review-ready] [at=4]: internal ask' \
   'needs-decision [key=captain-hold-demo-colour-1] [at=5]: relayed colour question' \
+  'working [at=6]: continuing unrelated work without resolving the question' \
   > "$SYNC_HOME/state/demo-asker.status"
 
 sync() { # sync [extra args]
@@ -461,6 +475,9 @@ items = {i['id']: i for i in t['goals'][0]['items']}
 assert items['build']['status'] == 'startable' and items['build']['mark'] == 'running'
 assert items['ship']['status'] == 'done' and items['ship']['pr']['state'] == 'merged'
 assert items['follow']['status'] == 'startable', items['follow']
+for item, state in [('parked', 'parked'), ('blocked', 'blocked'), ('deciding', 'unknown')]:
+    assert items[item]['task_state'] == state and items[item]['status'] == 'waiting', items[item]
+assert items['resolved']['status'] == 'startable', items['resolved']
 kinds = {(m['key'], m['kind']) for m in t['mismatches']}
 assert ('gamma/build', 'running-no-live-task') in kinds, kinds
 assert ('gamma/ship', 'pr-merged-not-marked') in kinds, kinds
@@ -478,6 +495,7 @@ assert 'captain-hold-demo-colour-1' in can['demo-colour']['aliases']
 assert not any(key.startswith('demo-old') for key, _ in kinds), kinds
 PY
 pass 'cockpit sync: stale running mark, merged PR still waiting, answered question and open captain items are all found'
+pass 'cockpit sync: parked, blocked and undecided tasks wait; resolved and eligible items can start'
 cp "$TRUTH" "$TMP_ROOT/truth.first"
 sync > "$TMP_ROOT/sync2.out" 2>&1 || fail "second sync failed: $(cat "$TMP_ROOT/sync2.out")"
 cmp -s "$TMP_ROOT/truth.first" "$TRUTH" || fail 'second sync changed the truth file'

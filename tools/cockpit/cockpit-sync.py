@@ -274,7 +274,7 @@ def item_pr_url(item, meta, lines):
     return None
 
 
-def verify_item(item, task_state, pr):
+def verify_item(item, task_state, pr, must_wait):
     """(verified status, [(kind, text)]) for one item from its mark, its live task and its pull request."""
     mark, captain = item['state'], item['class'] == 'captain'
     number = pr and pr['url'].rsplit('/', 1)[-1]
@@ -294,7 +294,9 @@ def verify_item(item, task_state, pr):
             return 'waiting', flags
         return 'done', flags
     live = task_state in LIVE
-    if item['startable']:
+    if must_wait:
+        status = 'waiting'
+    elif item['startable']:
         status = 'startable'
     elif captain and mark == 'open':
         status = 'open-captain'
@@ -307,11 +309,11 @@ def verify_item(item, task_state, pr):
         return 'done', flags
     if merged and live:
         flags.append(('pr-merged-task-live', f'PR {number} merged, task still {task_state}'))
-        return 'running', flags
+        return 'waiting' if must_wait else 'running', flags
     if task_state == 'working':
         if mark != 'running':
             flags.append(('worker-running-not-marked', f'marked {mark}, a worker is running'))
-        return 'running', flags
+        return 'waiting' if must_wait else 'running', flags
     if task_state == 'failed':
         flags.append(('task-failed', f'marked {mark}, its task failed'))
     elif mark == 'running' and not live:
@@ -322,7 +324,7 @@ def verify_item(item, task_state, pr):
     return status, flags
 
 
-def build_goals(goals, homes):
+def build_goals(goals, homes, deciding_tasks):
     found, wanted = {}, []
     for goal in goals:
         for item in goal['items']:
@@ -338,12 +340,15 @@ def build_goals(goals, homes):
     prs = read_prs([v[4] for v in found.values() if v[4]])
     out, mismatches = [], []
     for goal in goals:
-        items = []
+        items, held_items = [], set()
         for item in goal['items']:
             name, home, meta, lines, url = found[goal['id'], item['id']]
             task_state = states.get((home, item.get('task')), 'none')
             pr = prs.get(url) if url else None
-            status, flags = verify_item(item, task_state, pr)
+            must_wait = task_state in {'parked', 'blocked'} or (home, item.get('task')) in deciding_tasks
+            if must_wait:
+                held_items.add(item['id'])
+            status, flags = verify_item(item, task_state, pr, must_wait)
             items.append({'id': item['id'], 'title': item['title'], 'owner': item['owner'], 'class': item['class'],
                           'task': item.get('task'), 'after': item.get('after') or [], 'mark': item['state'],
                           'status': status, 'task_state': task_state,
@@ -352,7 +357,8 @@ def build_goals(goals, homes):
         # reality may have closed a dependency the record still shows open
         closed = {i['id'] for i in items if i['status'] in CLOSED}
         for item in items:
-            if (goal.get('driven') and item['status'] == 'waiting' and item['mark'] == 'open'
+            if (goal.get('driven') and item['id'] not in held_items
+                    and item['status'] == 'waiting' and item['mark'] == 'open'
                     and item['class'] == 'drive' and item['after'] and set(item['after']) <= closed):
                 item['status'] = 'startable'
         out.append({'id': goal['id'], 'title': goal['title'], 'driven': goal.get('driven'), 'items': items})
@@ -434,9 +440,9 @@ def open_decisions(home):
         parts = line.split('\t', 3)
         if parts[0] == '#':
             reserved += tuple(parts[1].split())
-        elif len(parts) == 4 and parts[2] == 'needs-decision' and not parts[1].startswith(reserved):
+        elif len(parts) == 4 and parts[2] == 'needs-decision':
             rows.append((parts[0], parts[1], parts[3]))
-    return rows
+    return reserved, rows
 
 
 def entry(key, title, about='', question='', options=(), recommendation=None, source=''):
@@ -447,7 +453,7 @@ def entry(key, title, about='', question='', options=(), recommendation=None, so
             'recommendation': recommendation, 'blocks': [], 'sources': [source]}
 
 
-def captain_list(goals, dropped, homes, scope, sm_projects):
+def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
     links = {}  # task or item id -> goal items it belongs to
     for goal in goals:
         for item in goal['items']:
@@ -561,7 +567,10 @@ def captain_list(goals, dropped, homes, scope, sm_projects):
                     if ref:
                         captain_items[ref] = f'{goal["id"]}/{item["id"]}'
     for name, home in homes:
-        for task, key, note in open_decisions(home):
+        reserved, rows = decisions[home]
+        for task, key, note in rows:
+            if key.startswith(reserved):
+                continue
             relayed = re.fullmatch(r'captain-hold-(.+)-\d+', key)
             target = relayed.group(1) if relayed else key
             label = f'{task}:{key}' if key == 'default' else key
@@ -607,9 +616,11 @@ def build_truth(args):
         if home not in [h for _, h in unique]:
             unique.append((name, home))
     goals, dropped = export_goals(goal_home, set(args.goal_id), args.exclude_goal)
-    verified, mismatches = build_goals(goals, unique)
+    decisions = {home: open_decisions(home) for _, home in unique}
+    deciding_tasks = {(home, task) for home, (_, rows) in decisions.items() for task, _, _ in rows}
+    verified, mismatches = build_goals(goals, unique, deciding_tasks)
     section, more, skipped = captain_list(verified, dropped, unique, set(args.scope),
-                                          {sm: projects for sm, _, projects in mates})
+                                          {sm: projects for sm, _, projects in mates}, decisions)
     return {'schema': SCHEMA, 'goals': verified, 'mismatches': mismatches + more, 'section1': section,
             'out_of_scope': skipped}
 
