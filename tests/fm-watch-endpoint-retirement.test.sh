@@ -77,8 +77,10 @@ retire_meta_on_classification() {  # <case-dir> <meta>
   mv "$dir/fakebin/fm-crew-state.sh" "$dir/fakebin/fm-crew-state-stock.sh"
   cat > "$dir/fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
+output=$("${0%.sh}-stock.sh" "$@"); rc=$?
 [ -z "${FM_TEST_RETIRE_META:-}" ] || rm -f "$FM_TEST_RETIRE_META"
-exec "${0%.sh}-stock.sh" "$@"
+printf '%s\n' "$output"
+exit "$rc"
 SH
   chmod +x "$dir/fakebin/fm-crew-state.sh"
   printf '%s\n' "$meta" > "$dir/retire-meta.path"

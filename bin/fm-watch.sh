@@ -1511,8 +1511,8 @@ _wedge_cap_marker_stands() {
 # terminal row between them. Returns 0 having appended, 3 when an
 # unacknowledged terminal row already stands for THIS episode (or, where the
 # marker is unwritable, for this window) and the append was skipped, 4 when the
-# append lock itself could not be taken or held, and the append's own status
-# otherwise.
+# append lock itself could not be taken or held, 6 when endpoint retirement
+# wins after the lock/guard boundary, and the append's own status otherwise.
 # _wedge_cap_terminal_append <window> <window-key> <reason>
 # A guard is optional and runs last, under the queue lock and after the
 # duplicate check, so a terminal wake authored by an observation (the opt-in
@@ -1520,6 +1520,9 @@ _wedge_cap_marker_stands() {
 # changed during the lock wait. Rejection returns 5, distinct from 3 (a
 # terminal wake is already queued): the caller clears the observation's own
 # episode state instead of treating the stale append as duplicate suppression.
+# Endpoint retirement returns 6 after the queue lock and optional guard have
+# completed, so a teardown that lands during either slow step cannot publish a
+# capped wake for the freed endpoint.
 _wedge_cap_terminal_append() {  # <win> <wkey> <reason> [guard [guard args...]]
   local _win=$1 _wkey=$2 _reason=$3 _status=0 _queued _degraded=0 _had=0 _now _guard=${4:-} _created=0
   [ "$#" -lt 4 ] || shift 3
@@ -1544,6 +1547,11 @@ _wedge_cap_terminal_append() {  # <win> <wkey> <reason> [guard [guard args...]]
       fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 4
       return 3
     fi
+  fi
+  if retire_unrecorded_endpoint "$_win"; then
+    [ "$_created" -eq 0 ] || rm -f "$_queued"
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || return 4
+    return 6
   fi
   if [ -n "$_guard" ]; then
     fm_wake_append_locked stale "$_win" "$_reason" "$_guard" "$@" || _status=$?
@@ -2378,6 +2386,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           else
             _wedge_cap_terminal_append "$win" "$_wkey" "$_wrb_cap_reason" || _wrb_cap_status=$?
           fi
+          if [ "$_wrb_cap_status" -eq 6 ]; then
+            return 0
+          fi
           if [ -n "$stream_snapshot" ] && [ "$_wrb_cap_status" -eq 5 ]; then
             # The snapshot changed under the lock wait, so this terminal wake
             # belongs to an observation that no longer stands: discard it and
@@ -2448,6 +2459,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           retire_unrecorded_endpoint "$win" && return 0
           wedge_write_escalation_count "$win" "$_wkey" "$escalation_file" "$since_file" "$n"
         else
+          # The count write above is slow enough for teardown to land after its
+          # pre-write retirement check. Reconcile again at the publication
+          # boundary so the ordinary stale wake cannot name a freed endpoint.
+          retire_unrecorded_endpoint "$win" && return 0
           fm_wake_append stale "$win" "$reason" || exit 1
         fi
         # The ladder's own step, not an episode end: this pane is still wedged,
