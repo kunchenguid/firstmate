@@ -68,6 +68,7 @@ case "$1 ${2:-}" in
       exit 1
     fi
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
+      printf '%s\n' "$$" > "$state/$session.launch-pid"
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
     printf '%s\n' running > "$state/$session"
@@ -440,7 +441,7 @@ test_failed_delete_retains_tripwire() {
 }
 
 test_timed_out_provision_cancels_late_launch() {
-  local name="fm-lab-late-launch-$$" status=0
+  local name="fm-lab-late-launch-$$" status=0 launch_pid
   cat > "$FAKEBIN/sleep" <<'SH'
 #!/usr/bin/env bash
 if [ "${FM_FAKE_HERDR_FAST_POLL:-}" = 1 ]; then
@@ -453,15 +454,22 @@ exec "$FM_FAKE_HERDR_REAL_SLEEP" "$@"
 SH
   chmod +x "$FAKEBIN/sleep"
   : > "$FAKE_LOG"
+  # The status polls wait until the delayed launch has recorded its own pid,
+  # so the timeout always cancels a launch that is already running.
   FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=30 \
+    FM_FAKE_HERDR_WAIT_MARKER="$FAKE_STATE/$name.launch-pid" \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
+  launch_pid=$(cat "$FAKE_STATE/$name.launch-pid")
+  if kill -0 "$launch_pid" 2>/dev/null; then
+    kill -KILL "$launch_pid" 2>/dev/null || true
+    fail "timed-out provision returned with its herdr server launch (pid $launch_pid) still running"
+  fi
   assert_present "$TRIPWIRES/$name.fleet-state.json" \
     "timed-out provision must retain its tripwire until teardown"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after timed-out provision failed"
   assert_absent "$TRIPWIRES/$name.fleet-state.json" \
     "teardown after timed-out provision did not remove its tripwire"
-  "$REAL_SLEEP" 1.1
   if [ -f "$FAKE_STATE/$name" ] && [ "$(cat "$FAKE_STATE/$name")" = running ]; then
     fail "timed-out provision left a late-starting lab session after teardown"
   fi
