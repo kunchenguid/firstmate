@@ -85,7 +85,7 @@ globalThis.document = {
     return byId.get(id);
   },
 };
-globalThis.window = {};
+globalThis.window = { addEventListener() {} };
 globalThis.TextEncoder = TextEncoder;
 
 const script = html.slice(html.indexOf("<script>") + "<script>".length, html.lastIndexOf("</script>"));
