@@ -47,7 +47,7 @@ agent  subagent  task  workflow  cron  schedul  worktree
 delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
 ```
 
-Three exclusions keep the shape test from producing false positives.
+Three exclusions and one recipient-limited exception keep the shape test from producing false positives.
 
 - A name beginning `mcp__` is never classified.
   An MCP server chooses its own tool names, a task or agent noun there is common, and it has no bearing on fleet dispatch.
@@ -63,6 +63,12 @@ Three exclusions keep the shape test from producing false positives.
 
 Both exclusion lists match the whole normalized name, never a substring, so neither can widen by accident: `TaskCreateAgent` and `RemoteTaskCreate` stay denied.
 Folding the two lists together would be the drift risk, because the observe-or-stop rationale is not true of a tool that writes.
+
+One recipient-limited exception follows the same reasoning.
+`SendMessage` stays delegation-shaped because a recipient that is a teammate name, a broadcast `*`, or a `bridge:<session id>` address reaches work the fleet does not account for, but a message addressed to an existing same-machine Claude session creates nothing: the session already exists, it is not firstmate fleet work that needs a `state/<id>.meta`, and refusing it only forces the primary to write a reply to a file for the owner to forward by hand.
+Claude Code's `SendMessage` input names that recipient in `tool_input.to`, and the only two forms that identify an existing same-machine session - a `uds:<socket>` address or a `local_<session id>` peer name - are allowed.
+Every other recipient form stays denied, including an in-process agent addressed by name, so the exception cannot be used to re-task a helper agent; a missing or non-string recipient, the `--tool` CLI form which carries no payload, and near-miss names such as `SendMessageAndSpawn` also stay denied.
+The recommended local deny list below still removes `SendMessage` from the model's schema upstream of this hook, so a home that adopts it verbatim keeps the tool refused regardless of this exception.
 
 The shipped guard fires on every delegation-shaped name that reaches it, including future names that no deny list knows about yet.
 That future-name behavior is the reason the tracked matcher must match all tools and let the script filter.
@@ -363,7 +369,7 @@ The live consequence is confirmed by the shipped-guard result above: Claude hono
 ## Automated validation
 
 `tests/fm-subagent-pretool-check.test.sh` owns the acceptance matrix and is registered in the `pure-contract-unit` family in `bin/fm-test-run.sh`.
-It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
+It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the recipient-limited `SendMessage` exception (`uds:` and `local_` recipients on a stdin payload allowed; a named agent, broadcast, `bridge:` address, near-miss name, missing or non-string recipient, and the `--tool` CLI form denied); the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
 
 Run:
 
