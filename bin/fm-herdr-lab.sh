@@ -26,6 +26,8 @@
 # is discarded), and shown only as a bounded tail.
 # Provision also stops waiting as soon as the server process exits, and prints
 # the log tail when the session never reports running.
+# On timeout it terminates and reaps the server launch before returning failure;
+# the fleet-state tripwire remains for guarded teardown.
 # Every Herdr call made here carries --session <session>: trailing, or
 # immediately before the first -- delimiter so it stays a Herdr option instead
 # of becoming a passthrough argument such as an agent start argument.

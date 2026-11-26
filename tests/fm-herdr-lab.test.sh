@@ -69,7 +69,15 @@ case "$1 ${2:-}" in
     fi
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       printf '%s\n' "$$" > "$state/$session.launch-pid"
-      "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
+      if [ "$FM_FAKE_HERDR_SERVER_DELAY" = until-cancel ]; then
+        # Block on an event, not a wall-clock delay that can expire while a
+        # slower host is still making the provisioner's status polls.
+        mkfifo "$state/$session.launch-release"
+        exec 3<>"$state/$session.launch-release"
+        read -r release <&3
+      else
+        "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
+      fi
     fi
     printf '%s\n' running > "$state/$session"
     if [ -n "${FM_FAKE_HERDR_SERVER_STAY:-}" ]; then
@@ -456,7 +464,7 @@ SH
   : > "$FAKE_LOG"
   # The status polls wait until the delayed launch has recorded its own pid,
   # so the timeout always cancels a launch that is already running.
-  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=30 \
+  FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_DELAY=until-cancel \
     FM_FAKE_HERDR_WAIT_MARKER="$FAKE_STATE/$name.launch-pid" \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
