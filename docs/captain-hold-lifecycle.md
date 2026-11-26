@@ -238,6 +238,7 @@ Each key is reported as follows:
 | A replay with a mode mismatch | Skipped. |
 
 The command exits nonzero when any key was skipped.
+A keyed deferral re-holds the task first, then invalidates its PR-settlement policy; therefore a failed re-hold cannot destroy a still-valid policy. If policy invalidation fails after the re-hold, the command reports the failure while leaving the deferred hold and policy visible for recovery.
 `--source` is provenance text recorded in the durable decision, never a behavior switch, and the command carries no per-channel branch.
 
 ### Source bindings
