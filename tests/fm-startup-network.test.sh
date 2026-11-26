@@ -10,6 +10,8 @@
 #     which is what would strand a session-open hook behind the worker
 #   - a durable acknowledgement after harvest prints a finished result suppresses
 #     the wake, while an unacknowledged result always produces one
+#   - while that harvest is still pending, the worker waits without re-taking
+#     the publish lock the harvest needs to deliver
 #   - mutating sweeps are refused when the fleet lock no longer names the session
 #     that requested them, and the refusal is reported rather than silent
 #   - the aggregate bound turns a wedged sweep into an actionable line
@@ -274,6 +276,90 @@ EOF
   assert_absent "$home/state/.startup-network.delivered" \
     "an unharvested result was recorded as delivered"
   pass "fm-startup-network: a claimant crash after publication still surfaces the result"
+}
+
+# trace_lock_acquisitions <root> <trace>: replace the world's fm-wake-lib.sh with
+# one that sources the real library and then logs "<pid>\t<lockdir>" to <trace>
+# on every bounded lock acquisition before performing it. That bounded acquire
+# is how the stage takes every lock, so the trace is the worker's real lock
+# traffic, observed at the library boundary rather than read from its source.
+trace_lock_acquisitions() {  # <root> <trace>
+  rm -f "$1/bin/fm-wake-lib.sh"
+  cat > "$1/bin/fm-wake-lib.sh" <<SH
+# shellcheck shell=bash
+. "$ROOT/bin/fm-wake-lib.sh"
+eval "_fm_traced_\$(declare -f fm_lock_acquire_wait_bounded)"
+fm_lock_acquire_wait_bounded() {
+  printf '%s\t%s\n' "\$\$" "\$1" >> "$2"
+  _fm_traced_fm_lock_acquire_wait_bounded "\$@"
+}
+SH
+}
+
+# A published worker waits for its session start's harvest, and that harvest
+# needs the publish lock to print and acknowledge the result. Where process
+# launches are slow, a worker that re-took the lock every 0.1s while the claimant
+# was still pending won nearly every round and stalled the whole session start.
+# So while this generation's claimant is live and nothing is delivered, the
+# worker must not touch the lock at all, and it must still settle correctly once
+# harvest delivers or the delivery deadline passes.
+test_a_pending_claimant_is_awaited_without_retaking_the_publish_lock() {
+  local rec home root log trace lock claimant worker before after output
+  rec=$(new_world lock-free-claim-wait)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  trace="$home/lock-trace"
+  lock="$home/state/.startup-network.lock"
+  trace_lock_acquisitions "$root" "$trace"
+
+  # Delivery: a live claimant, with a delivery budget far beyond the window.
+  sleep 120 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=90 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the claimed worker never published"
+  worker=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+  grep -Fqx "$worker	$lock" "$trace" \
+    || fail "the trace did not observe the worker taking the publish lock to publish"
+  sleep 1
+  before=$(grep -Fcx "$worker	$lock" "$trace")
+  sleep 4
+  after=$(grep -Fcx "$worker	$lock" "$trace")
+  kill -0 "$worker" 2>/dev/null \
+    || fail "the worker stopped waiting while its claimant was still pending"
+  [ "$after" -eq "$before" ] \
+    || fail "the worker re-took the publish lock $((after - before)) times in 4s while its claimant was live and pending"
+
+  output=$(run_stage "$home" "$root" harvest --pid "$claimant")
+  assert_contains "$output" "some-tool" "harvest did not print the result the worker was waiting on"
+  await_pid_exit "$worker" 100 \
+    || fail "the worker was still waiting 10s after harvest delivered its result"
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "a result harvest delivered also queued a wake: $(cat "$home/state/.wake-queue")"
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  # Deadline: the claimant stays alive but never harvests. The lock-free wait
+  # must still end at the delivery deadline and hand the result to a wake.
+  sleep 120 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the deadline worker never published"
+  worker=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+  await_pid_exit "$worker" 200 \
+    || fail "the worker kept waiting on a live claimant 20s past its 4s delivery deadline"
+  kill -0 "$claimant" 2>/dev/null || fail "the claimant died before the deadline was reached"
+  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+    "a result the live claimant never harvested by the deadline did not reach the wake queue"
+  assert_absent "$home/state/.startup-network.delivered" \
+    "an unharvested result was recorded as delivered"
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+  pass "fm-startup-network: a pending claimant is awaited without re-taking the publish lock"
 }
 
 test_a_report_publication_failure_is_failed_and_still_wakes() {
@@ -863,6 +949,7 @@ test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake
+test_a_pending_claimant_is_awaited_without_retaking_the_publish_lock
 test_a_report_publication_failure_is_failed_and_still_wakes
 test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake

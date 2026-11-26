@@ -364,12 +364,37 @@ queue_result_wake() {  # <state>
     || true
 }
 
+# True when the claim file names <generation> and its claimant is still alive.
+claim_is_live() {  # <generation>
+  local claim_record claim_generation claim_pid
+  [ -f "$CLAIM_FILE" ] || return 1
+  claim_record=$(cat "$CLAIM_FILE" 2>/dev/null || true)
+  IFS=$'\t' read -r claim_generation claim_pid <<EOF
+$claim_record
+EOF
+  [ "$claim_generation" = "$1" ] || return 1
+  case "$claim_pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$claim_pid" 2>/dev/null
+}
+
 # Bounded by DELIVERY_DEADLINE, which publish() sets from the delivery budget.
 # Once the deadline passes, a still-live claimant is no longer waited for: the
 # wake decision is made as if it were gone, exactly as the old iteration cap did.
+#
+# While this generation's claimant is plainly still pending, the wait happens
+# outside the lock, because the claimant's harvest needs that same lock to
+# deliver. Where process launches are slow (a lock round trip takes seconds on
+# some Windows hosts), re-taking the lock every 0.1s left harvest almost no
+# window and stalled the whole session start. The locked check below still
+# makes every decision.
 await_delivery() {  # <generation> <state>
-  local generation=$1 state=$2 claim_record claim_generation claim_pid claim_live
+  local generation=$1 state=$2 claim_live
   while :; do
+    if [ ! -f "$DELIVERED_FILE" ] && [ "$(now)" -lt "$DELIVERY_DEADLINE" ] \
+      && claim_is_live "$generation"; then
+      sleep 0.5
+      continue
+    fi
     claim_live=0
     if ! take_lock "$PUBLISH_LOCK" "$(seconds_until "$DELIVERY_DEADLINE")"; then
       # A live holder outlived the whole delivery budget, so the claim cannot be
@@ -387,16 +412,7 @@ await_delivery() {  # <generation> <state>
       return 0
     fi
     if [ -f "$CLAIM_FILE" ] && [ "$(now)" -lt "$DELIVERY_DEADLINE" ]; then
-      claim_record=$(cat "$CLAIM_FILE" 2>/dev/null || true)
-      IFS=$'\t' read -r claim_generation claim_pid <<EOF
-$claim_record
-EOF
-      if [ "$claim_generation" = "$generation" ]; then
-        case "$claim_pid" in
-          ''|*[!0-9]*) ;;
-          *) kill -0 "$claim_pid" 2>/dev/null && claim_live=1 ;;
-        esac
-      fi
+      ! claim_is_live "$generation" || claim_live=1
       [ "$claim_live" -eq 1 ] || rm -f "$CLAIM_FILE" 2>/dev/null || true
     fi
     if [ "$claim_live" -eq 0 ]; then
