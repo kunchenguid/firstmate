@@ -38,6 +38,7 @@ When no C++ runtime is found on Linux, `--setup` says so and a render stops with
 On macOS onnxruntime links the platform C++ runtime, so `--setup` reports the runtime as not needed there and a render asks for nothing extra.
 
 Every missing piece is reported with the command that installs it rather than failing part-way through a render, and a Kokoro cache this build cannot use - files missing, or a venv whose packages will not import - is reported as one line naming `bin/fm-speak.sh --setup`, never as a Python traceback.
+A venv whose packages are installed but cannot import because the located C++ runtime will not load, or is older than onnxruntime needs, is a different failure: it is reported as that runtime cause, naming the located `libstdc++` and `LD_LIBRARY_PATH`, and `--setup` leaves the venv in place instead of reinstalling it.
 
 ## Caches
 
@@ -81,7 +82,7 @@ The one-time setup download dominates the first run and is never repeated.
 ## Where the audio lands
 
 The default output directory is `$HOME/audio-briefings`, created if missing, and `--out` overrides it.
-`<out-dir>/index.md` records every rendered file with its date, title, duration, file name and source path, newest row on top, so the directory itself answers what has been spoken. It is append-only: one row per rendered file, and nothing rewrites or prunes it.
+`<out-dir>/index.md` records every rendered file with its date, title, duration, file name and source path, newest row on top, so the directory itself answers what has been spoken. It is append-only: one row per rendered file, written as soon as that file is encoded and measured, and no row is ever rewritten or pruned.
 The engine, voice and speed of each render are printed on the command line rather than stored in the index.
 Each render is named `YYYY-MM-DD-<slug>.mp3` from `--title` or the input filename, and a same-day collision gets a counter suffix instead of overwriting the earlier briefing.
 Re-running into a fixed file name is deliberately out of scope: overwrite semantics need their own file-deletion and index rules, so a maintainer who wants them can add them as their own change.

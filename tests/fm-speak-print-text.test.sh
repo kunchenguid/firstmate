@@ -42,6 +42,16 @@ SH
   chmod +x "$1/uname"
 }
 
+# fake_linux <fakebin>: answer `uname -s` with Linux so the C++ runtime lookup
+# runs, with the located runtime supplied through LD_LIBRARY_PATH by the caller.
+fake_linux() {
+  cat > "$1/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' Linux
+SH
+  chmod +x "$1/uname"
+}
+
 # fake_curl <fakebin> [http-error]: model the two curl behaviours that matter
 # here. A response body is written to -o in both modes, because a transfer can
 # fail after part of the body has arrived; -f is what turns an HTTP error into a
@@ -132,12 +142,14 @@ test_abbreviations_expand_every_occurrence() {
   local input=$TMP_ROOT/abbreviations.md out expected
   cat > "$input" <<'MD'
 x w/o w/o y. A vs. vs. B. Use e.g.e.g. done. Repeat etc. etc. and approx.approx. end.
+Ends with vs.
 MD
   IFS= read -r -d '' expected <<'TXT' || true
 x without without y.
 A versus versus B.
 Use for example, for example, done.
 Repeat et cetera, et cetera, and approximately approximately end.
+Ends with versus.
 TXT
   expected=${expected%$'\n'}
   out=$(HOME="$HOME_DIR" "$SPEAK" "$input" --print-text) ||
@@ -272,9 +284,11 @@ SH
 }
 
 test_setup_on_macos_does_not_require_libstdcxx() {
-  local root fakebin kokoro out
+  local root fakebin kokoro out tmp
   root=$TMP_ROOT/darwin-setup
   kokoro=$root/kokoro
+  # A TMPDIR that does not exist: --setup must need no throwaway work directory.
+  tmp=$root/no-such-tmp
   fakebin=$(fm_fakebin "$root")
   mkdir -p "$kokoro/venv/bin"
   printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = -c ] || exit 1' 'exit 0' \
@@ -285,13 +299,128 @@ test_setup_on_macos_does_not_require_libstdcxx() {
   fake_darwin "$fakebin"
   fake_curl "$fakebin"
 
-  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
-    "$SPEAK" --setup) || fail "--setup failed on a Darwin host: $out"
+  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" TMPDIR="$tmp" \
+    "$SPEAK" --setup) ||
+    fail "--setup failed on a Darwin host and must not need a temporary work directory: $out"
   assert_contains "$out" "cxx-runtime: not needed on Darwin" \
     "setup on macOS must not ask for a libstdc++ the platform does not need"
   assert_contains "$out" "venv: present" \
     "setup must report a venv that can import its packages as present"
-  pass "setup: macOS needs no C++ runtime step and a working venv is present"
+  pass "setup: macOS needs no C++ runtime step, needs no temporary work directory, and a working venv is present"
+}
+
+# docs/audio-briefings.md: a venv whose packages are installed but whose C++
+# runtime cannot be loaded is reported as that runtime cause, never as missing
+# packages, and --setup leaves such a venv alone instead of reinstalling it.
+test_unusable_cpp_runtime_is_reported_as_the_cause() {
+  local root fakebin kokoro input outdir out rc
+  root=$TMP_ROOT/runtime-cause
+  kokoro=$root/kokoro
+  input=$root/report.md
+  outdir=$root/out
+  fakebin=$(fm_fakebin "$root")
+  mkdir -p "$kokoro/venv/bin" "$root/lib"
+  # A file named libstdc++.so.6 is what the Linux lookup hands the child process.
+  : > "$root/lib/libstdc++.so.6"
+  : > "$kokoro/venv/marker"
+  printf '%s' model > "$kokoro/kokoro-v1.0.onnx"
+  printf '%s' voices > "$kokoro/voices-v1.0.bin"
+  printf '%s\n' 'One sentence here.' > "$input"
+  fake_linux "$fakebin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/ffmpeg"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/ffprobe"
+  chmod +x "$fakebin/ffmpeg" "$fakebin/ffprobe"
+  # The packages are installed (find_spec succeeds) but importing them fails the
+  # way an unusable C++ runtime does.
+  cat > "$kokoro/venv/bin/python" <<'SH'
+#!/usr/bin/env bash
+case ${2:-} in
+  *find_spec*) exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$kokoro/venv/bin/python"
+
+  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    LD_LIBRARY_PATH="$root/lib" "$SPEAK" --setup 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "--setup must fail when the located C++ runtime cannot load the packages"
+  assert_contains "$out" "the C++ runtime at $root/lib cannot be loaded" \
+    "--setup must name the C++ runtime as the cause"
+  assert_not_contains "$out" "venv: repairing" \
+    "--setup must not rebuild a venv whose packages are installed"
+  [ -e "$kokoro/venv/marker" ] ||
+    fail "--setup deleted a venv that only the C++ runtime made unusable"
+
+  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    LD_LIBRARY_PATH="$root/lib" "$SPEAK" "$input" --out "$outdir" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "a render must refuse a venv that only the C++ runtime makes unusable"
+  assert_contains "$out" "the C++ runtime at $root/lib cannot be loaded" \
+    "a render must report the C++ runtime cause"
+  assert_not_contains "$out" "prepare it once with" \
+    "a render must not ask for --setup when the cache itself is fine"
+  [ ! -d "$outdir" ] || fail "the render wrote output before the runtime was usable"
+  pass "cache: an unusable C++ runtime is reported as the cause, not as missing packages"
+}
+
+# docs/audio-briefings.md: the index records every rendered file, written as
+# soon as that file is encoded, so a later failure leaves no part unrecorded.
+test_failed_later_part_still_leaves_earlier_parts_indexed() {
+  local root fakebin kokoro outdir input out rc part1 f n
+  root=$TMP_ROOT/partial-render
+  kokoro=$root/kokoro
+  outdir=$root/out
+  input=$root/report.md
+  fakebin=$(fm_fakebin "$root")
+  mkdir -p "$kokoro/venv/bin" "$root/lib"
+  : > "$root/lib/libstdc++.so.6"
+  printf '%s' model > "$kokoro/kokoro-v1.0.onnx"
+  printf '%s' voices > "$kokoro/voices-v1.0.bin"
+  cat > "$kokoro/venv/bin/python" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -c ] && exit 0
+printf '%s' wav-bytes > "$5"
+SH
+  chmod +x "$kokoro/venv/bin/python"
+  # The second encode fails, the way a full disk or a dying encoder would.
+  cat > "$fakebin/ffmpeg" <<'SH'
+#!/usr/bin/env bash
+n=0
+[ -f "$FM_RENDER_FFMPEG_COUNT" ] && n=$(cat "$FM_RENDER_FFMPEG_COUNT")
+n=$((n + 1))
+printf '%s' "$n" > "$FM_RENDER_FFMPEG_COUNT"
+[ "$n" -ge 2 ] && exit 1
+for last; do :; done
+printf '%s' mp3-bytes > "$last"
+SH
+  cat > "$fakebin/ffprobe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 12.5
+SH
+  chmod +x "$fakebin/ffmpeg" "$fakebin/ffprobe"
+  # Nine words a line and twenty lines: more than one --max-minutes 1 chunk.
+  for ((n = 1; n <= 20; n++)); do
+    printf 'Paragraph %s has ten words in it right here.\n' "$n"
+  done > "$input"
+
+  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    LD_LIBRARY_PATH="$root/lib" FM_RENDER_FFMPEG_COUNT="$root/ffmpeg-count" \
+    "$SPEAK" "$input" --out "$outdir" --max-minutes 1 --title "Partial report" 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "a render must fail when a later part cannot be encoded"
+  part1=
+  for f in "$outdir"/*-part1.mp3; do
+    [ -e "$f" ] || continue
+    part1=$f
+    break
+  done
+  [ -n "$part1" ] || fail "the encoded first part must stay on disk: $out"
+  assert_contains "$(cat "$outdir/index.md")" "$(basename "$part1")" \
+    "an encoded part must be indexed even when a later part fails"
+  [ "$(grep -c '^| [[:digit:]]' "$outdir/index.md")" -eq 1 ] ||
+    fail "the index must hold exactly one row for the one rendered file"
+  pass "render: a later failure still leaves earlier parts on disk and indexed"
 }
 
 test_setup_repairs_a_venv_that_cannot_import() {
@@ -398,6 +527,8 @@ fm_test_run \
   test_removed_urls_keep_the_sentence_boundary \
   test_render_reports_the_mp3_size_and_indexes_it \
   test_setup_on_macos_does_not_require_libstdcxx \
+  test_unusable_cpp_runtime_is_reported_as_the_cause \
+  test_failed_later_part_still_leaves_earlier_parts_indexed \
   test_setup_repairs_a_venv_that_cannot_import \
   test_setup_leaves_no_cache_file_after_a_failed_download \
   test_render_refuses_a_cache_that_cannot_import

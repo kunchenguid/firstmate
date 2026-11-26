@@ -195,16 +195,24 @@ kokoro_python() {
   fi
 }
 
-# One validity test for the cache, shared by --setup (what to repair) and the
-# render preflight (what to refuse), so a cache a render cannot use is never
-# reported as present.
-kokoro_venv_ready() {
+# One validity test for the venv, shared by --setup (what to repair) and the
+# render preflight (what to refuse). 0 means usable; 1 means the packages are
+# missing or broken, which reinstalling them repairs; 2 means they are installed
+# but the located C++ runtime cannot be loaded by them, which no reinstall fixes.
+kokoro_venv_state() {
   [ -x "$KOKORO_VENV/bin/python" ] || return 1
-  kokoro_python -c 'import kokoro_onnx, soundfile' >/dev/null 2>&1
+  kokoro_python -c 'import kokoro_onnx, soundfile' >/dev/null 2>&1 && return 0
+  [ -n "$libstdcpp_dir" ] || return 1
+  kokoro_python -c 'import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ("kokoro_onnx", "soundfile")) else 1)' \
+    >/dev/null 2>&1 || return 1
+  return 2
 }
 
-kokoro_cache_ready() {
-  [ -s "$KOKORO_MODEL" ] && [ -s "$KOKORO_VOICES" ] && kokoro_venv_ready
+# The failure text for state 2, naming the runtime that was found rather than
+# blaming the packages.
+kokoro_runtime_hint() {
+  printf 'the python packages in %s are installed, but the C++ runtime at %s cannot be loaded or is too old for onnxruntime; install a newer C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH' \
+    "$KOKORO_VENV" "$libstdcpp_dir"
 }
 
 # A download reaches the cache only after it completes, so an interrupted or
@@ -266,9 +274,6 @@ KOKORO_PY
 cmd_setup() {
   printf 'kokoro cache: %s\n' "$KOKORO_DIR"
   mkdir -p "$KOKORO_DIR" || die "cannot create the Kokoro cache directory: $KOKORO_DIR"
-  workdir=$(mktemp -d "${TMPDIR:-/tmp}/fm-speak-setup.XXXXXX") ||
-    die "cannot create a temporary work directory"
-  trap 'rm -rf "$workdir"' EXIT
 
   libstdcpp_dir=$(find_libstdcpp_dir)
   if [ -n "$libstdcpp_dir" ]; then
@@ -279,8 +284,12 @@ cmd_setup() {
     printf 'cxx-runtime: not needed on %s\n' "$HOST_OS"
   fi
 
-  if kokoro_venv_ready; then
+  kokoro_venv_state
+  venv_state=$?
+  if [ "$venv_state" -eq 0 ]; then
     printf 'venv: present\n'
+  elif [ "$venv_state" -eq 2 ]; then
+    die "$(kokoro_runtime_hint)"
   else
     command -v python3 >/dev/null 2>&1 ||
       die "python3 is needed to build the Kokoro venv and is not on PATH"
@@ -293,7 +302,10 @@ cmd_setup() {
     python3 -m venv "$KOKORO_VENV" || die "could not create the venv at $KOKORO_VENV"
     "$KOKORO_VENV/bin/pip" install --quiet --disable-pip-version-check \
       kokoro-onnx soundfile || die "could not install kokoro-onnx and soundfile into $KOKORO_VENV"
-    kokoro_venv_ready ||
+    kokoro_venv_state
+    venv_state=$?
+    [ "$venv_state" -eq 2 ] && die "$(kokoro_runtime_hint)"
+    [ "$venv_state" -eq 0 ] ||
       die "the venv at $KOKORO_VENV cannot import kokoro-onnx and soundfile"
   fi
 
@@ -435,7 +447,12 @@ command -v ffprobe >/dev/null 2>&1 ||
   die "ffprobe is not on PATH; it is required to verify the rendered audio (it ships with ffmpeg)"
 libstdcpp_dir=$(find_libstdcpp_dir) ||
   die "no libstdc++ found for the Kokoro runtime; install a C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH"
-kokoro_cache_ready ||
+[ -s "$KOKORO_MODEL" ] && [ -s "$KOKORO_VOICES" ] ||
+  die "the Kokoro cache at $KOKORO_DIR is incomplete; $setup_hint"
+kokoro_venv_state
+venv_state=$?
+[ "$venv_state" -eq 2 ] && die "$(kokoro_runtime_hint)"
+[ "$venv_state" -eq 0 ] ||
   die "the Kokoro cache at $KOKORO_DIR is incomplete; $setup_hint"
 case $VOICE in
   b*) kokoro_lang=en-gb ;;
@@ -601,18 +618,23 @@ awk '
   function word_char(c) {
     return c != "" && c ~ /^[[:alnum:]_]$/
   }
-  function expand(head) {
+  function boundary(c) {
+    return c == "" || c ~ /[[:space:]]/
+  }
+  function expand(head,   tail) {
     if (substr(head, 1, 4) == "e.g.") { consumed = 4; return "for example," }
     if (substr(head, 1, 4) == "i.e.") { consumed = 4; return "that is," }
     if (substr(head, 1, 4) == "etc.") { consumed = 4; return "et cetera," }
     if (substr(head, 1, 7) == "approx.") { consumed = 7; return "approximately" }
-    if (substr(head, 1, 3) == "vs." && substr(head, 4, 1) ~ /[[:space:]]/) {
-      consumed = 3
-      return "versus"
-    }
-    if (substr(head, 1, 2) == "vs" && substr(head, 3, 1) ~ /[[:space:]]/) {
-      consumed = 2
-      return "versus"
+    if (substr(head, 1, 2) == "vs") {
+      tail = substr(head, 3, 1)
+      if (tail == ".") {
+        if (substr(head, 4, 1) == "") { consumed = 2; return "versus" }
+        if (boundary(substr(head, 4, 1))) { consumed = 3; return "versus" }
+      } else if (boundary(tail)) {
+        consumed = 2
+        return "versus"
+      }
     }
     if (substr(head, 1, 3) == "w/o" && !word_char(substr(head, 4, 1))) {
       consumed = 3
@@ -789,7 +811,41 @@ while [ -e "$candidate.mp3" ] || [ -e "$candidate-part1.mp3" ]; do
 done
 
 rows=$workdir/rows.md
-: >"$rows"
+index=$out_dir/index.md
+indexed_parts=0
+
+# Every part is indexed as soon as it is encoded and measured, so a failure on a
+# later part cannot leave an earlier rendered file unrecorded. $rows holds only
+# the row being added, and $1 is the number of rows this run has already
+# inserted, which keeps one run's parts in part order under the newest row.
+write_index() {
+  local skip=$1
+  if [ ! -f "$index" ]; then
+    {
+      printf '# Rendered audio\n\n'
+      printf "Rendered by \`bin/fm-speak.sh\`. A record of what was spoken, newest first.\n\n"
+      printf '| Date | Title | Duration | File | Source |\n'
+      printf '| --- | --- | --- | --- | --- |\n'
+    } >"$index" || die "cannot write the index: $index"
+  fi
+
+  awk -v rows_file="$rows" -v skip="$skip" '
+    BEGIN {
+      rows = ""
+      while ((getline line < rows_file) > 0) { rows = rows line "\n" }
+      close(rows_file)
+    }
+    { print }
+    /^\|[[:space:]]*-/ && !inserted {
+      while (skip > 0 && (getline line) > 0) { print line; skip-- }
+      printf "%s", rows
+      inserted = 1
+    }
+    END { if (!inserted) { printf "%s", rows } }
+  ' "$index" >"$workdir/index.new" || die "cannot update the index: $index"
+  mv -f "$workdir/index.new" "$index" || die "cannot replace the index: $index"
+}
+
 total_seconds=0
 part=0
 for chunk in "$workdir"/chunk-*.txt; do
@@ -819,36 +875,14 @@ for chunk in "$workdir"/chunk-*.txt; do
     "$(escape_cell "$row_title")" \
     "$duration" \
     "$(escape_cell "$(basename -- "$dest")")" \
-    "$(escape_cell "$abs_source")" >>"$rows"
+    "$(escape_cell "$abs_source")" >"$rows"
+  write_index "$indexed_parts"
+  indexed_parts=$((indexed_parts + 1))
 
   printf 'file: %s\n' "$dest"
   printf 'duration: %s\n' "$duration"
   printf 'size: %s\n' "$size"
 done
-
-# --- index -------------------------------------------------------------------
-
-index=$out_dir/index.md
-if [ ! -f "$index" ]; then
-  {
-    printf '# Rendered audio\n\n'
-    printf "Rendered by \`bin/fm-speak.sh\`. A record of what was spoken, newest first.\n\n"
-    printf '| Date | Title | Duration | File | Source |\n'
-    printf '| --- | --- | --- | --- | --- |\n'
-  } >"$index" || die "cannot write the index: $index"
-fi
-
-awk -v rows_file="$rows" '
-  BEGIN {
-    rows = ""
-    while ((getline line < rows_file) > 0) { rows = rows line "\n" }
-    close(rows_file)
-  }
-  { print }
-  /^\|[[:space:]]*-/ && !inserted { printf "%s", rows; inserted = 1 }
-  END { if (!inserted) { printf "%s", rows } }
-' "$index" >"$workdir/index.new" || die "cannot update the index: $index"
-mv -f "$workdir/index.new" "$index" || die "cannot replace the index: $index"
 
 printf 'index: %s\n' "$index"
 printf 'engine: kokoro\n'
