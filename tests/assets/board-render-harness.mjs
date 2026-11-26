@@ -9,7 +9,7 @@
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
 //     charted:[{title,sub,badges,pickable}], empty, more, error,
 //     cards:[{detail, more:[{asked,answer,view,open}], refs:[{text,href,target,rel}],
-//       ask_button, ask_open, asked_shown, queued}], prompts:[{prompt,tag,queueKey,data}] }
+//       ask_button, ask_button_type, ask_open, asked_shown, queued}], prompts:[{prompt,tag,queueKey,data}] }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -178,6 +178,7 @@ const cards = cardNodes.map((card) => {
     more: moreItems,
     refs: findAll(card, "bb-ref").map((a) => ({ text: a.textContent, href: a.href, target: a.target, rel: a.rel })),
     ask_button: Boolean(find(card, "bb-ask-btn")),
+    ask_button_type: find(card, "bb-ask-btn")?.type ?? null,
     ask_open: askBox ? !askBox.hidden : false,
     asked_shown: Boolean(find(card, "bb-asked")?.classList.contains("is-visible")),
     queued: has(card, "is-queued"),

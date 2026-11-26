@@ -523,7 +523,7 @@ __FM_BEARINGS_BOARD_DATA__
       it.appendChild(el("p", "bb-more__answer", m.answer));
       if (typeof m.page === "string" && PAGE_PATH.test(m.page)) {
         if (/\.html?$/.test(m.page)) {
-          /* inline view runs no scripts; open full page for anything interactive */
+          /* inline view runs no scripts; an interactive page belongs in refs */
           var frame = el("iframe", "bb-more__frame");
           frame.setAttribute("sandbox", "");
           frame.setAttribute("loading", "lazy");
@@ -537,7 +537,8 @@ __FM_BEARINGS_BOARD_DATA__
           img.setAttribute("src", m.page);
           it.appendChild(img);
         }
-        it.appendChild(link("bb-more__open", "open full page", m.page));
+        /* an opened html or svg page would run on the board's own origin */
+        if (!/\.(html?|svg)$/.test(m.page)) it.appendChild(link("bb-more__open", "open full page", m.page));
       }
       block.appendChild(it);
     });
@@ -558,6 +559,7 @@ __FM_BEARINGS_BOARD_DATA__
   }
   /* Ask for more queues a plain prompt, never a `choice` row, so the answer
      intake never reads it: the card stays open and the deck does not advance. */
+  var askCount = 0;
   function askBox(item, asked) {
     var box = el("div", "bb-ask");
     box.hidden = true;
@@ -591,7 +593,7 @@ __FM_BEARINGS_BOARD_DATA__
       window.lavish.queuePrompt(
         "Ask for more - " + item.title + " (" + item.key + "): " + q,
         { tag: "ask-more", text: item.title + " -> asked: " + q, element: box,
-          queueKey: "ask-more." + item.key,
+          queueKey: "ask-more." + item.key + "." + (++askCount),
           data: { schema: "fm-bearings-ask-more.v1", question: item.key, ask: q } }
       );
       field.value = "";

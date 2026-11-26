@@ -84,14 +84,18 @@
 # url, shown as References), and `more` (a list of {asked, answer, page?}: the
 # captain's earlier Ask for more question and its answer, both non-empty text).
 # A `page` is an absolute local path to one self-contained .html, .htm, .svg,
-# .png, .jpg, .jpeg, .webp, or .gif file, because Lavish serves only files
-# beside the board. build copies each surviving card's page into
-# bearings-board-pages/ beside the board under a content-addressed name,
-# rewrites `page` to that relative path, and removes copied pages the
-# published board no longer names. A page that is not a readable regular file
-# refuses the build before the board is touched. The board shows an html page
-# in a frame that runs no scripts, an image inline, and an "open full page"
-# link to either.
+# .png, .jpg, .jpeg, .webp, or .gif file kept where it outlives the board,
+# because Lavish serves only files beside the board. build copies each
+# surviving card's page into bearings-board-pages/ beside the board under a
+# content-addressed name, rewrites `page` to that relative path, and removes
+# copied pages the published board no longer names. That relative path is
+# also accepted as input while its copy still exists, so a rebuild can carry
+# an open card's `more` forward from the published board. A page that is not
+# a readable regular file refuses the build before any page is copied or the
+# board is touched. The board shows an html page in a frame that runs no
+# scripts and an image inline; only a raster image gets an "open full page"
+# link, because an opened html or svg page would run on the board's origin.
+# Put an interactive page in `refs` by its https URL instead.
 #
 # ASK FOR MORE. Every card's Ask for more button queues a Lavish prompt tagged
 # `ask-more` with fm-bearings-ask-more.v1 context, never a `choice` row, so
@@ -155,8 +159,10 @@ validate_payload() {  # <data.json>
       and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
     def optional_https_url($name): (has($name) | not) or (.[$name] | https_url);
     def page_path:
-      type == "string" and startswith("/") and (test("[[:cntrl:]]") | not)
-      and test("[.](html?|svg|png|jpe?g|webp|gif)$"; "i");
+      type == "string"
+      and ((startswith("/") and (test("[[:cntrl:]]") | not)
+          and test("[.](html?|svg|png|jpe?g|webp|gif)$"; "i"))
+        or test("^bearings-board-pages/[0-9a-f]{16}[.](html?|svg|png|jpe?g|webp|gif)$"));
     def more_item:
       type == "object" and (.asked | nonempty_string) and (.answer | nonempty_string)
       and ((has("page") | not) or (.page | page_path));
@@ -377,14 +383,27 @@ file_sha256() {  # <file>
 # rewrite the payload's `page` to that served relative path. Any page that is
 # not a readable regular file refuses before the board is touched.
 stage_more_pages() {  # <payload.json>
-  local payload=$1 dir src ext digest name tmp map='{}'
+  local payload=$1 dir src file ext digest name tmp map='{}' sources
   dir=$(pages_dir)
+  sources=$(jq -r '.captains_call[] | .more[]? | .page // empty' "$payload") || return 1
+  # Check every page before copying any, so a refusal leaves no new copies.
   while IFS= read -r src; do
     [ -n "$src" ] || continue
-    if [ ! -f "$src" ] || [ -L "$src" ] || [ ! -r "$src" ]; then
+    case "$src" in
+      /*) file=$src ;;
+      *) file=$dir/${src#*/} ;;
+    esac
+    if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ]; then
       printf 'fm-bearings-board: more page is not a readable regular file: %s\n' "$src" >&2
       return 1
     fi
+  done <<< "$sources"
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    case "$src" in
+      /*) ;;
+      *) map=$(jq -c --arg src "$src" '. + {($src): $src}' <<< "$map") || return 1; continue ;;
+    esac
     (umask 077; mkdir -p "$dir") || return 1
     tmp=$(umask 077; mktemp "$dir/.page.XXXXXX") || return 1
     if ! { cp -- "$src" "$tmp" && digest=$(file_sha256 "$tmp") && [ "${#digest}" -eq 64 ]; }; then
@@ -395,7 +414,7 @@ stage_more_pages() {  # <payload.json>
     name=${digest:0:16}.$ext
     mv -f -- "$tmp" "$dir/$name" || { rm -f -- "$tmp"; return 1; }
     map=$(jq -c --arg src "$src" --arg rel "$PAGES_NAME/$name" '. + {($src): $rel}' <<< "$map") || return 1
-  done < <(jq -r '.captains_call[] | .more[]? | .page // empty' "$payload")
+  done <<< "$sources"
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-pages.XXXXXX") || return 1
   if ! jq --argjson map "$map" '
     .captains_call |= map(if has("more")

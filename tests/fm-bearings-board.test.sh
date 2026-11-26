@@ -794,16 +794,28 @@ test_build_refuses_bad_more_and_refs_before_touching_the_board() {
     jq "$edit" "$data" > "$data.tmp" && mv "$data.tmp" "$data"
     set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
     [ "$rc" -ne 0 ] || fail "an invalid More or refs payload was accepted: $edit"
+    assert_contains "$out" "does not satisfy fm-bearings-board.v1" "an invalid More or refs payload was not refused by validation: $edit: $out"
     [ "$(board_digest "$board")" = "$before" ] || fail "a refused More or refs payload changed the board: $edit"
   done
 
   write_valid_payload "$data"
-  jq --arg page "$home/missing.html" '.captains_call[0].more = [{"asked":"why","answer":"because","page":$page}]' \
+  jq --arg good "$page" --arg page "$home/missing.html" '.captains_call[0].more = [
+      {"asked":"first","answer":"fine","page":$good},{"asked":"why","answer":"because","page":$page}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
   set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
   [ "$rc" -ne 0 ] || fail "a missing More page was accepted"
   assert_contains "$out" "not a readable regular file" "the missing-page refusal did not say why: $out"
   [ "$(board_digest "$board")" = "$before" ] || fail "a missing More page changed the board"
+  [ -z "$(find "$home/.lavish/bearings-board-pages" -type f 2>/dev/null)" ] \
+    || fail "a refused build still copied its readable More page beside the board"
+
+  write_valid_payload "$data"
+  jq '.captains_call[0].more = [{"asked":"why","answer":"because","page":"bearings-board-pages/0123456789abcdef.html"}]' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e; out=$(run_board "$home" build "$data" 2>&1); rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "a carried page path with no copy beside the board was accepted"
+  assert_contains "$out" "not a readable regular file" "the missing-copy refusal did not say why: $out"
+  [ "$(board_digest "$board")" = "$before" ] || fail "a missing carried page changed the board"
 
   ln -s "$page" "$home/link.html"
   write_valid_payload "$data"
@@ -845,6 +857,16 @@ test_build_copies_more_pages_beside_the_board_and_prunes_old_ones() {
     and .captains_call[0].detail == "the full picture"
     and .captains_call[0].refs == [{"label":"plan","url":"https://example.com/plan"}]' >/dev/null \
     || fail "the published board lost a More, detail, or refs field"
+
+  # Carrying the published `more` forward keeps its copied page.
+  extract_payload "$board" | jq '.captains_call[0] | {more}' > "$home/carried.json"
+  jq --slurpfile carried "$home/carried.json" '.captains_call[0].more = $carried[0].more' \
+    "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  rm -f -- "$home/First.HTML"
+  run_board "$home" build "$data" >/dev/null || fail "a rebuild carrying the published More answers failed"
+  [ "$(extract_payload "$board" | jq -r '.captains_call[0].more[0].page')" = "$rel" ] \
+    || fail "a carried More page did not keep its served path"
+  [ -f "$first" ] || fail "a carried More page was pruned"
 
   jq --arg page "$home/second.svg" '.captains_call[0].more = [{"asked":"show it","answer":"redrawn","page":$page}]' \
     "$data" > "$data.tmp" && mv "$data.tmp" "$data"
