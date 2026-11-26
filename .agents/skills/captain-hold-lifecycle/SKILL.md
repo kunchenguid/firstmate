@@ -71,7 +71,7 @@ The absence of a routed work item is not a divergence and the guard never requir
 2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
 3. Firstmate holds that task - or creates one captain-held task for the review's open questions - with a concise reason carrying the question and options.
 4. Attest the full inventory for that review pass under the caller authority in Policy above.
-5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
+5. Relay the choices to the captain as decisions from Bearings' Captain's Call section, phrased in the captain-facing terms of `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. Resolve each call through `answer`, board-requested reconciliation, or the declared PR settlement policy above, and use `--until` when the captain defers it.
 7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
 
