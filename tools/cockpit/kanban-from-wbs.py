@@ -1,4 +1,18 @@
 import sys,re,html,json,collections
+from html.parser import HTMLParser
+
+
+class GoalItemSlot(HTMLParser):
+    """Find the goal item label the WBS host opts into for this box."""
+
+    item = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'text' and 'fm-goal-item-status' in (attrs.get('class') or '').split():
+            self.item = attrs.get('data-fm-goal-item')
+
+
 src,out,now,pg,ps=sys.argv[1:6]
 s=open(src).read(); gate=json.load(open(pg))['components']; states={c['id']:c['state'] for c in json.load(open(ps))['components']}
 E=lambda t: html.escape(t,quote=False)
@@ -53,7 +67,14 @@ for m in re.finditer(r'<g data-id="([^"]+)"[^>]*>(.*?)</g>',w,re.S):
     strip='<span style="display:flex;gap:2px;margin:2px 0 0'+(';opacity:.6' if estm else '')+'">'+''.join('<i style="flex:1;height:3px;border-radius:1px;background:'+('#3fa36b' if f=='#3fa36b' else (f if f!='#353b47' else '#353b47'))+'"></i>' for f in fills)+'</span>'
     extra=gstrip(GMAP[d]) if d in GMAP else ''
     if estm: short=short+' ≈'
-    chip=('<div class="kb-card kb-mini" data-wbs="'+E(d)+'" tabindex="0" role="button" title="'+html.escape(full,quote=True)+'" style="border:1px solid '+c+';border-radius:6px;padding:2px 5px;margin:0 0 3px;background:#181b22;font-size:11.5px;min-width:0;overflow-wrap:anywhere;cursor:pointer">'+E(short)+strip+extra+'</div>')
+    slot = ''
+    if 'data-fm-goal-item' in g:
+        marker = GoalItemSlot()
+        marker.feed(g)
+        marker.close()
+        if marker.item:
+            slot = f'<br><span class="fm-goal-item-status" data-fm-goal-item="{html.escape(marker.item, quote=True)}"></span>'
+    chip=('<div class="kb-card kb-mini" data-wbs="'+E(d)+'" tabindex="0" role="button" title="'+html.escape(full,quote=True)+'" style="border:1px solid '+c+';border-radius:6px;padding:2px 5px;margin:0 0 3px;background:#181b22;font-size:11.5px;min-width:0;overflow-wrap:anywhere;cursor:pointer">'+E(short)+slot+strip+extra+'</div>')
     gen[col][band(d)].append(chip)
 def column(n):
     h,sub=heads[n]; ng=sum(len(v) for v in gen[n].values()); tot=len(cur.get(n,[]))+ng

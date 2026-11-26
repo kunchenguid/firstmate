@@ -206,17 +206,44 @@ pass "refresh-cockpit: COCKPIT_OUT leaves the installed page alone and is repeat
 GOAL_HOME="$TMP_ROOT/goals-home"
 mkdir -p "$GOAL_HOME/state" "$GOAL_HOME/data"
 goal() { env -i PATH="$PATH" HOME="$TMP_ROOT/home" FM_HOME="$GOAL_HOME" bash "$ROOT/bin/fm-goal.sh" "$@"; }
-printf 'item [id=check] [owner=main]: Demo step\n' > "$TMP_ROOT/items"
+printf '%s\n' \
+  'item [id=check] [owner=main]: Ready' \
+  'item [id=orphan] [owner=main]: No live task' \
+  'item [id=live] [owner=main] [task=demo-goal-task]: Live task' \
+  'item [id=dep] [owner=main] [after=live]: Unmet dependency' \
+  'item [id=hold] [owner=main]: Blocked' \
+  'item [id=wait] [owner=main]: Waiting' \
+  'item [id=landed] [owner=main]: Landed' \
+  'item [id=removed] [owner=main]: Dropped' \
+  'item [id=decision] [owner=captain] [class=captain]: Decision' > "$TMP_ROOT/items-alpha"
+printf 'item [id=check] [owner=main]: Paused goal step\n' > "$TMP_ROOT/items-beta"
 for id in alpha beta; do
   goal start "$id" --title "Doel $id" --done-when 'demo complete' --named-by 'do this' \
-    --plan plan.md --items-file "$TMP_ROOT/items" >/dev/null || fail "could not start $id"
+    --plan plan.md --items-file "$TMP_ROOT/items-$id" >/dev/null || fail "could not start $id"
 done
+printf 'kind=ship\n' > "$GOAL_HOME/state/demo-goal-task.meta"
+printf 'working [at=%s]: fixture live task\n' "$(date +%s)" > "$GOAL_HOME/state/demo-goal-task.status"
+mark_alpha() { goal mark alpha "$@" >/dev/null || fail "could not mark alpha/$1 $2"; }
+mark_alpha orphan running -- 'task missing'
+mark_alpha live running -- 'task live'
+mark_alpha hold blocked -- 'blocked'
+mark_alpha wait waiting -- 'waiting'
+mark_alpha landed 'done' -- 'landed via https://github.com/demo/repo/pull/1'
+mark_alpha removed dropped -- 'dropped'
 goal pause beta >/dev/null || fail 'could not pause beta'
 python3 - "$DATA/cockpit-2.html" <<'PY'
 from pathlib import Path
 import sys
 page = Path(sys.argv[1])
-page.write_text(page.read_text().replace('</body>', '''
+source = page.read_text()
+rich = source.index('</div>', source.index('class="kb-card" data-wbs="I2:DEMO"'))
+source = (source[:rich] + '<span class="fm-goal-item-status" data-fm-goal-item="alpha/check"></span>'
+          + source[rich:])
+for wbs_id, item in [('I2:DEMO', 'check'), ('I5:EXTRA', 'orphan')]:
+    end = source.index('</g>', source.index(f'<g data-id="{wbs_id}"'))
+    slot = f'<text x="4" y="25" class="fm-goal-item-status" data-fm-goal-item="alpha/{item}"></text>'
+    source = source[:end] + slot + source[end:]
+page.write_text(source.replace('</body>', '''
 <section><h2 id="doelen">Doelen</h2>
 <div id="doel-alpha"><details><summary>Alpha</summary>Alpha steps</details></div>
 <div id="doel-beta"><details><summary>Beta</summary>Beta steps</details></div>
@@ -241,10 +268,14 @@ class Switches(HTMLParser):
     def __init__(self):
         super().__init__()
         self.states, self.answers = {}, {}
-        self.key = None
+        self.labels, self.legend = [], {}
+        self.status = self.key = None
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
+        if 'data-fm-goal-status' in a and (tag == 'li' or a.get('class') == 'fm-goal-item-status'):
+            self.status = (tag, a.get('data-fm-goal-item'), a['data-fm-goal-status'])
+            self.text = []
         if tag == 'div' and a.get('id') in ('doel-alpha', 'doel-beta'):
             self.states[a['id']] = a['data-fm-goal-drive']
         if tag == 'form':
@@ -254,7 +285,18 @@ class Switches(HTMLParser):
         if tag == 'input' and a.get('name') == 'a' and self.key and self.key.startswith('goal.drive.'):
             self.answers[self.key] = a['value']
 
+    def handle_data(self, data):
+        if self.status:
+            self.text.append(data)
+
     def handle_endtag(self, tag):
+        if self.status and self.status[0] == tag:
+            _, item, state = self.status
+            if tag == 'li':
+                self.legend[state] = ''.join(self.text)
+            else:
+                self.labels.append((tag, item, state, ''.join(self.text)))
+            self.status = None
         if tag == 'form':
             self.key = None
 
@@ -262,6 +304,15 @@ switches = Switches()
 switches.feed(page)
 assert switches.states == {'doel-alpha': 'on', 'doel-beta': 'off'}
 assert set(switches.answers.values()) == {'pause alpha', 'resume beta'}
+assert switches.legend == {
+    'done': 'Klaar 1', 'running': 'Bezig 1', 'startable': 'Kan starten 2',
+    'waiting': 'Wacht 4', 'open-captain': 'Aan jou 1', 'dropped': 'Vervallen 1',
+}, switches.legend
+assert sorted(switches.labels) == [
+    (tag, f'alpha/{item}', 'startable', 'Kan starten')
+    for tag in ('span', 'text') for item in ('check', 'orphan')
+], switches.labels
+assert '<strong>10</strong> taken' in page and 'conic-gradient(' in page
 # Lavish TOON preserves quoted context JSON with backslash escapes, not doubled quotes.
 with open(sys.argv[2], 'w') as result:
     result.write('session:\n  file: /cockpit.html\n  status: feedback\nprompts[2]{tag,text,prompt}:\n')
@@ -275,10 +326,13 @@ python3 -I "$TOOLS/goal_drive.py" --goal-home "$GOAL_HOME" --page "$preview" || 
 cmp -s "$preview" "$TMP_ROOT/goals-before.html" || fail 'rebuild duplicated or changed goal controls'
 goal apply-drive-answer "$TMP_ROOT/toggles.result" >/dev/null || fail 'apply rejected cockpit answer capture'
 goal export | jq -e '([.goals[] | select(.driven) | .id] == ["beta"])' >/dev/null || fail 'both keyed answers were not applied'
-pass 'cockpit goal switches: grey off card, 1-of-2 KPI, stable rebuild and both keyed answers applied'
+pass 'cockpit goal status: six legend counts and shared WBS/rich/mini labels from export, stable rebuild'
+pass 'cockpit goal switches: grey off card, 1-of-2 KPI and both keyed answers applied'
 
 # ---- a page can show just one goal from the shared home ----
-printf '%s\n' '<h2 id="doelen">Doelen</h2><div id="doel-alpha">Alpha steps</div>' > "$preview"
+printf '%s\n' '<h2 id="doelen">Doelen</h2><div id="doel-alpha">Alpha steps</div>' \
+  '<span class="fm-goal-item-status" data-fm-goal-item="alpha/check"></span>' \
+  '<span class="fm-goal-item-status" data-fm-goal-item="beta/check"></span>' > "$preview"
 python3 -I "$TOOLS/goal_drive.py" --goal-home "$GOAL_HOME" --page "$preview" --goal-id alpha || fail 'filtered goal-drive refresh failed'
 grep -Fq 'id="doel-alpha" data-fm-goal-drive="off"' "$preview" || fail 'allowed card was not patched'
 grep -Fq 'value="resume alpha"' "$preview" || fail 'allowed goal switch was not rendered'
@@ -286,7 +340,15 @@ if grep -Eq 'value="(pause|resume) beta"' "$preview"; then
   fail 'excluded goal switch was rendered'
 fi
 grep -Fq '0 van 1 doelen actief gedreven' "$preview" || fail 'drive KPI included the excluded goal'
-pass 'cockpit goal allowlist: one patched card and 0-of-1 KPI with no card for the excluded goal'
+grep -Fq '<strong>9</strong> taken' "$preview" || fail 'item KPI included the excluded goal'
+grep -Fq 'data-fm-goal-item="alpha/check" data-fm-goal-status="waiting"' "$preview" || fail 'paused item still startable'
+grep -Fq 'data-fm-goal-item="beta/check"></span>' "$preview" || fail 'excluded item label was rendered'
+pass 'cockpit goal allowlist: excluded goal affects neither KPI nor item labels'
+python3 -I "$TOOLS/goal_drive.py" --goal-home "$GOAL_HOME" --page "$preview" --goal-id unknown || fail 'empty selection refresh failed'
+grep -Fq '<strong>0</strong> taken' "$preview" || fail 'item KPI did not render zero'
+grep -Fq 'data-fm-goal-item="alpha/check"></span>' "$preview" || fail 'stale item label survived new filter'
+if grep -Fq 'conic-gradient(' "$preview"; then fail 'empty ring has a segment'; fi
+pass 'cockpit empty goal selection: zero total, neutral ring, no stale labels'
 
 # ---- paths come from the environment: no MIKO_WORKTREE is a clear failure, not a stray path ----
 if env -i PATH="$FAKEBIN:$PATH" HOME="$TMP_ROOT/home" TMPDIR="$SCRATCH" FM_HOME="$FM_FIX" COCKPIT_DATA_DIR="$DATA" \
