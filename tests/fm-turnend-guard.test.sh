@@ -1283,10 +1283,8 @@ EOF
   pass ".pi primary extension: delivery failure resets the logical-run latch"
 }
 
-# A Pi command started from inside the live session, such as the `pi --help`
-# capability probe, auto-loads this extension too and passes the ancestor walk
-# in lockOwnership. Its pid dies at once, so the marker must stay on the live
-# session above it, while a dead or foreign marker pid is still replaced.
+# Marker-preservation rationale: markerNamesLiveAncestor in
+# .pi/extensions/fm-primary-turnend-guard.ts.
 test_pi_extension_keeps_marker_of_live_ancestor_session() {
   local repo home ext marker_case out status
   repo="$TMP_ROOT/pi-marker-guard-root"
@@ -1306,9 +1304,10 @@ import { pathToFileURL } from "node:url";
 
 const marker = `${process.env.FM_HOME}/state/.pi-turnend-extension-loaded`;
 const version = `sha256:${createHash("sha256").update(readFileSync(process.env.PLUGIN)).digest("hex")}`;
-// The lock names the parent of this process: a live strict ancestor, exactly where
-// the real session sits above a nested `pi --help`.
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.ppid}\n`);
+// A nested probe is a separate process below the live lock owner. The other
+// cases are the owning Pi engine itself, whose identity is its exact pid.
+const lockHolder = process.env.MARKER_CASE === "nested" ? process.ppid : process.pid;
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${lockHolder}\n`);
 
 const handlers = new Map();
 const pi = {

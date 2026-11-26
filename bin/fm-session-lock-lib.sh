@@ -7,10 +7,10 @@
 # state/.lock-session sidecar; bin/fm-claude-stop-autoarm.sh uses it to prove a
 # Stop hook fires inside the lock-owning primary session before it may arm or
 # rewake. Two signals decide ownership, either one sufficient: the recorded pid
-# is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
-# signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# belongs to the canonical harness ownership set resolved from this process's
+# ancestry, or the trusted Claude session id below matches the id recorded beside
+# a live lock. Neither signal ever fails open: no id, no sidecar, an untrusted id,
+# or a different recorded id leaves the resolved-pid verdict exactly as it was.
 # A second decision is owned here too: fm_session_lock_pid_blocks_reclaim
 # answers whether a recorded owner may be reclaimed, so recovery callers
 # delegate that question instead of re-deriving liveness from the fields.
@@ -140,6 +140,59 @@ fm_harness_process_matches() {  # <comm> <args>
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   fm_omp_process_matches "$comm" "$args" && return 0
   return 1
+}
+
+# Pi's native transport is a `codex [-c key=value ...] app-server --stdio`
+# child of the Pi engine, either directly (the ChatGPT.app binary, or an
+# explicit PI_CODEX_NATIVE_BIN) or through exactly one hop of the installed npm
+# launcher: `node .../@openai/codex/bin/codex.js <same command>`, which spawns
+# the vendor binary and stays its parent. Only those two concrete shapes resolve
+# to the Pi parent; an interactive/exec Codex session, any other node process, a
+# wrapper, or a gap remains its own session. The evidence is executable
+# basenames, the launcher's symlink-resolved script path, and the exact command,
+# never a prompt substring or an inherited environment marker. Parents are read
+# from the kernel each time, so replacing the transport child does not replace
+# the session identity.
+fm_pi_native_transport_args() {  # <args> <program-words>
+  local -a words
+  read -r -a words <<< "$1"
+  words=("${words[@]:$2}")
+  while [ "${words[0]:-}" = -c ]; do
+    [ "${#words[@]}" -ge 2 ] || return 1
+    case "${words[1]}" in *=*) ;; *) return 1 ;; esac
+    words=("${words[@]:2}")
+  done
+  [ "${#words[@]}" -eq 2 ] && [ "${words[0]}" = app-server ] && [ "${words[1]}" = --stdio ]
+}
+
+fm_pi_native_npm_launcher() {  # <args>
+  local -a words
+  local script
+  read -r -a words <<< "$1"
+  [ "${#words[@]}" -ge 2 ] || return 1
+  script=$(fm_cursor_canonical_path "${words[1]}") || return 1
+  case "$script" in */@openai/codex/bin/codex.js) ;; *) return 1 ;; esac
+  fm_pi_native_transport_args "$1" 2
+}
+
+fm_pi_native_owner_pid() {  # <pid> <comm> <args>
+  local pid=$1 comm=$2 args=$3 parent
+  [ "$(basename -- "$comm")" = codex ] || return 1
+  fm_pi_native_transport_args "$args" 1 || return 1
+  fm_proc_info "$pid" || return 1
+  parent=$FM_PROC_PPID
+  case "$parent" in ''|1|*[!0-9]*) return 1 ;; esac
+  fm_proc_info "$parent" || return 1
+  if [ "$(basename -- "$FM_PROC_COMM")" = node ]; then
+    fm_pi_native_npm_launcher "$FM_PROC_ARGS" || return 1
+    parent=$FM_PROC_PPID
+    case "$parent" in ''|1|*[!0-9]*) return 1 ;; esac
+    fm_proc_info "$parent" || return 1
+  fi
+  case "$(basename -- "$FM_PROC_COMM")" in
+    pi|pi-signed) printf '%s\n' "$parent" ;;
+    *) return 1 ;;
+  esac
 }
 
 # --- Windows process-boundary bridge -----------------------------------------
@@ -563,7 +616,7 @@ fm_proc_info() {  # <pid>
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
-# contiguous verified-harness ancestry, innermost pid first.
+# canonical verified-harness ownership pid set, innermost pid first.
 #
 # The walk climbs freely until the first harness match, because the caller is
 # normally an ordinary shell several levels below its session. After that first
@@ -571,8 +624,9 @@ fm_proc_info() {  # <pid>
 # into an unrelated harness further up the real process tree - for example the
 # live session that launched a test as its own subprocess.
 #
-# For every harness except Claude the innermost match is the session, which is
-# where e.g. Pi's shared signed-wrapper ancestry actually holds the lock: a
+# Except for the Pi/native bridge above, which applies only to the first match,
+# and Claude below, the innermost match is the session. Pi's shared
+# signed-wrapper ancestry holds the lock at the inner engine: a
 # "pi-signed" launcher can be the direct parent of the inner "pi" engine pid that
 # owns the lock, and the wrapper pid above it is not that owner. Claude Code
 # instead runs hooks several levels below the session inside its own nested
@@ -581,10 +635,14 @@ fm_proc_info() {  # <pid>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ extending=0 printed=0
+  local pid=$$ native_owner extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     fm_proc_info "$pid" || break
     if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+      if [ "$printed" -eq 0 ] && native_owner=$(fm_pi_native_owner_pid "$pid" "$FM_PROC_COMM" "$FM_PROC_ARGS"); then
+        printf '%s\n' "$native_owner"
+        return 0
+      fi
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -611,11 +669,12 @@ fm_harness_ancestry_pids() {
   [ "$printed" -eq 1 ]
 }
 
-# Print the outermost pid of this session's contiguous harness run for callers
-# that need that ancestry identity. This is not necessarily the pid written to
-# the session lock: fm_session_lock_anchor_pid owns that choice and uses a
-# trusted Claude session's model-loop pid instead. Every non-Claude harness
-# reports a single pid, so this remains its innermost match unchanged.
+# Print the outermost pid of this session's canonical harness ownership set for
+# callers that need that ancestry-derived identity. This is not necessarily the
+# pid written to the session lock: fm_session_lock_anchor_pid owns that choice
+# and uses a trusted Claude session's model-loop pid instead. Every non-Claude
+# harness reports a single pid - its innermost match, or the Pi engine the native
+# bridge above resolves to - so this is that pid unchanged.
 fm_harness_ancestry_pid() {
   local pids
   pids=$(fm_harness_ancestry_pids) || return 1
@@ -849,8 +908,8 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # session, so "recorded pid dead" keeps meaning "session gone" instead of
 # wedging a home behind a live daemon whose session died. A replaced background
 # helper leaves a dead pid that its own session's next hook reclaims, because
-# the sidecar still names that session. Every other session records the
-# outermost pid of its contiguous run, exactly as before; a trusted Windows
+# the sidecar still names that session. Every other session records the outermost
+# pid of its canonical harness ownership set; a trusted Windows
 # session's run is its tagged CLAUDE_PID alone, so it records that tagged pid.
 fm_session_lock_anchor_pid() {
   local pids
@@ -864,17 +923,19 @@ fm_session_lock_anchor_pid() {
 }
 
 # True when state dir $1 holds a session lock that this process's session owns:
-# the recorded pid is ANY harness ancestor of the current process, or the lock
-# was recorded by this same trusted Claude session and its recorded pid is still
-# a live harness. Membership is the honest ancestry test, because the lock owner
-# sits at an unknown depth in a contiguous Claude run - it is the outermost pid
-# when the hook fires inside the session's own nested worker chain, and an inner
-# pid when a harness-named daemon parents the session. The same-session path
-# requires the recorded pid alive so that a dead one is reclaimed through
-# bin/fm-lock.sh's ordinary stale-owner path, which refreshes line 1, rather than
-# silently owned with a dead anchor. A missing lock, a malformed lock, a lock
-# held by a harness outside this ancestry under another (or no) session id, or
-# an ancestry that cannot be resolved all fail closed.
+# the recorded pid belongs to the canonical harness ownership set resolved from
+# the current process ancestry, or the lock was recorded by this same trusted
+# Claude session and its recorded pid is still a live harness. The Pi/native
+# bridge deliberately returns only the Pi engine, never the transport or npm
+# launcher. Membership remains the honest test for a contiguous Claude run,
+# where the owner may be the outermost pid when the hook fires inside the
+# session's own nested worker chain or an inner pid when a harness-named daemon
+# parents the session. The same-session path requires the recorded pid alive so
+# that a dead one is reclaimed through bin/fm-lock.sh's ordinary stale-owner
+# path, which refreshes line 1, rather than silently owned with a dead anchor. A
+# missing lock, a malformed lock, a lock held by a harness outside this ownership
+# set under another (or no) session id, or ancestry that cannot be resolved all
+# fail closed.
 fm_session_lock_owned_by_self() {
   local state=$1 lock_pid pids
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
@@ -885,8 +946,8 @@ fm_session_lock_owned_by_self() {
   fm_harness_pid_alive "$lock_pid"
 }
 
-# True when state dir $1 records a lock owner outside this process's contiguous
-# harness ancestry that this session must not reclaim and did not record under
+# True when state dir $1 records a lock owner outside this process's canonical
+# harness ownership set that this session must not reclaim and did not record under
 # its own trusted Claude session id - a live verified harness, or a live owner
 # whose identity cannot be read. Sets FM_SESSION_LOCK_FOREIGN_OWNER_PID for a
 # diagnostic caller.
