@@ -309,7 +309,7 @@ STEP='
           + (if $opt_any then {suspect:[$failmode.first_seen[] | {head:$head,name:.}]} else {} end)
           + (if $opt_stale then {stale_review:(($p.stale_review // []) + if $stale_new then [$head] else [] end)} else {} end)
           + (if $opt_green then {approved_green:(($p.approved_green // []) + if $green_new then [$head] else [] end)} else {} end)
-          + (if $opt_final then {open_seen:true} elif $p.open_seen != null then {open_seen:$p.open_seen} else {} end)),
+          + (if $opt_final then {open_seen:true} else {} end)),
          retry:(($failmode.first_seen | length) > 0),
          lines:([
            (select($author_new)

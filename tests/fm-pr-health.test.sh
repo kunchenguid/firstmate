@@ -1214,12 +1214,32 @@ test_final_report_only_names_PRs_seen_open_with_the_flag_on() {
   pass 'only a PR seen open with the flag on is named when it becomes final'
 }
 
+test_final_report_forgets_open_seen_when_the_flag_is_removed() {
+  local home
+  home=$(new_home final-flag-toggle)
+  opt "$home" pr-health-final
+  task "$home" tog1 pr=https://github.com/o/r/pull/9
+  pr "$home" 9 "$HEAD_A" "$BASE_1" true false
+  arm "$home"
+  expect_silent "$home" 'an open PR must stay silent'
+  rm "$home/config/pr-health-final"
+  expect_silent "$home" 'an open PR must stay silent with the flag off'
+  set_pr "$home" 9 '.state = "merged" | .merged_by = "merger"'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail 'could not record the merge'
+  opt "$home" pr-health-final
+  expect_silent "$home" 'a merge recorded while the flag was off must not print'
+  [ "$(jq '.prs["https://github.com/o/r/pull/9"].final' "$home/state/pr-health.json")" = true ] \
+    || fail 'the PR was not marked final'
+  pass 'open_seen does not survive a read with the flag off'
+}
+
 failures=0
 for test_name in test_any_failure_off_still_reports_only_required_checks \
   test_any_failure_confirms_on_the_next_pass test_any_failure_clears_when_the_check_passes \
   test_approved_green_off_is_silent test_approved_green_reports_once_per_commit \
   test_stale_review_off_stays_an_author_action test_stale_review_waits_on_the_reviewer \
   test_final_report_names_the_account_once test_final_report_only_names_PRs_seen_open_with_the_flag_on \
+  test_final_report_forgets_open_seen_when_the_flag_is_removed \
   test_maintainer_author_and_approval_states_are_distinct \
   test_pending_reviewer_without_review_decision_is_recorded test_more_than_a_page_of_review_requests_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
   test_failed_event_read_is_retried test_busy_feed_still_reads_only_events test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
