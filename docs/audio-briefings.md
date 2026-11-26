@@ -15,7 +15,7 @@ One engine is the design: choosing a different one is deliberately out of scope,
 
 The engine needs `python3` 3.10 to 3.13 with its `venv` module (the Kokoro python package refuses newer interpreters, and Debian or Ubuntu users also need the `python3-venv` package), `ffmpeg`, and `ffprobe` on `PATH`, plus `curl` for the one-time downloads.
 `ffmpeg` and `ffprobe` ship together, and any platform build works: `brew install ffmpeg`, `apt install ffmpeg`, or `nix shell nixpkgs#ffmpeg`.
-A render never needs `curl`: only `--setup` does.
+A render never needs `curl`: only a `--setup` that has to download something does, and it names `curl` and how to install it when it is missing.
 Plan for about 530 MB of disk for the cache.
 
 It runs on macOS and Linux.
@@ -38,7 +38,7 @@ When no C++ runtime is found on Linux, `--setup` says so and a render stops with
 On macOS onnxruntime links the platform C++ runtime, so `--setup` reports the runtime as not needed there and a render asks for nothing extra.
 
 Every missing piece is reported with the command that installs it rather than failing part-way through a render, and a Kokoro cache this build cannot use - files missing, or a venv whose packages will not import - is reported as one line naming `bin/fm-speak.sh --setup`, never as a Python traceback.
-A venv whose packages are installed but cannot import because the located C++ runtime will not load, or is older than onnxruntime needs, is a different failure: it is reported as that runtime cause, naming the located `libstdc++` and `LD_LIBRARY_PATH`, and `--setup` leaves the venv in place instead of reinstalling it.
+A venv whose packages are installed but cannot import on Linux is a different failure: it is reported as a C++ runtime cause, naming the located `libstdc++` or saying that none was found, plus `LD_LIBRARY_PATH`, and `--setup` leaves the venv in place instead of reinstalling it.
 
 ## Caches
 

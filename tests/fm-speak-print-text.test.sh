@@ -366,6 +366,68 @@ SH
   pass "cache: an unusable C++ runtime is reported as the cause, not as missing packages"
 }
 
+# docs/audio-briefings.md: a missing prerequisite is reported with how to install
+# it. A host without curl must get that line, not a shell `command not found`
+# followed by a failed download, and nothing may be written to the cache first.
+test_setup_reports_missing_curl_before_downloading() {
+  local root fakebin kokoro out rc
+  root=$TMP_ROOT/setup-no-curl
+  kokoro=$root/kokoro
+  fakebin=$(fm_fakebin "$root")
+  printf '%s\n' '#!/bin/sh' 'printf "%s\\n" Darwin' > "$fakebin/uname"
+  chmod +x "$fakebin/uname"
+  ln -s "$(command -v mkdir)" "$fakebin/mkdir"
+  mkdir -p "$kokoro/venv/bin"
+  printf '%s\n' '#!/bin/sh' 'exit 0' > "$kokoro/venv/bin/python"
+  chmod +x "$kokoro/venv/bin/python"
+
+  out=$(PATH="$fakebin" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    "$BASH" "$SPEAK" --setup 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "--setup must fail when curl is missing and a download is needed"
+  assert_contains "$out" "curl is needed to download" \
+    "a missing curl must be reported as the missing tool"
+  assert_contains "$out" "install it with your package manager" \
+    "the missing-curl line must say how to install it"
+  assert_not_contains "$out" "command not found" \
+    "setup must not let the shell report the missing curl"
+  assert_not_contains "$out" "could not download" \
+    "a missing curl must not be reported as a failed download"
+  [ ! -e "$kokoro/kokoro-v1.0.onnx" ] ||
+    fail "setup downloaded the model after reporting the missing curl"
+  [ ! -e "$kokoro/voices-v1.0.bin" ] ||
+    fail "setup downloaded the voices after reporting the missing curl"
+  pass "setup: a missing curl is named with its install line before any download"
+}
+
+# docs/audio-briefings.md: the C++ runtime is a Linux cause. Off Linux a venv
+# that cannot import its packages is rebuilt, never blamed on a runtime the
+# platform does not use.
+test_setup_repairs_an_unimportable_venv_off_linux() {
+  local root fakebin kokoro out
+  root=$TMP_ROOT/setup-repair-darwin
+  kokoro=$root/kokoro
+  fakebin=$(fm_fakebin "$root")
+  mkdir -p "$kokoro/venv/bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$kokoro/venv/bin/python"
+  chmod +x "$kokoro/venv/bin/python"
+  printf '%s' model > "$kokoro/kokoro-v1.0.onnx"
+  printf '%s' voices > "$kokoro/voices-v1.0.bin"
+  fake_darwin "$fakebin"
+  fake_venv_builder "$fakebin"
+  fake_curl "$fakebin"
+
+  out=$(PATH="$fakebin:$PATH" HOME="$HOME_DIR" FM_TTS_KOKORO_DIR="$kokoro" \
+    "$SPEAK" --setup 2>&1) || fail "--setup did not repair the venv on macOS: $out"
+  assert_contains "$out" "venv: repairing" \
+    "an unimportable venv off Linux must be rebuilt"
+  assert_not_contains "$out" "C++ runtime" \
+    "a macOS venv must not be blamed on a C++ runtime the platform does not use"
+  "$kokoro/venv/bin/python" -c 'import kokoro_onnx, soundfile' ||
+    fail "the rebuilt venv still cannot import kokoro_onnx and soundfile"
+  pass "setup: an unimportable venv off Linux is rebuilt, not blamed on a runtime"
+}
+
 # docs/audio-briefings.md: the index records every rendered file, written as
 # soon as that file is encoded, so a later failure leaves no part unrecorded.
 test_failed_later_part_still_leaves_earlier_parts_indexed() {
@@ -530,6 +592,8 @@ fm_test_run \
   test_render_reports_the_mp3_size_and_indexes_it \
   test_setup_on_macos_does_not_require_libstdcxx \
   test_unusable_cpp_runtime_is_reported_as_the_cause \
+  test_setup_reports_missing_curl_before_downloading \
+  test_setup_repairs_an_unimportable_venv_off_linux \
   test_failed_later_part_still_leaves_earlier_parts_indexed \
   test_setup_repairs_a_venv_that_cannot_import \
   test_setup_leaves_no_cache_file_after_a_failed_download \

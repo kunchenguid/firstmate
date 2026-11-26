@@ -198,21 +198,27 @@ kokoro_python() {
 # One validity test for the venv, shared by --setup (what to repair) and the
 # render preflight (what to refuse). 0 means usable; 1 means the packages are
 # missing or broken, which reinstalling them repairs; 2 means they are installed
-# but the located C++ runtime cannot be loaded by them, which no reinstall fixes.
+# but will not import on Linux, where the C++ runtime is the remaining cause and
+# no reinstall can change it.
 kokoro_venv_state() {
   [ -x "$KOKORO_VENV/bin/python" ] || return 1
   kokoro_python -c 'import kokoro_onnx, soundfile' >/dev/null 2>&1 && return 0
-  [ -n "$libstdcpp_dir" ] || return 1
+  [ "$HOST_OS" = Linux ] || return 1
   kokoro_python -c 'import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ("kokoro_onnx", "soundfile")) else 1)' \
     >/dev/null 2>&1 || return 1
   return 2
 }
 
-# The failure text for state 2, naming the runtime that was found rather than
-# blaming the packages.
+# The failure text for state 2, naming the runtime that was found, or the lookup
+# that found none, rather than blaming the packages.
 kokoro_runtime_hint() {
-  printf 'the python packages in %s are installed, but the C++ runtime at %s cannot be loaded or is too old for onnxruntime; install a newer C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH' \
-    "$KOKORO_VENV" "$libstdcpp_dir"
+  if [ -n "$libstdcpp_dir" ]; then
+    printf 'the python packages in %s are installed, but the C++ runtime at %s cannot be loaded or is too old for onnxruntime; install a newer C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH' \
+      "$KOKORO_VENV" "$libstdcpp_dir"
+  else
+    printf 'the python packages in %s are installed, but no C++ runtime was found for them; install a C++ runtime (for example nix build nixpkgs#gcc.cc.lib on NixOS) or set LD_LIBRARY_PATH' \
+      "$KOKORO_VENV"
+  fi
 }
 
 # A download reaches the cache only after it completes, so an interrupted or
@@ -272,6 +278,11 @@ KOKORO_PY
 # Build or repair the Kokoro cache. Idempotent; every step is skipped when its
 # output is already there, so a re-run costs nothing.
 cmd_setup() {
+  if [ ! -s "$KOKORO_MODEL" ] || [ ! -s "$KOKORO_VOICES" ]; then
+    command -v curl >/dev/null 2>&1 ||
+      die "curl is needed to download the Kokoro model and voice pack and is not on PATH (install it with your package manager, for example apt install curl or brew install curl)"
+  fi
+
   printf 'kokoro cache: %s\n' "$KOKORO_DIR"
   mkdir -p "$KOKORO_DIR" || die "cannot create the Kokoro cache directory: $KOKORO_DIR"
 
