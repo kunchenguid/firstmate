@@ -234,7 +234,7 @@ STEP='
        else (((($g.timelineItems.nodes // [{}])[0] // {}) | .actor.login) // "") end
        | if . == "" then "an unknown account" else @json end) as $actor
       | {fp:($p + {final:true}),
-         lines:(if $opt_final then
+         lines:(if $opt_final and ($p.open_seen // false) then
            ["pr-health: \($url) \(if $r.merged_at != null then "merged" else "closed" end) by \($actor) (task \($owners))"]
          else [] end)}
     elif $g == null or $g.headRefOid != $r.head.sha
@@ -308,7 +308,8 @@ STEP='
              author_action:(($p.author_action // []) + if $author_new then [$head] else [] end)}
           + (if $opt_any then {suspect:[$failmode.first_seen[] | {head:$head,name:.}]} else {} end)
           + (if $opt_stale then {stale_review:(($p.stale_review // []) + if $stale_new then [$head] else [] end)} else {} end)
-          + (if $opt_green then {approved_green:(($p.approved_green // []) + if $green_new then [$head] else [] end)} else {} end)),
+          + (if $opt_green then {approved_green:(($p.approved_green // []) + if $green_new then [$head] else [] end)} else {} end)
+          + (if $opt_final then {open_seen:true} elif $p.open_seen != null then {open_seen:$p.open_seen} else {} end)),
          retry:(($failmode.first_seen | length) > 0),
          lines:([
            (select($author_new)
@@ -530,12 +531,10 @@ poll() {
     | .branches |= with_entries(select(.key | IN($ids[])))' "$TMP/health.json" > "$TMP/next.json"
   save_health "$TMP/next.json"
   cp "$TMP/next.json" "$TMP/health.json"
-  # With config/pr-health-final, a PR the contribution record already calls final
-  # and the monitor never tracked is marked final silently; one the monitor
-  # tracked is read once, so the account can be named. health.final stops the next read.
   if [ "${FM_PR_HEALTH_FINAL:-}" = 1 ]; then
     jq --slurpfile owned "$TMP/owned.json" '
-      reduce ($owned[0][] | select(.final) | .url) as $u (.; if .prs[$u] == null then .prs[$u] = {final:true} else . end)'       "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
+      reduce ($owned[0][] | select(.final) | .url) as $u (.; if (.prs[$u].open_seen // false) then . else .prs[$u] = ((.prs[$u] // {}) + {final:true}) end)' \
+      "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
   fi
   jq -r --slurpfile health "$TMP/health.json" '
     .[] | select(($health[0].prs[.url].final // false) | not)

@@ -861,8 +861,8 @@ No reported check, a check that is still running, maintainer-gated CI, or a list
 The report does not merge, park, or land the PR.
 An empty `config/pr-health-final` reports a merged or closed PR once and names the account in quotes.
 It then never reads that PR again.
-A PR the contribution record already calls final, which the monitor never tracked, is marked final without a report when the monitor first sees the file.
-Only a PR the monitor tracked, and that later becomes merged or closed, prints the line.
+The line prints only for a PR the monitor read while it was open and `config/pr-health-final` was present.
+A PR that became merged or closed before that, or that the monitor first read already merged or closed, is marked final without a report.
 An empty `config/pr-health-stale-review` reports `CHANGES_REQUESTED` as waiting on the reviewer when every change-requesting review's commit is not the latest commit.
 The commit is `review.commit.oid`.
 Timestamps are not used.

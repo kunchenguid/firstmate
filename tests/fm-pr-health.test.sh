@@ -1143,9 +1143,10 @@ test_final_report_names_the_account_once() {
   home=$(new_home final-on)
   opt "$home" pr-health-final
   task "$home" done1 pr=https://github.com/o/r/pull/85
-  pr "$home" 85 "$HEAD_A" "$BASE_1" false false
-  set_pr "$home" 85 '.state = "merged" | .merged_by = "merger"'
+  pr "$home" 85 "$HEAD_A" "$BASE_1" true false
   arm "$home"
+  expect_silent "$home" 'an open PR must stay silent'
+  set_pr "$home" 85 '.state = "merged" | .merged_by = "merger"'
   expect_one "$home" '^pr-health: https://github.com/o/r/pull/85 merged by "merger" \(task done1\)$' \
     'a merge must name the account once'
   before=$(reads "$home" 85)
@@ -1154,7 +1155,8 @@ test_final_report_names_the_account_once() {
   [ "$(reads "$home" 85)" = "$before" ] || fail 'a merged PR was read again'
   [ "$(grep -Ec 'number=85([^0-9]|$)' "$home/forge/calls.log")" = "$gql" ] || fail 'a merged PR was read again through GraphQL'
   task "$home" done2 pr=https://github.com/o/r/pull/86
-  pr "$home" 86 "$HEAD_A" "$BASE_1" false false
+  pr "$home" 86 "$HEAD_A" "$BASE_1" true false
+  expect_silent "$home" 'a second open PR must stay silent'
   set_pr "$home" 86 '.state = "closed" | .closed_by = "closer"'
   expect_one "$home" '^pr-health: https://github.com/o/r/pull/86 closed by "closer" \(task done2\)$' \
     'a close must name the account'
@@ -1162,7 +1164,8 @@ test_final_report_names_the_account_once() {
   expect_silent "$home" 'a reported close must stay silent'
   [ "$(reads "$home" 86)" = "$before" ] || fail 'a closed PR was read again'
   task "$home" done3 pr=https://github.com/o/r/pull/87
-  pr "$home" 87 "$HEAD_A" "$BASE_1" false false
+  pr "$home" 87 "$HEAD_A" "$BASE_1" true false
+  expect_silent "$home" 'a third open PR must stay silent'
   set_pr "$home" 87 '.state = "merged"'
   expect_one "$home" 'pull/87 merged by an unknown account' \
     'a merge with no account must say so without quoting a forged name'
@@ -1172,33 +1175,43 @@ test_final_report_names_the_account_once() {
   pass 'a merged or closed PR is named once and then not read again'
 }
 
-test_final_report_baselines_PRs_already_final() {
+test_final_report_only_names_PRs_seen_open_with_the_flag_on() {
   local home n before
   home=$(new_home final-baseline)
   for n in 1 2 3; do
     task "$home" "old$n" "pr=https://github.com/o/r/pull/$n"
-    pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
+    pr "$home" "$n" "$HEAD_A" "$BASE_1" true false
+  done
+  arm "$home"
+  expect_silent "$home" 'open PRs before the flag must stay silent'
+  for n in 1 2 3; do
     set_pr "$home" "$n" '.state = "merged" | .merged_by = "merger"'
   done
   set_pr "$home" 3 '.state = "closed" | .closed_by = "closer"'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail 'could not make the PRs final'
   opt "$home" pr-health-final
-  arm "$home"
-  expect_silent "$home" 'PRs already final before the flag must not print'
-  [ "$(jq '[.prs[] | select(.final)] | length' "$home/state/pr-health.json")" = 3 ] || fail 'baseline PRs were not marked final'
+  task "$home" new4 pr=https://github.com/o/r/pull/4
+  pr "$home" 4 "$HEAD_A" "$BASE_1" true false
+  expect_silent "$home" 'PRs final before the flag must not print'
+  [ "$(jq '[.prs | to_entries[] | select(.key | test("pull/[123]$")) | select(.value.final)] | length' "$home/state/pr-health.json")" = 3 ] \
+    || fail 'baseline PRs were not marked final'
   before=$(reads "$home" 1)
   expect_silent "$home" 'a baselined PR must stay silent'
   [ "$(reads "$home" 1)" = "$before" ] || fail 'a baselined PR was read'
-  task "$home" new4 pr=https://github.com/o/r/pull/4
-  pr "$home" 4 "$HEAD_A" "$BASE_1" false false
-  expect_silent "$home" 'an open PR prints nothing'
+  task "$home" new5 pr=https://github.com/o/r/pull/5
+  pr "$home" 5 "$HEAD_A" "$BASE_1" true false
+  set_pr "$home" 5 '.state = "merged" | .merged_by = "late"'
+  expect_silent "$home" 'a PR first read already merged must stay silent'
+  [ "$(jq '.prs["https://github.com/o/r/pull/5"].final' "$home/state/pr-health.json")" = true ] \
+    || fail 'a PR first read merged was not marked final'
   set_pr "$home" 4 '.state = "merged" | .merged_by = "later"'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll || fail 'could not record the merge'
   expect_one "$home" '^pr-health: https://github.com/o/r/pull/4 merged by "later" \(task new4\)$' \
-    'a PR seen open then merged names the account once'
+    'a PR seen open with the flag on names the account once, though the contribution record is final'
   before=$(reads "$home" 4)
   expect_silent "$home" 'a reported merge must stay silent'
   [ "$(reads "$home" 4)" = "$before" ] || fail 'a merged PR was read again'
-  pass 'PRs already final when the flag is first seen are baselined silently'
+  pass 'only a PR seen open with the flag on is named when it becomes final'
 }
 
 failures=0
@@ -1206,7 +1219,7 @@ for test_name in test_any_failure_off_still_reports_only_required_checks \
   test_any_failure_confirms_on_the_next_pass test_any_failure_clears_when_the_check_passes \
   test_approved_green_off_is_silent test_approved_green_reports_once_per_commit \
   test_stale_review_off_stays_an_author_action test_stale_review_waits_on_the_reviewer \
-  test_final_report_names_the_account_once test_final_report_baselines_PRs_already_final \
+  test_final_report_names_the_account_once test_final_report_only_names_PRs_seen_open_with_the_flag_on \
   test_maintainer_author_and_approval_states_are_distinct \
   test_pending_reviewer_without_review_decision_is_recorded test_more_than_a_page_of_review_requests_is_recorded test_check_suites_beyond_the_first_page_are_read test_endless_check_suite_pages_stay_unsettled test_notifications_drive_reads_with_the_poll_as_fallback test_notifications_keep_events_at_the_saved_timestamp \
   test_failed_event_read_is_retried test_busy_feed_still_reads_only_events test_unknown_mergeability_is_reread_but_a_conflict_is_not test_interrupted_pass_keeps_events_pending test_full_notification_page_forces_a_sweep_and_advances \
