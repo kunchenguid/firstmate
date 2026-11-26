@@ -3,9 +3,11 @@
 #
 # The board is the captain-facing interactive surface of /bearings lavish: the
 # shipped template (.agents/skills/bearings/assets/board-template.html) plus one
-# injected fm-bearings-board.v1 JSON payload. This script owns the mechanics so
-# the invoking agent's per-run work stays "compose the JSON, run build" - the
-# agent never authors board UI at invocation time.
+# injected fm-bearings-board.v1 JSON payload. bin/fm-bearings-board-payload.sh
+# generates that payload from the fleet snapshot, so its shape is the same every
+# session, and this script owns the mechanics so the invoking agent's per-run
+# work stays "generate the JSON, run build" - the agent never authors board UI
+# at invocation time.
 #
 # Usage:
 #   fm-bearings-board.sh build <data.json>
@@ -57,6 +59,8 @@
 # THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
 # option, injected here so the guarantee does not depend on the composer's
 # memory, and the payload validator reserves that value across every card type.
+# A `link` card is the exception: it is link-only, names no held task, and
+# carries no options, so it gets no reconcile choice and no answer controls.
 # The validator's reservation scope must equal the adapter's reconcile
 # classification scope, which is all card types because the captured payload
 # carries no card type. Its meaning, and the reason it can never reach the
@@ -66,8 +70,8 @@
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
 # the fm-bearings-board.v1 types and item invariants below. Every fleet row and
-# Captain's Call item explicitly carries `repo`; the composer fills it from the
-# snapshot and task records wherever known, and uses null or an empty string
+# Captain's Call item explicitly carries `repo`; the payload generator fills it
+# from the snapshot and task records wherever known, and uses null or an empty string
 # only as the deliberate genuinely-no-repo marker. In that exceptional case
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
@@ -78,6 +82,17 @@
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
+#
+# CAPTAIN'S CALL SHOWS EVERYTHING WAITING ON THE CAPTAIN, including items
+# firstmate never held. Such an item is a `link` card: a title, a reason, and
+# the page to act on, with no options, no freeform answer, and no other answer
+# field, because its key names no held task and an answer could never apply.
+# A link card is dropped when a landed row carries the same PR URL.
+# Any card (decision, merge, credential, link) MAY carry `links`,
+# up to 8 `{url, label}` pointers to the page the captain acts on. A link url
+# must be https, like `pr_url`; every other scheme refuses. A card whose key is
+# not a captain-held task id is kept, because hygiene only drops a decision card
+# it can positively show is landed or no longer an open captain call.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
@@ -133,6 +148,19 @@ validate_payload() {  # <data.json>
       or (.[$name]
         | type == "string"
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def link_url:
+      type == "string"
+      and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
+    def optional_links:
+      (has("links") | not)
+      or (.links
+        | type == "array"
+          and length <= 8
+          and ([.[]
+            | type == "object"
+              and ((keys - ["url", "label"]) | length == 0)
+              and (.url | link_url)
+              and optional_string("label")] | all));
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
       (has("subject") | not)
@@ -144,11 +172,19 @@ validate_payload() {  # <data.json>
     def call_item:
       type == "object"
       and (.key | slug(128))
-      and (.type == "decision" or .type == "merge" or .type == "credential")
+      and (.type == "decision" or .type == "merge" or .type == "credential" or .type == "link")
       and repo_marker
       and (.title | nonempty_string)
       and (.options | type == "array")
-      and ((.options | length) > 0 or .allow_freeform == true)
+      and (if .type == "link"
+           then ((.options | length) == 0
+                 and ((has("allow_freeform") | not) or .allow_freeform == false)
+                 and (has("freeform_hint") | not)
+                 and (has("recommend_value") | not)
+                 and (has("close") | not)
+                 and (has("subject") | not)
+                 and (has("risk") | not))
+           else ((.options | length) > 0 or .allow_freeform == true) end)
       and ([.options[]
         | type == "object"
           and (.value | slug(128))
@@ -158,6 +194,7 @@ validate_payload() {  # <data.json>
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))
+      and optional_links
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
@@ -323,10 +360,13 @@ effective_payload() {  # <data.json> <dest.json>
   done < <(jq -r '.captains_call[]? | select(.type == "decision") | .key' "$data")
   tmp=$(printf '%s' "$drop" | jq -R -s 'split("\n") | map(select(length > 0))') || return 1
   jq --argjson dropped "$tmp" '
-    .captains_call = [
+    . as $payload
+    | .captains_call = [
       .captains_call[]
       | . as $card
       | select($card.type != "decision" or (($dropped | index($card.key)) == null))
+      | select($card.type != "link"
+               or ((($card.pr_url? != null) and ($payload.landed | any(.pr_url? == $card.pr_url))) | not))
       | if .type == "decision"
         then .options += [{
           value: "reconcile",
