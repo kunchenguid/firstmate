@@ -559,7 +559,7 @@ __FM_BEARINGS_BOARD_DATA__
   }
   /* Ask for more queues a plain prompt, never a `choice` row, so the answer
      intake never reads it: the card stays open and the deck does not advance. */
-  var askCount = 0;
+  var askLoad = Date.now().toString(36), askCount = 0;
   function askBox(item, asked) {
     var box = el("div", "bb-ask");
     box.hidden = true;
@@ -593,7 +593,7 @@ __FM_BEARINGS_BOARD_DATA__
       window.lavish.queuePrompt(
         "Ask for more - " + item.title + " (" + item.key + "): " + q,
         { tag: "ask-more", text: item.title + " -> asked: " + q, element: box,
-          queueKey: "ask-more." + item.key + "." + (++askCount),
+          queueKey: "ask-more." + item.key + "." + askLoad + "." + (++askCount),
           data: { schema: "fm-bearings-ask-more.v1", question: item.key, ask: q } }
       );
       field.value = "";

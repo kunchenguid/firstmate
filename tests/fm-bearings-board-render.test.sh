@@ -347,7 +347,7 @@ test_ask_for_more_queues_a_question_and_leaves_the_card_open() {
   printf '%s' "$out" | jq -e '
     .error == "" and (.prompts | length) == 1
     and (.prompts[0] | .tag == "ask-more"
-      and .queueKey == "ask-more.drafts-nav-call.1"
+      and (.queueKey | test("^ask-more\\.drafts-nav-call\\.[0-9a-z]+\\.1$"))
       and .data == {schema:"fm-bearings-ask-more.v1",question:"drafts-nav-call",ask:"show the risks as a table"}
       and (.prompt | contains("drafts-nav-call") and contains("show the risks as a table")))
     and (.cards[0] | (.queued | not) and .asked_shown and (.ask_open | not))
