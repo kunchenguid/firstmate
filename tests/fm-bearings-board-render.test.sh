@@ -93,8 +93,8 @@ require_listener_reached_poll() {  # <home>
 }
 
 # Build the board from <underway-json> plus <charted-json> and return what the
-# renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [calls-json]
+# renderer produced. A seventh argument submits decision forms: [{index,selection,note}].
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [calls-json] [submissions-json]
   local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
     --argjson more "$more" --argjson warning_more "$warning_more" --argjson calls "${6:-[]}" '{
@@ -107,7 +107,7 @@ render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charte
     LAVISH_AXI_STATE_DIR="$home/lavish-state" \
     "$BOARD" build "$data" >/dev/null || fail "the board did not build"
   require_listener_reached_poll "$home"
-  node "$HARNESS" "$home/.lavish/bearings-board.html" \
+  node "$HARNESS" "$home/.lavish/bearings-board.html" "${7:-}" \
     || fail "the built board could not be rendered"
 }
 
@@ -266,6 +266,31 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_queued_answers_keep_the_note_and_a_long_reconcile_note_is_refused() {
+  local home calls long ok out
+  home=$(make_home submit-caps)
+  calls='[{"key":"scope-call","type":"decision","repo":"sample","title":"Rollout scope","decide":"Pick one","allow_freeform":true,
+    "options":[{"value":"a","label":"Retain"},{"value":"b","label":"Defer"}]}]'
+  long=$(printf 'n%.0s' $(seq 1 1000))
+  ok=$(printf 'k%.0s' $(seq 1 512))
+  out=$(render_board "$home" '[]' '[]' 0 0 "$calls" "$(jq -n --arg long "$long" --arg ok "$ok" '[
+    {index:0, selection:"a", note:$long},
+    {index:0, selection:"reconcile", note:$long},
+    {index:0, selection:"reconcile", note:$ok},
+    {index:0, selection:"reconcile", note:""}]')")
+  printf '%s' "$out" | jq -e --arg long "$long" --arg ok "$ok" '
+    .error == ""
+      and (.submits[0].queued | length) == 1
+      and .submits[0].queued[0].data.note == $long and .submits[0].queued[0].data.selection == "a"
+      and (.submits[1].queued | length) == 0
+      and .submits[1].alert_visible == true
+      and (.submits[1].alert | test("512"))
+      and (.submits[2].queued | length) == 1 and .submits[2].queued[0].data.note == $ok
+      and (.submits[3].queued | length) == 1 and .submits[3].queued[0].data.selection == "reconcile"
+  ' >/dev/null || fail "a long reconcile note was queued, or a long ordinary note was refused: $(printf '%s' "$out" | cut -c1-600)"
+  pass "a long ordinary note queues whole while a reconcile note over 512 characters is refused with an alert"
+}
+
 test_full_snapshot_question_reaches_the_rendered_decision() {
   local home a b reason snapshot calls out
   home=$(make_home full-decision-question)
@@ -296,6 +321,7 @@ EOF
 }
 
 test_full_snapshot_question_reaches_the_rendered_decision
+test_queued_answers_keep_the_note_and_a_long_reconcile_note_is_refused
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
