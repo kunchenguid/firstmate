@@ -441,7 +441,7 @@ test_failed_delete_retains_tripwire() {
 }
 
 test_timed_out_provision_cancels_late_launch() {
-  local name="fm-lab-late-launch-$$" status=0
+  local name="fm-lab-late-launch-$$" status=0 launch_pid
   cat > "$FAKEBIN/sleep" <<'SH'
 #!/usr/bin/env bash
 if [ "${FM_FAKE_HERDR_FAST_POLL:-}" = 1 ]; then
@@ -455,10 +455,18 @@ SH
   chmod +x "$FAKEBIN/sleep"
   : > "$FAKE_LOG"
   mkfifo "$TMP_ROOT/late-launch.gate"
+  # The status polls wait until the gated launch has recorded its own pid,
+  # so the timeout always cancels a launch that is already running.
   FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_HERDR_SERVER_GATE="$TMP_ROOT/late-launch.gate" \
+    FM_FAKE_HERDR_WAIT_MARKER="$FAKE_STATE/$name.gated" \
     run_with_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "timed-out provision must fail"
   assert_present "$FAKE_STATE/$name.gated" "timed-out provision never launched its server"
+  launch_pid=$(cat "$FAKE_STATE/$name.gated")
+  if kill -0 "$launch_pid" 2>/dev/null; then
+    kill -KILL "$launch_pid" 2>/dev/null || true
+    fail "timed-out provision returned with its herdr server launch (pid $launch_pid) still running"
+  fi
   assert_present "$TRIPWIRES/$name.fleet-state.json" \
     "timed-out provision must retain its tripwire until teardown"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after timed-out provision failed"
