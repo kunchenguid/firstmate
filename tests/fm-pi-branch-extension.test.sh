@@ -1014,7 +1014,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
   if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
   const verdictDescription = report.parameters.properties.verdict.description;
-  if (!verdictDescription.includes("Verdict: routine or captain") ||
+  if (!verdictDescription.includes("Verdict owner") ||
       !verdictDescription.includes("one owner of the rule") ||
       verdictDescription.includes("unconditionally")) {
     throw new Error(`branch provider received conflicting verdict semantics: ${verdictDescription}`);
@@ -2258,6 +2258,19 @@ if (!mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome
   throw new Error("the captain row's visible entry was not persisted under the record");
 }
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1, seq2])) throw new Error(`the rows did not accumulate unprocessed: ${unprocessedSeqs()}`);
+// A Firstmate-owned decision uses the ordinary durable wake path, even while
+// captain processing remains parked. Its handoff never crosses the held rows.
+const firstmate = await globalThis.__fmSessions.at(-1).options.customTools
+  .find((tool) => tool.name === "fm_branch_report")
+  .execute("fm1", { task: "branch-driver", verdict: "firstmate", summary: "release the approved qualification run" }, undefined, undefined, {});
+if (firstmate.isError) throw new Error(`firstmate report failed: ${JSON.stringify(firstmate)}`);
+const fmSeq = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+const mainWake = readFileSync(`${home}/state/.wake-queue`, "utf8");
+if (!mainWake.includes(`\tcheck\tfirstmate-outcome:${fmSeq}\tcheck: firstmate-outcome:`)) {
+  throw new Error(`firstmate report did not queue MAIN's durable wake: ${mainWake}`);
+}
+if (requests().length !== 1) throw new Error("firstmate handoff opened captain processing while away");
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1, seq2])) throw new Error("firstmate handoff acknowledged held captain decisions");
 await runOf();
 if (requests().length !== 1) throw new Error("a run boundary under the record opened a processing turn");
 await fire("session_shutdown", {});

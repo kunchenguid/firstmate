@@ -1,7 +1,7 @@
 // Firstmate supervision notes for the Claude Code mod, kept free of the engine.
 //
-// Pi renders each supervision outcome in the transcript: a sailboat note for a visible
-// routine outcome and a sequence-keyed anchor entry for a captain outcome
+// Pi renders visible routine and captain outcomes in the transcript: a sailboat note
+// for a routine outcome and a sequence-keyed anchor entry for a captain outcome
 // (.pi/extensions/fm-branch-supervision.ts). This module owns the same lines for
 // Claude Code, read from the display tail copy of the one outcome store
 // (bin/fm-branch-outcome.sh owns every file format read here) and from the supervision
@@ -26,7 +26,7 @@ export type OutcomeRow = {
   readonly seq: number;
   readonly epoch: number;
   readonly task: string;
-  readonly verdict: "routine" | "captain";
+  readonly verdict: "routine" | "firstmate" | "captain";
   readonly summary: string;
   readonly silent: boolean;
 };
@@ -42,7 +42,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | undefined {
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return undefined;
   if (typeof row.epoch !== "number" || !Number.isSafeInteger(row.epoch) || row.epoch < 0) return undefined;
   if (typeof row.task !== "string" || row.task === "") return undefined;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return undefined;
+  if (row.verdict !== "routine" && row.verdict !== "firstmate" && row.verdict !== "captain") return undefined;
   if (typeof row.summary !== "string" || row.summary === "") return undefined;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return undefined;
   const silent = row.silent === true;
@@ -72,9 +72,9 @@ export function parseOutcomeMarker(text: string | undefined): number {
   return /^(0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : 0;
 }
 
-/** Pi's transcript line for one row, on one line; a silent row has none. */
+/** Pi's transcript line for one row; silent routines and MAIN handoffs have none. */
 export function outcomeNoteLine(row: OutcomeRow): string | undefined {
-  if (row.silent) return undefined;
+  if (row.silent || row.verdict === "firstmate") return undefined;
   const summary = row.summary.replace(/\s*\n\s*/g, " ");
   return row.verdict === "captain"
     ? `${BRANCH_NOTE_ANCHOR} [seq ${row.seq}] ${row.task}: ${summary}`

@@ -253,13 +253,7 @@ The legacy `state/.afk` daemon flag has no effect on Pi.
 
 ### Attended and away authority
 
-While the away-posture record `state/.afk-contract` exists:
-
-- The branch takes every actionable row.
-- No processing turn opens on the parked main.
-- Main's standing authority moves to the branch through the guarded scripts, each retaining its own gate.
-
-[docs/pi-supervision-branch.md](pi-supervision-branch.md#postures) defines that posture.
+[Postures](pi-supervision-branch.md#postures) owns away routing, Firstmate-owned handbacks to main, and the guarded authority available while `state/.afk-contract` exists.
 
 While attended, the branch cannot merge a PR, land local work, freshly spawn, or answer a decision.
 These are the bounds set by the captain-approved architecture.
@@ -274,7 +268,7 @@ While attended, a captain-facing branch outcome (verdict `captain`) is saved as 
 It then opens one processing turn on main for that sequence.
 The turn stays open until main acknowledges the sequence through its `fm_branch_processed` tool.
 While away, the entry is saved, but processing waits until the away-posture record is archived.
-The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
+The branch prompt's "Verdict owner" section owns the distinction between Firstmate-owned, captain-facing, unsolicited routine, and unchanged-review outcomes.
 
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
 A task-level routine no-change outcome or a no-change heartbeat explicitly reported with `silent=true` is delivered without a rendered note; the branch prompt owns task-level eligibility, and every other routine outcome still appends a rendered, sailboat-prefixed note.
