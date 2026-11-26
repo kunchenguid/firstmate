@@ -12,8 +12,8 @@
 # WHAT IT DOES. Reads one input file, turns its prose into speakable sentences,
 # synthesises each chunk with a local neural voice, encodes mono MP3 with ffmpeg,
 # and keeps an index of what it rendered. Everything stays on this machine: no
-# cloud text to speech, no API key, and no network call except the one-time model
-# and voice fetches named below.
+# cloud text to speech, no API key, and no network call except the one-time
+# setup fetches named below.
 #
 # ENGINE AND VOICE. One local engine reads every file: Kokoro-82M (ONNX, CPU
 # only), reading `af_heart` at speed 1.0 unless --voice or --speed says

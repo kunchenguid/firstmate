@@ -6,7 +6,7 @@ It is on demand only: nothing renders on a schedule, nothing watches a directory
 
 ## Engine
 
-The tool ships one local engine: Kokoro-82M (ONNX, CPU only), reading `af_heart` (US female) at speed 1.0 unless `--voice` or `--speed` says otherwise.
+The tool ships one local engine: Kokoro-82M (ONNX, CPU only), reading `af_heart` (US female) at speed 1.0 unless `--voice`, `--speed`, or `FM_TTS_VOICE` says otherwise.
 It is local and neural, and it needs no API key, an account, or a cloud service.
 The only network calls in the whole flow are the one-time downloads named below.
 One engine is the design: choosing a different one is deliberately out of scope, and a maintainer who wants more can ask for it as its own change.
@@ -27,7 +27,7 @@ Prepare the engine once:
 bin/fm-speak.sh --setup
 ```
 
-`--setup` creates a python venv, installs `kokoro-onnx` and `soundfile` into it, downloads the Kokoro model and voice pack, and reports the C++ runtime it found.
+`--setup` creates a python venv, installs `kokoro-onnx` and `soundfile` into it from PyPI, downloads the Kokoro model and voice pack from the Kokoro release, and reports the C++ runtime it found.
 It is idempotent: a re-run prints what is already present and downloads nothing.
 It is also the repair: a venv that cannot import its packages is rebuilt, and each download is written to a temporary file and moved into place only when it completes, so a run interrupted by a network failure leaves nothing that a later run mistakes for a finished cache.
 
