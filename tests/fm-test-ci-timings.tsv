@@ -283,6 +283,7 @@ tests/fm-spawn-herdr-lease.test.sh	19025
 tests/fm-spawn-manual-pr-text.test.sh	8446
 tests/fm-spawn-orca-worktree.test.sh	59730
 tests/fm-spawn-pool-base-freshen.test.sh	170365
+tests/fm-spawn-secondmate-pool.test.sh	3798
 tests/fm-spawn-worktree-settle.test.sh	12233
 tests/fm-startup-growth-check.test.sh	6029
 tests/fm-startup-memory-budget.test.sh	11138

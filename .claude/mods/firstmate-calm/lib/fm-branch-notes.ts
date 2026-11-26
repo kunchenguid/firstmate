@@ -26,7 +26,7 @@ export type OutcomeRow = {
   readonly seq: number;
   readonly epoch: number;
   readonly task: string;
-  readonly verdict: "routine" | "captain";
+  readonly verdict: "routine" | "captain" | "notice";
   readonly summary: string;
   readonly silent: boolean;
 };
@@ -42,7 +42,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | undefined {
   if (typeof row.seq !== "number" || !Number.isSafeInteger(row.seq) || row.seq < 1) return undefined;
   if (typeof row.epoch !== "number" || !Number.isSafeInteger(row.epoch) || row.epoch < 0) return undefined;
   if (typeof row.task !== "string" || row.task === "") return undefined;
-  if (row.verdict !== "routine" && row.verdict !== "captain") return undefined;
+  if (row.verdict !== "routine" && row.verdict !== "captain" && row.verdict !== "notice") return undefined;
   if (typeof row.summary !== "string" || row.summary === "") return undefined;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return undefined;
   const silent = row.silent === true;
@@ -76,6 +76,7 @@ export function parseOutcomeMarker(text: string | undefined): number {
 export function outcomeNoteLine(row: OutcomeRow): string | undefined {
   if (row.silent) return undefined;
   const summary = row.summary.replace(/\s*\n\s*/g, " ");
+  if (row.verdict === "notice") return `${BRANCH_NOTE_ANCHOR} ${summary}`;
   return row.verdict === "captain"
     ? `${BRANCH_NOTE_ANCHOR} [seq ${row.seq}] ${row.task}: ${summary}`
     : `${BRANCH_NOTE_BOAT} ${row.task}: ${summary}`;
