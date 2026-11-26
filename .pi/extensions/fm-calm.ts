@@ -4,7 +4,8 @@
 // renderers, renderShell: "self", session_start replacement reasons, agent_start and
 // agent_settled, ExtensionUIContext.setToolsExpanded(), setWorkingVisible(), setWidget()
 // with a disposable component factory, and setHiddenThinkingLabel().
-// ./lib/fm-calm-working-ship.ts owns the animated working presentation this file
+// `config/calm-ship` selects whether ./lib/fm-calm-working-ship.ts or
+// ./lib/fm-calm-working-spaceship.ts owns the animated working presentation this file
 // installs. The focused tests pin those assumptions but never reject a
 // newer Pi solely for its version. The collapsed-thinking, operational-user, and
 // queued-operational presentation adapters probe the exact API they patch and degrade
