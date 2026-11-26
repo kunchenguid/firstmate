@@ -589,6 +589,7 @@ function makeHost(session) {
     runtimeHost: { session },
     pendingBashComponents: [],
     compactionQueuedMessages: [],
+    pendingBashComponents: [],
     statuses: [],
     warnings: [],
     editorText: "",
