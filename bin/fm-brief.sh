@@ -465,16 +465,21 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 # owned by bin/fm-task-inbox-lib.sh. The doorbell names the inbox as
 # "$FM_TASK_INBOX", which bin/fm-spawn.sh exports into every launch; the full
 # path here remains the fallback for a worker launched without that export.
-# The doorbell itself is self-describing, so this section is reinforcement
-# for the natural-checkpoint habit, not the only carrier of the instruction.
+# This section owns worker command-boundary and receipt guidance;
+# the self-describing doorbell also carries the receive reminder.
 # config/wait-no-turns (docs/configuration.md) adds the line that a waiting
 # worker does not poll the inbox: checkpoint checks happen during active work,
 # so waiting still spends no turns.
 IFS= read -r -d '' INBOX_SECTION <<EOF || true
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.
-When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list them with \`find $INBOX_DIR -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`, read the complete contents of each record (including its final line even when it is not newline-terminated) and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list them with \`find $INBOX_DIR -maxdepth 1 -name '*.msg' 2>/dev/null | sort -V\`, read the complete contents of each record (including its final line even when it is not newline-terminated) in numeric order, then acknowledge each read and accepted message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
 Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
+During active work, after a command returns and before starting the next expensive suite/campaign or a fresh blocking reattachment, use this same read-and-acknowledge procedure for pending task-owned messages even without a doorbell.
+Move each read and accepted message to handled/ before starting that next command; do not acknowledge unread or unaccepted messages.
+If an accepted action must wait for a later safe boundary, retain the action and its deferred condition in the task's existing status/report before acknowledging it.
+Acknowledgement means receipt and accepted responsibility, never completion or additional authority to act or repeat a live action; it does not resolve an unanswered keyed decision, which still requires its separate matching resolution.
+Do not interrupt an in-flight owned command merely to acknowledge steering or add inbox polling during a blocked wait.
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 if [ -e "$CONFIG/wait-no-turns" ]; then
