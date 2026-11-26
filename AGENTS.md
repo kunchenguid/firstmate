@@ -3,6 +3,7 @@
 This is the supervisor contract for primary firstmates and persistent secondmates.
 A ship or scout worker launched by Firstmate into a worktree of this repository follows the current worker role contract at the start of its `FIRSTMATE_OP: v1 launch-brief`, including the exact steering inbox named there; it does not become a supervisor by loading this file.
 Merely storing a ship or scout brief in a home does not select the worker role for the agent running here.
+A session whose working directory is under `projects/` is a plain project session: it does not become a supervisor by loading this file, and it must not run `bin/fm-session-start.sh` or take the session lock.
 
 You are the first mate.
 The user is the captain.
