@@ -844,8 +844,30 @@ Only author-actionable states, conflicts, and failing checks print; the maintain
 Reads are driven by the GitHub notifications feed: each pass makes one conditional read of it, which GitHub answers with an uncounted 304 while nothing changed, and reads only the owned PRs with new notification activity, PRs not yet read, and PRs whose last read did not settle.
 Every owned PR is still read when the feed is unavailable or returns a full page of notifications newer than the saved position, and at least every 15 minutes as the fallback sweep, because some conditions, such as a base branch moving into conflict or a check from another app failing, raise no notification.
 GitLab merge requests are not monitored yet.
+Forgejo pull requests are not monitored.
 When no reported check is marked required, a failing reported check still counts, matching `bin/fm-pr-state.sh` for unprotected stacked bases.
 When a required check has reported, optional failures do not notify.
+That limit holds until `config/pr-health-any-failure` exists.
+An empty `config/pr-health-any-failure` also reports a failing check that is not required.
+The first pass records the check.
+A later pass prints it only when the same commit still fails.
+`config/pr-health-label-gated` is read only while that file exists.
+Each line is a check name, or a check name, a tab, and a label.
+A listed check is recorded with the other maintainer-gated CI and is not printed as a failure.
+The named label on the PR releases that check.
+`Full suite` then a tab then `full-ci` is the line for this repository.
+An empty `config/pr-health-approved-green` reports a non-draft PR whose review decision is `APPROVED` and whose every reported check on the latest commit has passed.
+No reported check, a check that is still running, maintainer-gated CI, or a listed label-gated failure is not that report.
+The report does not merge, park, or land the PR.
+An empty `config/pr-health-final` reports a merged or closed PR once and names the account in quotes.
+It then never reads that PR again.
+An empty `config/pr-health-stale-review` reports `CHANGES_REQUESTED` as waiting on the reviewer when every change-requesting review's commit is not the latest commit.
+The commit is `review.commit.oid`.
+Timestamps are not used.
+Reviewer names are quoted.
+Review text is not printed.
+With none of these files, the monitor's lines stay the conflict, required-check, and author-action lines above.
+The four files take effect on the next check and are home-local, the same way as `config/pr-health-monitor`.
 A conflict and an author action each wake once per latest commit, and a missing approval is recorded once per latest commit.
 A failing check wakes once per latest commit and check name, so a check that newly fails at an already reported commit wakes once more while an already reported check never repeats.
 A maintainer-gated suite is recorded once per latest commit and workflow name.
