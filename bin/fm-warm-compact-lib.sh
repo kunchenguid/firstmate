@@ -28,7 +28,10 @@
 # THE PRIMARY. fm_warm_compact_primary types /compact through the backend's
 # verified submit primitive (fm_backend_send_text_submit, the one the away-mode
 # daemon injects through), only when the backend reports the agent not busy and
-# the composer provably empty. It never uses raw pane send-text or send-keys.
+# the composer provably empty
+# Transcript activity owns idle age because conversation can continue during a
+# host park; unreadable activity defers compaction
+# No raw pane send-text or send-keys
 #
 # THE ENGINE. fm_warm_compact_engine resumes the engine conversation with
 # /compact as a bounded headless turn (fm_supervision_engine_turn).
@@ -71,6 +74,19 @@ fm_warm_compact_context_tokens() {
     ' 2>/dev/null | tail -n 1
 }
 
+# fm_warm_compact_last_activity <transcript>: print the latest entry timestamp
+# as epoch seconds, or nothing when it cannot be read
+fm_warm_compact_last_activity() {
+  local transcript=$1
+  [ -r "$transcript" ] || return 1
+  tail -n 400 "$transcript" 2>/dev/null | jq -R -s -r '
+      [splits("\n") | select(length > 0) | fromjson
+       | select(type == "object" and has("timestamp")) | .timestamp]
+      | last | select(type == "string")
+      | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601 | floor
+    ' 2>/dev/null
+}
+
 # fm_warm_compact_verdict <config-dir> <idle-seconds> <context-tokens> <compacted 0|1>
 # prints off|episode|young|small|due.
 fm_warm_compact_verdict() {
@@ -84,12 +100,17 @@ fm_warm_compact_verdict() {
   printf 'due\n'
 }
 
-# fm_warm_compact_primary <config-dir> <backend> <target> <idle-seconds> <transcript> <compacted 0|1>
+# fm_warm_compact_primary <config-dir> <backend> <target> <transcript> <compacted 0|1>
 # prints off|episode|young|small|busy|composer|sent|failed. "sent" and "failed"
 # both mean a /compact was attempted, so the caller marks the episode.
 fm_warm_compact_primary() {
-  local config=$1 backend=$2 target=$3 idle=$4 transcript=$5 compacted=$6
-  local tokens verdict state
+  local config=$1 backend=$2 target=$3 transcript=$4 compacted=$5
+  local tokens verdict state last_activity idle=
+  last_activity=$(fm_warm_compact_last_activity "$transcript") || last_activity=
+  case "$last_activity" in
+    '' | *[!0-9]*) ;;
+    *) idle=$(( $(date +%s) - last_activity )) ;;
+  esac
   tokens=$(fm_warm_compact_context_tokens "$transcript")
   verdict=$(fm_warm_compact_verdict "$config" "$idle" "$tokens" "$compacted")
   if [ "$verdict" != due ]; then printf '%s\n' "$verdict"; return 0; fi
@@ -99,6 +120,11 @@ fm_warm_compact_primary() {
   fi
   state=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$state" != empty ]; then printf 'composer\n'; return 0; fi
+  # Backend reads can overlap a new primary turn
+  if [ "$(fm_warm_compact_last_activity "$transcript")" != "$last_activity" ]; then
+    printf 'young\n'
+    return 0
+  fi
   if [ "$(fm_backend_send_text_submit "$backend" "$target" /compact 3 0.4 0.4 2>/dev/null)" = empty ]; then
     printf 'sent\n'
   else

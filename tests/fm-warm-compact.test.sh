@@ -31,8 +31,13 @@ CALLS="$TMP_ROOT/calls"
 BUSY=idle
 COMPOSER=empty
 SUBMIT_VERDICT=empty
+ACTIVITY_ON_COMPOSER=0
 fm_backend_busy_state() { printf '%s' "$BUSY"; }
-fm_backend_composer_state() { printf '%s' "$COMPOSER"; }
+fm_backend_composer_state() {
+  [ "$ACTIVITY_ON_COMPOSER" != 1 ] \
+    || printf '{"type":"user","timestamp":"2026-10-28T03:21:48Z"}\n' >> "$TMP_ROOT/t.jsonl"
+  printf '%s' "$COMPOSER"
+}
 fm_backend_send_text_submit() { printf 'submit %s %s\n' "$1 $2" "$3" >> "$CALLS"; printf '%s' "$SUBMIT_VERDICT"; }
 
 transcript() {  # <file> <input> <cache_read> <cache_creation>
@@ -49,12 +54,21 @@ reset() {
   BUSY=idle
   COMPOSER=empty
   SUBMIT_VERDICT=empty
+  ACTIVITY_ON_COMPOSER=0
   printf '' > "$CONFIG/warm-compact"
   transcript "$TMP_ROOT/t.jsonl" 10 90000 5000
 }
 
+primary_from_transcript() (  # <compacted>
+  date() { printf '1793157708\n'; }
+  fm_warm_compact_primary "$CONFIG" herdr sess:pane "$TMP_ROOT/t.jsonl" "$1"
+)
+
 primary() {  # <idle> <compacted>
-  fm_warm_compact_primary "$CONFIG" herdr sess:pane "$1" "$TMP_ROOT/t.jsonl" "$2"
+  jq -c --argjson epoch "$((1793157708 - $1))" \
+    '.timestamp = ($epoch | strftime("%Y-%m-%dT%H:%M:%SZ"))' "$TMP_ROOT/t.jsonl" > "$TMP_ROOT/t.tmp"
+  mv "$TMP_ROOT/t.tmp" "$TMP_ROOT/t.jsonl"
+  primary_from_transcript "$2"
 }
 
 submits() { wc -l < "$CALLS" | tr -d ' '; }
@@ -113,6 +127,45 @@ test_young_session_is_not_compacted() {
   assert_equals young "$(primary 2699 0)" 'a session idle for less than the window is held back'
   assert_equals 0 "$(submits)" 'nothing typed before the idle window'
   pass 'idle window guard'
+}
+
+test_latest_transcript_activity_controls_primary_idle() {
+  local type
+  for type in user assistant system progress; do
+    reset
+    primary 2700 1 >/dev/null
+    printf '{"type":"%s","timestamp":"2026-10-28T03:16:28.123Z"}\n' "$type" >> "$TMP_ROOT/t.jsonl"
+    assert_equals young "$(primary_from_transcript 0)" "recent $type activity defers compaction"
+    assert_equals 0 "$(submits)" "nothing typed after recent $type activity"
+  done
+  printf '{"type":"file-history-snapshot"}\n' >> "$TMP_ROOT/t.jsonl"
+  assert_equals 1793157388 "$(fm_warm_compact_last_activity "$TMP_ROOT/t.jsonl")" 'metadata without a timestamp does not hide recent activity'
+  pass 'primary idle age follows the latest timestamped transcript entry'
+}
+
+test_unreadable_or_future_activity_defers_primary_compaction() {
+  local record
+  for record in '' '{"timestamp":"invalid"}' '{"timestamp":42}' '{"timestamp":null}' '{"timestamp":false}' \
+    '{"timestamp":"2026-10-28T04:00:00Z"}' '{"timestamp":'; do
+    reset
+    [ -z "$record" ] || primary 2700 1 >/dev/null
+    printf '%s\n' "$record" >> "$TMP_ROOT/t.jsonl"
+    assert_equals young "$(primary_from_transcript 0)" 'missing, invalid, partial, or future activity is held back'
+    assert_equals 0 "$(submits)" 'unknown activity time never submits /compact'
+  done
+  rm -f "$TMP_ROOT/t.jsonl"
+  assert_equals young "$(primary_from_transcript 0)" 'a missing transcript is held back'
+  assert_equals 0 "$(submits)" 'a missing transcript never submits /compact'
+  pass 'primary compaction requires a readable activity timestamp'
+}
+
+test_activity_during_backend_reads_defers_compaction() {
+  reset
+  primary 2700 1 >/dev/null
+  ACTIVITY_ON_COMPOSER=1
+  assert_equals young "$(primary_from_transcript 0)" 'activity during backend checks defers submission'
+  assert_equals 0 "$(submits)" 'nothing typed after the transcript advances during backend checks'
+  pass 'primary activity is rechecked before submitting /compact'
 }
 
 test_one_compaction_per_idle_episode() {
@@ -179,6 +232,9 @@ test_busy_agent_is_never_typed_into
 test_non_empty_composer_is_never_typed_into
 test_small_context_is_not_compacted
 test_young_session_is_not_compacted
+test_latest_transcript_activity_controls_primary_idle
+test_unreadable_or_future_activity_defers_primary_compaction
+test_activity_during_backend_reads_defers_compaction
 test_one_compaction_per_idle_episode
 test_failed_submit_is_reported
 test_config_tunables

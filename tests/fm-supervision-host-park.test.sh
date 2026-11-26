@@ -193,6 +193,63 @@ test_restarted_host_stops_what_a_killed_predecessor_left() {
   pass "host: a restarted host stops, by recorded identity, the cycle a killed predecessor left running"
 }
 
+test_primary_activity_during_a_long_park_defers_compaction() {
+  local home recent old
+  home=$(make_home warm-compact-primary attended claude)
+  echo noreport > "$home/stub-mode"
+  : > "$home/config/warm-compact"
+  mkdir -p "$home/claude/projects/p"
+  old=$(jq -nr --argjson epoch "$(( $(date +%s) - 4000 ))" '$epoch | strftime("%Y-%m-%dT%H:%M:%SZ")')
+  recent=$(jq -nr --argjson epoch "$(( $(date +%s) - 600 ))" '$epoch | strftime("%Y-%m-%dT%H:%M:%SZ")')
+  printf '{"type":"assistant","timestamp":"%s","message":{"usage":{"input_tokens":1,"cache_read_input_tokens":90000}}}\n' "$recent" \
+    > "$home/primary.jsonl"
+  cp "$home/primary.jsonl" "$home/claude/projects/p/warm-sess.jsonl"
+  # Only the fixture CLI can run; no real terminal lifecycle is exercised
+  cat > "$home/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  'status --json') printf '{"server":{"running":true}}\n' ;;
+  'agent get')
+    state=idle
+    [ ! -e "$FM_HOME/primary-submitted" ] || state=working
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"%s"}}}\n' "$state"
+    ;;
+  'pane read')
+    printf '❯'
+    [ ! -e "$FM_HOME/primary-typed" ] || printf ' %s' "$(cat "$FM_HOME/primary-typed")"
+    printf '\n'
+    ;;
+  'pane send-text') printf '%s' "$4" > "$FM_HOME/primary-typed" ;;
+  'pane send-keys')
+    [ "$4" = enter ] && [ "$(cat "$FM_HOME/primary-typed")" = /compact ] || exit 1
+    rm -f "$FM_HOME/primary-typed"
+    : > "$FM_HOME/primary-submitted"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$home/fakebin/herdr"
+  echo 0 > "$home/park-clock"
+  CLAUDE_CONFIG_DIR="$home/claude" FM_WARM_COMPACT_TICK=1 FM_SUPERVISION_HOST_PARK_SECONDS=5000 \
+    FM_WARM_COMPACT_TRANSCRIPT="$home/primary.jsonl" FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET=fixture:w1:p1 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
+  wait_until 150 watcher_live "$home" || fail 'warm-compact-primary: no watcher started'
+  seed_idle_engine_record "$home" 4000
+  recent=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  printf '{"type":"user","timestamp":"%s","message":{"content":"continue"}}\n' "$recent" >> "$home/primary.jsonl"
+  echo 2800 > "$home/park-clock"
+  # The engine attempt follows the primary check in the same real host tick
+  wait_until 150 compacted_once "$home" || fail 'warm-compact-primary: no tick reached engine compaction'
+  assert_absent "$home/primary-submitted" 'recent primary activity must defer /compact despite a long park'
+  jq -c --arg old "$old" '.timestamp = $old' "$home/primary.jsonl" > "$home/primary.tmp"
+  mv "$home/primary.tmp" "$home/primary.jsonl"
+  echo 2801 > "$home/park-clock"
+  wait_until 150 test -e "$home/primary-submitted" || fail 'warm-compact-primary: an actually idle primary was not compacted'
+  stop_home_processes "$home"
+  wait_until 100 host_exited "$home" || fail 'warm-compact-primary: host did not stop'
+  pass 'host: primary transcript activity, not park age, controls compaction'
+}
+
 test_idle_engine_conversation_is_compacted_once_across_hosts() {
   local home run ended
   home=$(make_home warm-compact attended claude)
@@ -235,7 +292,7 @@ test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted() {
     FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_host "$home"
   wait_until 150 watcher_live "$home" || fail "warm-compact-stale: no watcher started"
   seed_idle_engine_record "$home" 600
-  sed -i 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine"
+  perl -pi -e 's/^model=.*/model=another-model/' "$home/state/.supervision-host-engine"
   echo 10 > "$home/park-clock"
   sleep 3
   [ "$(compact_calls "$home")" = 0 ] || fail "warm-compact-stale: compacted a conversation the next turn would not resume"
@@ -669,6 +726,7 @@ fm_test_run \
   test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main \
   test_engine_turn_is_bounded_and_its_descendants_reaped \
   test_restarted_host_stops_what_a_killed_predecessor_left \
+  test_primary_activity_during_a_long_park_defers_compaction \
   test_idle_engine_conversation_is_compacted_once_across_hosts \
   test_engine_conversation_the_next_turn_would_not_resume_is_not_compacted \
   test_compaction_abandoned_at_the_park_boundary_is_not_marked_done \
