@@ -2907,9 +2907,10 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
 
 # 0 when config/turnend-abort-absorb is present, crew <id>'s current-state read is a
 # run-step failed or unknown verdict naming run `run: <id>`, that run is terminal in
-# the no-mistakes run store with an explicit abort record (status cancelled, or the
-# daemon's user-abort error), and the task's busy-state record reads exactly
-# state=busy with a ts newer than that run's last update. Every other shape - flag
+# the no-mistakes run store with an explicit abort record (status cancelled with error
+# exactly "cancelled: aborted by user", or status failed with error exactly
+# "step <name>: aborted by user" optionally followed by ": <reason>"), and the task's
+# busy-state record reads exactly state=busy with a ts newer than that run's last update. Every other shape - flag
 # absent, a run that failed for another reason, a busy verdict at or before the
 # abort, or any unreadable input - returns 1, so the wake surfaces as before.
 crew_aborted_run_superseded_by_busy() {  # <id>
@@ -2944,8 +2945,8 @@ if len(r) == 1 and isinstance(r[0][2], int):
   IFS=$'\t' read -r run_status run_error run_end <<< "$row"
   case "$run_end" in ''|*[!0-9]*) return 1 ;; esac
   case "$run_status" in
-    cancelled) ;;
-    failed) [ "$run_error" = "cancelled: aborted by user" ] || return 1 ;;
+    cancelled) [ "$run_error" = "cancelled: aborted by user" ] || return 1 ;;
+    failed) [[ $run_error =~ ^step\ [A-Za-z0-9_-]+:\ aborted\ by\ user(:\ .+)?$ ]] || return 1 ;;
     *) return 1 ;;
   esac
   declare -F fm_busy_record_read >/dev/null 2>&1 || {

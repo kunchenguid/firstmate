@@ -681,9 +681,21 @@ test_aborted_run_superseded_by_busy_verdict() {
   abort_absorb_case abort-on cancelled 'cancelled: aborted by user' busy 2000 on
   signal_crew_provably_working "$STATE/abort.turn-ended" \
     || fail "flag on: aborted run with a newer busy verdict was not absorbed"
-  abort_absorb_case abort-failed-status failed 'cancelled: aborted by user' busy 2000 on
+  abort_absorb_case abort-gate-abort failed 'step review: aborted by user' busy 2000 on
   signal_crew_provably_working "$STATE/abort.turn-ended" \
-    || fail "flag on: failed run carrying the user-abort error was not absorbed"
+    || fail "flag on: a run failed by a gate abort without a reason was not absorbed"
+  abort_absorb_case abort-gate-abort-reason failed 'step test: aborted by user: wrong approach' busy 2000 on
+  signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a run failed by a gate abort with a reason was not absorbed"
+  abort_absorb_case abort-failed-cancel-text failed 'cancelled: aborted by user' busy 2000 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a failed run carrying the cancel error text was absorbed"
+  abort_absorb_case abort-failed-substring failed 'step review failed: aborted by user' busy 2000 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: an abort phrase that is not the whole error was absorbed"
+  abort_absorb_case abort-superseded cancelled 'cancelled: superseded by new push' busy 2000 on
+  ! signal_crew_provably_working "$STATE/abort.turn-ended" \
+    || fail "flag on: a run cancelled by a new push was absorbed"
   abort_absorb_case abort-older cancelled 'cancelled: aborted by user' busy 900 on
   ! signal_crew_provably_working "$STATE/abort.turn-ended" \
     || fail "flag on: a busy verdict older than the abort was absorbed"
