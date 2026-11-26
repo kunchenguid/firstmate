@@ -169,6 +169,15 @@ Existing task operations use recorded endpoint ids and do not move a live task w
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
+### Granted recovery
+
+After a host restart, a one-use native grant can authorize recovery of a stopped ship or scout in its recorded Herdr pane.
+Granted recovery can bring back open work held for an external reason or blocked by a dependency while preserving its recorded profile and leaving the backlog unchanged.
+A captain hold still requires the captain's authority.
+The [spawn header](../bin/fm-spawn.sh) supplies `--help` and owns invocation, refusal conditions, and when a grant is spent.
+The [grant validator](../bin/fm-native-grant-lib.sh) owns the file contract.
+[The relaunch regression tests](../tests/fm-control-relaunch.test.sh) cover grant acceptance and refusals.
+
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
@@ -373,7 +382,7 @@ Herdr restores a pane from the cwd of that top-level shell, and the pane's `cwd`
 The lease outlives the pane: teardown closes the exact pane before it returns the lease, because returning the copy ends the pane's top-level shell and Herdr would then remove the pane outside the focus-preserving close.
 An aborted spawn returns the lease only when Herdr confirms the task pane gone and the copy holds no uncommitted work; otherwise it names the `treehouse return --force` command.
 
-Recovery is deliberately conservative and presentation-only.
+Presentation-journal recovery is deliberately conservative and changes only presentation.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
 That presentation lock lives in a namespace private to the OS account, so another account on the same host running its own Firstmate on Herdr cannot block this account's spawn, recovery, or teardown.

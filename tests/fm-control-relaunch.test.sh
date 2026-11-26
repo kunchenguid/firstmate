@@ -3201,6 +3201,390 @@ test_away_branch_relaunch_accepts_existing_dispatchable_items() {
   pass "away supervision relaunches existing In-flight and queued items under the saturated fresh-spawn spend cap"
 }
 
+# --- granted recovery: --native-grant ----------------------------------------
+#
+# A native one-use grant lets an already stopped Herdr ship come back without
+# the new-work dispatchability gate, and bypasses nothing else
+# (bin/fm-spawn.sh header, bin/fm-native-grant-lib.sh).
+
+GRANT_SESSION=0123abcd-0000-4000-8000-0000000000aa
+
+# write_grant <case-dir> <id> [json]: a grant file named <id>.json outside the
+# home. With no json it is a valid grant for the herdr fixture's task.
+write_grant() {  # <case-dir> <id> [json]
+  local dir=$1 id=$2 json=${3:-}
+  mkdir -p "$dir/grants"
+  [ -n "$json" ] || json=$(printf '{"task":"%s","pane":"%%7","agent":"claude","session":"%s","written":%s}' \
+    "$id" "$GRANT_SESSION" "$(date +%s)")
+  printf '%s' "$json" > "$dir/grants/$id.json"
+  printf '%s\n' "$dir/grants/$id.json"
+}
+
+hold_backlog_item() {  # <case-dir> <id> [kind]
+  tasks-axi hold "$2" --reason "waiting on ${3:-external} dependency" --kind "${3:-external}" \
+    --file "$1/home/data/backlog.md" >/dev/null
+}
+
+backlog_held() {  # <case-dir> <id>
+  tasks-axi show "$2" --file "$1/home/data/backlog.md" 2>/dev/null |
+    sed -n 's/^  held: *//p' | head -1
+}
+
+# Sets GRANT_CASE_DIR: a herdr ship task whose backlog item is held (an
+# external-kind hold unless a kind is named), or returns 1 when the fixture's
+# tools are missing.
+GRANT_CASE_DIR=
+grant_case_or_skip() {  # <name> <id> [hold-kind]
+  GRANT_CASE_DIR=
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  fm_tasks_axi_compatible || return 1
+  herdr_case_or_skip "$1" "$2" || return 1
+  GRANT_CASE_DIR=$HERDR_CASE_DIR
+  seed_backlog "$GRANT_CASE_DIR" "$2" in_flight
+  hold_backlog_item "$GRANT_CASE_DIR" "$2" "${3:-}"
+  return 0
+}
+
+test_native_grant_recovers_a_held_task_without_touching_its_item() {
+  local dir out rc=0 grant before after
+  grant_case_or_skip grant-held ng1 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  sed -i.bak 's/^model=default$/model=opus/; s/^effort=default$/effort=high/' "$dir/home/state/ng1.meta"
+  grant=$(write_grant "$dir" ng1)
+  before=$(cat "$dir/home/data/backlog.md")
+
+  out=$(run_spawn "$dir" ng1 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 0 "$rc" "a matching grant should recover a held, stopped task"$'\n'"$out"
+  [ -s "$dir/fake/launched-command" ] || fail "granted recovery launched nothing"
+  assert_contains "$(cat "$dir/fake/launched-command")" "opus" \
+    "granted recovery must launch the recorded model"
+  [ "$(meta_field "$dir" ng1 model)" = opus ] \
+    || fail "granted recovery lost the recorded model, got $(meta_field "$dir" ng1 model)"
+  [ "$(meta_field "$dir" ng1 effort)" = high ] \
+    || fail "granted recovery lost the recorded effort, got $(meta_field "$dir" ng1 effort)"
+  [ "$(meta_field "$dir" ng1 herdr_pane_id)" = '%7' ] \
+    || fail "granted recovery moved the task off its recorded pane"
+  after=$(cat "$dir/home/data/backlog.md")
+  [ "$before" = "$after" ] || fail "granted recovery changed the backlog"$'\n'"$before"$'\n---\n'"$after"
+  [ "$(backlog_held "$dir" ng1)" = yes ] || fail "granted recovery released the hold"
+  [ -f "$grant" ] || fail "granted recovery consumed the grant its dispatcher owns"
+  [ -s "$dir/home/state/ng1.native-grant-spent" ] || fail "granted recovery did not record the grant as spent"
+
+  # The same grant cannot license a second attempt, even once the pane is
+  # agent-free again.
+  rm -f "$dir/fake/herdr-agent-live" "$dir/fake/launched-command"
+  rc=0
+  out=$(run_spawn "$dir" ng1 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 1 "$rc" "a spent grant must refuse"$'\n'"$out"
+  assert_contains "$out" "already used" "the refusal should name the spent grant"
+  assert_absent "$dir/fake/launched-command" "a spent grant must launch nothing"
+  pass "granted recovery: a matching grant recovers a held task once, launches its recorded profile, and leaves the item untouched"
+}
+
+test_native_grant_never_bypasses_a_captain_hold() {
+  local dir out rc grant before after
+  grant_case_or_skip grant-captain ng12 captain || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  grant=$(write_grant "$dir" ng12)
+  before=$(cat "$dir/home/data/backlog.md")
+  out=$(run_spawn "$dir" ng12 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not recover an item under a captain hold"$'\n'"$out"
+  assert_contains "$out" "captain hold" "the refusal should name the captain hold"
+  assert_absent "$dir/fake/launched-command" "a captain hold refusal must launch nothing"
+  after=$(cat "$dir/home/data/backlog.md")
+  [ "$before" = "$after" ] || fail "a refused recovery changed the backlog"
+  [ "$(backlog_held "$dir" ng12)" = yes ] || fail "a refused recovery released the captain hold"
+  pass "granted recovery: a captain hold is never bypassed, and the item stays untouched"
+}
+
+test_native_grant_refuses_a_live_agent() {
+  local dir out rc grant
+  grant_case_or_skip grant-live ng2 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  : > "$dir/fake/herdr-agent-live"
+  grant=$(write_grant "$dir" ng2)
+
+  out=$(run_spawn "$dir" ng2 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not launch beside a live agent"$'\n'"$out"
+  assert_contains "$out" "alive" "the refusal should name the live agent"
+  assert_absent "$dir/fake/launched-command" "a live agent refusal must launch nothing"
+  assert_absent "$dir/home/state/ng2.native-grant-spent" "a refusal before the grant check must not spend it"
+  [ "$(backlog_held "$dir" ng2)" = yes ] || fail "a refused recovery released the hold"
+  pass "granted recovery: a live agent still refuses, so a grant never adds a second agent"
+}
+
+test_native_grant_refuses_malformed_expired_and_mismatched_grants() {
+  local dir out rc grant now case json
+  grant_case_or_skip grant-bad ng3 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  now=$(date +%s)
+  for case in malformed duplicate extra expired future pane task agent session; do
+    case "$case" in
+      malformed) json='{"task":"ng3",' ;;
+      duplicate) json=$(printf '{"task":"ng3","task":"ng3","pane":"%%7","agent":"claude","session":"%s","written":%s}' "$GRANT_SESSION" "$now") ;;
+      extra) json=$(printf '{"task":"ng3","pane":"%%7","agent":"claude","session":"%s","written":%s,"owner_home":"/x"}' "$GRANT_SESSION" "$now") ;;
+      expired) json=$(printf '{"task":"ng3","pane":"%%7","agent":"claude","session":"%s","written":%s}' "$GRANT_SESSION" $((now - 43201))) ;;
+      future) json=$(printf '{"task":"ng3","pane":"%%7","agent":"claude","session":"%s","written":%s}' "$GRANT_SESSION" $((now + 600))) ;;
+      pane) json=$(printf '{"task":"ng3","pane":"%%8","agent":"claude","session":"%s","written":%s}' "$GRANT_SESSION" "$now") ;;
+      task) json=$(printf '{"task":"other","pane":"%%7","agent":"claude","session":"%s","written":%s}' "$GRANT_SESSION" "$now") ;;
+      agent) json=$(printf '{"task":"ng3","pane":"%%7","agent":"codex","session":"%s","written":%s}' "$GRANT_SESSION" "$now") ;;
+      session) json=$(printf '{"task":"ng3","pane":"%%7","agent":"claude","session":"not-a-session","written":%s}' "$now") ;;
+    esac
+    grant=$(write_grant "$dir" ng3 "$json")
+    out=$(run_spawn "$dir" ng3 --relaunch --native-grant "$grant"); rc=$?
+    expect_code 1 "$rc" "a $case grant must refuse"$'\n'"$out"
+    assert_contains "$out" "native grant refused" "the $case refusal should name the grant"
+    assert_absent "$dir/fake/launched-command" "a $case grant must launch nothing"
+  done
+  # A grant file not named for the task is refused even when its body matches.
+  mkdir -p "$dir/grants/elsewhere"
+  write_grant "$dir" ng3 >/dev/null
+  mv "$dir/grants/ng3.json" "$dir/grants/elsewhere/grant.json"
+  out=$(run_spawn "$dir" ng3 --relaunch --native-grant "$dir/grants/elsewhere/grant.json"); rc=$?
+  expect_code 1 "$rc" "a misnamed grant must refuse"$'\n'"$out"
+  assert_contains "$out" "not named ng3.json" "the refusal should name the expected file"
+  assert_absent "$dir/home/state/ng3.native-grant-spent" "refused grants must not be recorded as spent"
+  [ "$(backlog_held "$dir" ng3)" = yes ] || fail "a refused recovery released the hold"
+  pass "granted recovery: malformed, expired, future, misnamed and mismatched grants all refuse"
+}
+
+test_native_grant_is_required_to_bypass_the_dispatchability_gate() {
+  local dir out rc grant
+  grant_case_or_skip grant-none ng4 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+
+  out=$(run_spawn "$dir" ng4 --relaunch); rc=$?
+  expect_code 1 "$rc" "an ordinary relaunch of a held item must still refuse"$'\n'"$out"
+  assert_contains "$out" "not dispatchable" "the ordinary relaunch should keep the gate"
+  assert_absent "$dir/fake/launched-command" "the gated relaunch must launch nothing"
+
+  grant=$(write_grant "$dir" ng4)
+  out=$(run_spawn "$dir" ng4 --relaunch --harness claude --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not accompany a profile override"$'\n'"$out"
+  assert_contains "$out" "recorded profile" "the refusal should name the recorded profile"
+  out=$(run_spawn "$dir" ng4 "$dir/proj" --mode local-only --yolo off --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not reach a fresh spawn"$'\n'"$out"
+  assert_contains "$out" "only to --relaunch" "the refusal should name relaunch"
+  assert_absent "$dir/fake/launched-command" "refused grant flags must launch nothing"
+  assert_absent "$dir/home/state/ng4.native-grant-spent" "refused grant flags must not spend the grant"
+
+  # A closed item is not open work, so even a valid grant refuses it.
+  tasks-axi "done" ng4 --file "$dir/home/data/backlog.md" >/dev/null
+  out=$(run_spawn "$dir" ng4 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not recover a Done item"$'\n'"$out"
+  assert_contains "$out" "not open work" "the refusal should name the closed item"
+  assert_absent "$dir/fake/launched-command" "a Done item must launch nothing"
+  [ "$(backlog_state "$dir" ng4)" = "done" ] || fail "a refused recovery reopened a Done item"
+  pass "granted recovery: without a grant the gate stays, and a grant cannot change the profile, start new work, or reopen a Done item"
+}
+
+test_native_grant_refuses_a_home_without_a_readable_backlog() {
+  local dir out rc grant
+  grant_case_or_skip grant-manual ng9 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  mkdir -p "$dir/home/config"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  grant=$(write_grant "$dir" ng9)
+  tasks-axi "done" ng9 --file "$dir/home/data/backlog.md" >/dev/null
+  out=$(run_spawn "$dir" ng9 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not recover a Done item in a manual-backlog home"$'\n'"$out"
+  assert_contains "$out" "not open work" "the refusal should name the closed item"
+  assert_absent "$dir/fake/launched-command" "a refused recovery must launch nothing"
+  rm -f "$dir/home/data/backlog.md"
+  : > "$dir/home/data/backlog.md"
+  rm -f "$dir/home/state/ng9.native-grant-spent"
+  out=$(run_spawn "$dir" ng9 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant must not recover a task with no backlog item"$'\n'"$out"
+  assert_absent "$dir/fake/launched-command" "a refused recovery must launch nothing"
+  pass "granted recovery: a manual-backlog home refuses a Done or missing item"
+}
+
+test_native_grant_recovers_a_held_item_in_a_manual_backlog_home() {
+  local dir out rc grant
+  grant_case_or_skip grant-manual-held ng11 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  mkdir -p "$dir/home/config"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  grant=$(write_grant "$dir" ng11)
+  out=$(run_spawn "$dir" ng11 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 0 "$rc" "a readable held item should recover in a manual-backlog home"$'\n'"$out"
+  [ -s "$dir/fake/launched-command" ] || fail "granted recovery launched nothing"
+  pass "granted recovery: a readable held item recovers in a manual-backlog home"
+}
+
+test_native_grant_refuses_a_decoded_nul_in_an_identity_field() {
+  local dir rc=0 grant
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant NUL test needs jq"
+    return 0
+  fi
+  dir="$TMP_ROOT/grant-decoded-nul"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng10 \
+    "$(printf '{"task":"ng10","pane":"%%7","agent":"cla\\u0000ude","session":"%s","written":%s}' "$GRANT_SESSION" "$(date +%s)")")
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    if fm_native_grant_check "$grant" ng10 claude %7 "$dir/ledger"; then exit 3; fi
+    [ ! -s "$dir/ledger" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a grant whose agent decodes to contain NUL must be refused (rc=$rc)"
+  pass "grant with a decoded NUL in an identity field is refused"
+}
+
+test_native_grant_refuses_a_repeated_key_hidden_in_a_nested_value() {
+  local dir rc=0 grant
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant nested repeated-key test needs jq"
+    return 0
+  fi
+  dir="$TMP_ROOT/grant-nested-repeat"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng13 \
+    "$(printf '{"task":{"x":1},"task":"ng13","pane":"%%7","agent":"claude","session":"%s","written":%s}' "$GRANT_SESSION" "$(date +%s)")")
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    if fm_native_grant_check "$grant" ng13 claude %7 "$dir/ledger"; then exit 3; fi
+    [ ! -s "$dir/ledger" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a grant repeating a key inside a nested value must be refused (rc=$rc)"
+  pass "grant repeating a key inside a nested value is refused and not spent"
+}
+
+test_native_grant_keeps_the_recorded_account() {
+  local dir out rc=0 grant
+  grant_case_or_skip grant-acct ng6 || {
+    echo "skip - granted recovery needs jq and a compatible tasks-axi"
+    return 0
+  }
+  dir=$GRANT_CASE_DIR
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/first" "$dir/second"
+  : > "$dir/first/.credentials.json"
+  : > "$dir/second/.credentials.json"
+  printf 'account=%s\n' "$dir/first" >> "$dir/home/state/ng6.meta"
+  grant=$(write_grant "$dir" ng6)
+
+  printf '%s\n' "$dir/second" > "$dir/home/config/claude-account"
+  out=$(run_spawn "$dir" ng6 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 1 "$rc" "a changed account pin must refuse granted recovery"$'\n'"$out"
+  assert_contains "$out" "different account" "the refusal should name the account change"
+  assert_absent "$dir/fake/launched-command" "a changed pin must launch nothing"
+  assert_absent "$dir/home/state/ng6.native-grant-spent" "a refused account must not spend the grant"
+
+  rm "$dir/home/config/claude-account"
+  rc=0
+  out=$(run_spawn "$dir" ng6 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 1 "$rc" "a removed account pin must refuse granted recovery"$'\n'"$out"
+  assert_contains "$out" "different account" "the refusal should name the account change"
+  assert_absent "$dir/fake/launched-command" "a removed pin must launch nothing"
+  assert_absent "$dir/home/state/ng6.native-grant-spent" "a refused account must not spend the grant"
+
+  printf '%s\n' "$dir/first" > "$dir/home/config/claude-account"
+  rc=0
+  out=$(run_spawn "$dir" ng6 --relaunch --native-grant "$grant") || rc=$?
+  expect_code 0 "$rc" "the recorded account should still recover"$'\n'"$out"
+  pass "granted recovery: only the recorded account is relaunched, and a refused account leaves the grant unspent"
+}
+
+test_native_grant_spends_the_bytes_it_checked() {
+  local dir out rc=0 grant orig_sum
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant snapshot test needs jq"
+    return 0
+  fi
+  dir="$TMP_ROOT/grant-snapshot"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng7)
+  if command -v sha256sum >/dev/null 2>&1; then
+    orig_sum=$(sha256sum < "$grant")
+  else
+    orig_sum=$(shasum -a 256 < "$grant")
+  fi
+  orig_sum=${orig_sum%% *}
+  # The producer replaces the file the moment the check first parses it.
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    real_jq=$(command -v jq)
+    swapped=0
+    # shellcheck disable=SC2329  # shadows jq for the library under test
+    jq() {
+      if [ "$swapped" -eq 0 ]; then
+        swapped=1
+        printf '{"task":"ng7","pane":"%%9","agent":"claude","session":"%s","written":%s}' \
+          "$GRANT_SESSION" "$(date +%s)" > "$grant.new" && mv "$grant.new" "$grant"
+      fi
+      "$real_jq" "$@"
+    }
+    fm_native_grant_check "$grant" ng7 claude %7 "$dir/ledger" || exit 3
+    [ "$FM_NATIVE_GRANT_FINGERPRINT" = "$orig_sum" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "grant check must fingerprint the bytes it validated (rc=$rc)"
+}
+
+test_native_grant_refuses_nul_padding() {
+  local dir rc=0 grant
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "skip - grant NUL test needs jq"
+    return 0
+  fi
+  dir="$TMP_ROOT/grant-nul"
+  mkdir -p "$dir"
+  grant=$(write_grant "$dir" ng8)
+  head -c 5000 /dev/zero >> "$grant"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-native-grant-lib.sh"
+    if fm_native_grant_check "$grant" ng8 claude %7 "$dir/ledger"; then exit 3; fi
+    [ ! -s "$dir/ledger" ] || exit 4
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "NUL-padded grant must be refused and not spent (rc=$rc)"
+  pass "grant with NUL padding past the size limit is refused and not spent"
+}
+
+test_native_grant_refuses_a_pane_that_did_not_survive() {
+  local dir out rc grant
+  if ! command -v tasks-axi >/dev/null 2>&1 || ! fm_tasks_axi_compatible; then
+    echo "skip - granted recovery needs a compatible tasks-axi"
+    return 0
+  fi
+  herdr_case_or_skip grant-gone ng5 fmlab '%none' || {
+    echo "skip - granted recovery needs jq"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  seed_backlog "$dir" ng5 in_flight
+  grant=$(write_grant "$dir" ng5)
+  out=$(run_spawn "$dir" ng5 --relaunch --native-grant "$grant"); rc=$?
+  expect_code 1 "$rc" "a grant naming a destroyed pane must refuse"$'\n'"$out"
+  assert_contains "$out" "rather than rebinding" "the refusal should explain the rebind"
+  assert_not_contains "$(cat "$dir/fake/herdr-log")" "tab create" "a refused recovery must not mint a tab"
+  pass "granted recovery: a pane that did not survive refuses instead of rebinding"
+}
+
 test_exit_and_relaunch_remove_the_dialog_file() {
   local dir out rc
   dir=$(new_case dialog-file-exit rl70)
@@ -3349,3 +3733,16 @@ test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
 test_away_branch_relaunch_accepts_existing_dispatchable_items
+test_native_grant_recovers_a_held_task_without_touching_its_item
+test_native_grant_never_bypasses_a_captain_hold
+test_native_grant_refuses_a_live_agent
+test_native_grant_refuses_malformed_expired_and_mismatched_grants
+test_native_grant_is_required_to_bypass_the_dispatchability_gate
+test_native_grant_keeps_the_recorded_account
+test_native_grant_refuses_a_home_without_a_readable_backlog
+test_native_grant_recovers_a_held_item_in_a_manual_backlog_home
+test_native_grant_refuses_a_decoded_nul_in_an_identity_field
+test_native_grant_refuses_a_repeated_key_hidden_in_a_nested_value
+test_native_grant_spends_the_bytes_it_checked
+test_native_grant_refuses_nul_padding
+test_native_grant_refuses_a_pane_that_did_not_survive

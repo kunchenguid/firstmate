@@ -200,6 +200,7 @@ The worktree and the task's records are unaffected either way.
   For a ship or scout it also refuses, by name, a recorded worktree that is the home, the code root, or the recorded project repository's primary checkout (the worktree's git dir is the recorded project's common git dir - the same boundary fresh spawn's isolation check draws, so a standalone clone passes this isolation check), so a worker only ever comes back in its own task worktree.
   This check lives only in the launch owner, so on the `relaunch` verb it fires after the old agent has stopped and the transaction ends as a failed launch.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path (Herdr, whose shell may not be ready for it, gets one resend if the path has not moved after about 10 seconds), then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.
+- For the launch owner's separate recovery path for an already stopped Herdr worker, see [Granted recovery](herdr-backend.md#granted-recovery).
 
 ## Capability matrix
 
