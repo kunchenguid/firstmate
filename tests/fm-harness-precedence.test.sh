@@ -826,6 +826,38 @@ test_supervision_protocol_follows_corrected_verdict() {
   pass "session start renders the Codex protocol for a Codex primary holding a retained CLAUDECODE"
 }
 
+# Pin the traversal budget with real nested shells, including the first depth
+# the old eight-position scan missed and the first position beyond the new cap.
+test_deep_ancestry_is_bounded() {
+  local dir bin nest levels got
+  dir="$TMP_ROOT/deep-ancestry"
+  bin=$(named_bin "$dir" codex)
+  nest="$dir/nest.sh"
+  cat > "$nest" <<'SH'
+#!/usr/bin/env bash
+levels=$1
+shift
+if [ "$levels" -gt 0 ]; then
+  bash "$0" $((levels - 1)) "$@"
+  exit $?
+fi
+exec "$@"
+SH
+  for levels in 7 14 15; do
+    # The leaf replaces nest level zero. Counting that leaf, the harness sits
+    # at levels+2: positions 9, 16, and 17 respectively.
+    # shellcheck disable=SC2016 # Positional arguments expand in the child.
+    got=$("$bin" -c 'bash "$1" "$2" "$3" ancestry; exit $?' _ "$nest" "$levels" "$HARNESS")
+    if [ "$levels" -eq 15 ]; then
+      [ -z "$got" ] || fail "ancestry escaped its sixteen-position cap: $got"
+    else
+      [ "$got" = 'comm codex' ] || fail "Codex at position $((levels + 2)) resolved '$got'"
+    fi
+  done
+  pass 'ancestry reaches positions nine and sixteen and stops before seventeen'
+}
+
+test_deep_ancestry_is_bounded
 test_markerless_ancestry_outranks_foreign_marker
 test_genuine_marker_and_ancestry_agree
 test_cursor_ordering_still_decides_when_ancestry_is_silent
