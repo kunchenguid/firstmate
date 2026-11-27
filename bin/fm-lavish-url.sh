@@ -272,7 +272,9 @@ PYCLAIM
         continue;
       }
       try {
-        let css = Array.from(sheet.cssRules, rule => rule.cssText).join('\n');
+        const rules = sheet.cssRules;
+        if (sheet.ownerNode && !owner) continue;
+        let css = Array.from(rules, rule => rule.cssText).join('\n');
         const media = sheet.media && sheet.media.mediaText;
         if (media) css = '@media ' + media + ' {' + css + '}';
         if (owner) owner.setAttribute('data-fm-captured-sheet', String(styles.length));

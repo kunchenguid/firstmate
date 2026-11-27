@@ -97,7 +97,7 @@ function fixtureRoot(html) {
 }
 const root = fixtureRoot(markup);
 const owners = root.querySelectorAll("style, link");
-const sheets = fixture.styles.map(s => ({ownerNode: owners.find(node => node.opening === s.owner), href: s.baseURI,
+const sheets = fixture.styles.map(s => ({ownerNode: s.owner ? (owners.find(node => node.opening === s.owner) ?? {}) : null, href: s.baseURI,
   get cssRules() { if (s.inaccessible) throw new Error("SecurityError"); return [{cssText: s.css}]; },
   media: {mediaText: s.media || ""}, disabled: !!s.disabled}));
 const document = {baseURI: url, title: "Fixture page", querySelectorAll: root.querySelectorAll, documentElement: root,
@@ -530,9 +530,9 @@ test_overlapping_captures_keep_pages_and_names_distinct() {
 test_cssom_and_reserved_markup() {
   local home out snap
   home=$(make_home cssom)
-  printf '<html data-fm-captured-sheet="0"><head><link rel="stylesheet" href="https://external.test/sheet.css"><style>.removed{display:none}.dynamic{color:black}</style><style id="empty-sheet">.removed-empty{display:none}</style><style id="unreadable-sheet" data-fm-captured-sheet="0">.fallback{color:green}</style><style id="disabled-inline" media="screen">.disabled{color:green}</style><link id="disabled-link" rel="stylesheet" media="screen" href="https://external.test/disabled.css"></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
+  printf '<html data-fm-captured-sheet="0"><head><style>.removed{display:none}.dynamic{color:black}</style><style id="empty-sheet">.removed-empty{display:none}</style><style id="unreadable-sheet" data-fm-captured-sheet="0">.fallback{color:green}</style><link rel="stylesheet" href="https://external.test/sheet.css"><style id="disabled-inline" media="screen">.disabled{color:green}</style><link id="disabled-link" rel="stylesheet" media="screen" href="https://external.test/disabled.css"></head><body><div id="fm-lavish-url-panel">Page panel</div><form name="fmLavishUrl"><input id="fmLavishUrl"><p id="fm-lavish-url-outline">Content</p></form></body></html>' > "$home/pages/css.test.html"
   cat > "$home/pages/css.test.html.json" <<'JSON'
-{"styles":[{"owner":"<style id=\"disabled-inline\" media=\"screen\">","css":".disabled{color:green}","disabled":true},{"owner":"<link id=\"disabled-link\" rel=\"stylesheet\" media=\"screen\" href=\"https://external.test/disabled.css\">","baseURI":"https://external.test/disabled.css","disabled":true,"inaccessible":true},{"owner":"<style>","css":".dynamic{color:red;background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"owner":"<style id=\"empty-sheet\">","css":""},{"owner":"<link rel=\"stylesheet\" href=\"https://external.test/sheet.css\">","baseURI":"https://external.test/sheet.css","inaccessible":true},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"},{"css":".disabled-adopted{color:green}","disabled":true}]}
+{"styles":[{"owner":"<?xml-stylesheet href=\"outside.css\" type=\"text/css\"?>","css":".outside-root{color:red}","baseURI":"https://css.test/outside.css"},{"owner":"<style id=\"disabled-inline\" media=\"screen\">","css":".disabled{color:green}","disabled":true},{"owner":"<link id=\"disabled-link\" rel=\"stylesheet\" media=\"screen\" href=\"https://external.test/disabled.css\">","baseURI":"https://external.test/disabled.css","disabled":true,"inaccessible":true},{"owner":"<style>","css":".dynamic{color:red;background:url(img.png)}","baseURI":"https://css.test/assets/sheet.css","media":"(width < 600px)"},{"owner":"<style id=\"empty-sheet\">","css":""},{"owner":"<link rel=\"stylesheet\" href=\"https://external.test/sheet.css\">","baseURI":"https://external.test/sheet.css","inaccessible":true},{"css":".adopted{color:red} /* </style><img src=x> */","baseURI":"https://css.test/"},{"css":".disabled-adopted{color:green}","disabled":true}]}
 JSON
   out=$(lu "$home" snapshot https://css.test/ 2>&1) || fail "$out"
   snap=$(field "$out" snapshot)
@@ -569,7 +569,7 @@ class Output(HTMLParser):
             if ".dynamic{color:red" in data: self.cascade.append("copied-red")
 p = Output()
 p.feed(open(sys.argv[1]).read())
-assert p.cascade == ["external-blue", "copied-red"], p.cascade
+assert p.cascade == ["copied-red", "external-blue"], p.cascade
 assert "fm-lavish-url-panel" not in p.ids
 assert "fmLavishUrl" not in p.ids
 assert "fm-lavish-url-outline" not in p.ids
@@ -578,6 +578,7 @@ assert any(".adopted{color:red}" in css for css in p.styles)
 assert any("@media (width < 600px)" in css for css in p.styles)
 assert p.disabled_owners == {"inline": ("style", "screen"), "link": ("link", "screen")}, p.disabled_owners
 assert not any(".disabled" in css for css in p.styles)
+assert not any(".outside-root" in css for css in p.styles)
 assert not any(".removed" in css or ".dynamic{color:black}" in css for css in p.styles)
 assert any(".fallback{color:green}" in css for css in p.styles)
 PYHTML
