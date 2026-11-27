@@ -64,8 +64,10 @@ fm_auggie_path_is_auggie() {  # <path>
 # A --opt=value word is one option. The separate-operand list below is every
 # Node option `node --help` shows with a required value (Node v26.13.1), plus
 # the hidden aliases --inspect-port, --debug-port, and --loader; an option with
-# an optional value (--inspect[=...]) never consumes the next word, and V8
-# flags accept only the --flag=value form. -e, -p, and --run run no main
+# an optional value (--inspect[=...]) never consumes the next word. Bare
+# --config-file and --experimental-config-file select Node's default config;
+# only their =path forms supply a config path, so neither consumes the script.
+# V8 flags accept only the --flag=value form. -e, -p, and --run run no main
 # script, so they carry no auggie identity. In flattened args an operand,
 # separate or after =, extends over following words while the longest
 # space-joined value names an existing path, so a preload path containing

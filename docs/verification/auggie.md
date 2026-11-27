@@ -49,7 +49,7 @@ ancestry_pid=540034 comm=node-MainThread args=node /home/mike/.local/bin/auggie
 alive
 ```
 
-Node 24 can report the same process as a bare `MainThread`, which the rule accepts as an interpreter name; that shape is pinned by the portable tests below, not observed live here.
+Node 24 can report the same process as a bare `MainThread`, which the rule accepts as an interpreter name; that shape is pinned by [`fm-session-lock-ancestry.test.sh`](../../tests/fm-session-lock-ancestry.test.sh) and [`fm-harness-precedence.test.sh`](../../tests/fm-harness-precedence.test.sh), not observed live here.
 
 ## Bare launch: detection from a pane, with no tokens
 
