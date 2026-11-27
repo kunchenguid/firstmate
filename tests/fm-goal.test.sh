@@ -91,11 +91,11 @@ test_drive_readiness() {
   expect_rc 0 goal edit I1 --items-file "$H/items.gaps"
   assert_contains "$(<"$TMP_ROOT/out")" 'WARN I1/sign: gates verify' 'ordinary edit warns without refusing'
   local marker
-  for marker in '{TASK}' '{FIRSTMATE_SPEC}'; do
+  for marker in '{TASK}' '{FIRSTMATE_SPEC}' '{FILL:MIKO_ROUTE}'; do
     printf 'Replace me: %s\n' "$marker" > "$H/data/qa/brief.md"
     expect_rc 1 goal ready I1
     assert_contains "$(<"$TMP_ROOT/out")" '0 of 1 items drive-ready' "$marker prevents readiness"
-    assert_contains "$(<"$TMP_ROOT/out")" "verify: replace {TASK}/{FIRSTMATE_SPEC} placeholders in $H/data/qa/brief.md" 'names the incomplete brief'
+    assert_contains "$(<"$TMP_ROOT/out")" "verify: fill $marker in $H/data/qa/brief.md" 'names the token and incomplete brief'
   done
 
   printf '%s\n' 'item [id=build] [owner=main] [task=missing]: build' \

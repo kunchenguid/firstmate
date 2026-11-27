@@ -93,7 +93,7 @@ read_entry() {  # <file>
   ENTRY_QUEUED=0 ENTRY_LAST=0 ENTRY_ATTEMPTS=0 ENTRY_STATE=held ENTRY_REASON='' ENTRY_CWD=''
   ENTRY_ARGS=()
   ENTRY_COMMAND=spawn
-  ENTRY_GOAL_PUSH=''
+  ENTRY_GOAL_PUSH='' ENTRY_GOAL_BRIEF=''
   ENTRY_ALLOWANCE=ordinary
   ENTRY_AUTO_DISPATCH=0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -107,6 +107,7 @@ read_entry() {  # <file>
       command=*) ENTRY_COMMAND=${line#*=} ;;
       auto_dispatch=1) ENTRY_AUTO_DISPATCH=1 ;;
       goal_push=*) ENTRY_GOAL_PUSH=${line#*=} ;;
+      goal_brief=*) ENTRY_GOAL_BRIEF=${line#*=} ;;
       arg=*)
         ENTRY_ARGS+=("${line#arg=}")
         [ "$line" != arg=--merge-review ] || ENTRY_ALLOWANCE=reserved-review
@@ -138,6 +139,7 @@ write_entry() {  # <id> <queued> <attempts> <state> <reason> <cwd> <arg>...
       printf 'auto_dispatch=1\n'
     fi
     if [ -n "${FM_GOAL_PUSH_BINDING:-}" ]; then printf 'goal_push=%s\n' "$FM_GOAL_PUSH_BINDING"; fi
+    if [ -n "${FM_GOAL_PUSH_BRIEF:-}" ]; then printf 'goal_brief=%s\n' "$FM_GOAL_PUSH_BRIEF"; fi
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the queue entry for $id"; }
   mv -f -- "$tmp" "$QUEUE/$id.start" || { rm -f -- "$tmp"; die "cannot publish the queue entry for $id"; }
@@ -164,7 +166,7 @@ age_text() {  # <seconds>
 
 cmd_add() {
   local id cwd arg queued old='' attempts=0 reason=''
-  local FM_GOAL_PUSH_BINDING=${FM_GOAL_PUSH_BINDING:-}
+  local FM_GOAL_PUSH_BINDING=${FM_GOAL_PUSH_BINDING:-} FM_GOAL_PUSH_BRIEF=${FM_GOAL_PUSH_BRIEF:-}
   [ "$#" -ge 1 ] || die "add needs a task id"
   id=$1; shift
   id_valid "$id" || die "invalid task id '$id'"
@@ -189,9 +191,11 @@ cmd_add() {
     queued=$ENTRY_QUEUED
     attempts=$ENTRY_ATTEMPTS
     FM_GOAL_PUSH_BINDING=${ENTRY_GOAL_PUSH:-$FM_GOAL_PUSH_BINDING}
+    FM_GOAL_PUSH_BRIEF=${ENTRY_GOAL_BRIEF:-$FM_GOAL_PUSH_BRIEF}
     [ "$queued" -gt 0 ] || queued=$(date +%s)
   fi
   case "$FM_GOAL_PUSH_BINDING" in *[!a-zA-Z0-9./_-]*) die 'invalid goal push binding' ;; esac
+  [ -z "$FM_GOAL_PUSH_BRIEF" ] || [[ "$FM_GOAL_PUSH_BRIEF" =~ ^[a-f0-9]{64}$ && -n "$FM_GOAL_PUSH_BINDING" ]] || die 'invalid goal brief fingerprint'
   attempts=$((attempts + 1))
   write_entry "$id" "$queued" "$attempts" held "$reason" "$cwd" "$@"
 }
@@ -271,7 +275,8 @@ start_budget() {
 
 cmd_retry() {
   local max='' attempts_cap f id out rc reason started=0 tried=0 lock command resolver_retry
-  local enforce=0 links remaining=0 budget only='' FM_GOAL_PUSH_BINDING=''
+  local enforce=0 links remaining=0 budget only='' FM_GOAL_PUSH_BINDING='' FM_GOAL_PUSH_BRIEF=''
+  export FM_GOAL_PUSH_BRIEF
   resolver_retry=${FM_ADMISSION_RESOLVER_RETRY_SECS:-900}
   is_uint "$resolver_retry" || resolver_retry=900
   while [ "$#" -gt 0 ]; do
@@ -310,7 +315,7 @@ cmd_retry() {
     id=$(basename "$f" .start)
     [ -z "$only" ] || [ "$id" = "$only" ] || continue
     read_entry "$f"
-    FM_GOAL_PUSH_BINDING=$ENTRY_GOAL_PUSH
+    FM_GOAL_PUSH_BINDING=$ENTRY_GOAL_PUSH FM_GOAL_PUSH_BRIEF=$ENTRY_GOAL_BRIEF
     if [ -n "$only" ]; then
       [ -n "$FM_GOAL_PUSH_BINDING" ] || continue
       "$SCRIPT_DIR/fm-goal-push.sh" eligible "$FM_GOAL_PUSH_BINDING" "$id" || continue

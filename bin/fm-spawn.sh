@@ -1075,6 +1075,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-goal-brief-lib.sh
+. "$SCRIPT_DIR/fm-goal-brief-lib.sh"
 # shellcheck source=bin/fm-account-lib.sh
 . "$SCRIPT_DIR/fm-account-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
@@ -5649,11 +5651,15 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
-# A goal may be switched OFF while routing or admission is in flight.
+# A goal or draft may change while routing or admission is in flight.
 # Recheck at the common endpoint boundary, under the per-task meta lock.
+if [ "$RELAUNCH" != 1 ] && [ -z "${FM_GOAL_PUSH_BINDING:-}" ] && fm_goal_is_draft "$BRIEF"; then
+  echo 'error: a generated goal brief must start through scoped goal dispatch' >&2
+  exit 1
+fi
 if [ -n "${FM_GOAL_PUSH_BINDING:-}" ] && ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
-    "$SCRIPT_DIR/fm-goal-push.sh" eligible "$FM_GOAL_PUSH_BINDING" "$ID" --launch; then
+    "$SCRIPT_DIR/fm-goal-push.sh" eligible "$FM_GOAL_PUSH_BINDING" "$ID" --launch "$PROJ_ABS" "$MODE" "$YOLO" "$BRANCH_PREFIX"; then
   echo 'deferred: goal or host no longer eligible for automatic start' >&2
   exit 76
 fi

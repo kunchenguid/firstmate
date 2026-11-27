@@ -220,10 +220,11 @@
 # blocked, or off) for linked items owned by this home. It uses local parent
 # goal records for secondmates, and refuses remote or unreadable routes.
 #
-# `ready` checks every drive item in scope, even when drive is OFF. It looks
-# for a readable nonempty data/<task>/brief.md in the item's owner home with
-# neither {TASK} nor {FIRSTMATE_SPEC} left in it. A path-safe brief-source names
-# an alternate task directory in that same home, not a launch task binding.
+# `ready` checks every drive item in scope, even when drive is OFF. It checks
+# the owner's written brief for unresolved tokens, or uses the same main-home
+# source lint as the drafter (fm-goal-brief-lib.sh); it never writes a draft.
+# A path-safe brief-source names an alternate task directory in that same
+# home, not a launch task binding.
 # An unreachable owner is not checked and does not count as ready. Captain
 # items are outside the count, but a captain item gating drive work via after
 # or merge-after needs a captain-reason attesting to a captain-only action:
@@ -278,6 +279,8 @@ FM_GOAL_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_GOAL_HOME/config}"
 . "$FM_GOAL_DIR/fm-stage-ladder-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$FM_GOAL_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-goal-brief-lib.sh
+. "$FM_GOAL_DIR/fm-goal-brief-lib.sh"
 
 _FM_GOAL_LOCK_TIMEOUT=30
 _FM_GOAL_MARK_FUTURE_TOLERANCE=300
@@ -1494,7 +1497,7 @@ _fm_goal_item_task_home() {  # <idx> <data-dir>
 
 # Print one fix, or nothing when the brief is ready. Never render brief contents.
 _fm_goal_brief_fix() {  # <idx> <registry-data>
-  local i=$1 home data task path owner rc=0
+  local i=$1 home data task path owner token fix row_check=''
   owner=${FM_GOAL_ITEMS_OWNERS[$i]}
   if ! home=$(_fm_goal_item_task_home "$i" "$2"); then
     printf 'not checked: owner %s is unreachable; verify the brief in that home\n' "$owner"
@@ -1516,16 +1519,21 @@ _fm_goal_brief_fix() {  # <idx> <registry-data>
     printf 'replace the symlink with a regular task directory and brief at %s\n' "$path"
     return
   fi
+  if [ ! -e "$path" ] && [ "$owner" = main ] && [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] &&
+     [ -z "${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]}" ]; then
+    if ! fix=$(_fm_goal_draft_render "$i"); then printf '%s\n' "$fix"; fi
+    return
+  fi
   if [ ! -f "$path" ] || [ ! -r "$path" ] || [ ! -s "$path" ]; then
     printf 'write a readable, nonempty brief at %s\n' "$path"
     return
   fi
-  LC_ALL=C grep -Fq -e '{TASK}' -e '{FIRSTMATE_SPEC}' -- "$path" 2>/dev/null || rc=$?
-  case "$rc" in
-    0) printf 'replace {TASK}/{FIRSTMATE_SPEC} placeholders in %s\n' "$path" ;;
-    1) ;; # No template markers.
-    *) printf 'not checked: restore read access to %s\n' "$path" ;;
-  esac
+  if fm_goal_is_draft "$path"; then
+    [ ! -f "$FM_GOAL_STATE/$task.meta" ] || row_check=no-row
+    if ! fix=$(_fm_goal_draft_check "$i" "$path" "$row_check"); then printf '%s\n' "$fix"; fi
+  elif token=$(fm_goal_brief_token < "$path"); then
+    printf 'fill %s in %s, then rerun ready\n' "$token" "$path"
+  fi
 }
 
 _fm_goal_drive_readiness() {  # <registry-data> [owner filter]
@@ -2372,7 +2380,6 @@ cmd_start() {
     fm_goal_log "refused: a record for goal '$id' already exists at $path"
     exit 1
   fi
-  _fm_goal_check_before_write "$id" "$require_briefs" || exit 1
   now=$(date +%s)
   started=$(fm_goal_epoch_iso "$now")
   FM_GOAL_REC_ID=$id
@@ -2384,6 +2391,7 @@ cmd_start() {
   FM_GOAL_REC_NAMED_BY=$named_by
   FM_GOAL_REC_PLAN=$(_fm_goal_clean_field "$plan")
   FM_GOAL_REC_DONE_WHEN=$(_fm_goal_clean_field "$done_when")
+  _fm_goal_check_before_write "$id" "$require_briefs" || exit 1
   mkdir -p "$(fm_goal_dir)" || _fm_goal_die 1 'could not create the goals directory'
   fm_goal_lock_hold || exit 1
   _fm_goal_regular_file "$path"
@@ -2453,7 +2461,6 @@ cmd_edit() {
     idx=$(_fm_goal_index_of "${old_ids[$i]}") || continue
     [ -n "${FM_GOAL_ITEMS_SPECS[$idx]-}" ] || FM_GOAL_ITEMS_SPECS[idx]=${old_specs[$i]}
   done
-  _fm_goal_check_before_write "$id" "$require_briefs" edit || { fm_goal_lock_release; exit 1; }
   FM_GOAL_REC_ID=$r_id
   FM_GOAL_REC_TITLE=$(_fm_goal_clean_field "${title:-$r_title}")
   FM_GOAL_REC_STATE=active
@@ -2462,6 +2469,7 @@ cmd_edit() {
   FM_GOAL_REC_NAMED_BY=$r_named_by
   FM_GOAL_REC_PLAN=$r_plan
   FM_GOAL_REC_DONE_WHEN=$(_fm_goal_clean_field "${done_when:-$r_done_when}")
+  _fm_goal_check_before_write "$id" "$require_briefs" edit || { fm_goal_lock_release; exit 1; }
   path=$(fm_goal_path "$id")
   staged=$(mktemp "$(fm_goal_dir)/.goal.editing.XXXXXX") || {
     fm_goal_lock_release

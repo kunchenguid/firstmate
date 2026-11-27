@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Usage: fm-goal-push.sh run [--dry-run] | tick | eligible <goal>/<item> <task> [--launch]
+# Usage: fm-goal-push.sh run [--dry-run] | tick |
+#        eligible <goal>/<item> <task> [--launch <project-dir> <mode> <yolo> <prefix>]
 # config/goal-push: shadow (default, logs dispatch/mark proposals) or enforce.
 # The watcher calls tick: run every 120s or on a goal/mark, landing, status,
 # or cockpit truth change. tick also wakes on reached, uncovered captain
 # steps in both modes and stores its scheduling cursor in watcher state.
 # eligible is the read-only final guard for goal-originated dispatch and replay.
 # The main home drafts up to three missing briefs per driven goal per pass in
-# enforce; shadow only logs proposals. Drafts need task=, project=, a normalized
-# item line of at least 120 characters, and a nonempty Evidence: clause.
+# enforce; shadow only logs proposals. fm-goal-brief-lib.sh owns draft lint.
 # FM_GOAL_PUSH_CAPACITY replaces fm-capacity.sh for lab tests only.
 set -u
 export LC_ALL=C
@@ -46,18 +46,36 @@ startable() {
     _fm_goal_item_startable "$1" "$STATE" "$FM_GOAL_DATA"
 }
 
+load_eligible() {
+  local binding=$1 task=$2 goal=${1%%/*} item=${1#*/} links
+  [ "$goal/$item" = "$binding" ] && fm_goal_id_valid "$goal" && fm_goal_id_valid "$item" || return 1
+  [ "$(mode)" = enforce ] && _fm_goal_read_view && load_goal "$goal" || return 1
+  ELIGIBLE_INDEX=$(_fm_goal_index_of "$item") || return 1
+  [ -n "$task" ] && [ "${FM_GOAL_ITEMS_TASKS[$ELIGIBLE_INDEX]}" = "$task" ] && startable "$ELIGIBLE_INDEX" || return 1
+  links=$("$SCRIPT_DIR/fm-goal.sh" launch-links "$task") || return 1
+  ! grep -Fqx -- "$task"$'\toff' <<< "$links"
+}
+
 eligible() {
-  local binding=$1 task=$2 goal=${1%%/*} item=${1#*/} launch=${3:-} i remaining
+  local binding=$1 task=$2 launch=${3:-} remaining brief="$FM_GOAL_DATA/$2/brief.md"
   if [ "$launch" = --launch ]; then
     remaining=$(headroom) && [ "$remaining" -gt 0 ] || return 1
   fi
-  [ "$goal/$item" = "$binding" ] && fm_goal_id_valid "$goal" && fm_goal_id_valid "$item" || return 1
-  [ "$(mode)" = enforce ] && _fm_goal_read_view && load_goal "$goal" || return 1
-  i=$(_fm_goal_index_of "$item") || return 1
-  [ -n "$task" ] && [ "${FM_GOAL_ITEMS_TASKS[$i]}" = "$task" ] && startable "$i" || return 1
-  local links
-  links=$("$SCRIPT_DIR/fm-goal.sh" launch-links "$task") || return 1
-  ! grep -Fqx -- "$task"$'\toff' <<< "$links"
+  load_eligible "$binding" "$task" || return 1
+  [ ! -L "$FM_GOAL_DATA" ] && [ ! -L "${brief%/*}" ] && [ ! -L "$brief" ] && [ -f "$brief" ] && [ -r "$brief" ] || return 1
+  if [ -n "${FM_GOAL_PUSH_BRIEF:-}" ] && [ "$(fm_pr_sha256 "$brief")" != "$FM_GOAL_PUSH_BRIEF" ]; then
+    printf 'queued goal draft changed; review the brief and drop the saved admission before retrying\n' >&2
+    return 1
+  fi
+  if fm_goal_is_draft "$brief"; then
+    _fm_goal_draft_check "$ELIGIBLE_INDEX" "$brief" >&2 || return 1
+    if [ "$launch" = --launch ]; then
+      [ "$4" -ef "$FM_GOAL_DRAFT_CLONE" ] && [ "$5" = "$FM_GOAL_DRAFT_MODE" ] &&
+        [ "$6" = "$FM_GOAL_DRAFT_YOLO" ] && [ "$7" = "$FM_GOAL_DRAFT_PREFIX" ] || return 1
+    fi
+  elif fm_goal_brief_token < "$brief" >/dev/null; then
+    return 1
+  fi
 }
 
 log() { printf '%s %s %s\n' "$now" "$run_mode" "$*" >> "$LOG"; }
@@ -145,77 +163,35 @@ reconcile() {
 # Write privately, then link the complete brief without replacing an owner's
 # work. Both the stage and destination are on the task data filesystem.
 publish_draft() (
-  local binding=$1 task=$2 body=$3 line=$4 dir="$FM_GOAL_DATA/$2" stage idx
-  local plan=$FM_GOAL_REC_PLAN done_when=$FM_GOAL_REC_DONE_WHEN
+  local binding=$1 task=$2 body=$3 dir="$FM_GOAL_DATA/$2" stage
   [ -d "$FM_GOAL_DATA" ] && [ ! -L "$FM_GOAL_DATA" ] && [ ! -L "$dir" ] || exit 1
   stage=$(mktemp -d "$FM_GOAL_DATA/.goal-draft.XXXXXX") || exit 1
   trap 'rm -f -- "$stage/brief.md"; rmdir -- "$stage"' EXIT
   printf '%s\n' "$body" > "$stage/brief.md" || exit 1
-  eligible "$binding" "$task" && [ ! -e "$STATE/$task.meta" ] && [ ! -L "$STATE/$task.meta" ] || exit 1
-  idx=$(_fm_goal_index_of "${binding#*/}") || exit 1
-  [ "$(_fm_goal_item_line "$idx")" = "$line" ] &&
-    [ "$FM_GOAL_REC_PLAN" = "$plan" ] && [ "$FM_GOAL_REC_DONE_WHEN" = "$done_when" ] || exit 1
+  load_eligible "$binding" "$task" && [ ! -e "$STATE/$task.meta" ] && [ ! -L "$STATE/$task.meta" ] || exit 1
+  _fm_goal_draft_check "$ELIGIBLE_INDEX" "$stage/brief.md" >/dev/null || exit 1
   [ ! -L "$FM_GOAL_DATA" ] && [ ! -L "$dir" ] && mkdir -p -- "$dir" && ln -- "$stage/brief.md" "$dir/"
 )
 
 draft_brief() {
-  local i=$1 binding=$2 task=$3 project=${FM_GOAL_ITEMS_PROJECTS[$1]}
-  local line evidence posture delivery yolo prefix forge pr clone scaffold body row brief="$FM_GOAL_DATA/$3/brief.md"
-  local evidence_clause='(^|[[:space:];])([Ee][Vv][Ii][Dd][Ee][Nn][Cc][Ee]):[[:space:]]*([^[:space:]].*)$'
-  fm_task_id_creation_valid "$task" && [ -n "$project" ] || {
-    log "cannot draft $binding: set task= and project="; return 1;
-  }
-  line=$(_fm_goal_item_line "$i")
-  if [ "${#line}" -lt 120 ] || ! [[ "${FM_GOAL_ITEMS_TITLES[$i]}" =~ $evidence_clause ]]; then
-    log "cannot draft $binding: need a 120-character item line and a nonempty Evidence: clause"
-    return 1
-  fi
-  evidence=${BASH_REMATCH[3]}
+  local i=$1 binding=$2 task=$3 body brief="$FM_GOAL_DATA/$3/brief.md"
   if [ -e "$brief" ] || [ -L "$brief" ] || [ -L "${brief%/*}" ]; then
     log "cannot draft $binding: unsafe or existing brief path"
     return 1
   fi
-  clone="${FM_PROJECTS_OVERRIDE:-$FM_GOAL_HOME/projects}/$project"
-  if ! { posture=$("$SCRIPT_DIR/fm-project-mode.sh" "$project") &&
-         prefix=$("$SCRIPT_DIR/fm-project-mode.sh" --branch-prefix "$project") &&
-         forge=$("$SCRIPT_DIR/fm-project-mode.sh" --forge "$project") &&
-         pr=$("$SCRIPT_DIR/fm-project-mode.sh" --pr "$project"); }; then
-    log "cannot draft $binding: project posture could not be resolved"
+  if ! body=$(_fm_goal_draft_render "$i"); then
+    log "cannot draft $binding: $body"
     return 1
   fi
-  read -r delivery yolo <<< "$posture"
-  scaffold=$("$SCRIPT_DIR/fm-brief.sh" "$task" "$project" --render --project "$clone" \
-    --mode "$delivery" --branch-prefix "$prefix" --forge "$forge" --pr "$pr") || {
-      log "cannot draft $binding: scaffold refused"; return 1;
-    }
-  body=$(
-    printf '%s\n' 'Drafted by goal pusher from the item line' "Goal pusher project: $project"
-    while IFS= read -r row; do
-      case "$row" in
-        '{TASK}') printf '%s\n\nGoal done when: %s\nGoal plan: %s\n' \
-          "$line" "$FM_GOAL_REC_DONE_WHEN" "$FM_GOAL_REC_PLAN" ;;
-        '{FIRSTMATE_SPEC}') printf '%s\n' \
-          "Read the plan section for this item at $FM_GOAL_REC_PLAN." \
-          'Scope: the item line above.' 'Out of scope: everything else in the goal.' \
-          "Evidence: $evidence" 'Include a Reusable mechanisms note in your report.' \
-          'If changing Firstmate itself, load firstmate-coding-guidelines before editing.' ;;
-        *) printf '%s\n' "$row" ;;
-      esac
-    done <<< "$scaffold"
-  )
-  case "$body" in
-    *'{TASK}'*|*'{FIRSTMATE_SPEC}'*|*'{FILL:'*)
-      log "cannot draft $binding: brief would contain unresolved placeholders"; return 1 ;;
-  esac
   if [ "$run_mode" = shadow ]; then
     log "would draft $binding ($task)"
     return 0
   fi
-  if ! publish_draft "$binding" "$task" "$body" "$line"; then
+  if ! publish_draft "$binding" "$task" "$body"; then
     log "cannot draft $binding: eligibility or brief path changed, or write failed"
     return 1
   fi
-  log "drafted $binding ($task): mode=$delivery yolo=$yolo branch=$prefix$task"
+  log "drafted $binding ($task)"
   "$SCRIPT_DIR/fm-task-milestones.sh" stamp "$STATE/$task.status" brief -- 'drafted by goal pusher' || true
 }
 
@@ -290,6 +266,13 @@ run_pass() {
         listed=0 # The broker's earlier snapshot could not see this brief.
       fi
       [ ! -e "$STATE/$task.meta" ] && [ ! -L "$STATE/$task.meta" ] || continue
+      if [ -f "$brief" ] && [ ! -L "$brief" ] && [ ! -L "${brief%/*}" ] && fm_goal_is_draft "$brief"; then
+        if ! result=$(_fm_goal_draft_check "$i" "$brief"); then
+          log "hold $binding ($task): $result"
+          briefs="$briefs $binding"
+          continue
+        fi
+      fi
       if [ "$listed" -eq 0 ]; then
         links=$("$SCRIPT_DIR/fm-goal.sh" launch-links) || return 1
         ready=$("$AUTO" list | awk '$2 == "start" {print $1}')
@@ -360,8 +343,9 @@ event_key() {
 
 case "${1:-}" in
   eligible)
-    [ "$#" -eq 3 ] || { [ "$#" -eq 4 ] && [ "$4" = --launch ]; } || exit 2
-    eligible "$2" "$3" "${4:-}"; exit $? ;;
+    shift
+    [ "$#" -eq 2 ] || { [ "$#" -eq 7 ] && [ "$3" = --launch ]; } || exit 2
+    eligible "$@"; exit $? ;;
   tick) [ "$#" -eq 1 ] || exit 2 ;;
   run) [ "$#" -eq 1 ] || { [ "$#" -eq 2 ] && [ "$2" = --dry-run ]; } || exit 2 ;;
   -h|--help) awk 'NR > 1 && /^#/ {sub(/^# ?/, ""); print; next} NR > 1 {exit}' "$0"; exit 0 ;;

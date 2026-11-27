@@ -169,10 +169,11 @@ pass 'local mate uses the parent goal view, its own dispatcher, and the parent m
 
 # Missing briefs use the real scaffold and registry but still launch only via
 # the lab recorder. A prewritten row forces the broker snapshot before drafting.
-mkdir -p "$H/projects/draftrepo" "$H/projects/bare"
-git init -q "$H/projects/bare"
+for repo in draftrepo bare route; do git init -q "$H/projects/$repo"; done
 printf '%s\n' '- draftrepo [local-only +yolo branch=fix-] - lab project' \
-  '- bare [direct-PR branch=] - lab project' >> "$H/data/projects.md"
+  '- bare [direct-PR branch=] - lab project' '- route [local-only] - lab project' >> "$H/data/projects.md"
+mkdir -p "$H/config/brief-addenda"
+printf '%s\n' 'Contact {FILL:MIKO_ROUTE} for the lab route.' > "$H/config/brief-addenda/route.md"
 brief prewritten
 scope='Cover fallback rendering with the existing fixture and preserve literal data such as a/b & c\d.'
 proof='Run the focused rendering regression and record the pass line.'
@@ -190,14 +191,30 @@ item() {
   item draft-mate mate1 ' [project=draftrepo]' "$scope Evidence: $proof"
   item draft-bare main ' [project=bare]' "$scope Evidence: $proof"
   item wrong-project main ' [project=draftrepo]' "$scope Evidence: $proof"
+  item captain-hold main ' [project=draftrepo]' "$scope Evidence: $proof"
+  item addendum main ' [project=route]' "$scope Evidence: $proof"
+  item placeholder main ' [project=draftrepo]' "$scope Fill {FILL:MIKO_ROUTE}. Evidence: $proof"
+  item replay main ' [project=draftrepo]' 'Replay check in the lab'
   item over-cap main ' [project=draftrepo]' "$scope Evidence: $proof"
+  printf 'spec replay %s\n' "$(jq -cn --arg scope "$scope" --arg proof "$proof" '{section:"Rendering validation",scope:$scope,evidence:$proof}')"
 } > "$T/draft.items"
 item draft-off main ' [project=draftrepo]' "$scope Evidence: $proof" > "$T/nodraft.items"
 item cap-independent main ' [project=draftrepo]' "$scope Evidence: $proof" > "$T/separate.items"
 start draft 'plan.md#rendering'; start nodraft; start separate
 "$G" pause nodraft >/dev/null
 printf '%s\n' 'draft-good,queued,ship,draftrepo,Good' 'draft-bare,queued,ship,bare,Bare' \
-  'wrong-project,queued,ship,demo,Wrong project' >> "$T/ready.csv"
+  'wrong-project,queued,ship,demo,Wrong project' 'captain-hold,blocked,ship,draftrepo,Not ready' \
+  'addendum,queued,ship,route,Unfilled addendum' 'placeholder,queued,ship,draftrepo,Unfilled source' \
+  'replay,queued,ship,draftrepo,Held then replayed' 'over-cap,queued,ship,draftrepo,Deferred' \
+  'cap-independent,queued,ship,draftrepo,Separate goal' >> "$T/ready.csv"
+assert_equals '1 of 1 items drive-ready' "$("$G" ready separate)" 'approved source is ready before its brief exists'
+assert_absent "$H/data/cap-independent/brief.md" 'ready never materializes a brief'
+ready_out=$("$G" ready draft) && fail 'invalid draft sources must not all be ready'
+assert_contains "$ready_out" 'addendum: fill {FILL:MIKO_ROUTE}' 'ready checks rendered addenda'
+assert_contains "$ready_out" 'placeholder: fill {FILL:MIKO_ROUTE}' 'ready checks source tokens'
+assert_contains "$ready_out" 'wrong-project: make the unique ship row' 'ready rejects mismatched project'
+assert_contains "$ready_out" 'captain-hold: make the unique ship row' 'ready rejects held row'
+: > "$T/hold-replay"
 "$P" run --dry-run
 assert_grep 'shadow would draft draft/draft-good' "$H/state/goal-push.log" 'shadow proposes a viable draft'
 assert_absent "$H/data/draft-good/brief.md" 'shadow never writes a brief'
@@ -208,8 +225,8 @@ assert_equals 'Drafted by goal pusher from the item line' "$(head -n 1 "$f")" 'd
 expected=$(item draft-good main ' [project=draftrepo]' "$scope Evidence: $proof")
 assert_equals "$expected" "$(grep -Fx -- "$expected" "$f")" 'item line is copied literally'
 assert_grep 'Goal done when: done' "$f" 'brief includes the goal completion criterion'
-assert_grep 'Goal plan: plan.md#rendering' "$f" 'brief includes the goal plan link'
-assert_grep 'Read the plan section for this item at plan.md#rendering.' "$f" 'spec directs the worker to the plan section'
+assert_grep 'Goal plan (context only): plan.md#rendering' "$f" 'brief includes the goal plan as context, not authority'
+grep -Eq '^Goal pusher source: [a-f0-9]{64} [a-f0-9]{64}$' "$f" || fail 'brief records the source and body SHA-256s'
 assert_grep 'Out of scope: everything else in the goal.' "$f" 'spec limits work to the item'
 assert_grep "Evidence: $proof" "$f" 'brief includes the item proof'
 assert_grep 'Reusable mechanisms note' "$f" 'brief requires a reusable-mechanisms note'
@@ -221,12 +238,12 @@ assert_grep "new draft-bare $H/projects/bare --wait --mode direct-PR --yolo off 
   "$T/dispatch.log" 'broker forwards an explicitly empty branch prefix'
 assert_grep 'enforce drafted draft/draft-good' "$H/state/goal-push.log" 'enforce logs the draft'
 assert_equals 1 "$(grep -c 'goal briefs needed:.*draft/draft-thin.*draft/no-evidence.*draft/no-project' "$H/state/.wake-queue")" 'refusals wake the owner'
-for id in draft-thin no-evidence blank-evidence no-project draft-captain draft-mate draft-off over-cap; do
+for id in draft-thin no-evidence blank-evidence no-project draft-captain draft-mate draft-off over-cap wrong-project captain-hold addendum placeholder; do
   assert_absent "$H/data/$id/brief.md" "$id was not drafted"
 done
-assert_absent "$H/state/wrong-project.meta" 'draft cannot start against a mismatched ready project'
-assert_grep 'wrong-project skip: goal draft project disagrees with ready row' \
-  <("$ROOT/bin/fm-auto-dispatch.sh" list) 'the broker explains the mismatch'
+assert_grep 'cannot draft draft/wrong-project: make the unique ship row' "$H/state/goal-push.log" 'drafter explains the mismatch'
+assert_grep 'cannot draft draft/addendum: fill {FILL:MIKO_ROUTE}' "$H/state/goal-push.log" 'drafter names the unfilled route'
+assert_grep 'cannot draft draft/captain-hold: make the unique ship row' "$H/state/goal-push.log" 'drafter respects the captain hold'
 assert_grep 'enforce defer draft draft/over-cap: per-goal cap reached' "$H/state/goal-push.log" 'cap defers overflow'
 assert_grep 'Drafted by goal pusher' "$H/data/cap-independent/brief.md" 'another goal has its own draft allowance'
 FM_HOME="$M" FM_STATE_OVERRIDE="$M/state" FM_CONFIG_OVERRIDE="$M/config" FM_DATA_OVERRIDE="$M/data" \
@@ -235,6 +252,47 @@ assert_absent "$M/data/draft-mate/brief.md" 'mate never drafts an item inherited
 "$P" run
 assert_grep 'Drafted by goal pusher' "$H/data/over-cap/brief.md" 'next pass can draft a deferred item'
 pass 'goal fallback drafts viable items and routes them through the broker without widening scope or ownership'
+
+replay="$H/data/replay/brief.md"
+cp "$f" "$T/running-brief"
+assert_grep $'replay\theld\tdraft/replay' <("$Q" list --goal-push) 'clean draft reached the held queue'
+"$P" eligible draft/replay replay --launch "$H/projects/draftrepo" local-only on fix-
+if "$P" eligible draft/replay replay --launch "$H/projects/demo" direct-PR off fm/; then
+  fail 'queued launch arguments must match the approved registry contract'
+fi
+assert_grep 'Approved plan section: Rendering validation' "$replay" 'inline spec supplies approved section'
+assert_grep "Scope: $scope" "$replay" 'inline spec supplies scope despite a short title'
+cp "$replay" "$T/approved-brief"
+# The saved queue checks the new backlog and the bytes originally admitted.
+cp "$T/ready.csv" "$T/approved-rows"
+awk -F, '$1 != "replay"' "$T/approved-rows" > "$T/ready.csv"
+"$Q" retry --goal-task replay
+assert_absent "$H/state/replay.meta" 'ready row held after queuing cannot replay'
+cp "$T/approved-rows" "$T/ready.csv"
+printf '%s\n' 'Replacement written by hand, without any draft markers.' > "$replay"
+"$Q" retry --goal-task replay
+assert_absent "$H/state/replay.meta" 'removing provenance cannot unpin a held draft'
+cp "$T/approved-brief" "$replay"
+printf '\nHand-edited note.\n' >> "$replay"
+"$P" run
+assert_grep 'hold draft/replay (replay): generated brief is stale or edited' "$H/state/goal-push.log" 'edited brief is held with an actionable fix'
+assert_grep 'Hand-edited note.' "$replay" 'pusher never replaces a hand edit'
+cp "$T/approved-brief" "$replay"
+# Edit only the approved spec, leaving the title and the saved bytes intact.
+awk '$1 == "spec" && $2 == "replay" { sub(/record the pass line/, "record the full summary") } { print }' "$T/draft.items" > "$T/revised.items"
+assert_grep 'record the full summary' "$T/revised.items" 'fixture makes a meaningful spec edit'
+"$G" edit draft --items-file "$T/revised.items" >/dev/null 2>&1
+ready_out=$("$G" ready draft) && fail 'stale draft must not be ready'
+assert_contains "$ready_out" 'replay: generated brief is stale or edited' 'ready identifies the stale revision'
+"$Q" retry --goal-task replay
+assert_absent "$H/state/replay.meta" 'edited goal source cannot replay stale admission'
+cmp -s "$replay" "$T/approved-brief" || fail 'stale brief was unexpectedly rewritten'
+cmp -s "$f" "$T/running-brief" || fail 'running brief changed'
+"$G" edit draft --items-file "$T/draft.items" >/dev/null 2>&1
+"$Q" retry --goal-task replay
+assert_grep "replay $H/projects/draftrepo" "$T/spawn.log" 'restored approved source replays normally'
+assert_present "$H/state/replay.meta" 'clean replay reached the lab launch endpoint'
+pass 'held replay rechecks row, exact brief and approved source; staleness never overwrites a brief'
 
 printf 'shadow\n' > "$H/config/goal-push"
 printf '%s\n' 'item [id=review] [owner=captain] [class=captain]: Review the demo' > "$T/review.items"

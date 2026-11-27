@@ -9,6 +9,7 @@
 #
 # Usage:
 #   fm-auto-dispatch.sh list    one line per ready row: <id> <start|skip: why>
+#   fm-auto-dispatch.sh draft-row <task> <project>   check the unique ready ship row
 #   fm-auto-dispatch.sh check   the watcher check (state/auto-dispatch.check.sh):
 #                               shadow reports a changed candidate set once;
 #                               enforce starts `run` detached, exactly as
@@ -132,6 +133,8 @@ is_uint() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; }
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-goal-brief-lib.sh
+. "$SCRIPT_DIR/fm-goal-brief-lib.sh"
 
 case "$MAX_STARTS" in ''|*[!0-9]*|0) die 'FM_AUTODISPATCH_MAX_STARTS must be a whole number of at least 1' ;; esac
 case "$RETRY_SECS" in ''|*[!0-9]*) die 'FM_AUTODISPATCH_RETRY_SECS must be whole seconds' ;; esac
@@ -149,9 +152,20 @@ announce() {  # <key> <text>
 one_line() { printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-300; }
 
 # One "id state kind repo" row per ready line, in the tool's own order.
-ready_rows() {
+ready_rows() (
+  set -o pipefail
   fm_run_timed 30 "$READY" ready 2>/dev/null | awk -F, '
     $2 == "queued" && $1 != "" && $1 !~ /[\/]/ && $3 != "" && $4 != "" { print $1, $2, $3, $4 }'
+)
+
+# Read-only project binding for the goal drafter and for admission replay.
+# ready owns the backlog hold rules; a missing or ambiguous row cannot start.
+cmd_draft_row() {
+  local rows
+  [ "$#" -eq 2 ] && fm_task_id_creation_valid "$1" && [ -n "$2" ] || die 'expected draft-row <task> <project>'
+  rows=$(ready_rows) || return 1
+  awk -v id="$1" -v project="$2" '$1 == id { n++; match_row = ($3 == "ship" && $4 == project) }
+    END { exit !(n == 1 && match_row) }' <<< "$rows"
 }
 
 mark_epoch() {  # <file> -> its mtime epoch, 0 when absent
@@ -166,8 +180,8 @@ brief_value() {  # <brief> <sed-expr>
 # <id> <kind> <repo> -> "start <project-dir> <flag>..." on stdout when every
 # gate passes, or "skip: <reason>" (rc 1). Flags are data for cmd_run; they
 # are never evaluated as shell text.
-verdict() {  # <id> <kind> <repo>
-  local id=$1 kind=$2 repo=$3 brief meta project branch mode yolo base consent prefix draft_project
+verdict() {  # <id> <kind> <repo> [scope]
+  local id=$1 kind=$2 repo=$3 scope=${4-} brief meta project branch mode yolo base consent prefix draft_project
   case "$kind" in
     secondmate) printf 'skip: secondmate-class row\n'; return 1 ;;
     captain) printf 'skip: captain-class row\n'; return 1 ;;
@@ -178,11 +192,12 @@ verdict() {  # <id> <kind> <repo>
   [ ! -e "$STATE/admission-queue/$id.start" ] || { printf 'skip: admission queue owns start\n'; return 1; }
   brief="$DATA/$id/brief.md"
   [ -s "$brief" ] && [ -f "$brief" ] && [ ! -L "$brief" ] || { printf 'skip: no written brief\n'; return 1; }
-  if grep -q -e '{TASK}' -e '{FIRSTMATE_SPEC}' -e '{FILL:' "$brief"; then
+  if fm_goal_brief_token < "$brief" >/dev/null; then
     printf 'skip: brief still has placeholders\n'
     return 1
   fi
-  if [ "$(head -n 1 "$brief")" = 'Drafted by goal pusher from the item line' ]; then
+  if fm_goal_is_draft "$brief"; then
+    [ "$scope" != unscoped ] || { printf 'skip: goal draft needs scoped goal dispatch\n'; return 1; }
     draft_project=$(brief_value "$brief" 's/^Goal pusher project: //')
     [ "$draft_project" = "$repo" ] || { printf 'skip: goal draft project disagrees with ready row\n'; return 1; }
   fi
@@ -249,7 +264,7 @@ goal_can_start() {  # <id> <launch-links rows>
 
 # One "<id> <verdict>" line per ready row.
 verdicts() {
-  local id kind repo v m links='' only=${1:-}
+  local id kind repo v m links='' only=${1:-} scope=${2:-}
   m=$(mode)
   if [ "$m" = enforce ]; then
     links=$("$SCRIPT_DIR/fm-goal.sh" launch-links) || links=''
@@ -260,7 +275,7 @@ verdicts() {
     if [ "$m" = enforce ] && ! goal_can_start "$id" "$links"; then
       v='skip: no eligible ON goal link'
     else
-      v=$(verdict "$id" "$kind" "$repo")
+      v=$(verdict "$id" "$kind" "$repo" "$scope")
     fi
     printf '%s %s\n' "$id" "$v"
   done < <(ready_rows | cut -d' ' -f1,3,4)
@@ -271,8 +286,17 @@ cmd_list() { verdicts; }
 # Dispatch one row; prints one outcome line. Never trusts dispatch output as
 # shell text: only its exit status and grepped evidence lines are read.
 dispatch_one() {  # <id> <project-dir> <flag>...
-  local id=$1 project=$2 out rc reason pick
+  local id=$1 project=$2 out rc reason pick FM_GOAL_PUSH_BRIEF=''
   shift 2
+  if fm_goal_is_draft "$DATA/$id/brief.md"; then
+    if [ -z "${FM_GOAL_PUSH_BINDING:-}" ]; then
+      printf 'skip %s: goal draft needs scoped goal dispatch\n' "$id"
+      return 0
+    fi
+    FM_GOAL_PUSH_BRIEF=$(fm_pr_sha256 "$DATA/$id/brief.md")
+    [[ "$FM_GOAL_PUSH_BRIEF" =~ ^[a-f0-9]{64}$ ]] || return 0
+  fi
+  export FM_GOAL_PUSH_BRIEF
   if [ -n "${FM_GOAL_PUSH_BINDING:-}" ] &&
      ! "$SCRIPT_DIR/fm-goal-push.sh" eligible "$FM_GOAL_PUSH_BINDING" "$id"; then
     printf 'skip %s: goal no longer eligible\n' "$id"
@@ -323,9 +347,9 @@ dispatch_one() {  # <id> <project-dir> <flag>...
 }
 
 cmd_run() {
-  local mode started=0 id v links only=''
+  local mode started=0 id v links only='' scope=unscoped
   if [ "$#" -eq 2 ] && [ "$1" = --goal-task ] && [ -n "${FM_GOAL_PUSH_BINDING:-}" ]; then
-    only=$2
+    only=$2 scope=goal
     fm_task_id_creation_valid "$only" || die 'invalid goal task id'
   else
     [ "$#" -eq 0 ] || die 'expected run [--goal-task <id>]'
@@ -353,7 +377,7 @@ cmd_run() {
         [ -z "$only" ] || break
         ;;
     esac
-  done < <(verdicts "$only")
+  done < <(verdicts "$only" "$scope")
 }
 
 # The check the watcher runs: shadow reports a changed candidate set once;
@@ -363,12 +387,12 @@ cmd_check() {
   m=$(mode)
   [ "$m" != off ] || return 0
   if [ "$m" = enforce ]; then
-    if verdicts | grep -q 'start ' && [ ! -d "$LOCK" ]; then
+    if verdicts '' unscoped | grep -Eq '^[^ ]+ start ' && [ ! -d "$LOCK" ]; then
       ( setsid "$0" run > "$LOG" 2>&1 < /dev/null & ) 2>/dev/null
     fi
     return 0
   fi
-  snapshot=$(verdicts | awk '$2 == "start"' | sort)
+  snapshot=$(verdicts '' unscoped | awk '$2 == "start"' | sort)
   if [ "$snapshot" != "$(cat "$STATE/.auto-dispatch-shadow" 2>/dev/null)" ]; then
     printf '%s\n' "$snapshot" > "$STATE/.auto-dispatch-shadow"
     [ -z "$snapshot" ] || printf 'auto-dispatch (shadow, nothing started): %s dispatchable row(s): %s. Write enforce to config/auto-dispatch to start them automatically.\n' \
@@ -400,6 +424,7 @@ cmd_drop() {
 
 case "${1:-}" in
   list) cmd_list ;;
+  draft-row) shift; cmd_draft_row "$@" ;;
   check) cmd_check ;;
   run) shift; cmd_run "$@" ;;
   arm) cmd_arm ;;
