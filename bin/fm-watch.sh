@@ -783,7 +783,7 @@ signal_turnend_panes_churned() {  # <file> ...
   [ -e "$CONFIG/turnend-churn-absorb" ] || return 1
   local f base task meta kind w key backend label terminal prev now since now_s absorb_secs marker age
   local rec_task task_index i j count hash_file hash_bytes created
-  local max_absorb_secs=9223372036854775807
+  local max_absorb_secs=9223372036854775807 checkpointed=0
   local -a signal_tasks=() signal_statuses=() snapshot_tasks=() snapshot_kinds=()
   local -a snapshot_windows=() snapshot_keys=() snapshot_backends=() snapshot_labels=()
   local -a signal_indexes=() churn_indexes=() churned_keys=() missing_keys=() created_keys=()
@@ -867,6 +867,10 @@ signal_turnend_panes_churned() {  # <file> ...
   fi
   absorb_secs=$((10#$TURNEND_CHURN_ABSORB_SECS))
   for task_index in "${churn_indexes[@]}"; do
+    if [ "$checkpointed" -eq 1 ] && command -v watcher_checkpoint >/dev/null 2>&1; then
+      watcher_checkpoint || return 1
+    fi
+    checkpointed=1
     w=${snapshot_windows[$task_index]}
     key=${snapshot_keys[$task_index]}
     backend=${snapshot_backends[$task_index]}
