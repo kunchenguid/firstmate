@@ -104,8 +104,8 @@ fm_auggie_script_arg() {  # <args> [pid]
           --dns-result-order|--unhandled-rejections|--max-http-header-size|\
           --max-old-space-size-percentage|--network-family-autoselection-attempt-timeout|\
           --openssl-config|--icu-data-dir|--secure-heap|--secure-heap-min|--snapshot-blob|\
-          --build-snapshot-config|--build-sea|--experimental-sea-config|--config-file|\
-          --experimental-config-file|--experimental-package-map|--localstorage-file|\
+          --build-snapshot-config|--build-sea|--experimental-sea-config|\
+          --experimental-package-map|--localstorage-file|\
           --redirect-warnings|--diagnostic-dir|--report-dir|--report-directory|\
           --report-filename|--report-signal|--heapsnapshot-near-heap-limit|\
           --heapsnapshot-signal|--cpu-prof-dir|--cpu-prof-interval|--cpu-prof-name|\

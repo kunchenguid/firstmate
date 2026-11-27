@@ -353,6 +353,16 @@ const result = spawnSync('bash', ['-c', `
   process.env.FM_TEST_AUGGIE_MODE, process.env.FM_TEST_AUGGIE_SCRIPT], {stdio: 'inherit'});
 process.exit(result.status === null ? 99 : result.status);
 JS
+  printf '%s\n' '{}' > "$dir/node.config.json"
+  for option in --config-file --experimental-config-file \
+    --config-file=node.config.json --experimental-config-file=node.config.json; do
+    (
+      cd "$dir" || exit 1
+      FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
+        FM_TEST_AUGGIE_SCRIPT="$script" \
+        node "$option" "$script"
+    ) || fail "auggie: live node $option lost script identity"
+  done
   for option in --require -r --import; do
     FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
       FM_TEST_AUGGIE_SCRIPT="$script" \
