@@ -91,7 +91,11 @@ function fixtureRoot(html) {
   const [root, ...descendants] = nodes;
   return {
     removeAttribute: root.removeAttribute,
-    querySelectorAll: selector => selector === "style, link" ? descendants : descendants.filter(n => n.getAttribute("data-fm-captured-sheet") !== null),
+    querySelectorAll(selector) {
+      if (selector === "style, link") return descendants;
+      if (selector === "[data-fm-captured-sheet]") return descendants.filter(n => n.getAttribute("data-fm-captured-sheet") !== null);
+      throw new Error(`Unsupported fixture selector: ${selector}`);
+    },
     get outerHTML() { let i = 0; return html.replace(tags, () => nodes[i++].outerHTML); }
   };
 }
