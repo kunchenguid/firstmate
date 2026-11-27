@@ -4912,6 +4912,17 @@ admission_retry_detached() {
     "$SCRIPT_DIR/fm-admission-queue.sh" retry </dev/null >/dev/null 2>&1 &
   ADMISSION_RETRY_PID=$!
 }
+GOAL_PUSH_PID=
+goal_push_detached() {
+  [ -x "$SCRIPT_DIR/fm-goal-push.sh" ] || return 0
+  if [ -n "$GOAL_PUSH_PID" ]; then
+    kill -0 "$GOAL_PUSH_PID" 2>/dev/null && return 0
+    wait "$GOAL_PUSH_PID" 2>/dev/null || true
+  fi
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG \
+    "$SCRIPT_DIR/fm-goal-push.sh" tick </dev/null >/dev/null 2>&1 &
+  GOAL_PUSH_PID=$!
+}
 WORKER_TABLE_REFRESH_PID=
 worker_table_refresh_detached() {
   if [ -n "$WORKER_TABLE_REFRESH_PID" ]; then
@@ -5370,6 +5381,7 @@ while :; do
   if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/lane-capacity.json")" -ge 30 ]; then
     lane_capacity_publish_detached
   fi
+  goal_push_detached
   # Held starts and the fresh cross-home count behind them: off costs a file test.
   if [ -d "$STATE/admission-queue" ] && [ "$(age_of "$STATE/.last-admission-retry")" -ge "$ADMISSION_RETRY_INTERVAL" ]; then
     admission_retry_detached

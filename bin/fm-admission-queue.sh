@@ -26,6 +26,10 @@
 #                                 offer held reviews first, then ordinary starts,
 #                                 oldest first within each allowance, by
 #                                 running fm-spawn.sh with the saved arguments
+#   fm-admission-queue.sh list --goal-push
+#                                 pusher entries as tab-separated id, state, binding
+#   fm-admission-queue.sh retry --goal-task <id> [--max-starts N]
+#                                 offer one tagged entry after its goal guard
 #   fm-admission-queue.sh drop <task-id>
 #                                 forget an entry (a failed one Firstmate gave up on)
 #
@@ -46,7 +50,9 @@
 # State: state/admission-queue/<task-id>.start, one `key=value` record per file
 # (mode 0600, written atomically) with queued_epoch, last_epoch, attempts,
 # state (held|failed), reason, cwd, command (spawn|dispatch; absent is spawn),
-# optional auto_dispatch=1 set by auto-dispatch, and one `arg=` line per argument.
+# optional auto_dispatch=1 and goal_push=<goal>/<item>, and one `arg=` line per argument.
+# Ordinary retry never offers goal-tagged entries. Their guard may defer an
+# in-flight attempt (exit 76) without changing the original entry.
 # retry serializes on state/.admission-queue.lock and exits 0 when another run
 # holds it. Arguments and directories containing a newline are refused.
 #
@@ -87,6 +93,7 @@ read_entry() {  # <file>
   ENTRY_QUEUED=0 ENTRY_LAST=0 ENTRY_ATTEMPTS=0 ENTRY_STATE=held ENTRY_REASON='' ENTRY_CWD=''
   ENTRY_ARGS=()
   ENTRY_COMMAND=spawn
+  ENTRY_GOAL_PUSH=''
   ENTRY_ALLOWANCE=ordinary
   ENTRY_AUTO_DISPATCH=0
   while IFS= read -r line || [ -n "$line" ]; do
@@ -99,6 +106,7 @@ read_entry() {  # <file>
       cwd=*) ENTRY_CWD=${line#*=} ;;
       command=*) ENTRY_COMMAND=${line#*=} ;;
       auto_dispatch=1) ENTRY_AUTO_DISPATCH=1 ;;
+      goal_push=*) ENTRY_GOAL_PUSH=${line#*=} ;;
       arg=*)
         ENTRY_ARGS+=("${line#arg=}")
         [ "$line" != arg=--merge-review ] || ENTRY_ALLOWANCE=reserved-review
@@ -129,6 +137,7 @@ write_entry() {  # <id> <queued> <attempts> <state> <reason> <cwd> <arg>...
     if [ "${ENTRY_AUTO_DISPATCH:-0}" = 1 ] || [ "${FM_ADMISSION_AUTO_DISPATCH:-0}" = 1 ]; then
       printf 'auto_dispatch=1\n'
     fi
+    if [ -n "${FM_GOAL_PUSH_BINDING:-}" ]; then printf 'goal_push=%s\n' "$FM_GOAL_PUSH_BINDING"; fi
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the queue entry for $id"; }
   mv -f -- "$tmp" "$QUEUE/$id.start" || { rm -f -- "$tmp"; die "cannot publish the queue entry for $id"; }
@@ -138,7 +147,7 @@ write_entry() {  # <id> <queued> <attempts> <state> <reason> <cwd> <arg>...
 entries_sorted() {
   local f priority
   for f in "$QUEUE"/*.start; do
-    [ -f "$f" ] || continue
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
     read_entry "$f"
     priority=1
     [ "$ENTRY_ALLOWANCE" != reserved-review ] || priority=0
@@ -155,6 +164,7 @@ age_text() {  # <seconds>
 
 cmd_add() {
   local id cwd arg queued old='' attempts=0 reason=''
+  local FM_GOAL_PUSH_BINDING=${FM_GOAL_PUSH_BINDING:-}
   [ "$#" -ge 1 ] || die "add needs a task id"
   id=$1; shift
   id_valid "$id" || die "invalid task id '$id'"
@@ -172,13 +182,16 @@ cmd_add() {
   cwd=$(pwd -P) || die "cannot resolve the working directory"
   case "$cwd" in *$'\n'*) die "a working directory holding a newline cannot be queued" ;; esac
   queued=$(date +%s)
+  [ ! -L "$QUEUE/$id.start" ] || die "$QUEUE/$id.start is a symlink"
   if [ -f "$QUEUE/$id.start" ]; then
     old=$QUEUE/$id.start
     read_entry "$old"
     queued=$ENTRY_QUEUED
     attempts=$ENTRY_ATTEMPTS
+    FM_GOAL_PUSH_BINDING=${ENTRY_GOAL_PUSH:-$FM_GOAL_PUSH_BINDING}
     [ "$queued" -gt 0 ] || queued=$(date +%s)
   fi
+  case "$FM_GOAL_PUSH_BINDING" in *[!a-zA-Z0-9./_-]*) die 'invalid goal push binding' ;; esac
   attempts=$((attempts + 1))
   write_entry "$id" "$queued" "$attempts" held "$reason" "$cwd" "$@"
 }
@@ -203,11 +216,16 @@ cmd_submit() {
 
 cmd_list() {
   local f id now
+  [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --goal-push ]; } || die 'expected list [--goal-push]'
   now=$(date +%s)
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     id=$(basename "$f" .start)
     read_entry "$f"
+    if [ "${1:-}" = --goal-push ]; then
+      [ -z "$ENTRY_GOAL_PUSH" ] || printf '%s\t%s\t%s\n' "$id" "$ENTRY_STATE" "$ENTRY_GOAL_PUSH"
+      continue
+    fi
     printf '%s %s queued %s tries %s %s allowance=%s\n' "$id" "$ENTRY_STATE" \
       "$(age_text $((now > ENTRY_QUEUED ? now - ENTRY_QUEUED : 0)))" "$ENTRY_ATTEMPTS" "$ENTRY_REASON" "$ENTRY_ALLOWANCE"
   done < <(entries_sorted)
@@ -253,7 +271,7 @@ start_budget() {
 
 cmd_retry() {
   local max='' attempts_cap f id out rc reason started=0 tried=0 lock command resolver_retry
-  local enforce=0 links remaining=0 budget
+  local enforce=0 links remaining=0 budget only='' FM_GOAL_PUSH_BINDING=''
   resolver_retry=${FM_ADMISSION_RESOLVER_RETRY_SECS:-900}
   is_uint "$resolver_retry" || resolver_retry=900
   while [ "$#" -gt 0 ]; do
@@ -261,6 +279,9 @@ cmd_retry() {
       --max-starts)
         if [ "$#" -lt 2 ] || ! is_uint "$2"; then die "--max-starts needs a number"; fi
         max=$2; shift 2 ;;
+      --goal-task)
+        id_valid "${2:-}" || die '--goal-task needs a task id'
+        only=$2; shift 2 ;;
       *) die "unknown retry argument '$1'" ;;
     esac
   done
@@ -273,7 +294,9 @@ cmd_retry() {
   _FM_WAKE_LIB_LOADED=1
   lock="$STATE/.admission-queue.lock"
   fm_lock_try_acquire "$lock" || return 0
-  if auto_dispatch_enforced; then
+  if [ -n "$only" ]; then
+    max=${max:-1}
+  elif auto_dispatch_enforced; then
     enforce=1
     max=${max:-3}
     [ "$max" -le 3 ] || max=3
@@ -285,7 +308,15 @@ cmd_retry() {
     [ -n "$f" ] || continue
     [ "$started" -lt "$max" ] && [ "$tried" -lt "$attempts_cap" ] || break
     id=$(basename "$f" .start)
+    [ -z "$only" ] || [ "$id" = "$only" ] || continue
     read_entry "$f"
+    FM_GOAL_PUSH_BINDING=$ENTRY_GOAL_PUSH
+    if [ -n "$only" ]; then
+      [ -n "$FM_GOAL_PUSH_BINDING" ] || continue
+      "$SCRIPT_DIR/fm-goal-push.sh" eligible "$FM_GOAL_PUSH_BINDING" "$id" || continue
+    else
+      [ -z "$FM_GOAL_PUSH_BINDING" ] || continue
+    fi
     [ "$ENTRY_STATE" = held ] || continue
     if [ "$ENTRY_COMMAND" = dispatch ] && [ "$ENTRY_REASON" = resolver-held ] &&
        [ "$(( $(date +%s) - ENTRY_LAST ))" -lt "$resolver_retry" ]; then
@@ -302,7 +333,7 @@ cmd_retry() {
       echo "admission: $id failed: the saved start is unusable"
       continue
     }
-    if [ "$ENTRY_AUTO_DISPATCH" = 1 ] || [ "$enforce" = 1 ]; then
+    if [ -z "$only" ] && { [ "$ENTRY_AUTO_DISPATCH" = 1 ] || [ "$enforce" = 1 ]; }; then
       auto_dispatch_enforced || continue
       links=$("$SCRIPT_DIR/fm-goal.sh" launch-links "$id") || continue
       ! grep -Fqx -- "$id"$'\toff' <<< "$links" || continue
@@ -321,7 +352,7 @@ cmd_retry() {
       *) command= ;;
     esac
     if [ -n "$command" ]; then
-      out=$(cd "$ENTRY_CWD" && "$command" "${ENTRY_ARGS[@]}" 2>&1) || rc=$?
+      out=$(cd "$ENTRY_CWD" && FM_GOAL_PUSH_BINDING="$FM_GOAL_PUSH_BINDING" "$command" "${ENTRY_ARGS[@]}" 2>&1) || rc=$?
     else
       out='invalid saved command'; rc=2
     fi
@@ -338,6 +369,8 @@ cmd_retry() {
     elif [ "$rc" -eq 3 ] && [ "$ENTRY_COMMAND" = dispatch ] && printf '%s\n' "$out" | grep -q '^[[:space:]]*status: held'; then
       WRITE_COMMAND=dispatch write_entry "$id" "$ENTRY_QUEUED" "$((ENTRY_ATTEMPTS + 1))" held resolver-held "$ENTRY_CWD" "${ENTRY_ARGS[@]}"
       echo "admission: $id resolver held"
+    elif [ "$rc" -eq 76 ] && [ -n "$FM_GOAL_PUSH_BINDING" ]; then
+      echo "admission: $id still held: goal no longer eligible"
     elif [ "$rc" -eq "$HELD_EXIT" ]; then
       echo "admission: $id still held: $(one_line "$(printf '%s\n' "$out" | grep -m1 '^deferred:' || true)")"
     else
@@ -359,7 +392,7 @@ cmd_drop() {
 case "${1:-}" in
   add) shift; cmd_add "$@" ;;
   submit) shift; cmd_submit "$@" ;;
-  list) cmd_list ;;
+  list) shift; cmd_list "$@" ;;
   section) cmd_section ;;
   retry) shift; cmd_retry "$@" ;;
   drop) shift; cmd_drop "$@" ;;

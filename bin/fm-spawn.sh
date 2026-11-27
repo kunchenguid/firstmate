@@ -5649,6 +5649,15 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   exit 1
 fi
 
+# A goal may be switched OFF while routing or admission is in flight.
+# Recheck at the common endpoint boundary, under the per-task meta lock.
+if [ -n "${FM_GOAL_PUSH_BINDING:-}" ] && ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-goal-push.sh" eligible "$FM_GOAL_PUSH_BINDING" "$ID" --launch; then
+  echo 'deferred: goal or host no longer eligible for automatic start' >&2
+  exit 76
+fi
+
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
   # A secondmate's home already resolved WT above through the same validation a

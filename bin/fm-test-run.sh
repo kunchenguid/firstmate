@@ -430,7 +430,7 @@ family_for_basename() {
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
-    fm-goal.test.sh|fm-drive-board.test.sh|fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|\
+    fm-goal.test.sh|fm-goal-push.test.sh|fm-drive-board.test.sh|fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|\
     fm-supervision-host.test.sh|fm-supervision-host-drain.test.sh|\
     fm-supervision-host-hook.test.sh|fm-supervision-host-park.test.sh|\
     fm-host-mirror.test.sh)
@@ -1749,6 +1749,7 @@ families_for_changed_path() {
     bin/fm-capacity.sh|bin/fm-admission-lib.sh|bin/fm-admission-queue.sh)
       printf '%s\n' "__script__:fm-capacity.test.sh"
       printf '%s\n' "__script__:fm-admission.test.sh"
+      printf '%s\n' "__script__:fm-goal-push.test.sh"
       ;;
     bin/fm-reap.sh)
       printf '%s\n' "__script__:fm-reap.test.sh"

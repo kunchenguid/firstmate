@@ -14,6 +14,8 @@
 #                               enforce starts `run` detached, exactly as
 #                               bin/fm-reap.sh does for teardown
 #   fm-auto-dispatch.sh run     dispatch up to FM_AUTODISPATCH_MAX_STARTS rows now
+#   fm-auto-dispatch.sh run --goal-task <id>
+#                               pusher-only: check FM_GOAL_PUSH_BINDING and dispatch one row
 #   fm-auto-dispatch.sh arm     write state/auto-dispatch.check.sh and bind it
 #                               with bin/fm-check-register.sh (bootstrap arms it
 #                               every start while config/auto-dispatch exists)
@@ -240,13 +242,14 @@ goal_can_start() {  # <id> <launch-links rows>
 
 # One "<id> <verdict>" line per ready row.
 verdicts() {
-  local id kind repo v m links=''
+  local id kind repo v m links='' only=${1:-}
   m=$(mode)
   if [ "$m" = enforce ]; then
     links=$("$SCRIPT_DIR/fm-goal.sh" launch-links) || links=''
   fi
   while read -r id kind repo; do
     [ -n "${id:-}" ] || continue
+    [ -z "$only" ] || [ "$id" = "$only" ] || continue
     if [ "$m" = enforce ] && ! goal_can_start "$id" "$links"; then
       v='skip: no eligible ON goal link'
     else
@@ -263,6 +266,11 @@ cmd_list() { verdicts; }
 dispatch_one() {  # <id> <project-dir> <flag>...
   local id=$1 project=$2 out rc reason pick
   shift 2
+  if [ -n "${FM_GOAL_PUSH_BINDING:-}" ] &&
+     ! "$SCRIPT_DIR/fm-goal-push.sh" eligible "$FM_GOAL_PUSH_BINDING" "$id"; then
+    printf 'skip %s: goal no longer eligible\n' "$id"
+    return 0
+  fi
   mkdir -p "$ATTEMPT" "$FAILED" 2>/dev/null || die 'cannot create the auto-dispatch state directories'
   date +%s > "$ATTEMPT/$id" 2>/dev/null || true
   rc=0
@@ -280,6 +288,13 @@ dispatch_one() {  # <id> <project-dir> <flag>...
       rm -f -- "$ATTEMPT/$id"
       printf 'held %s: spawn admission held the start; the admission queue retries it\n' "$id"
       return 0
+      ;;
+    76)
+      if [ -n "${FM_GOAL_PUSH_BINDING:-}" ]; then
+        rm -f -- "$ATTEMPT/$id"
+        printf 'skip %s: goal no longer eligible\n' "$id"
+        return 0
+      fi
       ;;
   esac
   if [ -e "$STATE/$id.meta" ]; then
@@ -301,9 +316,15 @@ dispatch_one() {  # <id> <project-dir> <flag>...
 }
 
 cmd_run() {
-  local mode started=0 id v links
-  mode=$(mode)
-  [ "$mode" = enforce ] || die 'run dispatches only in enforce mode (config/auto-dispatch)'
+  local mode started=0 id v links only=''
+  if [ "$#" -eq 2 ] && [ "$1" = --goal-task ] && [ -n "${FM_GOAL_PUSH_BINDING:-}" ]; then
+    only=$2
+    fm_task_id_creation_valid "$only" || die 'invalid goal task id'
+  else
+    [ "$#" -eq 0 ] || die 'expected run [--goal-task <id>]'
+    mode=$(mode)
+    [ "$mode" = enforce ] || die 'run dispatches only in enforce mode (config/auto-dispatch)'
+  fi
   mkdir "$LOCK" 2>/dev/null || { printf 'auto-dispatch: a run is already in progress\n'; return 0; }
   # shellcheck disable=SC2064 # expand the lock path now
   trap "rmdir -- $(printf '%q' "$LOCK") 2>/dev/null" EXIT
@@ -315,16 +336,17 @@ cmd_run() {
     case "$v" in
       'start '*)
         # Verdicts can be buffered while the previous launch is in progress.
-        [ "$(mode)" = enforce ] || break
+        [ -n "$only" ] || [ "$(mode)" = enforce ] || break
         links=$("$SCRIPT_DIR/fm-goal.sh" launch-links "$id") || continue
         goal_can_start "$id" "$links" || continue
         v=${v#start }
         # shellcheck disable=SC2086 # verdict output is flag words, never evaluated
         dispatch_one "$id" $v
         started=$((started + 1))
+        [ -z "$only" ] || break
         ;;
     esac
-  done < <(verdicts)
+  done < <(verdicts "$only")
 }
 
 # The check the watcher runs: shadow reports a changed candidate set once;
@@ -372,7 +394,7 @@ cmd_drop() {
 case "${1:-}" in
   list) cmd_list ;;
   check) cmd_check ;;
-  run) cmd_run ;;
+  run) shift; cmd_run "$@" ;;
   arm) cmd_arm ;;
   drop) shift; cmd_drop "$@" ;;
   -h|--help) usage ;;
