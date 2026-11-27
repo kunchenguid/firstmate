@@ -62,7 +62,7 @@ case "$1 $2" in
       headRefOid:(.graphql_head // .head),isDraft:.draft,baseRef:{target:{oid:.base}},reviewDecision:(if has("reviewDecision") then .reviewDecision else "APPROVED" end),
       reviewRequests:{pageInfo:{hasNextPage:(.requests > 100)},
         nodes:[range([.requests, 100] | min) | {requestedReviewer:{__typename:"User"}}]},
-      latestReviews:{nodes:(if (.change_requests | type) == "array" then
+      latestReviews:{nodes:[]},latestOpinionatedReviews:{nodes:(if (.change_requests | type) == "array" then
           [.change_requests[] | {state:"CHANGES_REQUESTED",author:{login:.login},commit:{oid:.commit},submittedAt:.submitted_at}]
         else [range(.reviews // 0) | {author:{__typename:"User",login:"reviewer"}}] end)},
       timelineItems:{nodes:(if .closed_by != null then [{actor:{login:.closed_by}}] else [] end)},
@@ -109,7 +109,8 @@ case "$1 $2" in
     # newest page; an unconditional one honors it.
     since=$(printf '%s\n' "$@" | sed -n 's/.*[?&]since=\([^&]*\).*/\1/p')
     case "$*" in *If-Modified-Since:*) since= ;; esac
-    printf 'HTTP/2.0 200 OK\r\nLast-Modified: %s\r\n\r\n' "$lm"
+    if [ -f "$FORGE/notifications-no-lm" ]; then printf 'HTTP/2.0 200 OK\r\n\r\n'
+    else printf 'HTTP/2.0 200 OK\r\nLast-Modified: %s\r\n\r\n' "$lm"; fi
     jq --arg since "$since" '[.[] | select(.updated_at >= $since)] | sort_by(.updated_at) | reverse | .[:50]' \
       "$FORGE/notifications.json" ;;
   'api repos/o/r/issues/'*) printf '[[]]\n' ;;
@@ -1138,6 +1139,42 @@ test_stale_review_waits_on_the_reviewer() {
   pass 'a stale change request waits on the reviewer'
 }
 
+test_rerequested_reviewer_still_waits_on_the_reviewer() {
+  local home
+  home=$(new_home stale-rerequested)
+  opt "$home" pr-health-stale-review
+  task "$home" ship1 pr=https://github.com/o/r/pull/85
+  pr "$home" 85 "$HEAD_A" "$BASE_1" true false
+  # shellcheck disable=SC2016 # $head is a jq variable from --arg.
+  set_pr "$home" 85 --arg head "$HEAD_B" '.reviewDecision = "CHANGES_REQUESTED" | .requests = 1
+    | .change_requests = [{login:"pat",commit:$head,submitted_at:"2099-01-01T00:00:00Z"}]'
+  arm "$home"
+  expect_one "$home" 'waiting on "pat" at latest commit aaaaaaa \(task ship1\)$' \
+    'a re-requested reviewer is absent from latestReviews but still holds the stale change request'
+  pass 'a re-requested reviewer with a stale change request is waited on'
+}
+
+test_notification_cursor_survives_a_response_without_last_modified() {
+  local home before stored
+  home=$(new_home cursor-no-lm)
+  task "$home" ship1 pr=https://github.com/o/r/pull/46
+  pr "$home" 46 "$HEAD_A" "$BASE_1" true false
+  feed "$home"
+  arm "$home"
+  expect_silent "$home" 'the first pass stores the cursor'
+  stored=$(jq -r '.notifications.last_modified' "$home/state/pr-health.json")
+  [ -n "$stored" ] || fail 'the first pass stored no cursor'
+  : > "$home/forge/notifications-no-lm"
+  notify "$home" o/r 99 2026-11-01T00:05:00Z comment
+  expect_silent "$home" 'a since= answer without Last-Modified is read'
+  [ "$(jq -r '.notifications.last_modified' "$home/state/pr-health.json")" = "$stored" ] \
+    || fail 'a response without Last-Modified erased the stored value'
+  before=$(reads "$home" 46)
+  expect_silent "$home" 'the next pass answers 304'
+  [ "$(reads "$home" 46)" = "$before" ] || fail 'the lost Last-Modified forced a full sweep'
+  pass 'a response without Last-Modified keeps the stored cursor'
+}
+
 test_final_report_names_the_account_once() {
   local home before gql
   home=$(new_home final-on)
@@ -1238,6 +1275,7 @@ for test_name in test_any_failure_off_still_reports_only_required_checks \
   test_any_failure_confirms_on_the_next_pass test_any_failure_clears_when_the_check_passes \
   test_approved_green_off_is_silent test_approved_green_reports_once_per_commit \
   test_stale_review_off_stays_an_author_action test_stale_review_waits_on_the_reviewer \
+  test_rerequested_reviewer_still_waits_on_the_reviewer test_notification_cursor_survives_a_response_without_last_modified \
   test_final_report_names_the_account_once test_final_report_only_names_PRs_seen_open_with_the_flag_on \
   test_final_report_forgets_open_seen_when_the_flag_is_removed \
   test_maintainer_author_and_approval_states_are_distinct \

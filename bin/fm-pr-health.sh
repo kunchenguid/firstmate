@@ -55,7 +55,7 @@
 #     the account in JSON quotes (REST merged_by, or the ClosedEvent actor).
 #     That read sets final, and the PR is never read again.
 #   - config/pr-health-stale-review: reviewDecision CHANGES_REQUESTED, and every
-#     change-requesting review in the first latestReviews page has
+#     change-requesting review in the first latestOpinionatedReviews page has
 #     commit.oid different from the head. The line says the owner is waiting
 #     on those reviewers. It is not an author action. Commit timestamps are
 #     not read. Review bodies are not printed. Account names are JSON quotes.
@@ -203,7 +203,7 @@ gh_read() { # deadline args... : one bounded forge read
 PR_QUERY='query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){
 headRefOid
 reviewDecision
-latestReviews(first:100){nodes{state author{login} commit{oid}}}
+latestOpinionatedReviews(first:100){nodes{state author{login} commit{oid}}}
 timelineItems(last:1,itemTypes:[CLOSED_EVENT]){nodes{... on ClosedEvent{actor{login}}}}
 reviewRequests(first:100){nodes{requestedReviewer{__typename}}}
 statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
@@ -259,7 +259,7 @@ STEP='
       | [$gated_now[] | select(. as $name | any($gated[]; .head == $head and .name == $name) | not)] as $new_gated
       | ([($r.labels // [])[] | .name | select(ascii_downcase | sub("^[^:]*:"; "")
           | IN("pending-contributor-action","waiting-on-author","waiting-for-author","awaiting-author"))]) as $author_labels
-      | [($g.latestReviews.nodes // [])[] | select(.state == "CHANGES_REQUESTED")] as $requests
+      | [($g.latestOpinionatedReviews.nodes // [])[] | select(.state == "CHANGES_REQUESTED")] as $requests
       | ($opt_stale and $g.reviewDecision == "CHANGES_REQUESTED" and ($requests | length) > 0
           and all($requests[]; (.commit.oid // $head) != $head)) as $request_stale
       | ([$requests[] | .author.login // empty | select(. != "")] | unique | map(@json) | join(", ")
@@ -471,6 +471,7 @@ read_notifications() { # deadline
     *) return 0 ;;
   esac
   next_lm=$(sed -n '1,/^$/s/^[Ll]ast-[Mm]odified: //p' "$TMP/notify.txt")
+  [ -n "$next_lm" ] || next_lm=$lm
   sed '1,/^$/d' "$TMP/notify.txt" > "$TMP/notify.json"
   jq -e 'type == "array"' "$TMP/notify.json" >/dev/null 2>&1 || return 0
   next_since=$(jq -r --arg since "$since" '[.[].updated_at | strings] + [$since] | max' "$TMP/notify.json")
