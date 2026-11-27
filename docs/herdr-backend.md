@@ -787,6 +787,8 @@ If the ANSI capture ever fails, the plain fallback declares itself unstyled.
 The classifier then degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input.
 That safely defers injection and eventually raises the wedge alarm.
 
+Droid's cursorless bordered composer also admits its elapsed footer with an optional context percentage.
+
 ### Away-mode injection
 
 A bare shell prompt is never an empty agent composer.

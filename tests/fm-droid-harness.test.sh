@@ -66,12 +66,10 @@ fm_backend_capture() { return 1; }
   fail 'Droid busy fallback claimed an unverified prefix'
 pass 'Droid capture failure remains unknown and unverified prefixes are refused'
 
-# The live Droid footer sits directly below the box; it is gated on droid=1 so
-# non-Droid callers keep the shared staleness check unchanged.
-caps=$'styled=0\ncursor=0\nidentity=0\ndroid=1'
-ungated_caps=$'styled=0\ncursor=0\nidentity=0'
+# The live Droid footer sits directly below the box; a shell or arbitrary
+# activity below the same box must still refuse delivery.
+caps=$'styled=0\ncursor=0\nidentity=0'
 screen=$'╭──────────╮\n│ >        │\n╰──────────╯\n[⏱ 17s, context: <1%] TMUX ⧉\nworkspace main'
-[ "$(fm_composer_classify_screen "$ungated_caps" "$screen")" = unknown ] || fail 'Droid timer leaked into ungated cursorless classification'
 [ "$(fm_composer_classify_screen "$caps" "$screen")" = empty ] || fail 'Droid timer made an empty box stale'
 [ "$(LC_ALL=C fm_composer_classify_screen "$caps" "$screen")" = empty ] || fail 'Droid timer classification depends on UTF-8 locale'
 [ "$(fm_composer_classify_screen "$caps" "$screen"$'\n$ typed command')" = unknown ] || fail 'Droid timer hid a newer shell composer'
@@ -177,7 +175,7 @@ SH
   done
   [ "$cy" = 7 ] || fail 'background fixture did not park its cursor below the box'
   pane=$(PATH="$lab/shim:$PATH" fm_tmux_composer_capture background)
-  [ "$(fm_composer_classify_screen "$(fm_tmux_composer_caps)"$'\ndroid=1' "$pane" '')" = empty ] ||
+  [ "$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')" = empty ] ||
     fail 'background fixture lacks a structurally empty stale composer'
   tty=$("$real_tmux" -L "$socket" display-message -p -t background '#{pane_tty}')
   background=$(LC_ALL=C ps -t "${tty#/dev/}" -o pgid=,tpgid=,comm= | while read -r pgid tpgid comm; do

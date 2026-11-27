@@ -51,7 +51,7 @@ Because current builds have not refreshed Herdr away-daemon delivery with a disp
 
 `tests/fm-droid-primary.test.sh` executes the registered SessionStart, Execute PreToolUse, AskUser PreToolUse, and Stop commands against observable fixture owners.
 `tests/fm-droid-afk-approval.test.sh` exercises away-mode denial and inert behavior after return.
-`tests/fm-droid-harness.test.sh` exercises exact process identity, semantic and fallback busy signals, gated composer safety, rewind-picker dismissal, runtime model lock contention, exact-path trust, and receipt ownership.
+`tests/fm-droid-harness.test.sh` exercises exact process identity, semantic and fallback busy signals, composer safety, rewind-picker dismissal, runtime model lock contention, exact-path trust, and receipt ownership.
 `tests/fm-watch-checkpoint.test.sh` exercises the tracked background completion protocol and bounded foreground fallback.
 
 These tests establish the integration's behavior, not a vendor hook transport or rendered UI on a new CLI version.

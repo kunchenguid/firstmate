@@ -979,6 +979,10 @@ spawn_secondmate_harness() { # <case-dir> <id> <harness> [extra fake tools...]
     mkdir -p "$sm/.claude"
     cp "$SECONDMATE_LOCAL_SETTINGS" "$sm/.claude/settings.local.json"
   fi
+  if [ -n "${SECONDMATE_FACTORY_SETTINGS:-}" ]; then
+    mkdir -p "$sm/.factory"
+    cp "$SECONDMATE_FACTORY_SETTINGS" "$sm/.factory/settings.json"
+  fi
   : > "$case_dir/launch.log"
   FM_BACKEND=tmux FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     fm_test_run_spawn "$primary" "$sm" "$fakebin" "$id" "$sm" "$harness" --secondmate
@@ -1193,6 +1197,56 @@ test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook() {
   pass "a claude secondmate whose home guard predates .fm-busy-stop keeps the Stop idle hook"
 }
 
+# A Droid secondmate's home guard is its only Stop writer. Arm only when the
+# home's guard records droid-hook Stop state and the home registers it as a
+# Droid Stop hook; otherwise an idle mate would read busy until SessionEnd.
+test_secondmate_droid_busy_arms_only_with_a_droid_stop_guard() {
+  local case_dir id primary sm state settings out old_guard empty_factory
+  case_dir="$TMP_ROOT/sm-droid"
+  id=sm-droid
+  primary="$case_dir/primary"
+  sm="$case_dir/sm"
+  out=$(FM_FAKE_PANE_CAPTURE="Executing...  (Press ESC to stop)" SECONDMATE_FACTORY_SETTINGS="$ROOT/.factory/settings.json" \
+    spawn_secondmate_harness "$case_dir" "$id" droid) || fail "droid secondmate spawn failed: $out"
+  state="$primary/state"
+  settings="$state/$id.droid-settings.json"
+  assert_present "$state/$id.busy-gen" "a current Droid secondmate home did not arm the busy contract"
+  assert_present "$sm/.fm-busy-stop" "a current Droid secondmate home got no Stop pointer"
+  run_claude_hook "$settings" UserPromptSubmit || fail "droid secondmate UserPromptSubmit hook failed"
+  out=$(classify droid "$id" "$state")
+  [ "$out" = "busy droid-hook" ] || fail "droid secondmate UserPromptSubmit must open busy, got '$out'"
+  printf '{"stop_hook_active":false,"session_id":"sm-droid"}' \
+    | FM_ROOT_OVERRIDE="$sm" bash "$sm/bin/fm-turnend-guard.sh" >/dev/null 2>&1 \
+    || fail "droid secondmate home guard blocked a Stop with nothing to supervise"
+  out=$(classify droid "$id" "$state")
+  [ "$out" = "idle droid-hook" ] || fail "droid secondmate home guard must record idle on Stop, got '$out'"
+
+  old_guard="$TMP_ROOT/sm-droid-old-guard.sh"
+  printf '#!/usr/bin/env bash\n# Records .fm-busy-stop for --claude only.\nexit 0\n' > "$old_guard"
+  empty_factory="$TMP_ROOT/sm-droid-empty-factory.json"
+  printf '{"hooks":{}}\n' > "$empty_factory"
+  for variant in old-guard no-stop-hook; do
+    case_dir="$TMP_ROOT/sm-droid-$variant"
+    id="sm-droid-$variant"
+    primary="$case_dir/primary"
+    sm="$case_dir/sm"
+    if [ "$variant" = old-guard ]; then
+      out=$(FM_FAKE_PANE_CAPTURE="Executing...  (Press ESC to stop)" SECONDMATE_HOME_GUARD="$old_guard" SECONDMATE_FACTORY_SETTINGS="$ROOT/.factory/settings.json" \
+        spawn_secondmate_harness "$case_dir" "$id" droid) || fail "droid secondmate spawn failed ($variant): $out"
+    else
+      out=$(FM_FAKE_PANE_CAPTURE="Executing...  (Press ESC to stop)" SECONDMATE_FACTORY_SETTINGS="$empty_factory" \
+        spawn_secondmate_harness "$case_dir" "$id" droid) || fail "droid secondmate spawn failed ($variant): $out"
+    fi
+    state="$primary/state"
+    [ ! -e "$state/$id.busy-gen" ] || fail "a stale Droid secondmate home armed the busy contract ($variant)"
+    [ ! -e "$sm/.fm-busy-stop" ] || fail "a stale Droid secondmate home got a Stop pointer ($variant)"
+    out=$(fm_busy_classify tmux fake:w droid "$id" "$state" 'idle composer')
+    [ "$out" = "idle droid-regex" ] \
+      || fail "a stale Droid secondmate home must fall back to droid-regex ($variant), got '$out'"
+  done
+  pass "a droid secondmate arms busy only when its home guard is a registered droid-hook Stop writer"
+}
+
 test_secondmate_claude_spawn_leaves_local_settings_untouched() {
   local case_dir id=sm-claude-local primary sm state prior out
   case_dir="$TMP_ROOT/sm-claude-local"
@@ -1390,6 +1444,7 @@ test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
 test_droid_stop_hook_and_rendered_state
+test_secondmate_droid_busy_arms_only_with_a_droid_stop_guard
 test_gemini_is_refused_as_a_secondmate
 test_kiro_hooks_semantic_lifecycle
 test_kiro_hooks_stale_incarnation_harmless

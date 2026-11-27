@@ -4015,6 +4015,12 @@ droid_effort_value() {
   esac
 }
 
+droid_secondmate_stop_guard_ready() {
+  grep -qF 'droid-hook' "$WT/bin/fm-turnend-guard.sh" 2>/dev/null &&
+    jq -e 'any(.hooks.Stop[]?.hooks[]?; (.command // "") | test("/bin/fm-turnend-guard\\.sh"))' \
+      "$WT/.factory/settings.json" >/dev/null 2>&1
+}
+
 droid_settings_json() { # <resolved-model> [busy-gen]; render this launch's process-local settings
   local model=$1 busy_gen=${2:-} effort hook_command='' observe_command start_command progress_command
   local busy_cmd_prefix='' busy_suffix='' busy_submit='' busy_stop='' busy_sessionend=''
@@ -6763,7 +6769,7 @@ busy_notify_turnend=true
 WIRING_HARNESS=$HARNESS
 if [ "$KIND" = secondmate ]; then
   busy_notify_turnend=false
-  if [ "$RAW_LAUNCH" -ne 0 ]; then
+  if [ "$RAW_LAUNCH" -ne 0 ] || { [ "$HARNESS" = droid ] && ! droid_secondmate_stop_guard_ready; }; then
     case "$HARNESS" in
     claude* | pi | pi-signed | omp | droid)
       WIRING_HARNESS=
@@ -6802,7 +6808,7 @@ BUSY_GEN=
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
   droid)
-    if [ "$DROID_TEMPLATE" -eq 1 ] && { [ "$KIND" != secondmate ] || grep -qF '.fm-busy-stop' "$WT/bin/fm-turnend-guard.sh" 2>/dev/null; }; then
+    if [ "$DROID_TEMPLATE" -eq 1 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1

@@ -1383,37 +1383,33 @@ test_matrix_kimi_bordered_shell_glyph_box() {
 }
 
 test_matrix_droid_box_allows_verified_status_footer() {
-  local idle idle_context idle_legacy typed malformed malformed_less_than unrelated out droid_styled droid_plain
-  droid_styled="$CAPS_STYLED_NOID"$'\ndroid=1'
-  droid_plain="$CAPS_PLAIN"$'\ndroid=1'
+  local idle idle_context idle_legacy typed malformed malformed_less_than unrelated out
   idle=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, context: <1%] 1 config issue — /diagnostics\n~/firstmate   main'
   idle_context=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 1m 9s, context: 12%] 1 config issue — /diagnostics\n~/firstmate   main'
   idle_legacy=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s] 1 config issue — /diagnostics\n~/firstmate   main'
   typed=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ > captain draft                                                              │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, context: <1%] 1 config issue — /diagnostics\n~/firstmate   main'
-  assert_screen "droid idle with current detached footer" empty "$droid_styled" "$idle"
-  assert_screen "droid idle with measured context" empty "$droid_styled" "$idle_context"
-  assert_screen "droid idle with legacy detached footer" empty "$droid_styled" "$idle_legacy"
-  assert_screen "droid typed with current detached footer" pending "$droid_styled" "$typed"
-  assert_screen "droid idle through plain cursorless capture" empty "$droid_plain" "$idle"
-  assert_screen "droid typed through plain cursorless capture" pending "$droid_plain" "$typed"
-  assert_screen "droid footer without droid=1 stays unknown" unknown "$CAPS_STYLED_NOID" "$idle"
-  assert_screen "droid footer with droid identity reads empty" empty "$CAPS_STYLED" "$idle" '' $'droid\tidle'
+  assert_screen "droid idle with current detached footer" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "droid idle with measured context" empty "$CAPS_STYLED_NOID" "$idle_context"
+  assert_screen "droid idle with legacy detached footer" empty "$CAPS_STYLED_NOID" "$idle_legacy"
+  assert_screen "droid typed with current detached footer" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "droid idle through plain cursorless capture" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "droid typed through plain cursorless capture" pending "$CAPS_PLAIN" "$typed"
 
   malformed=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, tokens: 1%] unrelated process output\n~/firstmate   main'
-  out=$(fm_composer_classify_screen "$droid_styled" "$malformed")
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$malformed")
   [ "$out" = unknown ] \
     || fail "a malformed Droid status lookalike must not widen the exception, got '$out'"
 
   malformed_less_than=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\n[⏱ 9s, context: <12%] unrelated process output\n~/firstmate   main'
-  out=$(fm_composer_classify_screen "$droid_styled" "$malformed_less_than")
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$malformed_less_than")
   [ "$out" = unknown ] \
     || fail "a malformed Droid less-than context percentage must not widen the exception, got '$out'"
 
   unrelated=$'transcript\n╭──────────────────────────────────────────────────────────────────────────────╮\n│ >                                                                            │\n╰──────────────────────────────────────────────────────────────────────────────╯\nunrelated process output\n~/firstmate   main'
-  out=$(fm_composer_classify_screen "$droid_styled" "$unrelated")
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$unrelated")
   [ "$out" = unknown ] \
     || fail "an unrelated row after a box must not borrow Droid's footer exception, got '$out'"
-  pass "matrix: Droid's exact elapsed and context footer is gated on droid=1 without widening lower activity"
+  pass "matrix: Droid's exact elapsed and context footer permits cursorless box classification without widening lower activity"
 }
 
 test_matrix_claude_inside_zellij_ansi_dump() {
