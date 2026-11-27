@@ -460,7 +460,7 @@ family_for_basename() {
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|fm-capacity.test.sh|fm-capacity-auto.test.sh|fm-lane-vitals.test.sh|\
     fm-classify-corr-token.test.sh|\
-    fm-claude-account-quota.test.sh|\
+    fm-claude-account-quota.test.sh|fm-codex-account-quota.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
@@ -1410,6 +1410,7 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       printf '%s\n' "__script__:fm-claude-account-quota.test.sh"
+      printf '%s\n' "__script__:fm-codex-account-quota.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
@@ -1419,6 +1420,13 @@ families_for_changed_path() {
       ;;
     bin/fm-claude-account-quota.sh)
       printf '%s\n' "__script__:fm-claude-account-quota.test.sh"
+      ;;
+    bin/fm-codex-account-quota.sh)
+      printf '%s\n' "__script__:fm-codex-account-quota.test.sh"
+      ;;
+    bin/fm-account-quota-lib.sh)
+      printf '%s\n' "__script__:fm-claude-account-quota.test.sh"
+      printf '%s\n' "__script__:fm-codex-account-quota.test.sh"
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"

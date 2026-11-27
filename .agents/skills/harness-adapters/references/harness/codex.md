@@ -21,7 +21,7 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+The decision persists for the repository in the launch's `CODEX_HOME`, so later worktrees of the same project skip it, while a worker launched on another [declared Codex account](../../../../../docs/configuration.md#several-codex-accounts-configcodex-accounts) asks once more in that account's home.
 
 ## Hook trust
 
