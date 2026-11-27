@@ -699,12 +699,12 @@ fm_lock_discard_staged_owners() {
 # A reused pid only delays removal. Session start runs it on each locked start.
 fm_state_reap_orphans() {
   local state=$1 dir path lock rest pid recorded name
-  for dir in "$state" "$state"/*.inbox; do
+  for dir in "$state" "$state"/*.inbox "$state/public-followup"; do
     [ -d "$dir" ] && [ ! -L "$dir" ] || continue
     for path in "$dir"/.*.owner.* "$dir"/*.owner.*; do
       [ -d "$path" ] && [ ! -L "$path" ] || continue
       lock=${path%.owner.*}
-      case "$lock" in *.lock|*.lock.steal) ;; *) continue ;; esac
+      case "$lock" in *.lock|*.lock.steal|"$state/.lock.acquire"|"$state/.lock.acquire.steal") ;; *) continue ;; esac
       rest=${path##*.owner.}
       case "$rest" in *.reaped.*) continue ;; esac
       pid=${rest%%.*}
@@ -717,7 +717,7 @@ fm_state_reap_orphans() {
     done
   done
   for name in home-summary.json home-summary-error claude-autoarm-output \
-    watch-arm-output fm-check-output fm-custom-check; do
+    watch-arm-output fm-check-output fm-custom-check claude-autoarm-epoch.tmp; do
     for path in "$state/.$name."*; do
       [ -f "$path" ] && [ ! -L "$path" ] || continue
       rest=${path#"$state/.$name."}

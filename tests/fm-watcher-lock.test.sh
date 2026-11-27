@@ -2455,13 +2455,20 @@ SH
 
 test_killed_acquirer_owner_litter_is_reaped() {
   local shape dir state fakebin lock holder holder_pid held acquirer_pid owner real_mktemp
-  local match at stranded
+  local match at stranded kind lock_parent
   real_mktemp=$(command -v mktemp)
+  for kind in meta session registry; do
   for shape in live-holder dead-holder; do
-    dir=$(make_case "killed-acquirer-$shape")
+    dir=$(make_case "killed-acquirer-$kind-$shape")
     state="$dir/state"
     fakebin="$dir/fakebin"
-    lock="$state/.meta-demo.lock"
+    case "$kind" in
+      meta) lock="$state/.meta-demo.lock" ;;
+      session) lock="$state/.lock.acquire" ;;
+      registry) lock="$state/public-followup/.registry-demo.lock" ;;
+    esac
+    lock_parent=${lock%/*}
+    mkdir -p -m 700 "$lock_parent"
     write_killing_mktemp "$fakebin"
     if [ "$shape" = live-holder ]; then
       # The holder stays alive blocked on a FIFO nobody writes, bounded by
@@ -2492,20 +2499,29 @@ test_killed_acquirer_owner_litter_is_reaped() {
       TEST_KILL_MATCH="$match" TEST_KILL_AT="$at" TEST_KILL_COUNT="$dir/count" \
       TEST_KILL_ONCE="$dir/once" TEST_KILL_PIDFILE="$dir/acquirer.pid" \
       TEST_KILL_DONE="$dir/done" TEST_KILL_REAL="$real_mktemp" \
-      bash -c 'printf "%s\n" "$$" > "$2"; . "$1"; fm_lock_acquire_wait "$3"' \
-        _ "$LIB" "$dir/acquirer.pid" "$lock" &
+      bash -c '
+        printf "%s\n" "$$" > "$2"
+        . "$1"
+        if [ "$4" = registry ]; then
+          . "$5"
+          fm_pf_registry_lock_acquire "$6" demo
+        else
+          fm_lock_acquire_wait "$3"
+        fi
+      ' _ "$LIB" "$dir/acquirer.pid" "$lock" "$kind" \
+        "$ROOT/bin/fm-public-followup-lib.sh" "$state" &
     acquirer_pid=$!
     wait "$acquirer_pid" 2>/dev/null
     [ -e "$dir/done" ] || fail "$shape: the acquirer was never killed mid-acquire"
     stranded=0
-    for owner in "$state"/.*.owner.*; do
+    for owner in "$lock_parent"/.*.owner.*; do
       [ -d "$owner" ] && [ ! -L "$owner" ] && [ "$owner" != "$holder" ] || continue
       stranded=$((stranded + 1))
     done
     [ "$stranded" -ge 1 ] || fail "$shape: the killed acquirer stranded no staging directory"
     FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_state_reap_orphans "$2"' _ "$LIB" "$state" \
       || fail "$shape: the state sweep failed"
-    for owner in "$state"/.*.owner.*; do
+    for owner in "$lock_parent"/.*.owner.*; do
       [ -d "$owner" ] && [ ! -L "$owner" ] || continue
       [ "$owner" = "$holder" ] || fail "$shape: the state sweep left stranded owner $owner"
     done
@@ -2516,7 +2532,8 @@ test_killed_acquirer_owner_litter_is_reaped() {
       wait "$holder_pid" 2>/dev/null || true
     fi
   done
-  pass "a killed acquirer's stranded lock and steal staging is reaped; published owners stay"
+  done
+  pass "killed meta, session and registry lock and steal staging is reaped; published owners stay"
 }
 
 test_killed_inbox_enqueue_owner_litter_is_reaped() {
@@ -2586,6 +2603,8 @@ test_state_reap_orphans_boundaries() {
     : > "$state/.$name.$dead.AbCdEf"
     : > "$state/.$name.$live.AbCdEf"
   done
+  : > "$state/.claude-autoarm-epoch.tmp.$dead"
+  : > "$state/.claude-autoarm-epoch.tmp.$live"
   : > "$state/.watch-arm-output.AbCdEf"
   : > "$state/home-summary.json"
   ln -s "$state/home-summary.json" "$state/.fm-check-output.$dead.link"
@@ -2597,7 +2616,8 @@ test_state_reap_orphans_boundaries() {
     .c.lock.steal.owner.$dead.gone \
     .home-summary.json.$dead.AbCdEf .home-summary-error.$dead.AbCdEf \
     .claude-autoarm-output.$dead.AbCdEf .watch-arm-output.$dead.AbCdEf \
-    .fm-check-output.$dead.AbCdEf .fm-custom-check.$dead.AbCdEf; do
+    .fm-check-output.$dead.AbCdEf .fm-custom-check.$dead.AbCdEf \
+    .claude-autoarm-epoch.tmp.$dead; do
     [ ! -e "$state/$name" ] || fail "the state sweep kept dead-process litter $name"
   done
   for name in .a.lock.owner.$live.staging .a.lock.owner.$dead.handed \
@@ -2606,7 +2626,8 @@ test_state_reap_orphans_boundaries() {
     .home-summary.json.$live.AbCdEf \
     .home-summary-error.$live.AbCdEf .claude-autoarm-output.$live.AbCdEf \
     .watch-arm-output.$live.AbCdEf .fm-check-output.$live.AbCdEf \
-    .fm-custom-check.$live.AbCdEf .watch-arm-output.AbCdEf home-summary.json; do
+    .fm-custom-check.$live.AbCdEf .claude-autoarm-epoch.tmp.$live \
+    .watch-arm-output.AbCdEf home-summary.json; do
     [ -e "$state/$name" ] || fail "the state sweep removed protected entry $name"
   done
   [ -L "$state/.fm-check-output.$dead.link" ] || fail "the state sweep removed a symlink"
