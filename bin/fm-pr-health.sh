@@ -91,9 +91,13 @@
 # read, or a latest commit that differs between the two reads, leaves the PR's
 # fingerprint untouched and prints nothing; fm-contributions.sh reports forge
 # outages for the same URLs. Forge reads stop FM_CHECK_TIMEOUT (default 30)
-# minus 5 seconds after the pass starts, and each read is capped at 5 seconds.
-# Branch discovery and owned-PR reads each fan out in one concurrent wave;
-# there is no rotating PR backlog or serial network wait per PR.
+# minus 5 seconds after the pass starts. Branch discovery fans out in one
+# concurrent wave with each read capped at 5 seconds. Owned-PR reads run in
+# waves of READ_WAVE PRs in the listed order, and each read gets the time left
+# before that stop, never less than READ_FLOOR seconds. A PR the stop leaves
+# unreached stays pending for the next pass. When a pass selects PRs and none
+# of their reads completes, it prints one line saying so, and prints it again
+# only after a pass in which a read completed.
 # Fingerprints and the notifications cursor (Last-Modified, newest seen
 # updated_at, unsettled PRs, last full sweep) are fm-pr-health.v1 in
 # state/pr-health.json, written by rename
@@ -192,11 +196,19 @@ save_health() { # json-file
   mv -f -- "$staged" "$HEALTH"
 }
 
+READ_WAVE=4 # ponytail: PRs read at once, three gh processes each; make it a config value if a home needs more
+READ_FLOOR=2 # seconds; a read is not started with less time than this left
+READ_CAP=5 # seconds per read; poll lifts it for the PR waves so each read gets the time left
+
 gh_read() { # deadline args... : one bounded forge read
   local left=$(($1 - $(date +%s)))
   shift
-  [ "$left" -gt 0 ] || return 124
-  [ "$left" -le 5 ] || left=5
+  if [ "$READ_CAP" -gt 0 ]; then
+    [ "$left" -gt 0 ] || return 124
+    [ "$left" -le "$READ_CAP" ] || left=$READ_CAP
+  else
+    [ "$left" -ge "$READ_FLOOR" ] || return 124
+  fi
   fm_run_timed "$left" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
 }
 
@@ -489,7 +501,7 @@ read_notifications() { # deadline
 }
 
 poll() {
-  local deadline timeout url step pid index=0 read_dir now full
+  local deadline timeout url step pid index=0 read_dir now full settled=0 stuck
   local pids=()
   flag_on || exit 0
   load_health_opts
@@ -559,7 +571,9 @@ poll() {
   # interruption leaves every unprocessed event eligible for retry.
   jq --rawfile urls "$TMP/urls" '.notifications.pending = ($urls | split("\n") | map(select(length > 0)))' \
     "$TMP/health.json" > "$TMP/next.json" && save_health "$TMP/next.json" && cp "$TMP/next.json" "$TMP/health.json"
+  READ_CAP=0
   while IFS= read -r url; do
+    [ $((deadline - $(date +%s))) -ge "$READ_FLOOR" ] || break
     index=$((index + 1))
     read_dir="$TMP/read-$index"
     mkdir "$read_dir"
@@ -567,6 +581,10 @@ poll() {
       read_pr "$url" "$deadline" "$read_dir" && : > "$read_dir/ok"
     ) &
     pids+=("$!")
+    if [ "${#pids[@]}" -ge "$READ_WAVE" ]; then
+      for pid in "${pids[@]}"; do wait "$pid" || true; done
+      pids=()
+    fi
   done < "$TMP/urls"
   for pid in ${pids[@]+"${pids[@]}"}; do wait "$pid" || true; done
   index=0
@@ -574,6 +592,7 @@ poll() {
     index=$((index + 1))
     read_dir="$TMP/read-$index"
     [ -f "$read_dir/ok" ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
+    settled=$((settled + 1))
     jq -L "$SCRIPT_DIR" -n --arg url "$url" --slurpfile rest "$read_dir/rest.json" --slurpfile gql "$read_dir/gql.json" \
       --slurpfile prev <(jq --arg url "$url" '.prs[$url] // {}' "$TMP/health.json") \
       --argjson tasks "$(jq -c --arg url "$url" '[.[] | select(.url == $url) | .tasks[]] | unique' "$TMP/owned.json")" \
@@ -592,7 +611,17 @@ poll() {
       cp "$TMP/next.json" "$TMP/health.json"
     fi
   done < "$TMP/urls"
-  jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/unsettled" '
+  stuck=$(jq -r '.cannot_settle // false' "$TMP/health.json")
+  if [ -s "$TMP/urls" ]; then
+    if [ "$settled" -gt 0 ]; then stuck=false
+    elif [ "$stuck" != true ]; then
+      printf 'pr-health: no PR read settled this sweep (%s selected); forge reads are slow or failing, so no condition can be reported until one settles\n' \
+        "$(grep -c . "$TMP/urls")"
+      stuck=true
+    fi
+  fi
+  jq --argjson full "$full" --argjson now "$now" --argjson stuck "$stuck" --rawfile unsettled "$TMP/unsettled" '
+    .cannot_settle = $stuck |
     if has("notifications") then
       .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
       | if $full then .notifications.swept_at = $now else . end

@@ -3,7 +3,7 @@
 #
 # Cases drive the registered check against a fake forge, with ownership from
 # real task records, task copies and durable contributions.
-# A barrier at the forge boundary proves reads fan out across owned PRs.
+# A barrier at the forge boundary proves reads fan out across a wave of owned PRs.
 set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -29,6 +29,16 @@ new_home() { # name -> home with the monitor flag on
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$FORGE/calls.log"
+[ ! -f "$FORGE/fail-all" ] || exit 1
+if [ -f "$FORGE/slow-ms" ]; then
+  # Each call takes longer for every call in flight beside it, as a loaded forge does.
+  mkdir -p "$FORGE/active"
+  : > "$FORGE/active/$$"
+  in_flight=$(find "$FORGE/active" -type f | wc -l)
+  printf '%s\n' "$in_flight" >> "$FORGE/peaks"
+  sleep "$(awk -v n="$in_flight" -v ms="$(cat "$FORGE/slow-ms")" 'BEGIN { print n * ms / 1000 }')"
+  rm -f "$FORGE/active/$$"
+fi
 model() {
   local n=$1 attempt
   if [ -f "$FORGE/barrier-count" ]; then
@@ -650,7 +660,7 @@ test_checks_on_later_pages() {
   pass 'all check pages contribute to required-check classification'
 }
 
-test_all_owned_pr_reads_start_in_one_wave() {
+test_owned_pr_reads_start_in_bounded_waves() {
   local home n out
   home=$(new_home concurrent)
   for n in $(seq 1 8); do
@@ -665,12 +675,48 @@ test_all_owned_pr_reads_start_in_one_wave() {
     pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
   done
   printf '4\n' > "$home/forge/branch-barrier-count"
-  printf '8\n' > "$home/forge/barrier-count"
+  printf '4\n' > "$home/forge/barrier-count"
   arm "$home"
   out=$(pass_once "$home")
   [ "$(printf '%s\n' "$out" | grep -c 'conflicts with its base')" = 8 ] \
-    || fail "every owned PR must start before a slow read completes: $out"
-  pass 'all owned PR reads start in one wave without rotating a backlog'
+    || fail "every owned PR must settle across the waves: $out"
+  pass 'owned PR reads start together in waves of four and all settle'
+}
+
+test_slow_forge_settles_within_the_wave_bound() {
+  local home n out
+  home=$(new_home slow-forge)
+  for n in $(seq 1 8); do
+    task "$home" "ship$n" "pr=https://github.com/o/r/pull/$n"
+    pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
+  done
+  printf '300\n' > "$home/forge/slow-ms"
+  arm "$home"
+  out=$(pass_once "$home")
+  [ "$(printf '%s\n' "$out" | grep -c 'conflicts with its base')" = 8 ] \
+    || fail "a forge that slows with load must still settle every read: $out"
+  [ "$(sort -n "$home/forge/peaks" | tail -n 1)" -le 12 ] \
+    || fail "at most four PRs, three reads each, may be in flight: $(sort -n "$home/forge/peaks" | tail -n 1)"
+  pass 'a load-sensitive forge settles within the bounded wave'
+}
+
+test_cannot_settle_prints_once() {
+  local home out
+  home=$(new_home cannot-settle)
+  task "$home" ship1 pr=https://github.com/o/r/pull/1
+  task "$home" ship2 pr=https://github.com/o/r/pull/2
+  pr "$home" 1 "$HEAD_A" "$BASE_1" false false
+  pr "$home" 2 "$HEAD_A" "$BASE_1" false false
+  : > "$home/forge/fail-all"
+  arm "$home"
+  expect_one "$home" 'no PR read settled this sweep \(2 selected\)' 'a sweep where every read fails must say so'
+  expect_silent "$home" 'the same unchanged condition must not print again'
+  rm "$home/forge/fail-all"
+  out=$(pass_once "$home")
+  [ "$(printf '%s\n' "$out" | grep -c 'conflicts with its base')" = 2 ] || fail "recovered reads must report: $out"
+  : > "$home/forge/fail-all"
+  expect_one "$home" 'no PR read settled this sweep' 'a new failure after a settled sweep must say so again'
+  pass 'a sweep that cannot settle any read says so once'
 }
 
 feed() { # home : serve an empty notifications feed
@@ -771,7 +817,7 @@ test_endless_check_suite_pages_stay_unsettled() {
   pr "$home" 48 "$HEAD_A" "$BASE_1" false false
   set_pr "$home" 48 '.suites = [{name:"CI",conclusion:"ACTION_REQUIRED"}] | .suites_truncated = true'
   arm "$home"
-  expect_silent "$home" 'a suite list beyond the page bound must not emit an incomplete result'
+  expect_one "$home" '^pr-health: no PR read settled this sweep \(1 selected\)' 'a suite list beyond the page bound must report only that nothing settled'
   jq -e '.prs["https://github.com/o/r/pull/48"] == null' "$home/state/pr-health.json" >/dev/null \
     || fail 'a suite list beyond the page bound was accepted as complete'
   set_pr "$home" 48 '.suites_truncated = false'
@@ -1255,7 +1301,7 @@ for test_name in test_any_failure_off_still_reports_only_required_checks \
   test_unreadable_contribution_record_pauses_the_monitor_once \
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
-  test_all_owned_pr_reads_start_in_one_wave test_checks_on_later_pages \
+  test_owned_pr_reads_start_in_bounded_waves test_slow_forge_settles_within_the_wave_bound test_cannot_settle_prints_once test_checks_on_later_pages \
   test_unsupported_provider_has_no_github_reads test_final_contributions_are_not_enrolled_again \
   test_many_recorded_contributions_do_not_starve_a_new_branch_pr; do
   ( "$test_name" ) || failures=$((failures + 1))
