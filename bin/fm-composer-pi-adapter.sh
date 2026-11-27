@@ -26,6 +26,9 @@
 # install, and on an unpinned install proves that refusal and names the release
 # whose pin needs refreshing.
 #
+# A caller that cannot prove the pane is on this host sets
+# FM_COMPOSER_PI_REMOTE_TARGET=1. The adapter then refuses the local PATH
+# version as proof, because it may describe a different host from the pane.
 # Sourced only from bin/fm-composer-lib.sh. Not a standalone entrypoint.
 
 # shellcheck shell=bash
@@ -81,6 +84,9 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
 # prints no version keeps the banner unproven.
 fm_composer_pi_adapter_installed_pinned() {
   local exe found=0 v candidates='pi pi-signed'
+  case "${FM_COMPOSER_PI_REMOTE_TARGET:-}" in
+    1|true|yes) return 1 ;;
+  esac
   case "${FM_COMPOSER_PI_EXECUTABLE:-}" in
     pi|pi-signed) candidates=$FM_COMPOSER_PI_EXECUTABLE ;;
   esac
