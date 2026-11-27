@@ -142,16 +142,6 @@ fi
 
 [ -n "$CMD" ] || exit 0
 
-if [ "$PRIMARY_ONLY" -eq 1 ]; then
-  SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-  ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
-  ACTIVE_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}
-  STATE=${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}
-  # shellcheck source=bin/fm-primary-scope-lib.sh
-  . "$ROOT/bin/fm-primary-scope-lib.sh"
-  fm_primary_scope_matches "$ROOT" "$STATE" || exit 0
-fi
-
 # Strict-superset prefilter (transport only; owns zero classification semantics).
 # Every protected watcher execution and every broad watcher kill resolves to the
 # fm-watch byte sequence AFTER the classifier's byte normalization, so a command
@@ -190,6 +180,16 @@ case "$CMD" in
     esac
     ;;
 esac
+
+if [ "$PRIMARY_ONLY" -eq 1 ]; then
+  SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
+  ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
+  ACTIVE_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$ROOT}}
+  STATE=${FM_STATE_OVERRIDE:-$ACTIVE_HOME/state}
+  # shellcheck source=bin/fm-primary-scope-lib.sh
+  . "$ROOT/bin/fm-primary-scope-lib.sh"
+  fm_primary_scope_matches "$ROOT" "$STATE" || exit 0
+fi
 
 SCRIPT_DIR=${SCRIPT_DIR:-$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)} || exit 0
 ROOT=${ROOT:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
