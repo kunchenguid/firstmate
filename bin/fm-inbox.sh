@@ -414,10 +414,16 @@ publish_from_reservation() {  # <request-id> <source> <body> <extra>
   id=$(tr -d '\r' <"$reserved")
   id=${id%%$'\n'*}
   valid_note_id "$id" || return 1
+  # Callers run this in `id=$(...) || die`, where errexit does not apply, so
+  # every write step must return its own failure: a replay is a success only
+  # when the reserved note now exists.
   if [ ! -f "$INBOX/$id.note" ] && [ ! -f "$INBOX/handled/$id.note" ]; then
-    tmp=$(mktemp "$INBOX/.staging-XXXXXX")
-    write_note_file "$tmp" "$id" "$source" "$body" "$extra" "$request_id"
-    mv "$tmp" "$INBOX/$id.note"
+    tmp=$(mktemp "$INBOX/.staging-XXXXXX") || return 1
+    if ! write_note_file "$tmp" "$id" "$source" "$body" "$extra" "$request_id" \
+      || ! mv "$tmp" "$INBOX/$id.note"; then
+      rm -f "$tmp"
+      return 1
+    fi
   fi
   printf '%s\n' "$id"
 }
@@ -437,7 +443,7 @@ queue_note() {
     reserved="$REQUESTS/$request_id"
     if [ -f "$reserved" ]; then
       id=$(publish_from_reservation "$request_id" "$source" "$body" "$extra") \
-        || die "request id $request_id is reserved but unreadable; retry the same request id"
+        || die "request id $request_id is reserved but its note could not be read or written; retry the same request id"
       summary=$(note_summary_from_body "$(read_note_body "$(note_path "$id")")")
       finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary"
       return $?
@@ -449,7 +455,7 @@ queue_note() {
     if ! claim_request_id "$request_id" "$id"; then
       rm -f "$tmp"
       id=$(publish_from_reservation "$request_id" "$source" "$body" "$extra") \
-        || die "request id $request_id is reserved but unreadable; retry the same request id"
+        || die "request id $request_id is reserved but its note could not be read or written; retry the same request id"
       summary=$(note_summary_from_body "$(read_note_body "$(note_path "$id")")")
       finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary"
       return $?
