@@ -3964,6 +3964,14 @@ SH
   : > "$dir/tea.log"
   : > "$dir/fgj.log"
   out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_FGJ_LOG="$dir/fgj.log" \
+    PATH="$dir/fakebin:$BASE_PATH" bash "$POLL" --validated forgejo "$url" forgejo.example o/r 7 fgj)
+  [ "$out" = merged ] || fail "the seven-argument --validated form silently dropped the read: '$out'"
+  grep -qF -- "api repos/o/r/pulls/7 --hostname forgejo.example" "$dir/fgj.log" \
+    || fail "the seven-argument --validated form did not read through the recorded fgj preference"
+
+  : > "$dir/tea.log"
+  : > "$dir/fgj.log"
+  out=$(FM_TEST_TEA_LOG="$dir/tea.log" FM_TEST_FGJ_LOG="$dir/fgj.log" \
     PATH="$dir/fakebin:$BASE_PATH" bash "$POLL" --validated forgejo "$url" forgejo.example o/r 7)
   [ "$out" = merged ] || fail "the documented six-argument --validated form stopped working: '$out'"
   grep -qF -- "api --login main --repo o/r" "$dir/tea.log" \

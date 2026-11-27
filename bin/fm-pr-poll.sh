@@ -38,7 +38,7 @@ degraded_enabled=0
 poll_home=${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}
 [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-degraded-watch" ] && degraded_enabled=1
 snapshot=0
-if [ "$#" -eq 6 ] && { [ "$1" = --validated ] || [ "$1" = --baseline ] || [ "$1" = --snapshot ]; }; then
+if { [ "$#" -eq 6 ] || [ "$#" -eq 7 ]; } && { [ "$1" = --validated ] || [ "$1" = --baseline ] || [ "$1" = --snapshot ]; }; then
   if [ "$1" = --snapshot ]; then
     [ -e "${FM_CONFIG_OVERRIDE:-$poll_home/config}/pr-follow" ] || exit 3
     snapshot=1
