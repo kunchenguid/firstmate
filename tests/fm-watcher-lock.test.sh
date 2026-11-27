@@ -2455,9 +2455,9 @@ SH
 
 test_killed_acquirer_owner_litter_is_reaped() {
   local shape dir state fakebin lock holder holder_pid held acquirer_pid owner real_mktemp
-  local match at stranded kind lock_parent
+  local match at stranded kind lock_parent live_owner
   real_mktemp=$(command -v mktemp)
-  for kind in meta session registry; do
+  for kind in meta session registry reply extension presentation nested; do
   for shape in live-holder dead-holder; do
     dir=$(make_case "killed-acquirer-$kind-$shape")
     state="$dir/state"
@@ -2466,6 +2466,10 @@ test_killed_acquirer_owner_litter_is_reaped() {
       meta) lock="$state/.meta-demo.lock" ;;
       session) lock="$state/.lock.acquire" ;;
       registry) lock="$state/public-followup/.registry-demo.lock" ;;
+      reply) lock="$state/inbox/.replies.lock" ;;
+      extension) lock="$state/procevent/.extension-binding-lifecycle.lock" ;;
+      presentation) lock="$state/.status-presentation-lock" ;;
+      nested) lock="$state/arbitrary/deeper/.future-mutex" ;;
     esac
     lock_parent=${lock%/*}
     mkdir -p -m 700 "$lock_parent"
@@ -2519,21 +2523,27 @@ test_killed_acquirer_owner_litter_is_reaped() {
       stranded=$((stranded + 1))
     done
     [ "$stranded" -ge 1 ] || fail "$shape: the killed acquirer stranded no staging directory"
+    live_owner="$lock.owner.$$.staging"
+    mkdir "$live_owner"
+    : > "$lock_parent/unrelated-file"
     FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_state_reap_orphans "$2"' _ "$LIB" "$state" \
       || fail "$shape: the state sweep failed"
     for owner in "$lock_parent"/.*.owner.*; do
       [ -d "$owner" ] && [ ! -L "$owner" ] || continue
-      [ "$owner" = "$holder" ] || fail "$shape: the state sweep left stranded owner $owner"
+      [ "$owner" = "$holder" ] || [ "$owner" = "$live_owner" ] \
+        || fail "$shape: the state sweep left stranded owner $owner"
     done
     [ "$(readlink "$lock")" = "$holder" ] && [ -d "$holder" ] \
       || fail "$shape: the state sweep removed the published owner"
+    [ -d "$live_owner" ] || fail "$kind: the state sweep removed live staging"
+    [ -f "$lock_parent/unrelated-file" ] || fail "$kind: the state sweep removed an unrelated file"
     if [ -n "$holder_pid" ]; then
       kill "$holder_pid" 2>/dev/null || true
       wait "$holder_pid" 2>/dev/null || true
     fi
   done
   done
-  pass "killed meta, session and registry lock and steal staging is reaped; published owners stay"
+  pass "killed lock and steal staging is reaped recursively; published and live owners stay"
 }
 
 test_killed_inbox_enqueue_owner_litter_is_reaped() {
@@ -2608,12 +2618,17 @@ test_state_reap_orphans_boundaries() {
   : > "$state/.watch-arm-output.AbCdEf"
   : > "$state/home-summary.json"
   ln -s "$state/home-summary.json" "$state/.fm-check-output.$dead.link"
+  mkdir -p "$dir/outside/.foreign.owner.$dead.staging" \
+    "$state/.retired.reaped.$dead/.nested.owner.$dead.staging" \
+    "$state/.unknown.owner.$dead.staging/.nested.owner.$dead.staging"
+  ln -s "$dir/outside" "$state/linked-directory"
+  ln -s "$dir/outside" "$state/.linked.owner.$dead.staging"
 
   FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_state_reap_orphans "$2"' _ "$LIB" "$state" \
     || fail "the state sweep failed"
 
   for name in .a.lock.owner.$dead.gone .lock.owner.$dead.gone b.lock.owner.$dead.gone \
-    .c.lock.steal.owner.$dead.gone \
+    .c.lock.steal.owner.$dead.gone .a.notlock.owner.$dead.x \
     .home-summary.json.$dead.AbCdEf .home-summary-error.$dead.AbCdEf \
     .claude-autoarm-output.$dead.AbCdEf .watch-arm-output.$dead.AbCdEf \
     .fm-check-output.$dead.AbCdEf .fm-custom-check.$dead.AbCdEf \
@@ -2622,7 +2637,7 @@ test_state_reap_orphans_boundaries() {
   done
   for name in .a.lock.owner.$live.staging .a.lock.owner.$dead.handed \
     .d.lock.owner.$dead.published .a.lock.owner.$dead.unknown/foreign .a.lock.owner.legacy \
-    .a.notlock.owner.$dead.x .a.lock.owner.$dead.x.reaped.$dead \
+    .a.lock.owner.$dead.x.reaped.$dead \
     .home-summary.json.$live.AbCdEf \
     .home-summary-error.$live.AbCdEf .claude-autoarm-output.$live.AbCdEf \
     .watch-arm-output.$live.AbCdEf .fm-check-output.$live.AbCdEf \
@@ -2631,6 +2646,12 @@ test_state_reap_orphans_boundaries() {
     [ -e "$state/$name" ] || fail "the state sweep removed protected entry $name"
   done
   [ -L "$state/.fm-check-output.$dead.link" ] || fail "the state sweep removed a symlink"
+  [ -L "$state/linked-directory" ] && [ -L "$state/.linked.owner.$dead.staging" ] \
+    && [ -d "$dir/outside/.foreign.owner.$dead.staging" ] \
+    || fail "the state sweep followed or removed a directory symlink"
+  [ -d "$state/.retired.reaped.$dead/.nested.owner.$dead.staging" ] \
+    && [ -d "$state/.unknown.owner.$dead.staging/.nested.owner.$dead.staging" ] \
+    || fail "the state sweep descended into a tombstone or unknown owner contents"
   [ "$(readlink "$state/.d.lock")" = "$state/.d.lock.owner.$dead.published" ] \
     || fail "the state sweep disturbed a published lock"
   pass "the state sweep removes only unclaimed dead-pid litter"
