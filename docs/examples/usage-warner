@@ -12,6 +12,10 @@
 # A configured window id the account does not return is silently never
 # compared.
 #
+# Banners never carry a sound clause, so they are silent by default.
+# Optional: sound:off is accepted and keeps them silent; deleting it changes
+# nothing.
+#
 # An ABSENT config/usage-warner means the feature is off: `check` stays
 # completely silent and `arm` refuses. This file's mere presence is the
 # opt-in.

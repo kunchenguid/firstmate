@@ -3168,6 +3168,65 @@ test_wedge_alarm_direct_notifiers_honor_discard_seam() {
   pass "direct notifier helpers honor the discard seam, including command:"
 }
 
+test_wedge_alarm_banner_sound_preference() {
+  local dir cfgdir mode
+  dir=$(make_wedge_case wedge-banner-sound)
+  cfgdir="$dir/config"
+  mkdir -p "$cfgdir"
+  cat > "$dir/fakebin/osascript" <<'SH'
+#!/usr/bin/env bash
+printf '<%s>\n' "$@" >> "$FM_WEDGE_ALARM_REAL_LOG"
+SH
+  for mode in default off; do
+    rm -f "$cfgdir/wedge-alarm"
+    [ "$mode" = default ] || printf '  sound:%s  \n' "$mode" > "$cfgdir/wedge-alarm"
+    : > "$dir/real.log"
+    PATH="$dir/fakebin:$PATH" FM_CONFIG_OVERRIDE="$cfgdir" FM_WEDGE_ALARM_CHANNEL='' \
+      FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_REAL_LOG="$dir/real.log" \
+      wedge_alarm_notify 'same summary "quoted"' '/s/.marker'
+    assert_grep 'same summary "quoted"' "$dir/real.log" "sound preference preserves summary"
+    assert_grep 'firstmate: away-mode escalations WEDGED' "$dir/real.log" "sound preference preserves title"
+    if [ "$mode" = off ]; then
+      # macOS treats an empty `sound name ""` as sounding, so silence means no clause.
+      grep -q 'sound name' "$dir/real.log" && fail "silent wedge banner passed a sound name clause"
+      grep -qx '<>' "$dir/real.log" && fail "silent wedge banner passed an empty sound argument"
+      grep -q Basso "$dir/real.log" && fail "silent wedge banner requested Basso"
+    else
+      assert_grep 'sound name (item 2 of argv)' "$dir/real.log" "default banner keeps its sound clause"
+      grep -qx '<Basso>' "$dir/real.log" || fail "default wedge banner lost Basso"
+    fi
+  done
+  pass "wedge banners support silent delivery and preserve default Basso"
+}
+
+test_wedge_alarm_env_sound_off_keeps_banner() {
+  local dir mode
+  dir=$(make_wedge_case wedge-env-sound)
+  cat > "$dir/fakebin/osascript" <<'SH'
+#!/usr/bin/env bash
+printf 'call\n' >> "$FM_WEDGE_ALARM_REAL_LOG"
+printf '<%s>\n' "$@" >> "$FM_WEDGE_ALARM_REAL_LOG"
+SH
+  # No config file: only the environment override decides the channels.
+  for mode in sound:off ''; do
+    : > "$dir/real.log"
+    PATH="$dir/fakebin:$PATH" FM_CONFIG_OVERRIDE="$dir/no-config" FM_WEDGE_ALARM_CHANNEL="$mode" \
+      FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_REAL_LOG="$dir/real.log" \
+      wedge_alarm_notify 'env summary' '/s/.marker'
+    [ "$(grep -cx call "$dir/real.log")" = 1 ] \
+      || fail "FM_WEDGE_ALARM_CHANNEL='$mode' did not post exactly one banner: $(cat "$dir/real.log")"
+    assert_grep 'env summary' "$dir/real.log" "env override banner keeps its summary"
+    if [ "$mode" = sound:off ]; then
+      grep -q 'sound name' "$dir/real.log" && fail "env sound:off banner passed a sound name clause"
+      grep -q Basso "$dir/real.log" && fail "env sound:off banner requested Basso"
+    else
+      assert_grep 'sound name (item 2 of argv)' "$dir/real.log" "empty env override keeps the default sound clause"
+      grep -qx '<Basso>' "$dir/real.log" || fail "empty env override lost the default Basso banner"
+    fi
+  done
+  pass "FM_WEDGE_ALARM_CHANNEL=sound:off keeps the banner silent; empty override falls back to auto"
+}
+
 test_wedge_alarm_osascript_channel_selected() {
   local dir log
   dir=$(make_wedge_case wedge-osascript); log="$dir/alert.log"
@@ -3999,6 +4058,8 @@ test_wedge_alarm_library_mode_defaults_to_discard
 test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
+test_wedge_alarm_banner_sound_preference
+test_wedge_alarm_env_sound_off_keeps_banner
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
 test_wedge_alarm_rex_channel_selected

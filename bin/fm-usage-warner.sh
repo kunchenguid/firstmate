@@ -106,6 +106,7 @@ Usage:
 
 Thresholds are read from config/usage-warner (local, gitignored), whose schema
 is owned by docs/configuration.md ("Local Claude usage warner").
+Banners are always silent; a sound:off line is accepted and changes nothing.
 See docs/usage-warner.md for the behaviour reference and
 docs/examples/usage-warner for a starting point.
 EOF
@@ -227,14 +228,18 @@ usage_warner_read() {
 # independent of any terminal pane. The summary is passed as an argv item
 # (never interpolated into the AppleScript source) so its text can never break
 # the script, matching bin/fm-supervise-daemon.sh's own osascript notifier.
+# The banner never carries a `sound name` clause: macOS treats any clause, even
+# an empty `sound name ""`, as a sounding notification, and omitting it is the
+# silent form. sound:off in config/usage-warner therefore needs no extra
+# argument here; the default delivery already omits the clause.
 usage_warner_notify() {  # <summary>
-  local summary=$1
+  local summary=$1 script='display notification (item 1 of argv) with title "Firstmate: Claude usage"'
   command -v osascript >/dev/null 2>&1 || {
     printf 'fm-usage-warner: osascript not found; cannot post a notification\n' >&2
     return 1
   }
   osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "Firstmate: Claude usage"' \
+    -e "$script" \
     -e 'end run' "$summary" >/dev/null 2>&1
 }
 
