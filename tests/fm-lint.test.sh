@@ -2095,6 +2095,11 @@ test_local_lint_bounds_resident_memory_and_deadline() {
     assert_contains "$out" "resident-hog.sh" "the over-ceiling root was not named"
     assert_contains "$out" "reason=memory rc=98" "the resident kill was not classified as memory"
     assert_contains "$out" "exceeded the per-root limit of 65536 KiB" "the resident kill did not explain itself"
+    if [ "$(uname)" = Darwin ]; then
+      # macOS compresses an idle allocation until ps rss is near zero, so the
+      # ceiling must count physical footprint there, not RSS.
+      assert_contains "$out" "physical footprint" "the macOS kill did not measure physical footprint"
+    fi
     kill -0 "$sentinel_pid" 2>/dev/null \
       || fail "the resident-memory kill took an unrelated sentinel process with it"
     kill -KILL "$sentinel_pid" 2>/dev/null || true

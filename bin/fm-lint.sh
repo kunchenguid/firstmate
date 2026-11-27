@@ -93,7 +93,11 @@
 # cannot apply the address-space limit at all) each root runs under the same
 # wall deadline and grace plus a resident-memory ceiling instead
 # (FM_LINT_ROOT_RSS_KIB, default 6291456 = 6 GiB summed over the root's
-# process group, sampled immediately then through ps every 500 milliseconds).
+# process group, sampled immediately then every 500 milliseconds). On macOS
+# each member counts its physical footprint (resident plus compressed and
+# swapped memory, what top's MEM column shows), because under memory pressure
+# the kernel compresses a growing ShellCheck so its RSS stays near zero; other
+# hosts count RSS from ps.
 # A root over that ceiling is killed and classified memory, like a CI memory death.
 # A local run without bin/fm-timeout-lib.sh refuses rather than lint
 # unbounded.
@@ -430,7 +434,7 @@ fi
 # count) and execs the tool; a limit the host cannot apply exits 97 so the
 # parent reports limit-unavailable instead of running uncapped. Under the
 # resident kind it runs the tool beside a monitor that sums resident memory
-# over this process group (the bounded runner made this process its leader)
+# (macOS: physical footprint) over this process group (the bounded runner made this process its leader)
 # immediately then every 500 milliseconds; over the limit it kills the
 # group's other members, records the observed peak, and exits 98, classified as
 # memory. Either kind wraps the tool in /usr/bin/time for the per-root
@@ -473,6 +477,16 @@ if [ "${1:-}" = "--internal-root" ]; then
       # shellcheck disable=SC2016 # Perl, not the shell, expands its variables.
       exec "${FM_LINT_PERL_BIN:-perl}" -MPOSIX=WNOHANG -MTime::HiRes=sleep -e '
         my ($rss_file, $limit) = (shift, shift);
+        # macOS: proc_pid_rusage(pid, RUSAGE_INFO_V0) through the proc_info
+        # syscall (336, call 9); phys_footprint is the eighth uint64 after the
+        # 16-byte uuid. It includes compressed and swapped pages that ps rss
+        # omits, so a compressed allocation still counts toward the ceiling.
+        my $darwin = $^O eq "darwin";
+        sub footprint_kib {
+          my $info = "\0" x 96;
+          return undef unless syscall(336, 9, $_[0] + 0, 0, 0, $info, 0) == 0;
+          return int((unpack "a16 Q10", $info)[8] / 1024);
+        }
         my $child = fork;
         exit 127 unless defined $child;
         if (!$child) { exec @ARGV; exit 127 }
@@ -490,6 +504,10 @@ if [ "${1:-}" = "--internal-root" ]; then
               while (my $row = <$rows>) {
                 my ($pid, $pgid, $rss) = split " ", $row;
                 next unless defined $rss && $pgid == $group && $pid != $$ && $pid != $ps;
+                if ($darwin) {
+                  my $footprint = footprint_kib($pid);
+                  $rss = $footprint if defined $footprint && $footprint > $rss;
+                }
                 $total += $rss;
                 push @members, $pid;
               }
@@ -500,7 +518,7 @@ if [ "${1:-}" = "--internal-root" ]; then
               kill "KILL", @members;
               waitpid $child, 0;
               if (open my $record, ">", $rss_file) { print $record "max_rss_kib=$peak\n"; close $record }
-              print STDERR "fm-lint.sh: resident memory $total KiB exceeded the per-root limit of $limit KiB\n";
+              print STDERR "fm-lint.sh: ", ($darwin ? "physical footprint" : "resident memory"), " $total KiB exceeded the per-root limit of $limit KiB\n";
               exit 98;
             }
           }
