@@ -94,10 +94,10 @@
 # wall deadline and grace plus a resident-memory ceiling instead
 # (FM_LINT_ROOT_RSS_KIB, default 6291456 = 6 GiB summed over the root's
 # process group, sampled immediately then every 500 milliseconds). On macOS
-# each member counts its physical footprint (resident plus compressed and
-# swapped memory, what top's MEM column shows), because under memory pressure
-# the kernel compresses a growing ShellCheck so its RSS stays near zero; other
-# hosts count RSS from ps.
+# each member counts the greater of ps RSS and physical footprint (which
+# includes compressed and swapped memory); if the footprint query fails it
+# falls back to RSS. This avoids missing compressed allocations when the
+# footprint query succeeds; other hosts count RSS from ps.
 # A root over that ceiling is killed and classified memory, like a CI memory death.
 # A local run without bin/fm-timeout-lib.sh refuses rather than lint
 # unbounded.
@@ -110,6 +110,8 @@
 # cross-file-dependent codes omitted in local no-source lint are excluded.
 # Other findings and failed retries still fail lint. The retry's diagnostics
 # replace the failed attempt's output; peak RSS is the maximum of both attempts.
+# On a local memory kill, that RSS field instead records the monitor's peak
+# process-group total using the accounting described above.
 #
 # Per-root evidence is incremental: workers append begin/end records (root,
 # mode, shard, start, end, duration, final exit status, reason, peak RSS when
@@ -1340,11 +1342,10 @@ ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
 # tests/fm-pending-reply.test.sh, and
 # tests/fm-launch-prompt-signals-live-e2e.test.sh. CI runs one root per
 # lint job, so worst-case resident demand is ~8 GiB plus runner overhead,
-# inside the 16 GiB runner. Local lint defaults to two workers; two such
-# caps allow ~16 GiB resident plus host overhead, so use FM_LINT_JOBS=1 on
-# smaller local machines. A root that exceeds its cap fails by name.
-# Never disable, narrow, or redirect source-following to fit a root under
-# the cap. The roots sidecar records each root's peak RSS; roots peaking
+# inside the 16 GiB runner. Local lint uses ROOT_RSS_KIB instead unless
+# FM_LINT_REQUIRE_BOUNDS=1 is set. The header owns the permitted memory
+# fallback and test source-boundary cuts.
+# The roots sidecar records each root's peak RSS; roots peaking
 # above about 3 GiB resident are reduction candidates,
 # bin/fm-pending-reply-lib.sh first (its separate dedup fix is PR 5753).
 ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-12582912}
