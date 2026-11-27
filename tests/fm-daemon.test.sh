@@ -1567,12 +1567,12 @@ test_overdue_open_decision_without_marker_is_not_repeated() {
 }
 
 test_housekeeping_overdue_queue_failure_resume_discards() {
-  local event route dir state fakebin task win pane statusf original_enqueue original_append undated
+  local event resume_route dir state fakebin task win pane statusf original_enqueue original_append undated
   original_enqueue=$(declare -f escalate_add)
   for event in working paused; do
-    for route in housekeeping signal stale; do
+    for resume_route in housekeeping signal stale; do
       (
-        dir=$(make_supercase "overdue-resume-$event-$route")
+        dir=$(make_supercase "overdue-resume-$event-$resume_route")
         arm_pause_ceiling "$dir"
         state="$dir/state"; fakebin="$dir/fakebin"
         task=overdue-resume; win="sess:fm-$task"; pane="$dir/pane.txt"; statusf="$state/$task.status"
@@ -1589,32 +1589,34 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
         fixture() { PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
           FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=$undated FM_ESCALATE_BATCH_SECS=999999 "$@"; }
         original_append=$(declare -f fm_wake_status_append_self_announced)
+        # shellcheck disable=SC2329 # Invoked indirectly by housekeeping.
         escalate_add() { return 1; }
         fixture housekeeping "$state"
         [ -e "$state/.paused-overdue-$task" ] || fail "failed queue lost the overdue marker"
         undated=86400
         printf '%s: worker changed wait\n' "$event" >> "$statusf"
         eval "$original_enqueue"
+        # shellcheck disable=SC2329 # Invoked indirectly during overdue resolution.
         fm_wake_status_append_self_announced() { return 2; }
-        case "$route" in
+        case "$resume_route" in
           housekeeping) fixture housekeeping "$state" ;;
           signal) fixture handle_wake "signal: $statusf" "$state" ;;
           stale) fixture handle_wake "stale: $win" "$state" ;;
         esac
-        [ -e "$state/.paused-overdue-$task" ] || fail "failed resolution lost the overdue marker ($event/$route)"
+        [ -e "$state/.paused-overdue-$task" ] || fail "failed resolution lost the overdue marker ($event/$resume_route)"
         : > "$state/.subsuper-escalations"
         eval "$original_append"
-        case "$route" in
+        case "$resume_route" in
           housekeeping) fixture housekeeping "$state" ;;
           signal) fixture handle_wake "signal: $statusf" "$state"; fixture housekeeping "$state" ;;
           stale) fixture handle_wake "stale: $win" "$state"; fixture housekeeping "$state" ;;
         esac
-        [ ! -s "$state/.subsuper-escalations" ] || fail "resumed worker queued an obsolete alert ($event/$route)"
+        [ ! -s "$state/.subsuper-escalations" ] || fail "resumed worker queued an obsolete alert ($event/$resume_route)"
         [ ! -e "$state/.paused-overdue-$task" ] || fail "resume retained the overdue marker"
         FM_HOME="$dir" status_open_decisions "$statusf" | grep -F "paused-overdue-$task" >/dev/null \
-          && fail "resume left the overdue decision open ($event/$route)"
+          && fail "resume left the overdue decision open ($event/$resume_route)"
         grep -Fq "resolved [key=paused-overdue-$task]" "$statusf" || fail "resume did not record resolution"
-      ) || fail "pending resume reconciliation failed ($event/$route)"
+      ) || fail "pending resume reconciliation failed ($event/$resume_route)"
     done
   done
   pass "failed enqueue followed by a worker event closes without an obsolete alert, retaining failed resolutions"

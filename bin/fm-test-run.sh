@@ -670,11 +670,13 @@ standalone
 EOF
 }
 
+# Repeated scheduling lookups use here-strings because Bash 3.2 can retain
+# process-substitution descriptors while running shell functions.
 family_is_concurrent_safe() {
   local want=$1 line
   while IFS= read -r line; do
     [ "$line" = "$want" ] && return 0
-  done < <(list_concurrent_safe_families)
+  done <<<"$(list_concurrent_safe_families)"
   return 1
 }
 
@@ -694,8 +696,9 @@ script_allows_concurrency() {
   family=$(family_for_basename "$(basename "$s")")
   family_is_concurrent_safe "$family" || return 1
   while IFS= read -r repo_script; do
+    [ -n "$repo_script" ] || continue
     [ "$repo_script" = "$s" ] && return 0
-  done < <(all_repo_tests)
+  done <<<"$(all_repo_tests)"
   return 1
 }
 
@@ -703,7 +706,7 @@ is_proven_isolated_script() {
   local want=$1 line
   while IFS= read -r line; do
     [ "$line" = "$want" ] && return 0
-  done < <(list_proven_isolated)
+  done <<<"$(list_proven_isolated)"
   return 1
 }
 
@@ -771,11 +774,11 @@ portable_parallel_weight_for() {
 portable_serial_weight_for() {
   local want=$1 path ms
   while read -r path ms; do
-    if [ "$path" = "$want" ]; then
+    if [ -n "$path" ] && [ "$path" = "$want" ]; then
       printf '%s\n' "$ms"
       return 0
     fi
-  done < <(portable_serial_weight_hints)
+  done <<<"$(portable_serial_weight_hints)"
   printf '%s\n' "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS"
 }
 
@@ -2297,7 +2300,7 @@ if [ "$JOBS" -gt 1 ]; then
         while IFS= read -r admitted_family; do
           [ "$family" = "$admitted_family" ] && break
           phase=$((phase + 1))
-        done < <(list_concurrent_safe_families)
+        done <<<"$(list_concurrent_safe_families)"
       fi
       # Longest first within each isolation phase: workers are handed scripts
       # in order, so starting the longest last strands it at the tail.
