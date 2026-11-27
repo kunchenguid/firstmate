@@ -857,7 +857,7 @@ Reads are driven by the GitHub notifications feed: each pass makes one condition
 Every owned PR is still read when the feed is unavailable or returns a full page of notifications newer than the saved position, and at least every 15 minutes as the fallback sweep, because some conditions, such as a base branch moving into conflict or a check from another app failing, raise no notification.
 A pass reads owned PRs in waves of four, in listed order, and gives each read the time left before the check timeout.
 A PR the timeout leaves unreached stays pending for the next pass.
-When a pass selects PRs and none of their reads completes, the monitor prints one line saying so, and prints it again only after a pass in which a read completed.
+When a pass selects PRs and none of their reads completes, the monitor prints one line per cause for the PRs that newly fail: a read that did not finish in time, or one that returned no usable answer. A PR prints again only after one of its own reads completes and later fails again. A PR whose read failed is listed after the PRs not tried, so one stuck PR cannot hold the others back.
 GitLab merge requests are not monitored yet.
 Forgejo pull requests are not monitored.
 When no reported check is marked required, a failing reported check still counts, matching `bin/fm-pr-state.sh` for unprotected stacked bases.

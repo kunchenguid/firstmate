@@ -634,18 +634,20 @@ poll() {
   if [ "$settled" -eq 0 ]; then
     newly=$(jq -r --rawfile failed "$TMP/failed.tsv" '
       (.read_failed // {}) as $old
-      | ($failed | split("\n") | map(select(length > 0) | split("\t")))[] | select($old[.[0]] == null) | .[1]' "$TMP/health.json")
+      | ($failed | split("\n") | map(select(length > 0) | split("\t")))[] | select(($old[.[0]].announced? // false) | not) | .[1]' "$TMP/health.json")
     cause_count() { printf '%s\n' "$newly" | grep -c "^$1$" || true; }
     [ "$(cause_count timeout)" = 0 ] || printf 'pr-health: no PR read settled this sweep (%s selected); %s did not finish in time, so no condition can be reported for it until a read completes\n' \
       "$(grep -c . "$TMP/urls")" "$(cause_count timeout)"
     [ "$(cause_count answer)" = 0 ] || printf 'pr-health: no PR read settled this sweep (%s selected); %s returned no usable answer (a page bound, lost access or an unreadable reply), so no condition can be reported for it until a read completes\n' \
       "$(grep -c . "$TMP/urls")" "$(cause_count answer)"
   fi
-  jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/unsettled" \
+  jq --argjson full "$full" --argjson now "$now" --argjson announce "$([ "$settled" -eq 0 ] && echo true || echo false)" --rawfile unsettled "$TMP/unsettled" \
     --rawfile failed "$TMP/failed.tsv" --rawfile ok "$TMP/settled-urls" '
     ($ok | split("\n")) as $ok
-    | ($failed | split("\n") | map(select(length > 0) | split("\t") | {key:.[0],value:.[1]}) | from_entries) as $f
-    | .read_failed = ((.read_failed // {}) | with_entries(select(.key | IN($ok[]) | not))) + $f
+    | ($failed | split("\n") | map(select(length > 0) | split("\t") | {key:.[0],value:{cause:.[1]}}) | from_entries) as $f
+    | (.read_failed // {}) as $old
+    | .read_failed = ($old | with_entries(select(.key | IN($ok[]) | not)))
+        + ($f | with_entries(.value.announced = ($announce or ($old[.key].announced? // false))))
     | if has("notifications") then
       .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
       | if $full then .notifications.swept_at = $now else . end

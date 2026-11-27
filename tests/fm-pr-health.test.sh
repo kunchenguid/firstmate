@@ -754,6 +754,24 @@ test_one_stuck_pr_prints_once_across_other_activity() {
   pass 'a PR stuck on its answer prints once, not after every pass with other activity'
 }
 
+test_a_stuck_pr_first_failing_beside_a_settled_pr_prints_when_alone() {
+  local home out
+  home=$(new_home stuck-beside-settled)
+  task "$home" ship1 pr=https://github.com/o/r/pull/1
+  task "$home" ship2 pr=https://github.com/o/r/pull/2
+  pr "$home" 1 "$HEAD_A" "$BASE_1" false false
+  pr "$home" 2 "$HEAD_A" "$BASE_1" false false
+  set_pr "$home" 2 '.suites = [{name:"CI",conclusion:"ACTION_REQUIRED"}] | .suites_truncated = true'
+  feed "$home"
+  arm "$home"
+  out=$(pass_once "$home")
+  printf '%s\n' "$out" | grep -q 'pull/1 conflicts with its base' || fail "PR 1 must settle: $out"
+  printf '%s\n' "$out" | grep -q 'no PR read settled' && fail "a pass where PR 1 settled must not report a stuck read: $out"
+  expect_one "$home" 'no PR read settled this sweep \(1 selected\); 1 returned no usable answer' 'the stuck PR must be reported once it fails alone'
+  expect_silent "$home" 'the stuck PR must not repeat'
+  pass 'a stuck PR first failing beside a settled PR is reported when it fails alone'
+}
+
 feed() { # home : serve an empty notifications feed
   printf '[]\n' > "$1/forge/notifications.json"
   printf 'Sun, 01 Nov 2026 00:00:00 GMT\n' > "$1/forge/notifications-lm"
@@ -1336,7 +1354,7 @@ for test_name in test_any_failure_off_still_reports_only_required_checks \
   test_unreadable_contribution_record_pauses_the_monitor_once \
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
-  test_owned_pr_reads_start_in_bounded_waves test_slow_forge_settles_within_the_wave_bound test_cannot_settle_prints_once test_a_hanging_pr_does_not_starve_later_prs test_one_stuck_pr_prints_once_across_other_activity test_checks_on_later_pages \
+  test_owned_pr_reads_start_in_bounded_waves test_slow_forge_settles_within_the_wave_bound test_cannot_settle_prints_once test_a_hanging_pr_does_not_starve_later_prs test_one_stuck_pr_prints_once_across_other_activity test_a_stuck_pr_first_failing_beside_a_settled_pr_prints_when_alone test_checks_on_later_pages \
   test_unsupported_provider_has_no_github_reads test_final_contributions_are_not_enrolled_again \
   test_many_recorded_contributions_do_not_starve_a_new_branch_pr; do
   ( "$test_name" ) || failures=$((failures + 1))
