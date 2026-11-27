@@ -1838,8 +1838,8 @@ status_observed_signature() {
     case "$size" in ''|*[!0-9]*) size='size-error' ;; esac
   fi
   if [ -z "$ident" ]; then
-    ident=$(_fm_open_decisions_file_ident "$f") || ident=identity-error
-    [ -n "$ident" ] || ident=identity-error
+    ident=$(_fm_open_decisions_file_ident "$f") || ident='identity-error'
+    [ -n "$ident" ] || ident='identity-error'
   fi
   if [ -r "$f" ]; then access=readable; else access=unreadable; fi
   encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' \

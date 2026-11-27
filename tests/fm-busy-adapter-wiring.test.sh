@@ -1203,7 +1203,7 @@ test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook() {
 test_secondmate_droid_busy_arms_only_with_a_droid_stop_guard() {
   local case_dir id primary sm state settings out old_guard empty_factory
   case_dir="$TMP_ROOT/sm-droid"
-  id=sm-droid
+  id='sm-droid'
   primary="$case_dir/primary"
   sm="$case_dir/sm"
   out=$(FM_FAKE_PANE_CAPTURE="Executing...  (Press ESC to stop)" SECONDMATE_FACTORY_SETTINGS="$ROOT/.factory/settings.json" \
