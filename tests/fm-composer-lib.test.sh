@@ -958,6 +958,11 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
   [ "$out" = unknown ] \
     || fail "a remote target must not trust the local Pi version, got '$out'"
+  out=$(FM_COMPOSER_PI_EXECUTABLE=pi FM_COMPOSER_PI_REMOTE_TARGET=1 \
+    FM_COMPOSER_PI_HOST_VERSION=0.85.1 \
+    fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
+  [ "$out" = empty ] \
+    || fail "a remote target must accept only its explicit host version, got '$out'"
   # The adapter reads the installed `pi --version` itself, so a pinned install
   # settles the banner and an
   # unpinned or absent pi keeps refusing.

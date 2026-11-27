@@ -85,7 +85,10 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
 fm_composer_pi_adapter_installed_pinned() {
   local exe found=0 v candidates='pi pi-signed'
   case "${FM_COMPOSER_PI_REMOTE_TARGET:-}" in
-    1|true|yes) return 1 ;;
+    1|true|yes)
+      fm_composer_pi_adapter_version_pinned "${FM_COMPOSER_PI_HOST_VERSION:-}"
+      return
+      ;;
   esac
   case "${FM_COMPOSER_PI_EXECUTABLE:-}" in
     pi|pi-signed) candidates=$FM_COMPOSER_PI_EXECUTABLE ;;
