@@ -4,6 +4,9 @@
 # The watcher calls tick: run every 120s or on a goal/mark, landing, or status
 # (including answer) change. tick stores its scheduling cursor in watcher state.
 # eligible is the read-only final guard for goal-originated dispatch and replay.
+# The main home drafts up to three missing briefs per driven goal per pass in
+# enforce; shadow only logs proposals. Drafts need task=, project=, a normalized
+# item line of at least 120 characters, and a nonempty Evidence: clause.
 # FM_GOAL_PUSH_CAPACITY replaces fm-capacity.sh for lab tests only.
 set -u
 export LC_ALL=C
@@ -138,8 +141,85 @@ reconcile() {
   esac
 }
 
+# Write privately, then link the complete brief without replacing an owner's
+# work. Both the stage and destination are on the task data filesystem.
+publish_draft() (
+  local binding=$1 task=$2 body=$3 line=$4 dir="$FM_GOAL_DATA/$2" stage idx
+  local plan=$FM_GOAL_REC_PLAN done_when=$FM_GOAL_REC_DONE_WHEN
+  [ -d "$FM_GOAL_DATA" ] && [ ! -L "$FM_GOAL_DATA" ] && [ ! -L "$dir" ] || exit 1
+  stage=$(mktemp -d "$FM_GOAL_DATA/.goal-draft.XXXXXX") || exit 1
+  trap 'rm -f -- "$stage/brief.md"; rmdir -- "$stage"' EXIT
+  printf '%s\n' "$body" > "$stage/brief.md" || exit 1
+  eligible "$binding" "$task" && [ ! -e "$STATE/$task.meta" ] && [ ! -L "$STATE/$task.meta" ] || exit 1
+  idx=$(_fm_goal_index_of "${binding#*/}") || exit 1
+  [ "$(_fm_goal_item_line "$idx")" = "$line" ] &&
+    [ "$FM_GOAL_REC_PLAN" = "$plan" ] && [ "$FM_GOAL_REC_DONE_WHEN" = "$done_when" ] || exit 1
+  [ ! -L "$FM_GOAL_DATA" ] && [ ! -L "$dir" ] && mkdir -p -- "$dir" && ln -- "$stage/brief.md" "$dir/"
+)
+
+draft_brief() {
+  local i=$1 binding=$2 task=$3 project=${FM_GOAL_ITEMS_PROJECTS[$1]}
+  local line evidence posture delivery yolo prefix forge pr clone scaffold body row brief="$FM_GOAL_DATA/$3/brief.md"
+  local evidence_clause='(^|[[:space:];])([Ee][Vv][Ii][Dd][Ee][Nn][Cc][Ee]):[[:space:]]*([^[:space:]].*)$'
+  fm_task_id_creation_valid "$task" && [ -n "$project" ] || {
+    log "cannot draft $binding: set task= and project="; return 1;
+  }
+  line=$(_fm_goal_item_line "$i")
+  if [ "${#line}" -lt 120 ] || ! [[ "${FM_GOAL_ITEMS_TITLES[$i]}" =~ $evidence_clause ]]; then
+    log "cannot draft $binding: need a 120-character item line and a nonempty Evidence: clause"
+    return 1
+  fi
+  evidence=${BASH_REMATCH[3]}
+  if [ -e "$brief" ] || [ -L "$brief" ] || [ -L "${brief%/*}" ]; then
+    log "cannot draft $binding: unsafe or existing brief path"
+    return 1
+  fi
+  clone="${FM_PROJECTS_OVERRIDE:-$FM_GOAL_HOME/projects}/$project"
+  if ! { posture=$("$SCRIPT_DIR/fm-project-mode.sh" "$project") &&
+         prefix=$("$SCRIPT_DIR/fm-project-mode.sh" --branch-prefix "$project") &&
+         forge=$("$SCRIPT_DIR/fm-project-mode.sh" --forge "$project") &&
+         pr=$("$SCRIPT_DIR/fm-project-mode.sh" --pr "$project"); }; then
+    log "cannot draft $binding: project posture could not be resolved"
+    return 1
+  fi
+  read -r delivery yolo <<< "$posture"
+  scaffold=$("$SCRIPT_DIR/fm-brief.sh" "$task" "$project" --render --project "$clone" \
+    --mode "$delivery" --branch-prefix "$prefix" --forge "$forge" --pr "$pr") || {
+      log "cannot draft $binding: scaffold refused"; return 1;
+    }
+  body=$(
+    printf '%s\n' 'Drafted by goal pusher from the item line' "Goal pusher project: $project"
+    while IFS= read -r row; do
+      case "$row" in
+        '{TASK}') printf '%s\n\nGoal done when: %s\nGoal plan: %s\n' \
+          "$line" "$FM_GOAL_REC_DONE_WHEN" "$FM_GOAL_REC_PLAN" ;;
+        '{FIRSTMATE_SPEC}') printf '%s\n' \
+          "Read the plan section for this item at $FM_GOAL_REC_PLAN." \
+          'Scope: the item line above.' 'Out of scope: everything else in the goal.' \
+          "Evidence: $evidence" 'Include a Reusable mechanisms note in your report.' \
+          'If changing Firstmate itself, load firstmate-coding-guidelines before editing.' ;;
+        *) printf '%s\n' "$row" ;;
+      esac
+    done <<< "$scaffold"
+  )
+  case "$body" in
+    *'{TASK}'*|*'{FIRSTMATE_SPEC}'*|*'{FILL:'*)
+      log "cannot draft $binding: brief would contain unresolved placeholders"; return 1 ;;
+  esac
+  if [ "$run_mode" = shadow ]; then
+    log "would draft $binding ($task)"
+    return 0
+  fi
+  if ! publish_draft "$binding" "$task" "$body" "$line"; then
+    log "cannot draft $binding: eligibility or brief path changed, or write failed"
+    return 1
+  fi
+  log "drafted $binding ($task): mode=$delivery yolo=$yolo branch=$prefix$task"
+  "$SCRIPT_DIR/fm-task-milestones.sh" stamp "$STATE/$task.status" brief -- 'drafted by goal pusher' || true
+}
+
 run_pass() {
-  local run_mode=$1 now path goal i changed task binding brief result budget=-1 remaining queued links
+  local run_mode=$1 now path goal i changed task binding brief result budget=-1 remaining queued links drafts
   local briefs='' ready='' held='' off='' listed=0
   now=$(date +%s)
   while IFS= read -r path; do
@@ -151,6 +231,7 @@ run_pass() {
       reconcile "$goal" "$i" && changed=1
     done
     [ "$changed" -eq 0 ] || load_goal "$goal" || continue
+    drafts=0
     for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
       startable "$i" || continue
       task=${FM_GOAL_ITEMS_TASKS[$i]}
@@ -158,8 +239,23 @@ run_pass() {
       brief="$FM_GOAL_DATA/$task/brief.md"
       if [ -z "$task" ] || { [ ! -e "$STATE/$task.meta" ] &&
          { [ ! -f "$brief" ] || [ ! -s "$brief" ] || [ -L "$brief" ]; }; }; then
-        briefs="$briefs $binding"
-        continue
+        # Mate homes can launch written briefs from their parent view but
+        # never draft from that view. Cap deferrals wait for the next pass.
+        if [ -n "$FM_GOAL_VIEW_OWNER" ]; then
+          briefs="$briefs $binding"
+          continue
+        fi
+        if [ "$drafts" -ge 3 ]; then
+          log "defer draft $binding: per-goal cap reached"
+          continue
+        fi
+        if ! draft_brief "$i" "$binding" "$task"; then
+          briefs="$briefs $binding"
+          continue
+        fi
+        drafts=$((drafts + 1))
+        [ "$run_mode" = enforce ] || continue
+        listed=0 # The broker's earlier snapshot could not see this brief.
       fi
       [ ! -e "$STATE/$task.meta" ] && [ ! -L "$STATE/$task.meta" ] || continue
       if [ "$listed" -eq 0 ]; then

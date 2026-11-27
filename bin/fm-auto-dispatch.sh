@@ -167,7 +167,7 @@ brief_value() {  # <brief> <sed-expr>
 # gate passes, or "skip: <reason>" (rc 1). Flags are data for cmd_run; they
 # are never evaluated as shell text.
 verdict() {  # <id> <kind> <repo>
-  local id=$1 kind=$2 repo=$3 brief meta project branch mode yolo base consent prefix
+  local id=$1 kind=$2 repo=$3 brief meta project branch mode yolo base consent prefix draft_project
   case "$kind" in
     secondmate) printf 'skip: secondmate-class row\n'; return 1 ;;
     captain) printf 'skip: captain-class row\n'; return 1 ;;
@@ -181,6 +181,10 @@ verdict() {  # <id> <kind> <repo>
   if grep -q -e '{TASK}' -e '{FIRSTMATE_SPEC}' -e '{FILL:' "$brief"; then
     printf 'skip: brief still has placeholders\n'
     return 1
+  fi
+  if [ "$(head -n 1 "$brief")" = 'Drafted by goal pusher from the item line' ]; then
+    draft_project=$(brief_value "$brief" 's/^Goal pusher project: //')
+    [ "$draft_project" = "$repo" ] || { printf 'skip: goal draft project disagrees with ready row\n'; return 1; }
   fi
   mode=$(brief_value "$brief" 's/^Delivery contract: mode=\([^ ]*\).*$/\1/')
   consent=$(brief_value "$brief" 's/^Delivery contract: mode=[^ ]*.*[[:space:]]upstream-consent=\([^ ]*\).*$/\1/')
@@ -223,11 +227,14 @@ verdict() {  # <id> <kind> <repo>
   case "$branch" in
     '') : ;;
     "fm/$id") : ;;
-    *"/$id") prefix=${branch%"$id"} ;;
+    *"$id")
+      git check-ref-format --branch "$branch" >/dev/null 2>&1 || { printf 'skip: invalid ship branch\n'; return 1; }
+      prefix=${branch%"$id"} ;;
     *) printf 'skip: ship branch %s does not end in the task id\n' "$(one_line "$branch")"; return 1 ;;
   esac
   printf 'start %s --mode %s --yolo %s' "$project" "$mode" "$yolo"
-  [ -z "$prefix" ] || printf ' --branch-prefix %s' "$prefix"
+  if [ "$branch" = "$id" ]; then printf ' --branch-prefix='
+  elif [ -n "$prefix" ]; then printf ' --branch-prefix %s' "$prefix"; fi
   [ -z "$base" ] || printf ' --base-branch %s' "$base"
   [ -z "$consent" ] || printf ' --upstream-consent %s' "$consent"
   printf '\n'

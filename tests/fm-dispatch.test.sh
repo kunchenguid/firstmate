@@ -143,6 +143,12 @@ jq -e 'index("--kind") as $i | $i != null and .[$i + 1] == "ship"' "$BROKER_LOG.
 pass 'new composes resolver-owned intake, receipt, gate and guarded spawn'
 
 reset_case
+run_broker new task /projects/project --mode direct-PR --yolo off --branch-prefix=
+assert_rc 0
+last_args | jq -e 'index("--branch-prefix=") != null' >/dev/null || fail 'explicit empty branch prefix did not reach spawn'
+pass 'new preserves the explicit bare ship branch through guarded spawn'
+
+reset_case
 run_broker new task /projects/project --scout --merge-review
 assert_rc 0
 last_args | jq -e 'index("--scout") != null and index("--merge-review") != null' >/dev/null || fail 'explicit review marker was not forwarded'

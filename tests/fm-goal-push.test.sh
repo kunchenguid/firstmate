@@ -12,7 +12,8 @@ unset FM_TASK_ID
 G=$ROOT/bin/fm-goal.sh P=$ROOT/bin/fm-goal-push.sh Q=$ROOT/bin/fm-admission-queue.sh
 export FM_GOAL_PUSH_CAPACITY="$T/capacity" FM_AUTODISPATCH_READY="$T/ready"
 export FM_AUTODISPATCH_DISPATCH="$T/dispatch" FM_ADMISSION_DISPATCH="$T/dispatch"
-export FM_ADMISSION_SPAWN="$T/spawn" FM_AUTODISPATCH_PROJECT_MODE="$T/project-mode"
+export FM_ADMISSION_SPAWN="$T/spawn"
+unset FM_AUTODISPATCH_PROJECT_MODE
 export FM_CREW_STATE_BIN="$T/crew" QUEUE_CMD="$Q" LAB="$T"
 
 # Every redirected target below is in a fresh private fixture directory.
@@ -42,21 +43,18 @@ set -eu
 printf '%s\n' "$*" >> "$LAB/spawn.log"
 printf 'kind=ship\n' > "$FM_STATE_OVERRIDE/$1.meta"
 SH
-cat > "$T/project-mode" <<'SH'
-#!/usr/bin/env bash
-printf 'direct-PR off\n'
-SH
 cat > "$T/crew" <<'SH'
 #!/usr/bin/env bash
 if [ -f "$LAB/done-$1" ]; then printf 'state: done\n'; else printf 'state: working\n'; fi
 SH
-chmod +x "$T/"{capacity,ready,dispatch,spawn,project-mode,crew}
+chmod +x "$T/"{capacity,ready,dispatch,spawn,crew}
+printf '%s\n' '- demo [direct-PR] - lab project' > "$H/data/projects.md"
 
 capacity() {
   printf '%s\n' "$1" > "$T/budget"
 }
 start() {
-  "$G" start "$1" --title "$1" --named-by lab --plan plan.md --done-when 'done' --items-file "$T/$1.items" >/dev/null
+  "$G" start "$1" --title "$1" --named-by lab --plan "${2:-plan.md}" --done-when 'done' --items-file "$T/$1.items" >/dev/null
 }
 brief() {
   mkdir -p "$H/data/$1"
@@ -160,4 +158,73 @@ assert_grep "new mate-task $M/projects/demo --wait" "$T/dispatch.log" 'mate disp
 assert_grep '[goal=mategoal] [item=mate] [state=running]' "$H/state/mate1.status" 'mate marks the item via the parent channel'
 assert_absent "$M/state/goals/mategoal.marks" 'mate never creates a second goal record'
 pass 'local mate uses the parent goal view, its own dispatcher, and the parent mark channel'
+
+# Missing briefs use the real scaffold and registry but still launch only via
+# the lab recorder. A prewritten row forces the broker snapshot before drafting.
+mkdir -p "$H/projects/draftrepo" "$H/projects/bare"
+git init -q "$H/projects/bare"
+printf '%s\n' '- draftrepo [local-only +yolo branch=fix-] - lab project' \
+  '- bare [direct-PR branch=] - lab project' >> "$H/data/projects.md"
+brief prewritten
+scope='Cover fallback rendering with the existing fixture and preserve literal data such as a/b & c\d.'
+proof='Run the focused rendering regression and record the pass line.'
+item() {
+  printf 'item [id=%s] [owner=%s] [task=%s]%s: %s\n' "$1" "$2" "$1" "$3" "$4"
+}
+{
+  item prewritten main '' 'Existing brief'
+  item draft-good main ' [project=draftrepo]' "$scope Evidence: $proof"
+  item draft-thin main ' [project=draftrepo]' 'Tiny. Evidence: test.'
+  item no-evidence main ' [project=draftrepo]' "$scope No explicit proof is named."
+  item blank-evidence main ' [project=draftrepo]' "$scope Evidence: "
+  item no-project main '' "$scope Evidence: $proof"
+  item draft-captain main ' [project=draftrepo] [class=captain]' "$scope Evidence: $proof"
+  item draft-mate mate1 ' [project=draftrepo]' "$scope Evidence: $proof"
+  item draft-bare main ' [project=bare]' "$scope Evidence: $proof"
+  item wrong-project main ' [project=draftrepo]' "$scope Evidence: $proof"
+  item over-cap main ' [project=draftrepo]' "$scope Evidence: $proof"
+} > "$T/draft.items"
+item draft-off main ' [project=draftrepo]' "$scope Evidence: $proof" > "$T/nodraft.items"
+item cap-independent main ' [project=draftrepo]' "$scope Evidence: $proof" > "$T/separate.items"
+start draft 'plan.md#rendering'; start nodraft; start separate
+"$G" pause nodraft >/dev/null
+printf '%s\n' 'draft-good,queued,ship,draftrepo,Good' 'draft-bare,queued,ship,bare,Bare' \
+  'wrong-project,queued,ship,demo,Wrong project' >> "$T/ready.csv"
+"$P" run --dry-run
+assert_grep 'shadow would draft draft/draft-good' "$H/state/goal-push.log" 'shadow proposes a viable draft'
+assert_absent "$H/data/draft-good/brief.md" 'shadow never writes a brief'
+assert_absent "$H/state/draft-good.status" 'shadow never stamps a draft'
+"$P" run
+f="$H/data/draft-good/brief.md"
+assert_equals 'Drafted by goal pusher from the item line' "$(head -n 1 "$f")" 'draft is visibly labeled'
+expected=$(item draft-good main ' [project=draftrepo]' "$scope Evidence: $proof")
+assert_equals "$expected" "$(grep -Fx -- "$expected" "$f")" 'item line is copied literally'
+assert_grep 'Goal done when: done' "$f" 'brief includes the goal completion criterion'
+assert_grep 'Goal plan: plan.md#rendering' "$f" 'brief includes the goal plan link'
+assert_grep 'Read the plan section for this item at plan.md#rendering.' "$f" 'spec directs the worker to the plan section'
+assert_grep 'Out of scope: everything else in the goal.' "$f" 'spec limits work to the item'
+assert_grep "Evidence: $proof" "$f" 'brief includes the item proof'
+assert_grep 'Reusable mechanisms note' "$f" 'brief requires a reusable-mechanisms note'
+if grep -q -e '{TASK}' -e '{FIRSTMATE_SPEC}' -e '{FILL:' "$f"; then fail 'draft has leftover scaffold placeholders'; fi
+assert_grep ': drafted by goal pusher' "$H/state/draft-good.status" 'successful publication stamps a brief milestone'
+assert_grep "new draft-good $H/projects/draftrepo --wait --mode local-only --yolo on --branch-prefix fix-" \
+  "$T/dispatch.log" 'newly drafted item takes registry posture through the normal broker after its snapshot'
+assert_grep "new draft-bare $H/projects/bare --wait --mode direct-PR --yolo off --branch-prefix=" \
+  "$T/dispatch.log" 'broker forwards an explicitly empty branch prefix'
+assert_grep 'enforce drafted draft/draft-good' "$H/state/goal-push.log" 'enforce logs the draft'
+assert_equals 1 "$(grep -c 'goal briefs needed:.*draft/draft-thin.*draft/no-evidence.*draft/no-project' "$H/state/.wake-queue")" 'refusals wake the owner'
+for id in draft-thin no-evidence blank-evidence no-project draft-captain draft-mate draft-off over-cap; do
+  assert_absent "$H/data/$id/brief.md" "$id was not drafted"
+done
+assert_absent "$H/state/wrong-project.meta" 'draft cannot start against a mismatched ready project'
+assert_grep 'wrong-project skip: goal draft project disagrees with ready row' \
+  <("$ROOT/bin/fm-auto-dispatch.sh" list) 'the broker explains the mismatch'
+assert_grep 'enforce defer draft draft/over-cap: per-goal cap reached' "$H/state/goal-push.log" 'cap defers overflow'
+assert_grep 'Drafted by goal pusher' "$H/data/cap-independent/brief.md" 'another goal has its own draft allowance'
+FM_HOME="$M" FM_STATE_OVERRIDE="$M/state" FM_CONFIG_OVERRIDE="$M/config" FM_DATA_OVERRIDE="$M/data" \
+  FM_PROJECTS_OVERRIDE="$M/projects" "$P" run
+assert_absent "$M/data/draft-mate/brief.md" 'mate never drafts an item inherited from the parent view'
+"$P" run
+assert_grep 'Drafted by goal pusher' "$H/data/over-cap/brief.md" 'next pass can draft a deferred item'
+pass 'goal fallback drafts viable items and routes them through the broker without widening scope or ownership'
 echo '# all fm-goal-push tests passed'

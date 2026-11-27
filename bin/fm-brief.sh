@@ -171,6 +171,8 @@
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
 # Refuses to overwrite an existing brief.
+# --render (ship only) writes the scaffold to stdout without creating task files
+# or stamping a milestone, for callers that fill and publish it themselves.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -234,6 +236,7 @@ fi
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
+RENDER=0
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
@@ -274,6 +277,7 @@ for a in "$@"; do
     continue
   fi
   case "$a" in
+    --render) RENDER=1 ;;
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
@@ -372,6 +376,7 @@ if [ "$BASE_BRANCH_SET" -eq 1 ]; then
   fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-brief.sh --base-branch" || exit 1
 fi
 if [ "$KIND" != ship ]; then
+  [ "$RENDER" -eq 0 ] || { echo 'error: --render applies only to ship briefs' >&2; exit 1; }
   [ "$UPSTREAM_CONSENT_SET" -eq 0 ] || {
     echo "error: --upstream-consent applies only to ship briefs; a scout publishes nothing and a charter is not a delivery contract" >&2
     exit 1
@@ -451,12 +456,14 @@ append_brief_include() {
   printf '\n%s\n%s\n%s\n' \
     '# Home brief additions' \
     "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
-    "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
+    "$BRIEF_INCLUDE_BODY"
 }
 
 BRIEF="$DATA/$ID/brief.md"
-[ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
-mkdir -p "$DATA/$ID"
+if [ "$RENDER" -eq 0 ]; then
+  [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+  mkdir -p "$DATA/$ID"
+fi
 
 ASK_USER_BLOCK=
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -844,7 +851,7 @@ When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\`
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 record_brief_milestone
-append_brief_include
+append_brief_include >> "$BRIEF"
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
@@ -870,7 +877,8 @@ esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT" "$DATA" "$STATE") || exit 1
 
-cat > "$BRIEF" <<EOF
+render_ship() {
+cat <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
@@ -930,8 +938,14 @@ A correction edits only the wrong text: do not run \`$FM_ROOT/bin/fm-ensure-agen
 
 $DOD
 EOF
-record_brief_milestone
 append_brief_include
+}
+if [ "$RENDER" -eq 1 ]; then
+  render_ship
+  exit
+fi
+render_ship > "$BRIEF"
+record_brief_milestone
 if [ "$PR_TEXT" = manual ]; then
   echo "scaffolded: $BRIEF (ship, mode=$MODE pr=manual; replace {TASK} and {FIRSTMATE_SPEC})"
 elif [ "$FORGE" = none ]; then
