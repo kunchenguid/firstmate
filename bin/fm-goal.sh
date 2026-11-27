@@ -143,6 +143,7 @@
 #   fm-goal.sh ready <id>
 #   fm-goal.sh mark <id> <item> <state> [--stage <stage>] [--task <task-id>] [--on <condition>] -- <note>
 #   fm-goal.sh mark <id> <item> stage=<stage> [--task <task-id>] -- <note>
+#   fm-goal.sh mark <id> <item> done --confirm-check -- <owner confirmation>
 #   fm-goal.sh can-merge <task-id>
 #   fm-goal.sh evidence <id> <item> -- <evidence>
 #   fm-goal.sh probe [<id> [<item>]] [--dry-run]
@@ -174,7 +175,14 @@
 # it changes neither state nor stage nor their clocks. It remains in the
 # normal marks archive and is shown by `show`. Local parent-channel routes
 # validate the parent's linked task and owner; remote routes fail closed.
-# Done drive marks must name the PR they landed through: a full PR URL in the
+# A report-only drive item (spec kind=check) does not land a PR. The linked
+# scout writes data/<task>/report.md with one `Goal check: PASS` verdict line,
+# runs `evidence <goal> <item> -- check passed`, and reports done. The owner
+# checks the report against done_when and confirms with `--confirm-check`
+# before scout teardown. Its target stage must already be recorded, and
+# personal dependencies must be done, not dropped. The confirmation is bound
+# to the report and item; a report is never a merge-after landing.
+# Other done drive marks must name the PR they landed through: a full PR URL in the
 # note, or the PR an earlier done mark already recorded for the item (a
 # --task alone no longer suffices; a remote route keeps the task-or-URL rule
 # because it cannot see the item's class).
@@ -1087,7 +1095,7 @@ _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now
       # The PR a done mark landed through folds from the note's first full
       # PR URL word (audit item 12); a later mark without one keeps the pr
       # an earlier done mark recorded for the item.
-      if [ "$state" = 'done' ]; then
+      if [ "$state" = 'done' ] && { [[ "$note" != 'check confirmed '* ]] || ! _fm_goal_item_report_check "$idx"; }; then
         local -a note_words=()
         local w
         read -r -a note_words <<< "$note"
@@ -1338,7 +1346,8 @@ _fm_goal_item_doneish() {  # <idx>
 _fm_goal_merge_pending() {  # <idx>
   local refs=${FM_GOAL_ITEMS_MERGE_AFTERS[$1]} ref idx out='' IFS=,
   for ref in $refs; do
-    if idx=$(_fm_goal_index_of "$ref") && [ "${FM_GOAL_M_STATES[$idx]}" = 'done' ]; then continue; fi
+    if idx=$(_fm_goal_index_of "$ref") && [ "${FM_GOAL_M_STATES[$idx]}" = 'done' ] \
+      && ! _fm_goal_item_report_check "$idx"; then continue; fi
     out=${out:+$out,}$ref
   done
   printf '%s' "$out"
@@ -2496,12 +2505,91 @@ _fm_goal_mark_line() {  # <id> <item> <state> <task> <note> [stage] [on] -> prin
   printf '%s: %s' "$head" "$5" | cut -c1-$cap
 }
 
-# Bind completion evidence to the folded task, including a task assigned by
-# an earlier mark. Planning items may remain unbound until work is dispatched.
-# Bind completion evidence to the folded task, including a task assigned by
-# an earlier mark, and require the PR a done mark lands through (audit item
-# 12): a task alone proves who worked, not where the work landed, and
-# without the PR the landing lag of a done item cannot be measured.
+_fm_goal_item_report_check() {  # <idx>
+  local spec=${FM_GOAL_ITEMS_SPECS[$1]-}
+  [ "${FM_GOAL_ITEMS_CLASSES[$1]}" = drive ] && [ -n "$spec" ] || return 1
+  jq -e '.kind == "check"' >/dev/null <<< "$spec"
+}
+
+# Resolve the proof only in the linked task's owning home, never a namesake.
+_fm_goal_check_paths() {  # <idx> <registry-data>
+  local home task=${FM_GOAL_ITEMS_TASKS[$1]} data=$FM_GOAL_DATA
+  fm_goal_id_valid "$task" || return 1
+  home=$(_fm_goal_item_task_home "$1" "$2") || return 1
+  [ -z "$home" ] || data=$home/data
+  [ ! -L "$data" ] && [ ! -L "$data/$task" ] || return 1
+  report="$data/$task/report.md"
+}
+
+_fm_goal_check_waiting() {  # <idx>
+  local refs=${FM_GOAL_ITEMS_AFTERS[$1]} ref idx IFS=,
+  _fm_goal_item_waiting "$1"
+  [ -z "$FM_GOAL_WAITING" ] || return 1
+  # A drop releases ordinary start dependencies, not a personal sign-off.
+  for ref in $refs; do
+    idx=$(_fm_goal_index_of "$ref") || return 1
+    if [ "${FM_GOAL_ITEMS_CLASSES[$idx]}" = captain ] && [ "${FM_GOAL_M_STATES[$idx]}" != 'done' ]; then
+      FM_GOAL_WAITING=$ref
+      return 1
+    fi
+  done
+}
+
+# Bind proof to this goal incarnation, approved item and exact report bytes.
+# Only one explicit verdict line is allowed; prose is read by the owner.
+_fm_goal_check_digest() {  # <idx> <report>
+  _fm_goal_regular_file "$2" && [ -r "$2" ] && [ -s "$2" ] || return 1
+  perl -MDigest::SHA -e '
+    my $sha = Digest::SHA->new(256);
+    $sha->add(join("\0", @ARGV), "\0");
+    binmode STDIN;
+    my @verdicts;
+    while (defined(my $line = <STDIN>)) {
+      $sha->add($line);
+      push @verdicts, $line if $line =~ /^Goal check:/;
+    }
+    exit 1 unless @verdicts == 1 && $verdicts[0] =~ /\AGoal check: PASS\r?\n?\z/;
+    print $sha->hexdigest;
+  ' -- "$FM_GOAL_REC_ID" "$FM_GOAL_REC_STARTED_EPOCH" "$FM_GOAL_REC_DONE_WHEN" \
+    "$(_fm_goal_item_line "$1")" "${FM_GOAL_ITEMS_SPECS[$1]}" < "$2"
+}
+
+_fm_goal_confirm_check() {  # <idx> <registry-data>
+  local idx=$1 report scout_status scout_meta digest line linked=${FM_GOAL_ITEMS_TASKS[$1]}
+  [ -z "${FM_GOAL_PUSH_EXPECT-}" ] && [ "$confirm_check" -eq 1 ] || {
+    fm_goal_log 'check completion needs the owner to review the report and use --confirm-check'; return 1;
+  }
+  if [ "$task" != "$linked" ] || [ "${FM_GOAL_ITEMS_OWNERS[$idx]}" != "${FM_PARENT_CHANNEL_ID:-main}" ] ||
+    ! _fm_goal_check_paths "$idx" "$2"; then
+    fm_goal_log 'check completion needs the linked scout in its owner home'; return 1
+  fi
+  _fm_goal_check_waiting "$idx" || { fm_goal_log "check completion has unmet after items: $FM_GOAL_WAITING"; return 1; }
+  scout_status="$FM_GOAL_STATE/$linked.status"
+  scout_meta="$FM_GOAL_STATE/$linked.meta"
+  if [ -n "${FM_GOAL_ITEMS_TARGETS[$idx]}" ]; then
+    if [ -n "$stage" ] || ! _fm_goal_item_target_reached "$idx"; then
+      fm_goal_log 'check completion needs a separately recorded stage at target (omit --stage)'; return 1
+    fi
+  fi
+  if ! _fm_goal_regular_file "$scout_meta" || ! _fm_goal_regular_file "$scout_status" ||
+    [ "$(awk -F= '$1 == "kind" { print $2 }' "$scout_meta")" != scout ]; then
+    fm_goal_log 'check completion needs a finished scout'; return 1
+  fi
+  line=$(status_current_line "$scout_status" scout)
+  [ "$(status_line_verb "$line")" = 'done' ] || {
+    fm_goal_log 'check completion needs a finished scout'; return 1;
+  }
+  digest=$(_fm_goal_check_digest "$idx" "$report") || {
+    fm_goal_log 'check completion needs a durable report with Goal check: PASS'; return 1;
+  }
+  [ "${FM_GOAL_EVIDENCE[$idx]}" = "$linked: check passed $digest" ] || {
+    fm_goal_log 'check completion needs current positive evidence from the linked scout'; return 1;
+  }
+  note="check confirmed $digest: $note"
+}
+
+# Bind completion to the folded task. A drive item that ships must still
+# name the PR it landed through, including on an idempotent re-mark.
 _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
   [ "$3" = 'done' ] || return 0
   local idx word pending
@@ -2512,6 +2600,11 @@ _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
     pending=$(_fm_goal_merge_pending "$idx")
     [ -z "$pending" ] || { fm_goal_log "completion refused for $1/$2: merge-after pending: $pending"; return 1; }
     [ -n "$task" ] || task=${FM_GOAL_ITEMS_TASKS[$idx]}
+    if _fm_goal_item_report_check "$idx"; then
+      _fm_goal_confirm_check "$idx" "${5:-$FM_GOAL_DATA}"
+      return $?
+    fi
+    [ "$confirm_check" -eq 0 ] || { fm_goal_log '--confirm-check needs a report-only check item'; return 1; }
     [ "${FM_GOAL_ITEMS_CLASSES[$idx]}" = drive ] || return 0
     # A PR an earlier done mark folded for this item already records the
     # landing, so a re-mark need not name it again.
@@ -2519,7 +2612,8 @@ _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
   else
     # No parent record is readable on a remote route, so the drive/captain
     # distinction cannot be seen there; the long-standing task-or-URL rule
-    # stays for it.
+    # stays for it, but it cannot confirm a report check.
+    [ "$confirm_check" -eq 0 ] || { fm_goal_log 'check completion needs a readable goal record'; return 1; }
     [ -z "$task" ] || return 0
   fi
   read -r -a pr_words <<< "$note"
@@ -2533,13 +2627,25 @@ _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
 # Recheck under the append lock too, so an edit/rebind cannot lend authority
 # from a stale snapshot. The launch marker is shared by every harness/backend.
 _fm_goal_check_evidence_link() {
-  local idx
+  local idx report digest
   fm_goal_fold "$1" "${2:-$FM_GOAL_STATE}" "${3:-$FM_GOAL_DATA}" "$(date +%s)"
   idx=$(_fm_goal_index_of "$4") || return 1
   [ "${FM_GOAL_ITEMS_TASKS[$idx]}" = "${FM_TASK_ID-}" ] || {
     fm_goal_log 'evidence refused: worker is not linked to this item'; return 1;
   }
-  [ -z "${5-}" ] || [ "${FM_GOAL_ITEMS_OWNERS[$idx]}" = "$5" ]
+  [ -z "${5-}" ] || [ "${FM_GOAL_ITEMS_OWNERS[$idx]}" = "$5" ] || return 1
+  if _fm_goal_item_report_check "$idx"; then
+    case "$note" in
+      'evidence: check passed')
+        if [ "$task" != "$FM_TASK_ID" ] || [ "${FM_GOAL_ITEMS_OWNERS[$idx]}" != "${FM_PARENT_CHANNEL_ID:-main}" ] ||
+          ! _fm_goal_check_paths "$idx" "${3:-$FM_GOAL_DATA}" || ! digest=$(_fm_goal_check_digest "$idx" "$report"); then
+          fm_goal_log 'positive check evidence needs a durable report with Goal check: PASS in the owner home'; return 1
+        fi
+        note="$note $digest"
+        ;;
+      'evidence: check passed '*) fm_goal_log 'use the exact evidence words: check passed'; return 1 ;;
+    esac
+  fi
 }
 
 cmd_evidence() {
@@ -2563,7 +2669,7 @@ _fm_goal_mark_push_guard() {  # <goal> <item> <state-dir> <data-dir>
 
 cmd_mark() {
   [ -z "${FM_TASK_ID-}" ] || [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ] || _fm_goal_die 1 'workers may only record evidence'
-  local id item state='' task='' stage='' note='' on='' dash_seen=0 flag what
+  local id item state='' task='' stage='' note='' on='' dash_seen=0 flag what confirm_check=0
   local rc=0 line stamped path
   [ "$#" -ge 3 ] || _fm_goal_usage_error 'mark needs <goal> <item> <state|stage=<stage>> -- <note>'
   id=$1
@@ -2583,6 +2689,11 @@ cmd_mark() {
         [ "$#" -ge 2 ] && [ -n "${2-}" ] || _fm_goal_usage_error '--task needs a value'
         task=$2
         shift 2
+        ;;
+      --confirm-check)
+        [ "$state" = 'done' ] && [ "$confirm_check" -eq 0 ] || _fm_goal_usage_error '--confirm-check is only given once, on a done mark'
+        confirm_check=1
+        shift
         ;;
       --on)
         [ "$state" = waiting ] && [ -z "$on" ] || _fm_goal_usage_error '--on is only given once, on a waiting mark'
@@ -3232,13 +3343,27 @@ cmd_close() {
   return 0
 }
 
+# A confirmed check can close after scout teardown. The archived receipt in
+# its done mark cannot carry a changed report, task, item or done_when.
+_fm_goal_check_receipt_current() {  # <idx>
+  local report digest idx=$1
+  [ "${FM_GOAL_M_STATES[$idx]}" = 'done' ] || return 1
+  _fm_goal_check_waiting "$idx" && [ -z "$(_fm_goal_merge_pending "$idx")" ] || return 1
+  _fm_goal_check_paths "$idx" "$FM_GOAL_DATA" && digest=$(_fm_goal_check_digest "$idx" "$report") || return 1
+  [[ "${FM_GOAL_M_NOTES[$idx]}" == "check confirmed $digest: "* ]] || return 1
+  [ "${FM_GOAL_EVIDENCE[$idx]}" = "${FM_GOAL_ITEMS_TASKS[$idx]}: check passed $digest" ]
+}
+
 # Refuse close --done while any planned item is not done or dropped.
 _fm_goal_close_check_done() {  # <id>
-  local id=$1 i offenders='' short=''
+  local id=$1 i offenders='' short='' checks=''
   fm_goal_fold "$id"
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_doneish "$i" || offenders="$offenders${offenders:+ }${FM_GOAL_ITEMS_IDS[$i]}"
+    if _fm_goal_item_report_check "$i" && ! _fm_goal_check_receipt_current "$i"; then
+      checks="$checks${checks:+ }${FM_GOAL_ITEMS_IDS[$i]}"
+    fi
     # a dropped item no longer owes its target; any other item does
     if [ -n "${FM_GOAL_ITEMS_TARGETS[$i]}" ] && [ "${FM_GOAL_M_STATES[$i]}" != dropped ] \
       && ! _fm_goal_item_target_reached "$i"; then
@@ -3252,6 +3377,10 @@ _fm_goal_close_check_done() {  # <id>
   }
   [ -z "$short" ] || {
     fm_goal_log "refused: close --done with items short of their target stage: $short"
+    return 1
+  }
+  [ -z "$checks" ] || {
+    fm_goal_log "refused: close --done with missing or stale check proof: $checks"
     return 1
   }
   return 0

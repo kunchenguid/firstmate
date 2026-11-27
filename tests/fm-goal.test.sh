@@ -703,6 +703,70 @@ test_target_close_and_brief() {
   pass 'close --done and the brief hold an item to its target; a dropped item owes none'
 }
 
+test_report_only_check() {
+  fixture
+  printf '%s\n' \
+    'item [id=sign] [owner=main] [class=captain] [captain-reason=captain-test]: personal test' \
+    'item [id=verify] [owner=main] [task=qa] [after=sign] [project=miko] [target=deployed]: verify done_when' \
+    'item [id=ship] [owner=main] [task=builder] [merge-after=verify]: cannot merge after a report' \
+    'spec verify {"section":"Acceptance","scope":"Verify small e2e at target","evidence":"Result and transcript","kind":"check"}' \
+    'spec ship {"section":"Implementation","scope":"Ship the change","evidence":"Landing","kind":"ship"}' > "$ITEMS"
+  ladder miko 'stage merged: true' 'stage deployed: true'
+  start >/dev/null
+  mkdir -p "$H/data/qa"
+  local report=$H/data/qa/report.md
+  printf 'kind=scout\n' > "$H/state/qa.meta"
+  printf 'working: tests running\n' > "$H/state/qa.status"
+  printf '# Acceptance\nGoal check: PASS\nSmall e2e passed using fixture accounts.\n' > "$report"
+  goal mark I1 verify stage=merged -- 'merge visible' >/dev/null
+  FM_TASK_ID=qa goal evidence I1 verify -- 'check passed' >/dev/null
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check -- 'owner reviewed'
+  assert_grep 'unmet after items: sign' "$TMP_ROOT/out" 'a missing personal test blocks the check'
+  goal mark I1 sign dropped -- 'not answered' >/dev/null
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check -- 'owner reviewed'
+  assert_grep 'unmet after items: sign' "$TMP_ROOT/out" 'a dropped personal test is not sign-off'
+  goal mark I1 sign 'done' -- 'captain ran and passed personal test' >/dev/null
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check --stage deployed -- 'owner reviewed'
+  assert_grep 'separately recorded stage at target' "$TMP_ROOT/out" 'short of target; cannot assert target in the confirmation'
+  goal mark I1 verify stage=deployed -- 'target independently probed' >/dev/null
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check -- 'owner reviewed'
+  assert_grep 'needs a finished scout' "$TMP_ROOT/out" 'working scout is not finished'
+  printf 'done: e2e report complete\n' >> "$H/state/qa.status"
+  printf 'kind=ship\n' > "$H/state/qa.meta"
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check -- 'owner reviewed'
+  assert_grep 'needs a finished scout' "$TMP_ROOT/out" 'a finished ship cannot supply report-only proof'
+  printf 'kind=scout\n' > "$H/state/qa.meta"
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check --task other -- 'owner reviewed'
+  assert_grep 'needs the linked scout' "$TMP_ROOT/out" 'explicit rebind cannot borrow scout proof'
+  FM_TASK_ID=other expect_rc 1 goal evidence I1 verify -- 'check passed'
+  printf '# Acceptance\nGoal check: FAIL\nOne required route failed.\n' > "$report"
+  FM_TASK_ID=qa expect_rc 1 goal evidence I1 verify -- 'check passed'
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check -- 'owner reviewed'
+  assert_grep 'durable report with Goal check: PASS' "$TMP_ROOT/out" 'a failing report cannot complete'
+  printf '# Acceptance\nGoal check: PASS\nRechecked both required routes.\n' > "$report"
+  expect_rc 1 goal mark I1 verify 'done' --confirm-check -- 'owner reviewed'
+  assert_grep 'current positive evidence' "$TMP_ROOT/out" 'proof of the previous report is stale'
+  FM_TASK_ID=qa goal evidence I1 verify -- 'check passed' >/dev/null
+  expect_rc 1 goal mark I1 verify 'done' -- 'no owner confirmation'
+  goal mark I1 verify 'done' --confirm-check -- 'owner read report and confirmed done_when at target' >/dev/null
+  assert_equals 'done null' "$(goal export I1 | jq -r '.goals[0].items[] | select(.id == "verify") | "\(.state) \(.pr)"')" 'confirmed check is done without a PR'
+  expect_rc 1 goal mark I1 ship 'done' -- 'landed https://github.com/example/fixture/pull/7'
+  assert_grep 'merge-after pending: verify' "$TMP_ROOT/out" 'a report does not count as a landing for merge-after'
+  printf '%s\n' 'item [id=ship] [owner=main] [task=builder]: ship the change' >> "$H/items.ship"
+  grep -v 'merge-after=verify' "$ITEMS" >> "$H/items.ship"
+  goal edit I1 --items-file "$H/items.ship" >/dev/null
+  expect_rc 1 goal mark I1 ship 'done' -- 'did not land'
+  assert_grep 'must name the PR' "$TMP_ROOT/out" 'the ship guard still needs a PR'
+  goal mark I1 ship 'done' -- 'landed https://github.com/example/fixture/pull/7' >/dev/null
+  goal edit I1 --items-file "$H/items.ship" --done-when 'changed acceptance' >/dev/null
+  expect_rc 1 goal close I1 --done
+  assert_grep 'missing or stale check proof: verify' "$TMP_ROOT/out" 'a changed done_when invalidates the confirmation'
+  goal edit I1 --items-file "$H/items.ship" --done-when 'small e2e passes' >/dev/null
+  rm "$H/state/qa.meta" "$H/state/qa.status"
+  expect_rc 0 goal close I1 --done
+  pass 'owner-confirmed report checks need fresh linked scout proof, target and personal sign-off, and cannot stand in for landings'
+}
+
 test_export() {
   probe_fixture
   local out
@@ -917,4 +981,4 @@ test_wait_conditions() {
 fm_test_run test_drive_readiness test_merge_after test_wait_conditions test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \
   test_projection test_main_landing test_symlinks test_edit test_specs test_invalid_specs test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
-  test_probe_pr_merged test_limits test_orphaned_running test_target_close_and_brief test_export test_driven
+  test_probe_pr_merged test_limits test_orphaned_running test_target_close_and_brief test_report_only_check test_export test_driven
