@@ -9,6 +9,11 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-wedge-defer-tests)
 
+# These fixtures drive one pane through as many rungs as the deferral they test
+# needs, so they pin the default per-episode alarm bound out of the way; the
+# bound itself is owned by tests/fm-watch-wedge-episode-bound.test.sh.
+export FM_WEDGE_ALARM_MAX=8
+
 # Arm the opt-in parked-gate wait evidence for a fixture built above.
 arm_parked_gate() {  # <case-dir>
   : > "$1/config/wedge-defer-parked-gate"

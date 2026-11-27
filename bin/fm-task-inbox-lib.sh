@@ -52,7 +52,10 @@
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect another draft in a proven pending
-# composer; an unsubmitted copy of this doorbell is retried. After
+# composer; an unsubmitted copy of this doorbell is retried. A composer holding
+# text inside an active generation is not such a draft - that pane is
+# busy-working (fm_busy_working_class in bin/fm-busy-lib.sh), so the doorbell
+# queues behind the turn instead of being skipped. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: due actions deferred
 # by the caller's delivery guard consume a separate durable consecutive-poll budget,
@@ -102,6 +105,10 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-wake-lib.sh"
 # shellcheck source=/dev/null
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
+# fm_busy_working_class owns whether a composer holding text is an idle draft
+# or the in-flight turn's own content, so no consumer of the ring restates it.
+# shellcheck source=/dev/null
+. "$_FM_TASK_INBOX_LIB_DIR/fm-busy-lib.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
@@ -376,23 +383,33 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
+# <busy-verdict> is the caller's already-computed semantic classification of
+# this pane (bin/fm-busy-lib.sh vocabulary, e.g. "busy pi-ext"). It is what
+# tells the composer pre-check whether text sitting in the composer is the
+# turn's own in-flight content or an idle draft; without it the check falls
+# back to the backend's native busy read, which pane backends may not offer.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# other than our own doorbell (the watcher re-rings later), 2 the backend send
-# failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
-# acknowledgement move is the only delivery signal.
+# other than our own doorbell while no turn is in flight (the watcher re-rings
+# later), 2 the backend send failed, 3 skipped because the endpoint is
+# positively dead or missing (nothing typed; recovery owns the record). No
+# return value is delivery proof; the acknowledgement move is the only
+# delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
+# A composer holding text inside an ACTIVE GENERATION is busy-working, not an
+# idle draft (fm_busy_working_class): Enter queues the constant line behind the
+# turn the pane is already running, so the ring proceeds and the message is
+# never left silently un-rung behind a working agent.
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [busy-verdict]
+  local backend=$1 target=$2 rec=$3 label=${4:-} verdict=${5:-} line cstate cbusy
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -402,14 +419,18 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
-        && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
-        || return 1
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
-      sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
-      return 0
+      if fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label"; then
+        cbusy=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
+        [ "$cbusy" != busy ] || return 1
+        fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+        sleep 0.3
+        fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
+        fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+        return 0
+      fi
+      # Foreign text: only a proven active generation makes it the turn's own
+      # content. Anything else is an idle draft the doorbell must not submit.
+      [ "$(fm_busy_working_class "$verdict" "$cstate")" = working ] || return 1
       ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery

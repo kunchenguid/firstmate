@@ -715,6 +715,41 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+# The delivery-time classification of one pane. The point of this predicate is
+# the captain's ask: an agent that is GENERATING is working, never stuck. A
+# composer that holds text while a turn is in flight holds that turn's own
+# content (a long answer streaming through the pane, or a queued follow-up), so
+# it must classify WORKING; the same text with no turn in flight is an idle
+# draft and stays blocked, which is the guard the doorbell must never weaken.
+test_working_class_reads_the_turn_not_the_composer() {
+  local verdict cstate out
+  for verdict in 'busy pi-ext' 'busy claude-hook' 'busy grok-regex' 'busy herdr-native'; do
+    for cstate in pending pending-unproven empty unknown ''; do
+      out=$(fm_busy_working_class "$verdict" "$cstate")
+      [ "$out" = working ] \
+        || fail "an active generation with composer '$cstate' must classify working (verdict '$verdict'), got '$out'"
+    done
+  done
+  # T3 Code's native uncertainty is not proof of a turn, so a pending composer
+  # there is still an idle draft.
+  out=$(fm_busy_working_class 'unknown t3code-native' pending)
+  [ "$out" = blocked ] || fail "unproven turn state with pending text must stay blocked, got '$out'"
+  out=$(fm_busy_working_class 'unknown missing' pending)
+  [ "$out" = blocked ] || fail "an unreadable endpoint with pending text must stay blocked, got '$out'"
+  out=$(fm_busy_working_class 'idle claude-hook' pending)
+  [ "$out" = blocked ] || fail "an idle pane holding a draft must stay blocked, got '$out'"
+  out=$(fm_busy_working_class 'idle claude-hook' empty)
+  [ "$out" = idle ] || fail "an idle pane with an empty composer is idle, got '$out'"
+  out=$(fm_busy_working_class 'idle claude-hook' pending-unproven)
+  [ "$out" = unknown ] || fail "unproven composer content is unknown, got '$out'"
+  out=$(fm_busy_working_class 'dead endpoint-gone' pending)
+  [ "$out" = blocked ] || fail "a dead endpoint keeps the pending-text guard, got '$out'"
+  fm_busy_turn_active 'busy pi-ext' || fail "a busy verdict is an active turn"
+  if fm_busy_turn_active 'unknown t3code-native'; then fail "t3 native uncertainty must not read as an active turn"; fi
+  if fm_busy_turn_active 'idle claude-hook'; then fail "idle must not read as an active turn"; fi
+  pass "an active generation classifies working whatever its composer holds, while an idle draft stays blocked"
+}
+
 test_progress_is_generation_bound_and_not_semantic_state() {
   local state gen replacement before
   state=$(new_state_dir native-progress)
@@ -857,5 +892,6 @@ test_herdr_native_busy_only
 test_tern_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
+test_working_class_reads_the_turn_not_the_composer
 
 echo "all fm-busy-state tests passed"

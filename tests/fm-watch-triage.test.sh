@@ -29,6 +29,11 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
+# These fixtures drive one pane through as many rungs as the ladder behavior
+# under test needs, so they pin the default per-episode alarm bound out of the
+# way; the bound itself is owned by tests/fm-watch-wedge-episode-bound.test.sh.
+export FM_WEDGE_ALARM_MAX=8
+
 test_status_span_actionable_classifier() {
   local dir state offset
   dir=$(make_case classify-signal); state="$dir/state"

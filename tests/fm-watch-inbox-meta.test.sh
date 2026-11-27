@@ -19,14 +19,17 @@ FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$TMP_ROOT/state" \
   [ "$verdict" = "unknown no-target" ]
   # The terminal and rendered busy token alone would classify busy.
   fm_busy_is_busy tmux lab:fm-worker grok worker "$STATE" "BUSYTOKEN active"
-  if inbox_steer_busy lab:fm-worker tmux worker "BUSYTOKEN active"; then
+  verdict=$(inbox_steer_verdict lab:fm-worker "BUSYTOKEN active")
+  [ "$verdict" = "unknown no-target" ] || { echo "unexpected verdict without a target: $verdict" >&2; exit 1; }
+  if inbox_steer_busy "$verdict"; then
     echo "missing metadata target incorrectly deferred non-T3 steering" >&2
     exit 1
   fi
 
   printf "window=lab:fm-worker\n" >> "$meta"
-  inbox_steer_busy lab:fm-worker tmux worker "BUSYTOKEN active"
-  if inbox_steer_busy lab:fm-worker tmux worker "quiet output"; then
+  inbox_steer_busy "$(inbox_steer_verdict lab:fm-worker "BUSYTOKEN active")" \
+    || { echo "recorded busy verdict did not defer non-T3 steering" >&2; exit 1; }
+  if inbox_steer_busy "$(inbox_steer_verdict lab:fm-worker "quiet output")"; then
     echo "idle non-T3 metadata incorrectly deferred steering" >&2
     exit 1
   fi

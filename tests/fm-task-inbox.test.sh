@@ -410,6 +410,47 @@ test_ring_submits_its_own_stuck_doorbell() {
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
+# A composer that holds text BECAUSE THE PANE IS GENERATING is busy-working, not
+# an idle draft: the doorbell queues behind the active turn instead of being
+# skipped. The idle-draft refusal above is unchanged, and that is the guard that
+# must never be weakened - only the classification of the text changes.
+test_ring_queues_behind_active_generation() {
+  local dir state rec doorbell log composer rc verdict
+  dir="$TMP_ROOT/ring-generating"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"
+  ring() {  # <busy-verdict>
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$dir/drops" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 "$1"
+  }
+
+  # Generating: the pending text is the turn's own, so Enter queues the constant
+  # doorbell behind it and the message is not left un-rung.
+  : > "$log"; printf '%s' 'a long answer still streaming' > "$composer"
+  rc=0; ring 'busy claude-hook' || rc=$?
+  [ "$rc" = 0 ] || fail "a composer holding the active generation's text should queue the doorbell, got rc $rc"
+  grep -qF 'SUBMIT: a long answer still streaming' "$log" \
+    || fail "the doorbell was not queued behind the active generation:"$'\n'"$(cat "$log")"
+  grep -qF "$doorbell" "$log" \
+    || fail "the queued submit did not carry the doorbell line:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "the queued doorbell was left unsubmitted in the composer"
+
+  # The same text with no turn in flight is an idle draft: refusing is right.
+  for verdict in 'idle claude-hook' 'unknown missing' ''; do
+    : > "$log"; printf '%s' 'a human half-typed line' > "$composer"
+    rc=0; ring "$verdict" || rc=$?
+    [ "$rc" = 1 ] || fail "idle pending text must still skip the ring (verdict '$verdict'), got rc $rc"
+    [ ! -s "$log" ] || fail "idle pending text was submitted with verdict '$verdict':"$'\n'"$(cat "$log")"
+    [ "$(cat "$composer")" = 'a human half-typed line' ] || fail "idle pending text was changed with verdict '$verdict'"
+  done
+  pass "inbox: a composer holding text inside an active generation queues the doorbell, while an idle draft still refuses"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -903,7 +944,65 @@ busy_case() {
   printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
   rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "please continue")
   age_path "$rec"
+  # The busy-deferral budget belongs to a pane whose busy proof has outlived
+  # BUSY_TURN_MAX_SECS - busy with nothing to show for it. Age the spawn record
+  # past that bound so the fixture is the stuck-busy pane, not a generating one;
+  # test_watcher_generating_pane_rings covers the generating case.
+  touch -t 200001010000 "$dir/state/t1.meta"
   printf '%s' "$dir"
+}
+
+# One episode, one delivery: a pane that is GENERATING is working, not stuck.
+# Its doorbell queues behind the turn on this very cycle and the busy-deferral
+# budget is never touched, so a worker writing a long answer neither loses its
+# message nor escalates as stuck-busy.
+test_watcher_generating_pane_rings() {
+  local dir wakes
+  dir=$(busy_case generating)   # busy capture, but a FRESH spawn record: inside the turn bound
+  touch "$dir/state/t1.meta"
+  busy_steer_check "$dir"
+  grep -q 'Firstmate instruction waiting' "$dir/send.log" \
+    || fail "a generating pane did not ring the due doorbell:"$'\n'"$(cat "$dir/send.log")"
+  [ ! -s "$dir/state/.wake-queue" ] \
+    || fail "a generating pane was escalated as stuck-busy:"$'\n'"$(cat "$dir/state/.wake-queue")"
+  [ ! -e "$dir/state/t1.inbox/.busy-state" ] \
+    || fail "a generating pane spent the busy-deferral budget"
+  [ -f "$dir/state/t1.inbox/001.msg" ] || fail "the generating-pane ring lost the steer"
+  wakes=0
+  [ ! -s "$dir/state/.wake-queue" ] || wakes=$(wc -l < "$dir/state/.wake-queue")
+  [ "$wakes" = 0 ] || fail "a generating pane produced $wakes wakes"
+  pass "watcher: a generating pane rings its due doorbell and is never escalated as stuck-busy"
+}
+
+# A ring that does not land must be visible in the status, not only in the
+# deletable triage log. Here the composer provably holds an idle draft, so the
+# guard correctly refuses - and the refusal is recorded once, in the task's own
+# status, while the instruction stays durable and the ladder keeps going.
+test_watcher_ring_failure_is_visible_in_status() {
+  local dir rec statusf
+  dir=$(busy_case ring-failure-visible)
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  busy_steer_check "$dir" "$dir/draft.capture"
+  [ ! -s "$dir/send.log" ] || fail "a protected idle composer was typed into"
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "a skipped doorbell was not written to the task status:"$'\n'"$(cat "$statusf")"
+  # Once per failure episode, not once per poll.
+  busy_steer_check "$dir" "$dir/draft.capture"
+  [ "$(grep -c 'inbox-ring-001.msg' "$statusf")" = 1 ] \
+    || fail "the same ring failure was reported again on the next poll:"$'\n'"$(cat "$statusf")"
+  rec="$dir/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "the un-rung instruction stopped being durable"
+  [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 2 ] \
+    || fail "the retry ladder did not advance after the failures"
+  pass "watcher: a doorbell that cannot be typed is recorded in the task status, once per failure"
 }
 
 test_watcher_waits_on_busy_pane() {
@@ -1391,7 +1490,10 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
+test_ring_queues_behind_active_generation
 test_watcher_rerings_idle_pane_quietly
+test_watcher_generating_pane_rings
+test_watcher_ring_failure_is_visible_in_status
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces
