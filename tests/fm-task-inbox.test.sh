@@ -787,6 +787,30 @@ test_fire_and_forget_retry_is_owed_once() {
   pass "inbox: a fire-and-forget record whose ring did not land is owed exactly one retry"
 }
 
+# An escalated ordinary record no longer owns the ring, so a due retry for a
+# newer fire-and-forget record re-rings instead of waiting behind it.
+test_fire_and_forget_retry_passes_an_escalated_record() {
+  local state tracked fire action
+  state="$TMP_ROOT/faf-retry-escalated/state"; mkdir -p "$state" "$TMP_ROOT/faf-retry-escalated/config"
+  : > "$TMP_ROOT/faf-retry-escalated/config/wait-no-turns"
+  export FM_CONFIG_OVERRIDE="$TMP_ROOT/faf-retry-escalated/config"
+  tracked=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "tracked steer")
+  age_path "$tracked"
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$tracked"
+  fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+  action=$(FM_TASK_INBOX_GRACE_SECS=3600 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a retry inside grace behind an escalated record should be quiet, got: $action"
+  age_path "$state/t1.inbox/.retry-ring"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "retry $fire" ] || fail "a due retry waited behind an escalated record, got: $action"
+  inbox_lib "$state" fm_task_inbox_clear_retry "$state" t1 "$fire"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a spent retry behind an escalated record rang again: $action"
+  unset FM_CONFIG_OVERRIDE
+  pass "inbox: a due fire-and-forget retry re-rings past an escalated ordinary record"
+}
+
 # A retry mark is ignored while config/wait-no-turns is absent.
 test_fire_and_forget_retry_is_quiet_without_the_flag() {
   local state fire action
@@ -1389,6 +1413,7 @@ test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
+test_fire_and_forget_retry_passes_an_escalated_record
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
