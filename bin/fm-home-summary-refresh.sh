@@ -63,7 +63,7 @@ case "${1:-}" in
     HOME_SUMMARY_MODE=worker
     BEST_EFFORT=${FM_HOME_SUMMARY_WORKER_BEST_EFFORT:-0}
     ;;
-  --_log-failure) HOME_SUMMARY_MODE=log-failure ;;
+  --_log-failure) HOME_SUMMARY_MODE='log-failure' ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac

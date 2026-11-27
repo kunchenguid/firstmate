@@ -231,6 +231,7 @@ Each note is appended to the transcript as its own system-notice row, which Clau
 | --- | --- |
 | `⛵ <task>: <summary>` | The supervision session recorded a routine outcome that is not silent. |
 | `⚓ [seq N] <task>: <summary>` | It recorded a captain outcome; main still receives and processes it as [`supervision-host.md`](supervision-host.md#captain-outcomes) describes. |
+| `⚓ <summary>` | A PR the captain explicitly asked to follow changed state; see [Explicit PR follows](configuration.md#explicit-pr-follows-configpr-follow). |
 | `⛵ Supervision session paused after repeated engine errors; main will handle wakes while it cools down.` | The host's broken-session latch trips. |
 | `⛵ Supervision session recovered after a successful cooldown probe.` | That latch clears. |
 
@@ -242,8 +243,9 @@ On later reads, if the copy skips sequence numbers since the last seen outcome, 
 The display copy's row and byte bounds are owned by [`fm-branch-outcome.sh`](../bin/fm-branch-outcome.sh); older outcomes and oversized rows cannot always be displayed by the mod, while the outcome store and main's delivery remain authoritative.
 Claude Code keeps each note in the session as a display-only entry and restores it on `claude --continue`, so the mod remembers in its own plugin store how far each session has followed the outcomes, and a resumed session replays only outcomes it has not shown.
 Claude Code keys that store by plugin name, so a session that showed notes before the plugin was renamed from `firstmate-calm` to `fm` and is resumed afterwards replays its still-due notes once.
-The mod only reads outcome and host state: the drain owns off-Pi read-cursor advancement, and main explicitly acknowledges captain outcomes as processed.
-Only a home that runs the supervision host has outcomes to show.
+The mod never advances the read cursor or the processed marker: the drain owns off-Pi read-cursor advancement, and main explicitly acknowledges captain outcomes as processed.
+With `config/pr-follow` present, the mod writes only the notice cursor and readiness heartbeat that [`fm-branch-outcome.sh`](../bin/fm-branch-outcome.sh) and [`fm-pr-follow.sh`](../bin/fm-pr-follow.sh) describe.
+Only a home that runs the supervision host or follows a PR has outcomes to show.
 
 ### What Calm hides on Claude Code
 

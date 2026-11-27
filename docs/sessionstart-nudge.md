@@ -26,10 +26,8 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, verified native Codex TUI, Pi / pi-signed, omp, Cursor, Antigravity (agy) |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, [Codex interactive TUI](#codex-interactive-tui), Pi / pi-signed, omp, Cursor, Antigravity (agy) |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
-
-Codex's interactive TUI has verified session-open delivery only on the native version selected by `bin/fm-codex-stop-park.sh`; its compaction and re-emit surfaces remain unverified.
 
 ### Tier by harness
 
@@ -37,7 +35,7 @@ Codex's interactive TUI has verified session-open delivery only on the native ve
 | --- | --- | --- |
 | Claude | Run | [Claude](#claude) |
 | Codex exec | Run | [Codex exec](#codex-exec) |
-| Codex interactive TUI | Run on the verified native version; otherwise uncovered | [Codex interactive TUI](#codex-interactive-tui) |
+| Codex interactive TUI | Run with native project SessionStart hooks; otherwise uncovered | [Codex interactive TUI](#codex-interactive-tui) |
 | Pi / pi-signed | Run | [Pi and pi-signed](#pi-and-pi-signed) |
 | OpenCode | Nudge | [OpenCode](#opencode) |
 | Grok | Nudge | [Grok](#grok) |
@@ -261,9 +259,10 @@ Native stdout context injection is supported under `codex exec`.
 
 ### Codex interactive TUI
 
-The verified native version fires the tracked project `SessionStart` hook and delivers the ordered digest before the first model call.
-The transport delegates through `bin/fm-codex-stop-park.sh --session-start`, whose [opt-in](configuration.md#codex-native-stop-park-configcodex-stop-park), version, and native-session receipt select the [Codex supervision protocol](supervision-protocols/codex.md).
-Earlier versions where project hooks do not fire retain the uncovered behavior and manual session start.
+For an eligible Firstmate primary, the tracked project `SessionStart` hook delivers the ordered startup digest before the first model call regardless of whether the [native Stop park](configuration.md#codex-native-stop-park-configcodex-stop-park) is enabled.
+The digest uses the native Codex process in its ancestry to identify the harness and render its supervision instructions.
+See the [native TUI verification](verification/runtime-backends.md#native-codex-supervision-park) and the [SessionStart ancestry regression](verification/runtime-backends.md#ancestry-reach-across-the-codex-sessionstart-hook) for measured coverage.
+Run the digest manually when the project hook does not fire.
 Firstmate ships no global hook and does not claim compaction, re-emit, or instruction-refresh delivery for this surface.
 
 ### Pi and pi-signed

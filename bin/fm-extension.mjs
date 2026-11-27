@@ -689,7 +689,11 @@ async function installPackage(home, sourceInfo) {
       fail("integrity-mismatch", "package changed while it was copied into the managed store");
     }
     try {
+      // macOS refuses to rename a directory without owner write permission.
+      // Publish the complete tree first, then make its root read-only.
+      await chmod(temporary, 0o700);
       await rename(temporary, destination);
+      await chmod(destination, 0o555);
       return { packageInfo: await validatePackage(destination, { installed: true }) };
     } catch (error) {
       if (!error || !["EEXIST", "ENOTEMPTY"].includes(error.code)) throw error;

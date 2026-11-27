@@ -21,7 +21,7 @@ These command-line and terminal facts apply to pane-backed sessions; for T3 Code
 
 A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
 Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+The decision persists for the repository in the launch's `CODEX_HOME`, so later worktrees of the same project skip it, while a worker launched on another [declared Codex account](../../../../../docs/configuration.md#several-codex-accounts-configcodex-accounts) asks once more in that account's home.
 
 ## Hook trust
 
@@ -50,7 +50,7 @@ Verified on 2026-07-08 with codex-cli 0.142.1: Codex runs the Stop command with 
 
 Codex CLI 0.163.0 supports the native asynchronous Stop park registered by `bin/fm-codex-stop-park.sh` in a home that opts in with [`config/codex-stop-park`](../../../../../docs/configuration.md#codex-native-stop-park-configcodex-stop-park), verified in an isolated real CLI lab on 2026-10-19.
 The hook waits outside the model and delivers actionable wakes with `codex queue --thread`, including in embedded mode without a shared app-server daemon.
-The script owns version and native-session selection; [`codex.md`](../../../../../docs/supervision-protocols/codex.md) owns the operating protocol and failure fallback.
-Homes without the opt-in, unverified versions, and sessions without the native registration keep [`codex-checkpoint.md`](../../../../../docs/supervision-protocols/codex-checkpoint.md), the unchanged bounded foreground protocol.
+The script owns version and native-session selection under the [minimum-version policy](../../../../../docs/configuration.md#codex-native-stop-park-configcodex-stop-park); [`codex.md`](../../../../../docs/supervision-protocols/codex.md) owns the operating protocol and failure fallback.
+Homes without the opt-in, unsupported versions, and sessions without the native registration keep [`codex-checkpoint.md`](../../../../../docs/supervision-protocols/codex-checkpoint.md), the unchanged bounded foreground protocol.
 The [supervision host](../../../../../docs/supervision-host.md) retains its existing posture decisions on both paths.
 Codex's PreToolUse watcher-arm seatbelt blocks directly through its project hook.
