@@ -95,9 +95,11 @@
 # concurrent wave with each read capped at 5 seconds. Owned-PR reads run in
 # waves of READ_WAVE PRs in the listed order, and each read gets the time left
 # before that stop, never less than READ_FLOOR seconds. A PR the stop leaves
-# unreached stays pending for the next pass. When a pass selects PRs and none
-# of their reads completes, it prints one line saying so, and prints it again
-# only after a pass in which a read completed.
+# unreached stays pending for the next pass, and a PR whose read failed is
+# listed after the PRs not tried then, so one stuck PR cannot hold the rest
+# back. When a pass selects PRs and none of their reads completes, it prints
+# one line per cause (timeout, or a failed answer) for the PRs that newly
+# fail, and a PR prints again only after one of its reads has completed.
 # Fingerprints and the notifications cursor (Last-Modified, newest seen
 # updated_at, unsettled PRs, last full sweep) are fm-pr-health.v1 in
 # state/pr-health.json, written by rename
@@ -354,7 +356,10 @@ read_pr() { # url deadline output-directory -> rest.json gql.json
   wait "$rest_pid" || rest_rc=$?
   wait "$gql_pid" || gql_rc=$?
   wait "$suite_pid" || suite_rc=$?
-  [ "$rest_rc" -eq 0 ] && [ "$gql_rc" -eq 0 ] && [ "$suite_rc" -eq 0 ] || return 1
+  if [ "$rest_rc" -ne 0 ] || [ "$gql_rc" -ne 0 ] || [ "$suite_rc" -ne 0 ]; then
+    if [ "$rest_rc" -eq 124 ] || [ "$gql_rc" -eq 124 ] || [ "$suite_rc" -eq 124 ]; then printf timeout > "$out/cause"; fi
+    return 1
+  fi
   jq -e '
     select(type == "array" and length > 0)
     | select(all(.[]; .errors == null and .data.repository.pullRequest != null))
@@ -372,7 +377,10 @@ read_pr() { # url deadline output-directory -> rest.json gql.json
       [ -n "$cursor" ] || return 0
       [ "$page" != last ] || return 1
       gh_read "$deadline" api graphql -F "owner=$owner" -F "repo=$repo" -F "number=$number" -f "suiteCursor=$cursor" \
-        -f "query=$SUITE_QUERY" > "$out/suites.json" 2>/dev/null || return 1
+        -f "query=$SUITE_QUERY" > "$out/suites.json" 2>/dev/null || {
+          [ $? -ne 124 ] || printf timeout > "$out/cause"
+          return 1
+        }
     fi
     jq -e --slurpfile more "$out/suites.json" '
       ($more[0].data.repository.pullRequest // null) as $m
@@ -540,6 +548,7 @@ poll() {
     ($owned[0] | map(.url)) as $urls | ($live | split(" ")) as $ids
     | .ownership_error = false
     | .prs |= with_entries(select(.key | IN($urls[])))
+    | if has("read_failed") then .read_failed |= with_entries(select(.key | IN($urls[]))) else . end
     | .branches |= with_entries(select(.key | IN($ids[])))' "$TMP/health.json" > "$TMP/next.json"
   save_health "$TMP/next.json"
   cp "$TMP/next.json" "$TMP/health.json"
@@ -566,7 +575,13 @@ poll() {
   jq -R -r --argjson full "$full" --slurpfile health "$TMP/health.json" --rawfile events "$TMP/events" '
     ($events | split("\n")) as $events | ($health[0].notifications.pending // []) as $pending
     | select($full or $health[0].prs[.] == null or IN($events[]) or IN($pending[]))' "$TMP/owned-urls" > "$TMP/urls"
+  jq -Rn -r --slurpfile health "$TMP/health.json" '
+    [inputs | select(length > 0)] as $urls | ($health[0].read_failed // {}) as $failed
+    | ($urls | map(select($failed[.] == null)) + ($urls | map(select($failed[.] != null))))[]' "$TMP/urls" > "$TMP/urls.ordered"
+  mv "$TMP/urls.ordered" "$TMP/urls"
   : > "$TMP/unsettled"
+  : > "$TMP/settled-urls"
+  : > "$TMP/failed.tsv"
   # Persist all selected URLs with the advanced notification cursor before reads;
   # interruption leaves every unprocessed event eligible for retry.
   jq --rawfile urls "$TMP/urls" '.notifications.pending = ($urls | split("\n") | map(select(length > 0)))' \
@@ -591,15 +606,20 @@ poll() {
   while IFS= read -r url; do
     index=$((index + 1))
     read_dir="$TMP/read-$index"
-    [ -f "$read_dir/ok" ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
+    if [ ! -f "$read_dir/ok" ]; then
+      printf '%s\n' "$url" >> "$TMP/unsettled"
+      if [ -d "$read_dir" ]; then printf '%s\t%s\n' "$url" "$(cat "$read_dir/cause" 2>/dev/null || printf answer)" >> "$TMP/failed.tsv"; fi
+      continue
+    fi
     settled=$((settled + 1))
+    printf '%s\n' "$url" >> "$TMP/settled-urls"
     jq -L "$SCRIPT_DIR" -n --arg url "$url" --slurpfile rest "$read_dir/rest.json" --slurpfile gql "$read_dir/gql.json" \
       --slurpfile prev <(jq --arg url "$url" '.prs[$url] // {}' "$TMP/health.json") \
       --argjson tasks "$(jq -c --arg url "$url" '[.[] | select(.url == $url) | .tasks[]] | unique' "$TMP/owned.json")" \
       "include \"fm-contributions\"; $STEP" > "$TMP/step.json" 2>/dev/null \
-      || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
+      || { printf '%s\n' "$url" >> "$TMP/unsettled"; printf '%s\tanswer\n' "$url" >> "$TMP/failed.tsv"; continue; }
     step=$(cat "$TMP/step.json")
-    [ "$step" != null ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; continue; }
+    [ "$step" != null ] || { printf '%s\n' "$url" >> "$TMP/unsettled"; printf '%s\tanswer\n' "$url" >> "$TMP/failed.tsv"; continue; }
     jq -r '.lines[]' "$TMP/step.json"
     if [ "$(jq -r '.mergeable == null' "$read_dir/rest.json")" = true ] \
       || [ "$(jq -r '.retry // false' "$TMP/step.json")" = true ]; then
@@ -611,18 +631,22 @@ poll() {
       cp "$TMP/next.json" "$TMP/health.json"
     fi
   done < "$TMP/urls"
-  stuck=$(jq -r '.cannot_settle // false' "$TMP/health.json")
-  if [ -s "$TMP/urls" ]; then
-    if [ "$settled" -gt 0 ]; then stuck=false
-    elif [ "$stuck" != true ]; then
-      printf 'pr-health: no PR read settled this sweep (%s selected); forge reads are slow or failing, so no condition can be reported until one settles\n' \
-        "$(grep -c . "$TMP/urls")"
-      stuck=true
-    fi
+  if [ "$settled" -eq 0 ]; then
+    newly=$(jq -r --rawfile failed "$TMP/failed.tsv" '
+      (.read_failed // {}) as $old
+      | ($failed | split("\n") | map(select(length > 0) | split("\t")))[] | select($old[.[0]] == null) | .[1]' "$TMP/health.json")
+    cause_count() { printf '%s\n' "$newly" | grep -c "^$1$" || true; }
+    [ "$(cause_count timeout)" = 0 ] || printf 'pr-health: no PR read settled this sweep (%s selected); %s did not finish in time, so no condition can be reported for it until a read completes\n' \
+      "$(grep -c . "$TMP/urls")" "$(cause_count timeout)"
+    [ "$(cause_count answer)" = 0 ] || printf 'pr-health: no PR read settled this sweep (%s selected); %s returned no usable answer (a page bound, lost access or an unreadable reply), so no condition can be reported for it until a read completes\n' \
+      "$(grep -c . "$TMP/urls")" "$(cause_count answer)"
   fi
-  jq --argjson full "$full" --argjson now "$now" --argjson stuck "$stuck" --rawfile unsettled "$TMP/unsettled" '
-    .cannot_settle = $stuck |
-    if has("notifications") then
+  jq --argjson full "$full" --argjson now "$now" --rawfile unsettled "$TMP/unsettled" \
+    --rawfile failed "$TMP/failed.tsv" --rawfile ok "$TMP/settled-urls" '
+    ($ok | split("\n")) as $ok
+    | ($failed | split("\n") | map(select(length > 0) | split("\t") | {key:.[0],value:.[1]}) | from_entries) as $f
+    | .read_failed = ((.read_failed // {}) | with_entries(select(.key | IN($ok[]) | not))) + $f
+    | if has("notifications") then
       .notifications.pending = ($unsettled | split("\n") | map(select(length > 0)))
       | if $full then .notifications.swept_at = $now else . end
     else . end' "$TMP/health.json" > "$TMP/next.json"

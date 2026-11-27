@@ -49,6 +49,7 @@ model() {
     done
     [ "$(find "$FORGE" -name 'arrived-*' | wc -l)" -ge "$(cat "$FORGE/barrier-count")" ] || exit 1
   fi
+  [ ! -f "$FORGE/hang-$n" ] || sleep 8
   cat "$FORGE/pr-$n.json"
 }
 case "$1 $2" in
@@ -719,6 +720,40 @@ test_cannot_settle_prints_once() {
   pass 'a sweep that cannot settle any read says so once'
 }
 
+test_a_hanging_pr_does_not_starve_later_prs() {
+  local home n out all="" pass_no
+  home=$(new_home hanging-pr)
+  for n in $(seq 1 8); do
+    task "$home" "ship$n" "pr=https://github.com/o/r/pull/$n"
+    pr "$home" "$n" "$HEAD_A" "$BASE_1" false false
+  done
+  : > "$home/forge/hang-2"
+  arm "$home"
+  for pass_no in 1 2 3; do
+    out=$(with_home "$home" env FM_CHECK_TIMEOUT=10 bash "$home/state/pr-health.check.sh") || fail 'the PR health check failed'
+    all="$all$out"$'\n'
+  done
+  for n in 1 3 4 5 6 7 8; do
+    printf '%s\n' "$all" | grep -q "pull/$n conflicts with its base" || fail "PR $n was never read behind a hanging PR 2: $all"
+  done
+  pass 'a PR that cannot finish is listed after the PRs not tried, so later PRs are read'
+}
+
+test_one_stuck_pr_prints_once_across_other_activity() {
+  local home out
+  home=$(new_home stuck-pr)
+  task "$home" ship2 pr=https://github.com/o/r/pull/2
+  pr "$home" 2 "$HEAD_A" "$BASE_1" false false
+  set_pr "$home" 2 '.suites = [{name:"CI",conclusion:"ACTION_REQUIRED"}] | .suites_truncated = true'
+  arm "$home"
+  expect_one "$home" 'no PR read settled this sweep \(1 selected\); 1 returned no usable answer' 'a stuck PR must be named once by its cause'
+  task "$home" ship1 pr=https://github.com/o/r/pull/1
+  pr "$home" 1 "$HEAD_A" "$BASE_1" false false
+  expect_one "$home" 'pull/1 conflicts with its base' 'PR 1 settles and the stuck PR 2 stays silent'
+  expect_silent "$home" 'a stuck PR on a healthy forge must not repeat after another PR settled'
+  pass 'a PR stuck on its answer prints once, not after every pass with other activity'
+}
+
 feed() { # home : serve an empty notifications feed
   printf '[]\n' > "$1/forge/notifications.json"
   printf 'Sun, 01 Nov 2026 00:00:00 GMT\n' > "$1/forge/notifications-lm"
@@ -1301,7 +1336,7 @@ for test_name in test_any_failure_off_still_reports_only_required_checks \
   test_unreadable_contribution_record_pauses_the_monitor_once \
   test_nothing_prints_while_nothing_changed test_merged_pr_is_not_read_again test_absent_flag_changes_nothing \
   test_watcher_surfaces_one_wake test_failure_once_per_latest_commit_after_cleanup \
-  test_owned_pr_reads_start_in_bounded_waves test_slow_forge_settles_within_the_wave_bound test_cannot_settle_prints_once test_checks_on_later_pages \
+  test_owned_pr_reads_start_in_bounded_waves test_slow_forge_settles_within_the_wave_bound test_cannot_settle_prints_once test_a_hanging_pr_does_not_starve_later_prs test_one_stuck_pr_prints_once_across_other_activity test_checks_on_later_pages \
   test_unsupported_provider_has_no_github_reads test_final_contributions_are_not_enrolled_again \
   test_many_recorded_contributions_do_not_starve_a_new_branch_pr; do
   ( "$test_name" ) || failures=$((failures + 1))
