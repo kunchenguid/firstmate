@@ -93,8 +93,10 @@
 # cannot apply the address-space limit at all) each root runs under the same
 # wall deadline and grace plus a resident-memory ceiling instead
 # (FM_LINT_ROOT_RSS_KIB, default 6291456 = 6 GiB summed over the root's
-# process group, sampled immediately then every 500 milliseconds). On macOS
-# each member counts the greater of ps RSS and physical footprint (which
+# process group, sampled immediately then every 500 milliseconds). The 500 ms
+# interval was chosen by measurement: a macOS ps -A sample costs about 14 ms
+# median / 16 ms p95, under ~3% of a core per lint worker versus ~28% at 50 ms.
+# On macOS each member counts the greater of ps RSS and physical footprint (which
 # includes compressed and swapped memory); if the footprint query fails it
 # falls back to RSS. This avoids missing compressed allocations when the
 # footprint query succeeds; other hosts count RSS from ps.
