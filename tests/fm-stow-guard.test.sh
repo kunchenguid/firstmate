@@ -204,6 +204,40 @@ test_recorded_stow_sets_the_age_clock() {
   pass "a Skill /stow sets the age clock and a later tail does not rewind it"
 }
 
+test_stow_command_sets_the_age_clock() {
+  local rc=0 epoch now tag='<command-name>/stow</command-name>'
+  command -v python3 >/dev/null 2>&1 || {
+    pass "a /stow command sets the age clock (skipped, python3 not found)"
+    return
+  }
+  prepare_case command
+  : > "$CASE_CONFIG/stow-guard"
+  epoch=$(python3 -c 'import datetime; print(int(datetime.datetime.fromisoformat("2026-01-01T00:00:00+00:00").timestamp()))')
+  jq -n --argjson last_stow "$((epoch - 100000))" --argjson asked 0 --argjson fired '{}' \
+    '{last_stow:$last_stow, asked:$asked, fired:$fired}' > "$CASE_STATE/.stow-guard.json"
+  # Later entries that only quote the command must not move the clock past it.
+  jq -nc --arg tag "$tag" '
+    {type:"user",timestamp:"2026-01-01T00:00:00.000Z",
+      message:{role:"user",content:("<command-message>stow</command-message>\n" + $tag)}},
+    {type:"user",timestamp:"2026-01-01T00:10:00.000Z",isCompactSummary:true,
+      message:{role:"user",content:("Summary of the session so far.\n" + $tag)}},
+    {type:"user",timestamp:"2026-01-01T00:20:00.000Z",
+      message:{role:"user",content:[{type:"tool_result",tool_use_id:"t1",content:$tag}]}},
+    {type:"user",timestamp:"2026-01-01T00:30:00.000Z",
+      message:{role:"user",content:("Why did " + $tag + " run twice?")}},
+    {type:"assistant",timestamp:"2026-01-01T00:40:00.000Z",
+      message:{role:"assistant",content:[{type:"text",text:$tag}]}}
+  ' > "$CASE_TRANSCRIPT"
+  now=$((epoch + 3000))
+  payload | invoke_guard "$PRIMARY" "$CASE_STATE" "$CASE_CONFIG" \
+    FM_STOW_GUARD_NOW="$now" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a /stow command stop must exit 0, got $rc"
+  assert_silent "a /stow command newer than a stale clock"
+  jq -e --argjson epoch "$epoch" '.last_stow == $epoch' "$CASE_STATE/.stow-guard.json" >/dev/null \
+    || fail "the /stow command was not recorded as the newest stow: $(cat "$CASE_STATE/.stow-guard.json")"
+  pass "a /stow command sets the age clock, and a summary, tool result, prompt, or reply quoting it does not"
+}
+
 test_crew_worktree_is_silent() {
   local child="$TMP_ROOT/child" rc=0
   git -C "$PRIMARY" add AGENTS.md
@@ -324,7 +358,8 @@ test_bad_payloads_and_missing_jq_are_silent() {
   done
   rm -f "$fakebin/jq"
   PATH="$fakebin" command -v dirname >/dev/null 2>&1 || fail "fixture PATH lost dirname"
-  PATH="$fakebin" command -v jq >/dev/null 2>&1 && fail "fixture PATH still finds jq"
+  # bash 3.2 answers command -v from its hash table, and this shell already ran jq.
+  ( hash -r; PATH="$fakebin" command -v jq >/dev/null 2>&1 ) && fail "fixture PATH still finds jq"
   rc=0
   payload | env -u GROK_AGENT -u GROK_HOOK_EVENT PATH="$fakebin" \
     FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" \
@@ -367,6 +402,7 @@ fm_test_run \
   test_continuation_stop_blocks_once_per_crossing \
   test_age_interval_blocks_once_per_hour \
   test_recorded_stow_sets_the_age_clock \
+  test_stow_command_sets_the_age_clock \
   test_crew_worktree_is_silent \
   test_secondmate_home_is_silent \
   test_missing_python_skips_the_age_ask \

@@ -26,9 +26,12 @@
 #
 # Context size is the same sum warm-cache compaction uses: input + cache_read
 # + cache_creation on the newest usage object in the last 2MB of the transcript.
-# A /stow is a Skill tool call whose skill is stow, in that same tail. The
-# newest one is remembered in state/.stow-guard.json, so a later tail that no
-# longer contains it does not rewind the clock.
+# A /stow is, in that same tail, either a Skill tool call whose skill is stow
+# or a /stow command: a user entry that is not a compaction summary and whose
+# text content starts with a command tag and carries
+# <command-name>/stow</command-name>. Text that only quotes the command is not
+# one. The newest /stow is remembered in state/.stow-guard.json, so a later
+# tail that no longer contains it does not rewind the clock.
 #
 # The hook prints one Claude block decision, or nothing. Any unreadable
 # payload, missing jq, scope miss, or state-write failure exits 0 and prints
@@ -171,8 +174,12 @@ if [ -n "$transcript" ] && [ -r "$transcript" ]; then
   if command -v python3 >/dev/null 2>&1; then
     if seen_stow=$(tail -c 2000000 "$transcript" | jq -R -r '
         fromjson? | .timestamp as $ts | select($ts != null)
-        | .message.content[]?
-        | select(.type == "tool_use" and .name == "Skill" and .input.skill == "stow")
+        | select(
+            any(.message.content[]?; .type == "tool_use" and .name == "Skill" and .input.skill == "stow")
+            or (.type == "user" and .isCompactSummary != true
+              and ((.message.content? // null)
+                | type == "string" and startswith("<command-")
+                  and contains("<command-name>/stow</command-name>"))))
         | $ts
       ' | python3 -c 'import datetime, sys
 best = 0
