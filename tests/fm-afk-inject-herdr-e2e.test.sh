@@ -91,7 +91,7 @@ CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
 TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-afk-e2e-supervisor" /tmp "$SEEDED_TAB_ID") \
   || fail "create_task for the scratch supervisor pane failed"
-read -r _TAB_ID PANE_ID <<EOF
+read -r _TAB_ID PANE_ID _ <<EOF
 $TASK_IDS
 EOF
 [ -n "$PANE_ID" ] || fail "create_task did not return a pane id"
@@ -127,7 +127,7 @@ done
 # parity so this test's shape matches the tmux e2e's.
 FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp) \
   || fail "could not create the fake crewmate scratch tab"
-read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
+read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID _ <<EOF
 $FAKE_CREW_IDS
 EOF
 
