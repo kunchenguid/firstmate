@@ -571,8 +571,9 @@ test_ledger_report_names_a_replacement_pr() {
 }
 
 # Without config/pr-register-scan, a GitHub-shaped ready line names the PR its
-# report carries, even over a different recorded PR, so the line's text and its
-# pr= never disagree; any other ready line leaves the recorded PR standing.
+# report carries, even over a different recorded PR, so for such a line the
+# text and its pr= never disagree. Any other ready line, a GitLab one included,
+# leaves the recorded PR standing, so there the text and pr= can still differ.
 test_ledger_report_without_scan_opt_in_names_the_ready_pr() {
   make_world ledger-no-replacement; bind_secondmate local
   write_replacement_children
