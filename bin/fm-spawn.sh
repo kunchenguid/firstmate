@@ -6199,7 +6199,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # Creating a new pool slot can take minutes on a loaded host, so the window
     # is FM_SPAWN_TREEHOUSE_TIMEOUT seconds (one poll per second), default 60.
     treehouse_wait=${FM_SPAWN_TREEHOUSE_TIMEOUT:-}
-    case "$treehouse_wait" in ''|*[!0-9]*|0) treehouse_wait=60 ;; esac
+    [[ "$treehouse_wait" =~ ^0*[1-9][0-9]*$ ]] || treehouse_wait=60
     candidate=""
     last_seen=""
     last_reason="the pane reported no path"

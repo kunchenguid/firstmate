@@ -256,17 +256,19 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 # the refusal carries treehouse's own output after the typed command, because
 # the refusal closes the window that holds it.
 test_treehouse_wait_is_configurable_and_reports_pane_output() {
-  local rec id out status screen format command_echo diagnostic expected typed_line parent
+  local rec id out status screen format command_echo diagnostic expected typed_line parent timeout polls
   diagnostic=$'treehouse: all 24 worktrees are in use (max_trees=24)\nuser@host mate %'
-  for format in single wrapped-word wrapped-space missing repeated root; do
+  for format in single wrapped-word wrapped-space missing repeated root zero; do
     id="settle-pool-cap-$format-z6"
     rec=$(make_primary_case "settle-pool-cap-$format" "$id" 100000)
     read_settle_record "$rec"
     fm_test_fake_sleep_noop "$FAKEBIN_DIR"
     expected="treehouse: all 24 worktrees are in use (max_trees=24) | user@host mate %"
     typed_line='treehouse get'
+    timeout=4
+    polls=4
     case "$format" in
-      single) command_echo='user@host mate % treehouse get' ;;
+      single|zero) command_echo='user@host mate % treehouse get' ;;
       wrapped-word) command_echo=$'user@host mate % treeho\nuse g\net' ;;
       wrapped-space) command_echo=$'user@host mate % treehouse\nget' ;;
       missing) command_echo='partial command echo'; expected="partial command echo | $expected" ;;
@@ -279,14 +281,15 @@ test_treehouse_wait_is_configurable_and_reports_pane_output() {
         command_echo=$'user@host mate % treehouse --ro\not '"${typed_line#treehouse --root }"
         ;;
     esac
+    if [ "$format" = zero ]; then timeout=00; polls=60; fi
     screen="$command_echo"$'\n'"$diagnostic"
     [ "$format" = missing ] || screen=$'earlier output\n'"$screen"
 
-    out=$(FM_SPAWN_TREEHOUSE_TIMEOUT=4 FM_FAKE_PANE_SCREEN="$screen" run_settle_spawn "$id")
+    out=$(FM_SPAWN_TREEHOUSE_TIMEOUT="$timeout" FM_FAKE_PANE_SCREEN="$screen" run_settle_spawn "$id")
     status=$?
     [ "$status" -ne 0 ] || fail "$format: spawn accepted a pane that never left the primary checkout"$'\n'"$out"
-    assert_contains "$out" "within 4s" "the refusal did not report the configured wait"
-    [ "$(cat "$COUNTFILE")" -eq 4 ] || fail "configured wait polled the pane $(cat "$COUNTFILE") times, expected 4"
+    assert_contains "$out" "within ${polls}s" "the refusal did not report the effective wait"
+    [ "$(cat "$COUNTFILE")" -eq "$polls" ] || fail "configured wait polled the pane $(cat "$COUNTFILE") times, expected $polls"
     assert_contains "$out" "pane output after '$typed_line': $expected" \
       "$format: the refusal did not carry treehouse's own pane output"$'\n'"$out"
     assert_not_contains "$out" "earlier output" "$format: the refusal carried pane output from before treehouse get"
