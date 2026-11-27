@@ -6221,19 +6221,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # slot once its worker exits, but that record's teardown would still return
   # the copy out from under this task, and the two records would refuse each
   # other's teardown (bin/fm-wake-lib.sh's fm_slot_other_record_namer).
+  # An unreadable local home only narrows the scan, with a warning: it must not
+  # stop every spawn on the machine, while teardown still refuses on it.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    slot_namer_rc=0
-    fm_slot_other_record_namer "$WT" "$STATE/$ID.meta" "$STATE" || slot_namer_rc=$?
-    case "$slot_namer_rc" in
-      0)
-        echo "error: Treehouse handed task $ID pool slot $WT, but task $FM_SLOT_NAMER_ID's record still names it as its $FM_SLOT_NAMER_FIELD; refusing to put two task records on one copy. Clean up or reconcile $FM_SLOT_NAMER_ID (bin/fm-crew-state.sh $FM_SLOT_NAMER_ID), then spawn again; $(spawn_endpoint_hint)" >&2
-        exit 1
-        ;;
-      2)
-        echo "error: cannot prove Treehouse pool slot $WT is free of other task records ($FM_LOCAL_FIRSTMATE_ERROR); $(spawn_endpoint_hint)" >&2
-        exit 1
-        ;;
-    esac
+    slot_named=0
+    fm_slot_other_record_namer "$WT" "$STATE/$ID.meta" "$STATE" best-effort && slot_named=1
+    [ -z "$FM_LOCAL_FIRSTMATE_ERROR" ] \
+      || echo "warning: checked Treehouse pool slot $WT for other task records only in the local Firstmate homes that could be read; skipped: $FM_LOCAL_FIRSTMATE_ERROR" >&2
+    if [ "$slot_named" = 1 ]; then
+      echo "error: Treehouse handed task $ID pool slot $WT, but task $FM_SLOT_NAMER_ID's record still names it as its $FM_SLOT_NAMER_FIELD; refusing to put two task records on one copy. Clean up or reconcile $FM_SLOT_NAMER_ID (bin/fm-crew-state.sh $FM_SLOT_NAMER_ID), then spawn again; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1

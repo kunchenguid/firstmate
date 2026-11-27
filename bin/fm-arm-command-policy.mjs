@@ -63,6 +63,22 @@ function normalizeLineContinuations(source) {
   return source.replace(/\\\r?\n/g, "");
 }
 
+// A pkill selects by pattern unless every argument is a signal or one of the
+// exact-target options (parent pid, pidfile, process group, session); -f, a
+// pattern operand, or anything unrecognized counts as a pattern kill.
+function pkillMatchesPattern(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index].value;
+    if (/^-(\d+|[A-Z][A-Z0-9]+)$/.test(value) || /^--signal=./.test(value) || /^-[PFgs]./.test(value)) continue;
+    if (/^(-[PFgs]|--signal)$/.test(value) && index + 1 < args.length) {
+      index += 1;
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 function basename(value) {
   return value.split("/").filter(Boolean).at(-1) || value;
 }
@@ -848,7 +864,7 @@ function analyzeProgram(command, context, depth = 0) {
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
-    if (commandName === "pkill" || commandName === "killall") patternKill = true;
+    if ((commandName === "pkill" && pkillMatchesPattern(args)) || commandName === "killall") patternKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
     if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;

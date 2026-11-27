@@ -131,14 +131,16 @@ It is gated on the grammar being unsupported: in grammar the classifier does mod
 
 ## Pattern kills
 
-Any actually executed `pkill` or `killall`, whatever its pattern, is denied with `pattern-kill`; a watcher-targeted `pkill` keeps the more specific `broad-watcher-kill`.
+Any actually executed `killall`, and any actually executed `pkill` that selects by pattern, is denied with `pattern-kill`; a watcher-targeted `pkill` keeps the more specific `broad-watcher-kill`.
+A `pkill` selects by pattern unless every argument is a signal or an exact-target option (`-P` parent pid, `-F` pidfile, `-g` process group, `-s` session), so `pkill -f`, a name pattern, and any unrecognized option are denied while `pkill -P $$` stays allowed.
 A pattern kill matches every process on the machine whose name or command line fits, so one agent resetting its own browser bridge with `pkill -f chrome-devtools-axi` can terminate every other agent whose command line carries that word.
 The deny reason points the agent at `pgrep` or `ps` to find the exact process and `kill <pid>` to stop only that one.
 Data mentions, `pgrep`, and `kill <pid>` stay allowed, and unsupported compound grammar whose raw bytes name `pkill` or `killall` fails closed as for broad watcher kills.
 
 `bin/fm-spawn.sh` registers this checker as a Claude crewmate's Bash `PreToolUse` hook in the worktree's `.claude/settings.local.json`, beside its busy hooks, so a delegated Claude worker in any project is covered.
 Agents Firstmate does not launch, such as no-mistakes pipeline agents, run with their own settings and are not covered.
-Give them the same guard on the no-mistakes side, for example by registering `bin/fm-arm-pretool-check.sh --claude` as a Bash `PreToolUse` hook in the settings those agents load, or an equivalent rule in their prompt.
+Other crewmate harnesses (Codex, OpenCode, Pi, Grok, Cursor, and the rest) do not get this hook yet; wiring them is a follow-up.
+Give no-mistakes agents the same guard on the no-mistakes side, for example by registering `bin/fm-arm-pretool-check.sh --claude` as a Bash `PreToolUse` hook in the settings those agents load, or an equivalent rule in their prompt.
 
 ## Stable reason codes
 
@@ -152,7 +154,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
-| `pattern-kill` | An actual `pkill` or `killall` runs; kill by exact pid instead. |
+| `pattern-kill` | An actual `killall`, or a `pkill` that selects by pattern, runs; kill by exact pid instead. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 
