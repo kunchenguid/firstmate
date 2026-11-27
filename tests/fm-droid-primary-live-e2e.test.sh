@@ -139,9 +139,17 @@ pass "Droid live spawn: fresh-worktree folder trust is answered and the default 
 
 # Exercise a real exact native pin against a conflicting project default.
 # The installed catalog must advertise both IDs; there is no guessed fallback.
-PIN_MODEL=${FM_DROID_PIN_MODEL:-gpt-6.1-sol}
+# Droid 1.21.1 runs some catalog pins on unlisted newer IDs (gpt-6.1-sol as
+# gpt-6.2-sol, claude-sonnet-5 as claude-sonnet-5-5). Default to a non-default
+# pin it was live-observed running unchanged.
+PIN_MODEL=${FM_DROID_PIN_MODEL:-claude-opus-5-5-fast}
 bash "$ROOT/bin/fm-droid-model.sh" resolve "$PIN_MODEL" >/dev/null ||
   fail "Droid $(droid --version): native pin is not in the installed catalog"
+PIN_LABEL=$(droid exec --help 2>/dev/null | awk -v model="$PIN_MODEL" '
+  /^(Available|Custom) Models:/ { models=1; next }
+  /^[^[:space:]]/ { models=0 }
+  models && $1 == model { sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, ""); sub(/ \(default\)$/, ""); print; exit }
+')
 bash "$ROOT/bin/fm-droid-model.sh" resolve auto >/dev/null ||
   fail "Droid $(droid --version): conflicting default is not in the installed catalog"
 mkdir -p "$SPAWN_WT/.factory"
@@ -173,7 +181,7 @@ spawn_target=$(sed -n 's/^window=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")
 # Capture the model row once per incarnation, and exclude the autonomy label:
 # Auto (High) is not evidence of the model's reasoning effort.
 pin_capture=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$spawn_target" -S -0)
-pin_indicator=$(printf '%s\n' "$pin_capture" | sed -n '/GPT-6[.]1 Sol/p' | sed 's/Auto.*//')
+pin_indicator=$(printf '%s\n' "$pin_capture" | grep -F -- "${PIN_LABEL:-$PIN_MODEL}" | sed 's/Auto.*//')
 if printf '%s' "$pin_indicator" | grep -Fq '(High)'; then
   printf 'Droid %s live spawn: requested=%s/high; observed=%s/(High); project default=auto/low\n' \
     "$(droid --version)" "$PIN_MODEL" "$PIN_MODEL"
@@ -195,7 +203,7 @@ if relaunch_output=$(FM_HOME="$FLEET_HOME" FM_ROOT_OVERRIDE='' FM_SPAWN_NO_GUARD
   --note 'Reply with exactly DROID_LIVE_RELAUNCH_READY and end your turn. Do not use tools.' 2>&1); then
   spawn_target=$(sed -n 's/^window=//p' "$FLEET_HOME/state/$SPAWN_ID.meta")
   relaunch_capture=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$spawn_target" -S -0)
-  relaunch_indicator=$(printf '%s\n' "$relaunch_capture" | sed -n '/GPT-6[.]1 Sol/p' | sed 's/Auto.*//')
+  relaunch_indicator=$(printf '%s\n' "$relaunch_capture" | grep -F -- "${PIN_LABEL:-$PIN_MODEL}" | sed 's/Auto.*//')
   if printf '%s' "$relaunch_indicator" | grep -Fq '(Medium)'; then
     printf 'Droid %s live relaunch: observed=%s/(Medium) after high-to-medium change\n' "$(droid --version)" "$PIN_MODEL"
   else
