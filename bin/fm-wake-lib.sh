@@ -689,9 +689,10 @@ fm_lock_discard_staged_owners() {
 }
 
 # fm_state_reap_orphans <state-dir>
-# Remove lock owner staging in state/ and real state/*.inbox/ directories,
-# plus top-level per-process temporary files named .<name>.<pid>.* below,
-# only once the pid each name leads with is dead. Lock owner directories
+# Reclaim dead-process litter recursively beneath state/, without following
+# symlinks or descending into owner directories or reaper tombstones.
+# Recognized temporary files carry a pid after their prefix (and may have a
+# random suffix); remove them only once that pid is dead. Lock owner directories
 # include <lock>.owner.<pid>.* and a .steal mutex's staging. An owner directory
 # its lock link still names, or whose recorded holder is alive (a bounded wait
 # hands its helper's owner to the caller), is lock evidence and stays, as do
