@@ -11,7 +11,8 @@
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
 # auto-approves), and only as a clean fast-forward. A diverged branch needs a
 # rebase and a new task/approval record under bin/fm-dod-lib.sh's head-latching
-# contract before landing. See AGENTS.md prime directives,
+# contract before landing; a further round of an already-landed task re-latches
+# its next done head under that contract instead. See AGENTS.md prime directives,
 # project management, and task lifecycle.
 # The task's existing per-task control lock serializes the captain-hold check
 # through that fast-forward. A still-held or unreadable row refuses before the

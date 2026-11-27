@@ -12,7 +12,10 @@
 # contract.
 # For local-only tasks, the first accepted done head is latched as exactly one
 # local_done_head= full commit id in the live task metadata. Observing done again
-# never changes that identity. Revised work needs a new task/approval record.
+# never changes that identity while it is unlanded; revised work then needs a
+# new task/approval record. Once the latched head is contained in the project's
+# local default branch (that round landed), the next accepted done head replaces
+# it, so a further round of the same task reports readiness for approval again.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -873,8 +876,10 @@ fm_dod_local_done_head() {  # <meta>
 # callers may supply captured meta; compare it with the live record under the
 # existing control/meta locks before publishing to the live owner only. A caller
 # already holding the live meta lock passes meta-locked and retains its locks.
+# A latched head that the project's local default branch already contains was
+# landed, so a different head replaces it instead of refusing.
 fm_dod_pin_local_done_head() (  # <state> <id> <meta> <sha> <captured-meta> [meta-locked]
-  local state=$1 id=$2 meta=$3 sha=$4 captured=$5 script_dir live control='' lock='' tmp='' pinned
+  local state=$1 id=$2 meta=$3 sha=$4 captured=$5 script_dir live control='' lock='' tmp='' pinned project default
   script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   # These lazy imports are canonical lint roots. Keep their subshell-local
   # initializers out of ShellCheck's analysis of the sourcing caller's globals.
@@ -882,6 +887,8 @@ fm_dod_pin_local_done_head() (  # <state> <id> <meta> <sha> <captured-meta> [met
   . "$script_dir/fm-wake-lib.sh"
   # shellcheck source=/dev/null
   . "$script_dir/fm-backlog-transition-lib.sh"
+  # shellcheck source=/dev/null
+  . "$script_dir/fm-tangle-lib.sh"
   live="$state/$id.meta"
   if [ "${6:-}" != meta-locked ]; then
     control="$state/.control-$id.lock"
@@ -896,11 +903,17 @@ fm_dod_pin_local_done_head() (  # <state> <id> <meta> <sha> <captured-meta> [met
   [ "$(cat "$live")" = "$captured" ] || return 1
   if grep -q '^local_done_head=' "$live"; then
     pinned=$(fm_dod_local_done_head "$live") || return 1
-    [ "$pinned" = "$sha" ]
-    return
+    [ "$pinned" != "$sha" ] || return 0
+    project=$(fm_dod_meta_value "$live" project)
+    [ -n "$project" ] && default=$(fm_default_branch "$project") \
+      && git -C "$project" merge-base --is-ancestor "$pinned" "refs/heads/$default" 2>/dev/null \
+      || return 1
+    tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
+    awk -v sha="$sha" '/^local_done_head=/ { print "local_done_head=" sha; next } { print }' "$live" > "$tmp" || return 1
+  else
+    tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
+    { cat "$live" && printf '\nlocal_done_head=%s\n' "$sha"; } > "$tmp" || return 1
   fi
-  tmp=$(mktemp "$state/.local-done-$id.XXXXXX") || return 1
-  { cat "$live" && printf '\nlocal_done_head=%s\n' "$sha"; } > "$tmp" || return 1
   fm_backlog_record_publish "$tmp" "$live" 'local readiness metadata' "$state"
 )
 
@@ -1169,7 +1182,7 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     if [ "$mode" = local-only ] && [ -n "$meta" ]; then
       if [ -z "$state" ] || [ -z "$id" ] \
         || ! fm_dod_pin_local_done_head "$state" "$id" "$meta" "$sha" "$captured" "${9:-}"; then
-        printf '%s\n' "local-only done head could not be recorded or differs from the recorded head; revised work requires a new task/approval record"
+        printf '%s\n' "local-only done head could not be recorded or differs from the recorded, not yet landed head; revised work requires a new task/approval record"
         return 1
       fi
     fi

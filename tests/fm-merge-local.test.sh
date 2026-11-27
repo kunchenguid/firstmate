@@ -66,6 +66,29 @@ test_branch_advance_does_not_change_approval() {
   pass 'branch advance refuses, and restoring the reported X lands exactly X'
 }
 
+# Round 1 landed X, so the latched head is in main; the next done for the same
+# task records the new head and lands it, while an unlanded head stays latched.
+test_landed_round_repins_next_done() {
+  local z
+  make_case second-round
+  record_done || fail 'round-one done head was not accepted'
+  land >/dev/null || fail 'round one did not land'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'round one did not land X'
+  printf 'approved Z\n' > "$WT/approved.txt"
+  git -C "$WT" commit -q -am Z
+  z=$(git -C "$WT" rev-parse HEAD)
+  record_done || fail 'round-two done head was refused although round one landed'
+  [ "$(fm_dod_local_done_head "$META")" = "$z" ] || fail 'round-two done did not re-latch the new head'
+  git -C "$WT" commit -q --allow-empty -m unlanded
+  record_done >/dev/null 2>&1 && fail 'an unlanded round-two head was replaced'
+  [ "$(fm_dod_local_done_head "$META")" = "$z" ] || fail 'the refused done changed the latched head'
+  git -C "$WT" reset -q --hard "$z"
+  land >/dev/null || fail 'round two did not land'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$z" ] || fail 'round two did not land Z'
+  [ "$(cat "$PROJ/approved.txt")" = 'approved Z' ] || fail 'round two did not update the checkout'
+  pass 'a landed round re-latches the next done head, and an unlanded head stays latched'
+}
+
 test_missing_and_malformed_head_refuse() {
   local value
   for value in missing empty abbreviated expression duplicate; do
@@ -311,4 +334,5 @@ SH
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_landed_round_repins_next_done
