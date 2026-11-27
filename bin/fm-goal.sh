@@ -142,7 +142,7 @@
 #   fm-goal.sh brief
 #   fm-goal.sh active [--driven]
 #   fm-goal.sh startable [--with-task-location]
-#   fm-goal.sh export [<id>]
+#   fm-goal.sh export [<id>|--driven]
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
 #   fm-goal.sh driven --since <epoch>
@@ -208,7 +208,9 @@
 # done mark landed through, null when none is folded), project,
 # target, stage, stage_at, since, until (each null when absent), after,
 # waiting_on and stop_on (lists), and the booleans startable, target_reached
-# and landing_hint. It is read-only, takes no lock, and needs jq.
+# and landing_hint, plus orphaned_running (a running mark without a live task).
+# drive_revision counts drive marks; --driven exports only active ON goals.
+# It is read-only, takes no lock, and needs jq.
 # In a secondmate home, startable and export read the local parent's goals and
 # list only items owned by this mate. Dependencies still use the full goal.
 #
@@ -2590,10 +2592,12 @@ cmd_startable() {
 # One active goal as a JSON object on stdout: the record fields, the folded
 # progress counts, and one object per item carrying its projection (see the
 # `export` paragraph in the header for the contract).
-_fm_goal_export_one() {  # <id>
-  local now i startable reached landing stopon items=''
+_fm_goal_export_one() {  # <id> [--driven]
+  local now i startable reached landing orphan stopon marks items=''
   now=$(date +%s)
   _fm_goal_open_record "$1" "$FM_GOAL_VIEW_STATE" || return 1
+  [ "${2-}" != --driven ] || [ "$FM_GOAL_REC_DRIVE" = driven ] || return 1
+  marks=${FM_GOAL_REC_DRIVE_MARKS//[^$'\n']/}
   fm_goal_fold "$1" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$now"
   for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
     [ -z "$FM_GOAL_VIEW_OWNER" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$FM_GOAL_VIEW_OWNER" ] || continue
@@ -2601,6 +2605,7 @@ _fm_goal_export_one() {  # <id>
     if _fm_goal_item_startable "$i"; then startable=true; else startable=false; fi
     if _fm_goal_item_target_reached "$i"; then reached=true; else reached=false; fi
     if _fm_goal_item_landing "$i" "$FM_GOAL_VIEW_STATE"; then landing=true; else landing=false; fi
+    if _fm_goal_item_orphaned_running "$i"; then orphan=true; else orphan=false; fi
     stopon=${FM_GOAL_ITEMS_STOPONS[$i]}
     items="$items$(jq -cn \
       --arg id "${FM_GOAL_ITEMS_IDS[$i]}" --arg owner "${FM_GOAL_ITEMS_OWNERS[$i]}" \
@@ -2612,7 +2617,7 @@ _fm_goal_export_one() {  # <id>
       --arg after "${FM_GOAL_ITEMS_AFTERS[$i]}" --arg waiting "$FM_GOAL_WAITING" \
       --arg until "${FM_GOAL_ITEMS_UNTILS[$i]}" --arg stopon "$stopon" \
       --arg title "${FM_GOAL_ITEMS_TITLES[$i]}" \
-      --argjson startable "$startable" --argjson reached "$reached" --argjson landing "$landing" '
+      --argjson orphan "$orphan" --argjson startable "$startable" --argjson reached "$reached" --argjson landing "$landing" '
       def csv: if . == "" then [] else split(",") end;
       def epoch: if . == "" then null else tonumber end;
       {id: $id, owner: $owner, class: $class, title: $title, state: $state,
@@ -2624,17 +2629,17 @@ _fm_goal_export_one() {  # <id>
        stage_at: ($stage_at | epoch), since: ($since | epoch),
        after: ($after | csv), waiting_on: ($waiting | csv),
        until: ($until | epoch), stop_on: ($stopon | csv),
-       startable: $startable, target_reached: $reached, landing_hint: $landing}')"$'\n'
+       startable: $startable, orphaned_running: $orphan, target_reached: $reached, landing_hint: $landing}')"$'\n'
   done
   [ -z "$FM_GOAL_VIEW_OWNER" ] || [ -n "$items" ] || return 1
   printf '%s' "$items" | jq -cs \
     --arg id "$FM_GOAL_REC_ID" --arg title "$FM_GOAL_REC_TITLE" --arg state "$FM_GOAL_REC_STATE" \
-    --arg drive "$FM_GOAL_REC_DRIVE" \
+    --arg drive "$FM_GOAL_REC_DRIVE" --argjson drive_revision "${#marks}" \
     --arg named_by "$FM_GOAL_REC_NAMED_BY" --arg plan "$FM_GOAL_REC_PLAN" \
     --arg done_when "$FM_GOAL_REC_DONE_WHEN" --argjson started "$FM_GOAL_REC_STARTED_EPOCH" \
     --arg last "${FM_GOAL_FOLD_LAST_AT:-}" '
     {id: $id, title: $title, state: $state, driven: ($drive == "driven"), named_by: $named_by, plan: $plan,
-     done_when: $done_when, started_epoch: $started,
+     done_when: $done_when, started_epoch: $started, drive_revision: $drive_revision,
      last_progress_epoch: (if $last == "" then null else ($last | tonumber) end),
      progress: {total: length, closed: ([.[] | select(.state == "done" or .state == "dropped")] | length),
                 at_target: ([.[] | select(.target_reached)] | length),
@@ -2646,7 +2651,7 @@ cmd_export() {
   local path id goals='' one
   command -v jq >/dev/null 2>&1 || _fm_goal_die 1 'export needs jq'
   [ "$#" -le 1 ] || _fm_goal_usage_error 'export takes at most one goal id'
-  if [ "$#" -eq 1 ]; then
+  if [ "$#" -eq 1 ] && [ "$1" != --driven ]; then
     fm_goal_id_valid "$1" || _fm_goal_usage_error "unsafe goal id: '$1'"
     _fm_goal_read_view || exit 1
     one=$(_fm_goal_export_one "$1") || exit 1
@@ -2655,9 +2660,9 @@ cmd_export() {
     while IFS= read -r path; do
       id=${path##*/}
       id=${id%.goal}
-      one=$(_fm_goal_export_one "$id" 2>/dev/null) || continue
+      one=$(_fm_goal_export_one "$id" "${1-}" 2>/dev/null) || continue
       goals="$goals$one"$'\n'
-    done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE" 2>/dev/null)
+    done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE" "${1-}" 2>/dev/null)
   fi
   printf '%s' "$goals" | jq -cs '{schema: "fm-goal-export.v1", goals: .}'
 }

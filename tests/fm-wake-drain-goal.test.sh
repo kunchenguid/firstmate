@@ -14,6 +14,7 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 GOAL="$ROOT/bin/fm-goal.sh"
+PACE="$ROOT/bin/fm-goal-pace.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-goal-tests)
 
@@ -129,6 +130,102 @@ test_unreadable_goal_never_fails_the_drain() {
   pass "a corrupt goal record is made visible and never fails the drain"
 }
 
+test_pace_reports_idle_on_goals_only() {
+  local dir out snapshot now
+  dir=$(lab_home pace)
+  start_goal "$dir" I1
+  start_goal "$dir" I2
+  lab_env "$dir" "$GOAL" pause I2 >/dev/null || fail 'could not switch I2 OFF'
+  lab_env "$dir" "$GOAL" mark I1 build running --task abandoned -- 'lab orphan' >/dev/null || fail 'could not mark running'
+  mkdir -p "$dir/config"
+  printf '12\n' > "$dir/config/lane-capacity"
+  now=$(date +%s)
+  out="$dir/drain.out"
+  FM_GOAL_PACE_NOW_EPOCH="$now" lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail 'first pace drain failed'
+  grep -Fq 'GOAL I2 (active, drive off)' "$out" || fail 'OFF goal disappeared from the brief'
+  [ "$(grep -c '^PACE ' "$out")" = 1 ] || fail "expected only one PACE line: $(cat "$out")"
+  grep -Fq 'PACE I1: running 0 · startable idle 1 · merge-after ready 0 · waiting 1 (captain 1; oldest ' "$out" \
+    || fail "incorrect first pace line: $(cat "$out")"
+  snapshot="$dir/state/goal-pace.json"
+  jq -e --argjson now "$now" '
+    .schema == "fm-goal-pace.v1" and .host.lane_target == 12 and (.host.free_lanes | type == "number") and
+    (.goals | length == 1 and .[0].id == "I1" and .[0].behind_after == ["verify"] and
+      .[0].idle_minutes == 0 and (.[0].startable_idle | map([.id, .idle_since_epoch])) == [["build", $now]])
+  ' "$snapshot" >/dev/null || fail "incorrect first snapshot: $(cat "$snapshot")"
+
+  # Preload a full window, then prove the next sample keeps only the latest 2048.
+  awk 'NR==1 {for(i=0;i<2048;i++) print}' "$snapshot" > "$dir/state/goal-pace.jsonl"
+  FM_GOAL_PACE_NOW_EPOCH="$((now + 720))" lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail 'second pace drain failed'
+  grep -Fq 'behind 1 · idle 12m' "$out" || fail "idle clock did not advance: $(cat "$out")"
+  jq -es 'length == 2048 and .[-1].goals[0].idle_minutes == 12' "$dir/state/goal-pace.jsonl" >/dev/null \
+    || fail 'history failed to retain the latest bounded window'
+
+  # No OFF sample between these two switches: the drive revision still resets idle.
+  lab_env "$dir" "$GOAL" pause I1 >/dev/null || fail 'pause failed'
+  lab_env "$dir" "$GOAL" resume I1 >/dev/null || fail 'resume failed'
+  FM_GOAL_PACE_NOW_EPOCH="$((now + 780))" lab_env "$dir" "$PACE" > "$out" || fail 'resumed pace failed'
+  grep -Fq 'behind 1 · idle 0m' "$out" || fail 'resume inherited pre-pause idle time'
+  lab_env "$dir" "$GOAL" pause I1 >/dev/null || fail 'could not switch final goal OFF'
+  FM_GOAL_PACE_NOW_EPOCH="$((now + 840))" lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail 'OFF-only pace drain failed'
+  if grep -q '^PACE ' "$out"; then fail 'an OFF goal got a PACE line'; fi
+  jq -e '.goals == []' "$snapshot" >/dev/null || fail 'OFF-only drain retained stale idle rows'
+  pass 'pace detects idle and hard dependencies, bounds history, and never reports OFF goals as idle'
+}
+
+test_pace_samples_the_mate_scope_without_writing_the_parent() {
+  local parent mate out cache cache_dir key now
+  parent=$(lab_home pace-parent)
+  mate=$(lab_home pace-mate)
+  printf 'terp\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$mate/.fm-secondmate-parent"
+  printf '%s\n' 'item [id=mine] [owner=terp]: mate item' 'item [id=theirs] [owner=main]: parent item' > "$parent/items"
+  lab_env "$parent" "$GOAL" start I1 --title 'Shared' --done-when 'Done' --named-by 'go' \
+    --plan plan.md --items-file "$parent/items" >/dev/null || fail 'could not start shared goal'
+  out=$(lab_env "$mate" "$PACE") || fail 'mate pace sample failed'
+  [[ "$out" == 'PACE I1: running 0 · startable idle 1'* ]] || fail "wrong mate pace: $out"
+  jq -e '.goals[0].startable_idle | map(.id) == ["mine"]' "$mate/state/goal-pace.json" >/dev/null \
+    || fail 'mate counted the parent item or did not publish its own snapshot'
+  [ ! -e "$parent/state/goal-pace.json" ] || fail 'mate published into the parent'
+  pass 'a local mate reports only its own goal items and writes only its own pace files'
+
+  # The parent learns worker state through the same cache the fleet table uses.
+  mkdir -p "$mate/bin"
+  printf '# lab home\n' > "$mate/AGENTS.md"
+  printf '%s\n' "- terp - Lab mate (home: $mate; scope: test; projects: ; added 2026-11-27)" > "$parent/data/secondmates.md"
+  cache_dir="$parent/state/secondmate-summary-cache"
+  mkdir -p "$cache_dir"
+  if command -v shasum >/dev/null; then
+    key=$(printf 'terp\n\n%s\n' "$mate" | shasum -a 256 | awk '{print $1}')
+  else
+    key=$(printf 'terp\n\n%s\n' "$mate" | sha256sum | awk '{print $1}')
+  fi
+  cache="$cache_dir/$key.board-input.json"
+  printf 'kind=ship\n' > "$mate/state/mate-lane.meta"
+  lab_env "$parent" "$GOAL" mark I1 mine running --task mate-lane -- 'mate is on it' >/dev/null || fail 'could not mark mate running'
+  now=$(date +%s)
+  jq -nc --arg home "$mate" --argjson now "$now" '
+    {schema:"fm-live-board-input.v1", fm_home:$home, generated_epoch:$now,
+     tasks:[{id:"mate-lane", current_state:{state:"working"}}]}' > "$cache"
+  out=$(lab_env "$parent" "$PACE") || fail 'parent fleet pace failed'
+  [[ "$out" == 'PACE I1: running 1 (terp 1) · startable idle 1'* ]] || fail "cached mate worker was not counted: $out"
+  jq -nc --arg home "$mate" --argjson now "$now" '
+    {schema:"fm-live-board-input.v1", fm_home:$home, generated_epoch:($now+61),
+     tasks:[{id:"mate-lane", current_state:{state:"parked"},
+       last_meaningful_event:{verb:"needs-decision", emitted_at_epoch:($now+1)}}]}' > "$cache"
+  out=$(FM_WORKER_TABLE_NOW_EPOCH="$((now + 61))" FM_GOAL_PACE_NOW_EPOCH="$((now + 61))" lab_env "$parent" "$PACE") \
+    || fail 'parked fleet pace failed'
+  [[ "$out" == 'PACE I1: running 0 · startable idle 1 · merge-after ready 0 · waiting 1 (fleet 1; oldest 1m)'* ]] \
+    || fail "parked mate worker was not counted as waiting: $out"
+  pass 'the parent distinguishes cached running mate work from a parked fleet wait and reports its age'
+
+  mv "$mate/state/mate-lane.meta" "$mate/former-lane.meta"
+  out=$(FM_WORKER_TABLE_NOW_EPOCH="$((now + 62))" FM_GOAL_PACE_NOW_EPOCH="$((now + 62))" lab_env "$parent" "$PACE") \
+    || fail 'orphaned mate pace failed'
+  [[ "$out" == 'PACE I1: running 0 · startable idle 2 · merge-after ready 0 · waiting 0'* ]] \
+    || fail "cached mate row hid the owner-home orphan: $out"
+  pass 'owner-home orphan evidence overrides a still-fresh worker cache row'
+}
+
 test_session_start_carries_the_goal_section() {
   local dir out
   dir=$(lab_home session-start)
@@ -147,4 +244,6 @@ test_goal_section_follows_queued_wake_rows
 test_away_record_drives_named_and_unnamed_goals
 test_mark_moves_an_item_in_the_next_drain
 test_unreadable_goal_never_fails_the_drain
+test_pace_reports_idle_on_goals_only
+test_pace_samples_the_mate_scope_without_writing_the_parent
 test_session_start_carries_the_goal_section

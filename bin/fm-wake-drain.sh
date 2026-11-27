@@ -6,8 +6,8 @@
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, captain
 # calls due to proceed on their deadline default, the GOAL section (every active
-# drive goal's live state and the GOAL DUTY line, read-only from
-# bin/fm-goal.sh brief, which owns its rendering and bounds), the ADMISSION
+# drive goal's live state from bin/fm-goal.sh brief and ON-goal pace from
+# bin/fm-goal-pace.sh), the ADMISSION
 # section (held fresh starts, from bin/fm-admission-queue.sh), and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
@@ -1098,16 +1098,15 @@ cap_outcome_line() {  # <line> <max-bytes>
   OUTCOME_LINE_BYTES=${#OUTCOME_LINE}
 }
 
-# The GOAL section the away prompt and the drive-goal skill promise: every
-# active drive goal's live state, then the GOAL DUTY line, exactly as
-# `bin/fm-goal.sh brief` renders and bounds it (that script owns the format, the
-# named-goal ordering, and the secondmate form). It is read-only and prints
-# nothing when the home has no goal, so a home without goals is unchanged. A
-# brief that cannot run is said on stderr and never fails the drain: a goal
-# render fault must not hide the wakes beside it.
+# Pace is sampled separately so every ON goal gets a line even if the
+# read-only brief collapses its details. A goal readout fault must not hide
+# the wakes beside it or suppress the other readout.
 print_goal_section() {
   local out
   [ -x "$SCRIPT_DIR/fm-goal.sh" ] || return 0
+  if [ -x "$SCRIPT_DIR/fm-goal-pace.sh" ]; then
+    "$SCRIPT_DIR/fm-goal-pace.sh" || printf 'GOAL SKIPPED: pace sample failed; run bin/fm-goal-pace.sh for details\n' >&2
+  fi
   if ! out=$("$SCRIPT_DIR/fm-goal.sh" brief 2>&1); then
     printf 'GOAL SKIPPED: bin/fm-goal.sh brief failed (%s); run it by hand to see the goal state\n' \
       "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" >&2

@@ -103,7 +103,7 @@
 #   projects (clone directory names under projects/),
 #   pressure {level ok|warn|critical|unknown, why[], basis beat|probe|none,
 #     beat_age_s, avail_gb, total_gb, runq_per_core (probe basis: load1 over
-#     cores), swap_rate_pps_1m, mem_stall_pct, load1, on_battery,
+#     cores), swap_rate_pps_1m, mem_stall_pct, load1, cores, on_battery,
 #     disks[{label, free_gb}]},
 #   uptime_s, boot_id, boots[] (boot epochs, last 10: the current boot is
 #     appended when boot_id differs from the previously published document's),
@@ -903,7 +903,7 @@ doc=$(jq -n \
   --arg target "$target" --arg cap_status "$cap_status" --arg projects "$project_names" \
   --arg level "$level" --arg why "$pub_why" --arg basis "$basis" --arg beat_age "$beat_age_s" \
   --arg avail "$avail_gb" --arg total "$total_gb" --arg runq "$runq_per_core" \
-  --arg swap "$swap_rate" --arg stall "$mem_stall" --arg load1 "$p_load1" \
+  --arg swap "$swap_rate" --arg stall "$mem_stall" --arg load1 "$p_load1" --arg cores "${cores#unknown}" \
   --arg battery "$on_battery" --arg disks "$disks" \
   --arg uptime "$uptime_s" --arg boot_id "$boot_id" --argjson prev_boots "$prev_boots" \
   --arg new_boot "$new_boot" --argjson kept "$BOOTS_KEPT" --arg watcher_age "$watcher_age" \
@@ -919,7 +919,7 @@ doc=$(jq -n \
    projects: ($projects | lines),
    pressure: {level: $level, why: ($why | lines), basis: $basis, beat_age_s: ($beat_age | num),
      avail_gb: ($avail | num), total_gb: ($total | num), runq_per_core: ($runq | num),
-     swap_rate_pps_1m: ($swap | num), mem_stall_pct: ($stall | num), load1: ($load1 | num),
+     swap_rate_pps_1m: ($swap | num), mem_stall_pct: ($stall | num), load1: ($load1 | num), cores: ($cores | num),
      on_battery: (if $battery == "" then null else $battery == "true" end),
      disks: [$disks | lines[] | split("\t") | {label: .[0], free_gb: (.[1] // "" | num)}]},
    uptime_s: ($uptime | num), boot_id: (if $boot_id == "" then null else $boot_id end),
