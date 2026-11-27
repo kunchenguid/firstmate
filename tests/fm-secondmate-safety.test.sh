@@ -1725,31 +1725,43 @@ EOF
 }
 
 test_secondmate_teardown_sweeps_process_events_before_removal() {
-  local home subhome subhome_abs fakebin log sweep_log
-  home="$TMP_ROOT/procevent-teardown-home"
-  subhome="$TMP_ROOT/procevent-teardown-subhome"
-  sweep_log="$TMP_ROOT/procevent-teardown-sweep.log"
-  mkdir -p "$home/state" "$home/data" "$subhome/state/procevent"
-  mark_firstmate_home "$subhome"
-  printf 'domain\n' > "$subhome/.fm-secondmate-home"
-  printf 'adapter=lavish\n' > "$subhome/state/procevent/source.source"
-  printf 'runner\n' > "$subhome/state/procevent/source.runner"
-  install_fake_process_event_sweep "$subhome" "$sweep_log"
-  subhome_abs=$(cd "$subhome" && pwd -P)
-  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
-  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
-  fakebin=$(make_fake_tmux "$TMP_ROOT/procevent-teardown-fake")
-  log="$TMP_ROOT/procevent-teardown-fake/tmux.log"
+  local home subhome control fakebin log out mode claims source_before
+  for mode in 775 700; do
+    home="$TMP_ROOT/procevent-teardown-$mode-home"
+    subhome="$TMP_ROOT/procevent-teardown-$mode-subhome"
+    control="$home/state/parent-route"
+    claims="$TMP_ROOT/procevent-teardown-$mode-claims"
+    source_before="$TMP_ROOT/procevent-teardown-$mode.source.before"
+    mkdir -p "$control/procevent" "$home/data" "$subhome/state"
+    chmod "$mode" "$control"
+    chmod 700 "$subhome/state"
+    mark_firstmate_home "$subhome"
+    printf 'domain\n' > "$subhome/.fm-secondmate-home"
+    cp -R "$ROOT/bin/." "$subhome/bin/"
+    FM_HOME="$subhome" FM_STATE_OVERRIDE="$subhome/state" FM_PROCEVENT_CLAIM_ROOT="$claims" \
+      "$subhome/bin/fm-procevent.sh" register lavish source -- "$(command -v true)" >/dev/null \
+      || fail "could not register the retiring home's source"
+    cp "$subhome/state/procevent/source.source" "$source_before"
+    cp "$source_before" "$control/procevent/source.source"
+    fm_write_secondmate_meta "$control/domain.meta" "$subhome"
+    printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+    fakebin=$(make_fake_tmux "$TMP_ROOT/procevent-teardown-$mode-fake")
+    log="$TMP_ROOT/procevent-teardown-$mode-fake/tmux.log"
 
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
-    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-teardown-fake/pane.txt" \
-    FM_FAKE_PROCEVENT_SWEEP_LOG="$sweep_log" \
-    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>/dev/null \
-    || fail "normal secondmate teardown failed after process-event sweep"
-  grep -Fx "$subhome_abs" "$sweep_log" >/dev/null || fail "normal secondmate teardown did not invoke the child home's sweep"
-  [ ! -d "$subhome" ] || fail "normal secondmate teardown retained a successfully swept home"
-  [ ! -e "$home/state/domain.meta" ] || fail "normal swept teardown retained parent evidence"
-  pass "normal secondmate teardown sweeps process events before removal"
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$control" \
+      FM_PROCEVENT_CLAIM_ROOT="$claims" FM_FAKE_TMUX_LOG="$log" \
+      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/procevent-teardown-$mode-fake/pane.txt" \
+      "$ROOT/bin/fm-teardown.sh" domain 2>&1) \
+      || fail "secondmate teardown failed with foreign state mode $mode: $out"
+    printf '%s\n' "$out" | grep -F 'swept: attempted=1' >/dev/null \
+      || fail "normal secondmate teardown did not sweep its source"
+    [ ! -d "$subhome" ] || fail "normal secondmate teardown retained a successfully swept home"
+    [ ! -e "$control/domain.meta" ] || fail "normal swept teardown retained parent evidence"
+    cmp -s "$source_before" "$control/procevent/source.source" \
+      || fail "secondmate teardown changed the parent source"
+    [ "$(file_mode "$control")" = "$mode" ] || fail "secondmate teardown changed the parent state permissions"
+  done
+  pass "normal secondmate teardown sweeps its own state despite a foreign state override"
 }
 
 test_secondmate_teardown_refuses_process_events_without_sweep_script() {
