@@ -556,6 +556,7 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Benign live-watcher cycle ends.
 - One-notice failure episodes.
 - Exit-2 translation.
+- Host-off rewakes of actionable wakes under a `pending:handling` or `announced:handling` recovery marker, bound to that recovery generation, and under no marker at all, recording no recovery generation.
 - The handling successor an ended attached cycle starts with the closed arm as its predecessor and that outlives the rewake.
 - An unconfirmed successor reported in the banner without withholding the wake.
 - The [session-bound HUP/TERM/INT failure handoff](turnend-guard.md#failure-progression-and-block-budget) and replacement-session notice isolation.
