@@ -236,7 +236,9 @@
 # An unreachable owner is not checked and does not count as ready. Captain
 # items are outside the count, but a captain item gating drive work via after
 # or merge-after needs a captain-reason attesting to a captain-only action:
-# money, destructive, security, geris-prod, or captain-test. Do not use these
+# money, destructive, security, geris-prod, or captain-test (own test or release).
+# Marking a classified captain item done requires its linked task to carry the
+# captain's own recorded result in the owning backlog. Do not use these
 # as substitutes for writing a brief. `ready` returns 1 on any gap. `start`
 # and `edit` warn about those same gaps, or refuse with --require-briefs.
 #
@@ -2604,6 +2606,31 @@ _fm_goal_confirm_check() {  # <idx> <registry-data>
   note="check confirmed $digest: $note"
 }
 
+# A classified personal action needs an explicit result from its own held task.
+# Probe a registered owner only, not a task with the same id in another home.
+_fm_goal_captain_done() {  # <item idx> <goal data-dir>
+  local owner=${FM_GOAL_ITEMS_OWNERS[$1]} home data
+  case "$owner" in
+    main|captain)
+      home=${FM_SECONDMATE_PARENT_HOME:-$FM_GOAL_HOME}
+      data=$2
+      ;;
+    *)
+      home=$(_fm_goal_item_task_home "$1" "$2") || return 1
+      if [ -n "$home" ]; then
+        data=$home/data
+      else
+        [ "${FM_PARENT_CHANNEL_ID-}" = "$owner" ] || return 1
+        home=$FM_GOAL_HOME
+        data=$FM_GOAL_DATA
+      fi
+      ;;
+  esac
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    bash "$FM_GOAL_DIR/fm-captain-hold.sh" answered "$task"
+}
+
 # Bind completion to the folded task. A drive item that ships must still
 # name the PR it landed through, including on an idempotent re-mark.
 _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
@@ -2615,13 +2642,29 @@ _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
     idx=$(_fm_goal_index_of "$2") || return 1
     pending=$(_fm_goal_merge_pending "$idx")
     [ -z "$pending" ] || { fm_goal_log "completion refused for $1/$2: merge-after pending: $pending"; return 1; }
+    if [ "${FM_GOAL_ITEMS_CLASSES[$idx]}" = captain ]; then
+      [ "$confirm_check" -eq 0 ] || { fm_goal_log '--confirm-check needs a report-only check item'; return 1; }
+      if [ -n "${FM_GOAL_ITEMS_CAPTAIN_REASONS[$idx]}" ]; then
+        [ -z "$task" ] || [ "$task" = "${FM_GOAL_ITEMS_TASKS[$idx]}" ] || {
+          fm_goal_log "completion refused for $1/$2: --task cannot replace the linked captain hold"
+          return 1
+        }
+        task=${FM_GOAL_ITEMS_TASKS[$idx]}
+        if [ -z "$task" ] || ! _fm_goal_captain_done "$idx" "${5:-$FM_GOAL_DATA}"; then
+          fm_goal_log "completion refused for $1/$2: record the captain's own result on the linked held task in its owning home first"
+          return 1
+        fi
+      else
+        [ -n "$task" ] || task=${FM_GOAL_ITEMS_TASKS[$idx]}
+      fi
+      return 0
+    fi
     [ -n "$task" ] || task=${FM_GOAL_ITEMS_TASKS[$idx]}
     if _fm_goal_item_report_check "$idx"; then
       _fm_goal_confirm_check "$idx" "${5:-$FM_GOAL_DATA}"
       return $?
     fi
     [ "$confirm_check" -eq 0 ] || { fm_goal_log '--confirm-check needs a report-only check item'; return 1; }
-    [ "${FM_GOAL_ITEMS_CLASSES[$idx]}" = drive ] || return 0
     # A PR an earlier done mark folded for this item already records the
     # landing, so a re-mark need not name it again.
     [ -z "${FM_GOAL_ITEMS_PRS[$idx]}" ] || return 0

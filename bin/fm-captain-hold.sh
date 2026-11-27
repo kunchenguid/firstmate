@@ -38,6 +38,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh answered <task-id>  (read-only; a completed call with the captain's own answer)
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -125,6 +126,13 @@
 # purpose carries a link, backtick or GUID, naming that reader.
 # A context stored before this rule stays valid and answerable, and the live
 # board marks it as needing a plain-language explanation.
+# PERSONAL ACTION: set `action: true` for a step only the captain can take.
+# Give the destination by its familiar name in `about`; use `question` for
+# the ordered steps and exact result to send back (include a link there if
+# needed); use `purpose` for what waits and what the crew can keep doing.
+# An action needs a question and can never carry a recommendation or deadline
+# default. `answered` checks the completed call's latest resolution without
+# printing the answer. It does not judge whether the reported result passed.
 # DEADLINE DEFAULT: a context may also carry scope (a nonempty unique list from
 # product, copy, outward-facing, irreversible, money, security),
 # default_eligible (exactly "small-reversible") and exactly one deadline:
@@ -967,6 +975,7 @@ load_question_context() {  # <path>; sets QUESTION_CONTEXT
   # Name the deadline-default refusal; malformed input falls through to the codec.
   case "$(jq -Rrs -L "$SCRIPT_DIR" 'include "fm-captain-question-context";
     fm_question_json_decode | fm_question_default_problem // "ok"' "$1" 2>/dev/null)" in
+    action) fail "a personal action can never carry a deadline default; it waits for the captain" ;;
     marker) fail "a deadline default needs default_eligible set to exactly \"small-reversible\" together with default_date" ;;
     missing) fail "a deadline default needs all of recommendation, default_date and scope" ;;
     date) fail "a deadline default needs exactly one of default_date (a real YYYY-MM-DD date) or default_at (a real YYYY-MM-DDTHH:MM:SSZ UTC time)" ;;
@@ -2933,6 +2942,25 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
+command_answered() {  # <task-id>
+  local id=${1:-} body leader digest mode line
+  [ "$#" -eq 1 ] || { usage >&2; return 2; }
+  validate_slug task-id "$id"
+  task_show "$id" || return 1
+  [ "$(show_field "$TASK_SHOW_OUTPUT" state)" = 'done' ] || return 1
+  body=$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)") || return 1
+  # Check only the latest resolution header; historical answers, default words
+  # and evidence-backed reconciliation must not vouch for a personal result.
+  {
+    IFS= read -r leader && IFS= read -r digest && IFS= read -r mode && IFS= read -r line || return 1
+    [ "$leader" = 'Resolution recorded by fm-captain-hold.' ] || return 1
+    [[ "$digest" =~ ^Decision\ digest:\ [a-f0-9]{64}$ ]] || return 1
+    case "$mode" in 'Resolution mode: answered'|'Resolution mode: repaired') ;; *) return 1 ;; esac
+    case "$line" in 'Captain answer lifecycle: '*) IFS= read -r line || return 1 ;; esac
+    [ -z "$line" ] && IFS= read -r line && [ "$line" = 'Captain decision:' ]
+  } <<< "$body"
+}
+
 case "${1:-}" in
   hold) shift; command_hold "$@" ;;
   answer) shift; command_answer "$@" ;;
@@ -2945,6 +2973,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  answered) shift; command_answered "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   defaults-due) shift; command_defaults_due "$@" ;;
   stop-clock) shift; command_stop_clock "$@" ;;

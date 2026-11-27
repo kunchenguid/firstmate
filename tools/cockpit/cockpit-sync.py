@@ -457,7 +457,8 @@ def build_goals(goals, homes, deciding_tasks, samples, fresh):
         for item in goal['items']:
             name, home, meta = find_task(homes, item['task'], item['owner']) if item.get('task') else (None, None, None)
             lines = status_lines(home, item['task']) if home else []
-            url = item_pr_url(item, meta, lines)
+            # A linked work PR is not evidence that the captain took his own step.
+            url = item_pr_url(item, meta, lines) if item['class'] != 'captain' else None
             found[goal['id'], item['id']] = (name, home, meta, lines, url)
             if meta is not None:
                 wanted.append((home, item['task']))
@@ -629,10 +630,10 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
                 have[field] = have[field] or new[field]
             have['blocks'] += [b for b in new['blocks'] if b not in have['blocks']]
             have['sources'] += [s for s in new['sources'] if s not in have['sources']]
-            if 'steps' in new:
+            if 'steps' in new and not have.get('personal_action'):
                 have.setdefault('steps', {}).update(new['steps'])
-                if new.get('other_project'):
-                    have['other_project'] = True
+            if new.get('other_project'):
+                have['other_project'] = True
         for key in keys:
             buckets[key] = old
             if key != old['entry']['key'] and key not in old['entry']['aliases']:
@@ -672,12 +673,16 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
             task = row['id']
             body = record.get('body', '')
             context = question_context(body)
-            new = entry(task, context.get('question') or record.get('title', task),
-                        context.get('about') or record.get('hold_reason', ''),
+            action = context.get('action') is True
+            title = record.get('title', task) if action else context.get('question') or record.get('title', task)
+            new = entry(task, title, context.get('about') or record.get('hold_reason', ''),
                         context.get('question', ''), context.get('options') or [], context.get('recommendation'),
                         f'captain hold {task} ({name})')
+            if action:
+                new['personal_action'] = True
+                new['question'] = plain(context.get('question', ''), 600)
             if context.get('purpose'):
-                new['about'] = plain(new['about'] + ' Waarom het telt: ' + context['purpose'], 900)
+                new['about'] = plain(new['about'] + ' Waarom het telt: ' + context['purpose'], 1220 if action else 900)
             authored = context.get('question') or record.get('hold_reason') or record.get('title') or task
             new['steps'] = {task: [line for line in authored.splitlines() if line.strip()] or [task]}
             new['other_project'] = other

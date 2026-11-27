@@ -347,8 +347,9 @@ def render_captain_steps(page, truth):
             attr = '' if existing else f' data-cockpit-captain="{html.escape(entry["key"], quote=True)}"'
             lis = ''.join(f'<li data-cockpit-step="{html.escape(key, quote=True)}">{html.escape(text)}</li>'
                           for key, texts in steps.items() for text in texts)
+            context = f'<p>{html.escape(entry["about"])}</p>' if entry.get('personal_action') else ''
             cards[entry.get('group') == 'other_projects'].append(
-                f'<li{attr}><b>{html.escape(entry["title"])}</b><ol>{lis}</ol></li>')
+                f'<li{attr}><b>{html.escape(entry["title"])}</b>{context}<ol>{lis}</ol></li>')
     patches = []
     for foreign, rows in cards.items():
         if not rows:

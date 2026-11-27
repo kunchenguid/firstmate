@@ -719,8 +719,10 @@ test_target_close_and_brief() {
 
 test_report_only_check() {
   fixture
+  local classified=''
+  if command -v tasks-axi >/dev/null 2>&1; then classified=' [captain-reason=captain-test]'; fi
   printf '%s\n' \
-    'item [id=sign] [owner=main] [class=captain] [captain-reason=captain-test]: personal test' \
+    "item [id=sign] [owner=main] [class=captain] [task=personal-test]$classified: personal test" \
     'item [id=verify] [owner=main] [task=qa] [after=sign] [project=miko] [target=deployed]: verify done_when' \
     'item [id=ship] [owner=main] [task=builder] [merge-after=verify]: cannot merge after a report' \
     'spec verify {"section":"Acceptance","scope":"Verify small e2e at target","evidence":"Result and transcript","kind":"check"}' \
@@ -739,6 +741,15 @@ test_report_only_check() {
   goal mark I1 sign dropped -- 'not answered' >/dev/null
   expect_rc 1 goal mark I1 verify 'done' --confirm-check -- 'owner reviewed'
   assert_grep 'unmet after items: sign' "$TMP_ROOT/out" 'a dropped personal test is not sign-off'
+  if [ -n "$classified" ]; then
+    printf '## In flight\n\n## Queued\n\n## Done\n' > "$H/data/backlog.md"
+    local hold="$ROOT/bin/fm-captain-hold.sh"
+    FM_HOME="$H" FM_ROOT_OVERRIDE="$H" FM_STATE_OVERRIDE="$H/state" FM_DATA_OVERRIDE="$H/data" \
+      bash "$hold" hold personal-test --title 'Run personal test' --category captain-only-fact --reason 'Captain runs own test' >/dev/null
+    printf 'My personal test passed.\n' > "$H/personal-result"
+    FM_HOME="$H" FM_ROOT_OVERRIDE="$H" FM_STATE_OVERRIDE="$H/state" FM_DATA_OVERRIDE="$H/data" \
+      bash "$hold" answer personal-test --decision-file "$H/personal-result" >/dev/null
+  fi
   goal mark I1 sign 'done' -- 'captain ran and passed personal test' >/dev/null
   expect_rc 1 goal mark I1 verify 'done' --confirm-check --stage deployed -- 'owner reviewed'
   assert_grep 'separately recorded stage at target' "$TMP_ROOT/out" 'short of target; cannot assert target in the confirmation'

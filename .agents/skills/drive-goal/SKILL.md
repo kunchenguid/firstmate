@@ -26,10 +26,12 @@ Plan parallel by default: use `merge-after` for dependencies that only order lan
 Make the last item the done-when check itself, with explicit evidence, because closing requires every item done or dropped.
 When the plan names where an item must end up, give it `project=<project>` and `target=<stage>`, where the stage is a rung of that project's home-local ladder (`config/stage-ladders/<project>`), so the drive carries it past the merge.
 `until=<epoch>` stops an item being startable after that time, and `stop-on=<words>` carries the plan's stop conditions to whoever drives it.
-Class an item `captain` only for money, destructive or irreversible steps, real security, or Geris PROD; otherwise use `drive` within existing authority.
+Use the personal-action classification in `captain-hold-lifecycle`; give each such goal item `class=captain` and its `captain-reason` from `bin/fm-goal.sh --help`.
 The classification does not waive the away limits' written analyse-first rule or any approval gate.
-Split the captain-only step from build work that can proceed without it, and never make unrelated items depend on it.
-A `captain` item is never advanced while the captain is away; when one is reached, hold it under the captain-hold lifecycle with its category named in the hold reason.
+Split preparation into drive items and leave unrelated work without an edge to the personal action.
+In the owning home, record one held task for the personal step with the personal-action context and `close: done`, and link its exact id with `task=` or `mark open --task` so the cockpit joins the goal item to that one card.
+The answer key is the held task id, not a second question under the goal item id.
+Only the owner marks the goal action done after recording the captain's actual result on that task and checking it satisfies the planned evidence; a recommendation, a landing, or an unrelated resolved status is not a result.
 When the plan changes later, `bin/fm-goal.sh edit <id> --items-file <path>` keeps every mark, and an item dropped while it still has marks shows as unplanned drift in `show`.
 
 ## Driving it

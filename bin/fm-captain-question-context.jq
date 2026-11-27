@@ -32,6 +32,7 @@ def fm_question_date:
 # never both.
 def fm_question_default_problem:
   if (has("default_eligible") or has("default_date") or has("default_at")) | not then null
+  elif .action == true then "action"
   elif .default_eligible != "small-reversible" then "marker"
   elif .recommendation == null or (.default_date == null and .default_at == null)
     or ((.scope // []) == []) then "missing"
@@ -71,13 +72,14 @@ def fm_question_default_pending:
   end;
 def fm_question_valid($stored):
   type == "object"
-  and ((keys - (["schema","close","about","purpose","question","options","recommendation","subject","scope","default_eligible","default_date","default_at"]
+  and ((keys - (["schema","close","about","purpose","question","options","recommendation","subject","scope","action","default_eligible","default_date","default_at"]
     + if $stored then ["lifecycle"] else [] end)) | length == 0)
   and .schema == "fm-captain-question.v1" and (.close | IN("done","release"))
   and (if $stored then (.lifecycle | fm_question_lifecycle_valid) else true end)
   and (.about == null or (.about | fm_question_text(600; false)))
   and (.purpose == null or (.purpose | fm_question_text(600; false)))
   and (.question == null or (.question | fm_question_text(600; true)))
+  and (.action == null or (.action == true and .question != null and .recommendation == null))
   and ((.options // []) | type == "array" and length <= 12
     and all(.[]; type == "object" and (keys == ["label","value"] or keys == ["detail","label","value"])
       and (.value | fm_question_slug(64)) and .value != "reconcile"
@@ -117,6 +119,7 @@ def fm_question_normalize:
   {schema,close,options:(.options // []),recommendation:(.recommendation // null),subject:(.subject // null)}
   + (if .about == null then {} else {about} end) + (if .purpose == null then {} else {purpose} end)
   + (if .question == null then {} else {question} end)
+  + (if .action == true then {action} else {} end)
   + (if .scope == null then {} else {scope} end)
   + if .default_eligible == null then {}
     elif .default_at != null then {default_eligible,default_at} else {default_eligible,default_date} end;

@@ -5830,6 +5830,7 @@ test_deadline_default_due_and_applied_as_not_the_captains_words() {
     assert_contains "$show" 'proceeded on its recommendation: Go live (go)' "record does not state the default"
     if printf '%s' "$show" | grep -F 'Captain decision:' >/dev/null; then fail "default was presented as the captain's decision"; fi
     assert_contains "$show" 'state: done' "default did not close the call"
+    if run_captain "$home" answered sample-due; then fail "the default counted as the captain's own answer"; fi
     run_captain "$home" verify sample-due >/dev/null 2>&1 || true
     if FM_CAPTAIN_HOLD_NOW=2026-08-02T00:00:00Z run_captain "$home" answer sample-due --deadline-default >/dev/null 2>&1; then
       fail "a closed call accepted the default again"

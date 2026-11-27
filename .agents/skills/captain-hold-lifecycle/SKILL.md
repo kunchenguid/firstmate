@@ -1,7 +1,7 @@
 ---
 name: captain-hold-lifecycle
 description: >-
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
+  Load whenever development or goal work waits on something only the captain can do or answer, before treating an investigation or review as complete, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
 user-invocable: false
 metadata:
   internal: true
@@ -25,6 +25,9 @@ Write that context for a manager who did not build the work and must understand 
 When the live board marks an active call "Needs a plain-language explanation", backfill it before relaying the call: re-hold the same task id with a context file that adds the missing about, purpose and option detail and changes nothing else, which keeps the call's lifecycle.
 Register or re-hold through `bin/fm-captain-hold.sh hold`, which is idempotent per task id and requires a captain-owned category and a reason for every new lifecycle; its `--help` owns the categories and legacy compatibility.
 Apply ASK LESS (`data/captain-shared.md`): choose and report reversible in-plan steps and ordinary read-only checks instead of parking them for the captain, unless a genuine captain-owned gate applies.
+A personal action is money, an irreversible action, real security, Geris PROD, or the captain's own test or release such as Miko's “Zet live”; a routine sign-off or delegable check is not one.
+For each such wait, in ordinary development as well as goal driving, put the single held task on the owning cockpit as soon as the need is known; see `bin/fm-captain-hold.sh --help` for its personal-action context.
+Separate the crew's preparation from the personal step so the crew can keep going while the card is unanswered.
 Route captain-facing calls through the owning board and parent channel, never only to a secondmate's pane.
 Once a worker's only remaining step is that recorded captain decision, exit its session with `bin/fm-control.sh <id> exit`, which keeps its worktree and unlanded work, and relaunch it when the answer lands; never keep an idle worker running just to wait.
 After inventorying the whole report and review surface, firstmate runs `bin/fm-captain-hold.sh complete` with every captain-held task id, or with `--none` when nothing waits on the captain.

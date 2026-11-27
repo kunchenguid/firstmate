@@ -863,4 +863,74 @@ grep -Fq 'missing or stale captain steps: demo/check' "$TMP_ROOT/scope.out" || f
 if grep -Fq 'id="doel-demo"' "$scoped"; then fail 'unscoped project got a second goal card'; fi
 pass 'cockpit routes other projects to Overige projecten with exact record steps'
 
+# A personal action uses one existing held-task key; it gates only the steps
+# that depend on its result, at the edge (start or merge) that needs it.
+SYNC_HOME="$TMP_ROOT/action-home"
+mkdir -p "$SYNC_HOME/state" "$SYNC_HOME/data"
+printf '## In flight\n\n## Queued\n\n## Done\n' > "$SYNC_HOME/data/backlog.md"
+printf '%s\n' \
+  'item [id=check] [owner=main] [class=captain] [captain-reason=captain-test] [task=demo-personal]: Check the four tabs' \
+  'item [id=triage] [owner=main] [after=check]: Triage the reported failure' \
+  'item [id=package] [owner=main] [task=demo-package] [merge-after=check]: Package the release' \
+  'item [id=notes] [owner=main]: Draft release notes' > "$TMP_ROOT/action-items"
+in_sync_home bash "$ROOT/bin/fm-goal.sh" start demo-action --title 'Demo check' --done-when 'Demo verified' \
+  --named-by 'verify Demo' --plan plan.md --items-file "$TMP_ROOT/action-items" >/dev/null
+cat > "$TMP_ROOT/action-context.json" <<'JSON'
+{"schema":"fm-captain-question.v1","close":"done","action":true,"about":"Go to Organisation in the Demo site.","question":"1. Sign in with your own login.\n2. Open Organisation.\n3. Check each of the four tabs.\nReport the failing tab or say all four work.","purpose":"Triage waits for your result and the release cannot land yet. Packaging and release notes continue."}
+JSON
+hold_action() {
+  in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" hold demo-personal --title 'Check the four Demo tabs' \
+    --category captain-only-fact --reason 'Only your login can verify the four tabs.' --context-file "$1"
+}
+jq '. + {default_eligible:"small-reversible",default_date:"2000-01-01",scope:["copy"]}' \
+  "$TMP_ROOT/action-context.json" > "$TMP_ROOT/action-with-default.json"
+if hold_action "$TMP_ROOT/action-with-default.json" > "$TMP_ROOT/action-default.out" 2>&1; then fail 'personal action accepted a default'; fi
+grep -q 'a personal action can never carry a deadline default' "$TMP_ROOT/action-default.out" || fail 'no personal action refusal'
+hold_action "$TMP_ROOT/action-context.json" >/dev/null
+printf '%s\n' 'kind=ship' 'pr=https://github.com/demo/repo/pull/7' > "$SYNC_HOME/state/demo-personal.meta"
+printf 'done\n' > "$SYNC_HOME/state/demo-personal.fake"
+in_sync_home bash "$ROOT/bin/fm-goal.sh" mark demo-action check 'done' -- 'assume the captain approved' \
+  > "$TMP_ROOT/action-mark.out" 2>&1 && fail 'goal accepted a personal result without an owner answer'
+grep -q 'record the captain.s own result' "$TMP_ROOT/action-mark.out" || fail 'no missing result refusal'
+in_sync_home bash "$ROOT/bin/fm-goal.sh" can-merge demo-package >/dev/null 2>&1 && fail 'landing passed before personal action'
+sync > "$TMP_ROOT/action-sync.out" 2>&1 || fail "action sync failed: $(<"$TMP_ROOT/action-sync.out")"
+python3 -I - "$TRUTH" <<'PY' || fail 'personal action truth is wrong'
+import json, sys
+truth = json.load(open(sys.argv[1]))
+rows = [e for bucket in truth['section1'].values() for e in bucket]
+assert len(rows) == 1 and rows[0]['key'] == 'demo-personal', rows
+card = rows[0]
+assert 'demo-action/check' in card['aliases'], card
+assert card['title'] == 'Check the four Demo tabs', card
+assert 'Organisation in the Demo site' in card['about'], card
+assert 'Packaging and release notes continue' in card['about'], card
+assert card['question'].index('1. Sign in') < card['question'].index('2. Open Organisation') < card['question'].index('3. Check'), card
+assert 'Report the failing tab or say all four work.' in card['question'], card
+assert not card['recommendation'], card
+assert list(card['steps']) == ['demo-personal'], card['steps']
+items = {i['id']: i['status'] for i in truth['goals'][0]['items']}
+assert items['check'] == 'open-captain' and items['triage'] == 'waiting', items
+assert items['package'] == items['notes'] == 'startable', items
+PY
+ACTION_PAGE="$TMP_ROOT/action.html"
+printf '%s\n' '<section id="captain-door"><form data-lavish-question="demo-personal"><textarea></textarea></form></section><h2 id="doelen">Doelen</h2>' > "$ACTION_PAGE"
+python3 -I "$TOOLS/goal_drive.py" --truth "$TRUTH" --page "$ACTION_PAGE" || fail 'personal action card did not render'
+grep -Fq 'Triage waits for your result and the release cannot land yet. Packaging and release notes continue.' "$ACTION_PAGE" \
+  || fail 'personal action card did not say what waits and what continues'
+grep -Fq 'data-cockpit-step="demo-personal">Report the failing tab or say all four work.</li>' "$ACTION_PAGE" \
+  || fail 'personal action card did not show what to report'
+if grep -Fq 'data-cockpit-captain="demo-personal"' "$ACTION_PAGE"; then fail 'personal action duplicated the keyed form'; fi
+printf 'demo-action/check\tall four work\tDemo tab check\n' \
+  | in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" answers --any-origin --source 'fixture' >/dev/null
+lifecycle=$(in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" open demo-personal --identity) \
+  || fail 'the alias incorrectly resolved the held task'
+printf 'demo-personal\tall four work\tDemo tab check\tdone\t%s\n' "$lifecycle" \
+  | in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" answers --any-origin --source 'fixture' >/dev/null
+in_sync_home bash "$ROOT/bin/fm-goal.sh" mark demo-action check 'done' -- 'Owner checked the recorded result' >/dev/null
+in_sync_home bash "$ROOT/bin/fm-goal.sh" can-merge demo-package >/dev/null
+sync > "$TMP_ROOT/action-sync.out" 2>&1 || fail "post-answer sync failed: $(<"$TMP_ROOT/action-sync.out")"
+jq -e '([.section1[][]] | length == 0) and any(.goals[].items[]; .id == "triage" and .status == "startable")' \
+  "$TRUTH" >/dev/null || fail 'the single answer did not retire the card and unblock triage'
+pass 'personal action: one owner card and answer, no default, independent work starts, explicit result clears only its gates'
+
 echo "all cockpit-tools tests passed"
