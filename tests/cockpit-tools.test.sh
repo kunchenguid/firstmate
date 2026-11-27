@@ -332,6 +332,57 @@ PY
 cp "$preview" "$TMP_ROOT/goals-before.html"
 python3 -I "$TOOLS/goal_drive.py" --truth "$preview.truth.json" --page "$preview" || fail 'truth rebuild failed'
 cmp -s "$preview" "$TMP_ROOT/goals-before.html" || fail 'rebuild duplicated or changed goal controls'
+# Include beta in the cache to check that the live OFF switch wins.
+pace_file="$GOAL_HOME/state/goal-pace.json"
+write_pace() {
+  goal export | jq -e --argjson at "$(($(date +%s) - $1))" --argjson idle "$2" '
+    {schema:"fm-goal-pace.v1", generated_epoch:$at, goals:[.goals[] |
+      {id, started_epoch, drive_revision, running_by_home:{main:1, mate:1},
+       startable_idle:[{id:"check"}], merge_after_ready:[{id:"orphan"}],
+       waiting_by_kind:{fleet:{count:2}, pr:{count:1}}, idle_minutes:$idle}]}' > "$pace_file"
+}
+pace_preview="$TMP_ROOT/pace.html"
+refresh_pace() { run_refresh COCKPIT_GOAL_HOME="$GOAL_HOME" COCKPIT_OUT="$pace_preview" >/dev/null; }
+for minutes in 10 11; do
+  write_pace 0 "$minutes" || fail 'could not write pace fixture'
+  refresh_pace || fail 'fresh pace refresh failed'
+  python3 - "$pace_preview" "$minutes" <<'PY' || fail 'incorrect pace marker or warning'
+from pathlib import Path
+import re
+import sys
+from xml.etree import ElementTree
+
+page = Path(sys.argv[1]).read_text()
+minutes = int(sys.argv[2])
+rows = ElementTree.fromstring(re.search(r'<ul id="fm-goal-kpis".*?</ul>', page, re.S)[0])
+markers = rows.findall('.//span[@class="fm-goal-pace"]')
+assert len(markers) == 1 and rows[0].find('.//span[@class="fm-goal-pace"]') is markers[0]
+assert rows[1].find('.//span[@class="fm-goal-pace"]') is None
+card = re.search(r'<div id="doel-alpha"[^>]*>.*?<details', page, re.S)[0]
+card_marker = ElementTree.fromstring(re.search(r'<p [^>]*class="fm-goal-pace".*?</p>', card)[0])
+for marker in (markers[0], card_marker):
+    assert ''.join(marker.itertext()) == f'Tempo: 2 actief · 2 stil ({minutes}m) · 3 wacht'
+    assert marker[1].get('class') == ('fm-goal-pace-warning' if minutes > 10 else None)
+assert page.count('class="fm-goal-pace"') == 2, 'extra marker, including possible OFF card leak'
+PY
+done
+cp "$pace_preview" "$TMP_ROOT/previous-pace.html"
+write_pace 3600 11 || fail 'could not write stale pace fixture'
+refresh_pace || fail 'stale pace refresh failed'
+cmp -s "$preview" "$pace_preview" || fail 'stale pace differs from absent pace'
+if bash "$TOOLS/cockpit-sync.sh" --verify-page "$TMP_ROOT/previous-pace.html" \
+  --out "$pace_preview.truth.json" > "$TMP_ROOT/stale-pace.out"; then
+  fail 'a stale card pace marker passed verification'
+fi
+grep -Fq 'unexpected pace marker: fm-goal-pace-alpha' "$TMP_ROOT/stale-pace.out" || fail 'stale card pace not reported'
+python3 -I "$TOOLS/goal_drive.py" --truth "$pace_preview.truth.json" --page "$TMP_ROOT/previous-pace.html" \
+  || fail 'could not rebuild a page with stale pace'
+cmp -s "$preview" "$TMP_ROOT/previous-pace.html" || fail 'rebuild retained stale pace'
+printf '%s\n' '{not JSON' > "$pace_file"
+refresh_pace || fail 'bad pace refresh failed'
+cmp -s "$preview" "$pace_preview" || fail 'bad pace differs from absent pace'
+pass 'cockpit goal pace: fresh sample on KPI and ON card, warning after 10m; OFF, absent, stale and bad samples stay quiet'
+
 goal apply-drive-answer "$TMP_ROOT/toggles.result" >/dev/null || fail 'apply rejected cockpit answer capture'
 goal export | jq -e '([.goals[] | select(.driven) | .id] == ["beta"])' >/dev/null || fail 'both keyed answers were not applied'
 python3 -I - "$preview" "$TMP_ROOT/swapped-link.html" <<'PY' || fail 'could not swap linked Kanban card'

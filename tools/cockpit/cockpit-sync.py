@@ -32,6 +32,8 @@ Mismatches between goal marks and reality are findings, not failures: sync still
 
 truth JSON (schema fm-cockpit-truth.v1; no timestamps, so an unchanged world writes nothing):
   goals[]      {id, title, done_when, driven, items[]}
+    pace       optional {running, idle, idle_minutes, waiting} from the owning home's state/goal-pace.json
+               (ON only, same start and drive revision, snapshot no more than 10 minutes old)
     items[]    {id, title, owner, class, task, mark, status, task_state, last_line, flags[],
                 pr: null | {url, state: merged|open|closed|unknown, draft, checks: passing|failing|pending|conflict|none}}
                status: done|running|startable|waiting|open-captain|dropped
@@ -50,6 +52,7 @@ Page contract checked by --verify-page:
   - every such value in the section belongs to an entry that is still open, and no entry appears twice
   - the goal cards, drive KPI, per-goal KPI lines and all ring counts match the scoped truth.
     The lines show done/total, running, waiting and waits on you; total includes every item.
+    The line and card show sampled pace when available, with a warning for actionable idle over 10m.
     Each card has a closed "Alle stappen (N)" disclosure with its compact per-goal ring and every
     item, using goal_item_title if set or the text before the first " - " in title.
     The closed contents count as rendered.
@@ -78,6 +81,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 
 # The shell entry point uses Python isolated mode, which omits the script directory.
@@ -361,7 +365,7 @@ def verify_item(item, task_state, pr, must_wait):
     return status, flags
 
 
-def build_goals(goals, homes, deciding_tasks):
+def build_goals(goals, homes, deciding_tasks, samples):
     found, wanted = {}, []
     for goal in goals:
         for item in goal['items']:
@@ -401,8 +405,12 @@ def build_goals(goals, homes, deciding_tasks):
                     and item['status'] == 'waiting' and item['mark'] == 'open'
                     and item['class'] == 'drive' and item['after'] and set(item['after']) <= closed):
                 item['status'] = 'startable'
-        out.append({'id': goal['id'], 'title': goal['title'], 'done_when': goal['done_when'],
-                    'driven': goal.get('driven'), 'items': items})
+        result = {'id': goal['id'], 'title': goal['title'], 'done_when': goal['done_when'],
+                  'driven': goal.get('driven'), 'items': items}
+        pace = goal_pace(goal, samples.get(goal['id'], {}))
+        if pace is not None:
+            result['pace'] = pace
+        out.append(result)
     return out, mismatches
 
 
@@ -642,6 +650,35 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
     return section, mismatches, skipped
 
 
+def read_goal_pace(home):
+    try:
+        snapshot = json.loads((home / 'state' / 'goal-pace.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    if not isinstance(snapshot, dict) or snapshot.get('schema') != 'fm-goal-pace.v1':
+        return {}
+    epoch, goals = snapshot.get('generated_epoch'), snapshot.get('goals')
+    if type(epoch) is not int or not 0 <= int(time.time()) - epoch <= 600 or not isinstance(goals, list):
+        return {}
+    return {row['id']: row for row in goals if isinstance(row, dict) and isinstance(row.get('id'), str)}
+
+
+def goal_pace(goal, row):
+    if not goal['driven'] or any(row.get(key) != goal[key] for key in ('started_epoch', 'drive_revision')):
+        return None
+    try:
+        running = list(row['running_by_home'].values())
+        waits = [wait['count'] for wait in row['waiting_by_kind'].values()]
+        idle, ready = row['startable_idle'], row['merge_after_ready']
+        minutes = row['idle_minutes']
+    except (AttributeError, KeyError, TypeError):
+        return None
+    if (not isinstance(idle, list) or not isinstance(ready, list)
+            or any(type(n) is not int or n < 0 for n in [*running, *waits, minutes])):
+        return None
+    return {'running': sum(running), 'idle': len(idle) + len(ready), 'idle_minutes': minutes, 'waiting': sum(waits)}
+
+
 def build_truth(args):
     goal_home = Path(args.goal_home).resolve()
     if not (goal_home / 'state').is_dir():
@@ -660,7 +697,7 @@ def build_truth(args):
                                   args.exclude_goal, args.scope, mates)
     decisions = {home: open_decisions(home) for _, home in unique}
     deciding_tasks = {(home, task) for home, (_, rows) in decisions.items() for task, _, _ in rows}
-    verified, mismatches = build_goals(goals, unique, deciding_tasks)
+    verified, mismatches = build_goals(goals, unique, deciding_tasks, read_goal_pace(goal_home))
     section, more, skipped = captain_list(verified, dropped, unique, set(args.scope),
                                           {sm: projects for sm, _, projects in mates}, decisions)
     return {'schema': SCHEMA, 'goals': verified, 'mismatches': mismatches + more, 'section1': section,

@@ -39,6 +39,14 @@ STYLE = '''<style>
 .fm-goal-kpi-metrics { flex:none; max-inline-size:75%; display:flex; flex-wrap:wrap;
     gap:2px 4px; font-size:.75rem; }
 .fm-goal-kpi-metrics > span { white-space:nowrap; color:var(--fm-goal-color); }
+.fm-goal-pace { color:#d4dbe7; font-size:.75rem; }
+.fm-goal-pace > span { white-space:nowrap; }
+.fm-goal-pace-warning { color:#ffc35c; font-weight:bold; }
+p.fm-goal-pace { display:table; background:#141821; border-radius:4px; margin:4px 0; padding:2px 4px; }
+@media (max-width:640px) {
+    #fm-goal-kpis > li:has(.fm-goal-pace) { flex-wrap:wrap; }
+    #fm-goal-kpis .fm-goal-pace { flex:0 0 100%; }
+}
 .fm-goal-drive { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; margin:2px 0 4px; }
 .fm-goal-drive button { font:inherit; color:inherit; background:#202633; border:1px solid #546074;
                         border-radius:6px; padding:4px 8px; cursor:pointer; }
@@ -132,6 +140,18 @@ def drive_kpi(goals):
             f'{sum(bool(g["driven"]) for g in goals)} van {len(goals)} doelen actief gedreven</p>')
 
 
+def pace_marker(goal, *, card=False):
+    pace = goal.get('pace')
+    if not goal['driven'] or pace is None:
+        return ''
+    tag = 'p' if card else 'span'
+    ident = f' id="fm-goal-pace-{html.escape(goal["id"])}"' if card else ''
+    warning = ' class="fm-goal-pace-warning"' if pace['idle'] and pace['idle_minutes'] > 10 else ''
+    return (f'<{tag}{ident} class="fm-goal-pace">Tempo: <span>{pace["running"]} actief</span> · '
+            f'<span{warning}>{pace["idle"]} stil ({pace["idle_minutes"]}m)</span> · '
+            f'<span>{pace["waiting"]} wacht</span></{tag}>')
+
+
 def goal_kpis(goals):
     if not goals:
         return ''
@@ -146,7 +166,7 @@ def goal_kpis(goals):
         gid, title = html.escape(goal['id']), html.escape(goal['title'])
         off = '' if goal['driven'] else ' class="fm-goal-kpi-off"'
         rows.append(f'<li{off}><a class="fm-goal-kpi-title" href="#doel-{gid}" title="{title}">{title}</a>'
-                    f'<span class="fm-goal-kpi-metrics">{"".join(metrics)}</span></li>')
+                    f'<span class="fm-goal-kpi-metrics">{"".join(metrics)}</span>{pace_marker(goal)}</li>')
     return f'<ul id="fm-goal-kpis" role="list" aria-label="Status per doel">{"".join(rows)}</ul>'
 
 
@@ -371,7 +391,7 @@ def render_truth(page, goals):
     overview = STYLE + goal_kpis(goals) + drive_kpi(goals) + items_kpi([i['status'] for i in items.values()])
     for goal in goals:
         gid = goal['id']
-        switch = drive_switch(goal)
+        controls = drive_switch(goal) + pace_marker(goal, card=True)
         steps = goal_steps(goal, items_kpi([i['status'] for i in goal['items']], ring_id(goal)))
         drive = 'on' if goal['driven'] else 'off'
         cards = goal_cards(parsed, goal)
@@ -381,12 +401,12 @@ def render_truth(page, goals):
                 raise ValueError(f'expected a closed cockpit card #doel-{gid}')
             # The switch stays first, even if the host card is empty and both offsets coincide.
             patches.extend([(card.close, generated(steps)), (card.end - 1, f' data-fm-goal-drive="{drive}"'),
-                            (card.end, generated(switch))])
+                            (card.end, generated(controls))])
         else:
             done_when = html.escape(goal.get('done_when', ''))
             completion = f'<p class="small mute">{done_when}</p>' if done_when else ''
             overview += (f'<article id="doel-{gid}" data-fm-goal-drive="{drive}">'
-                         f'<h3>{html.escape(goal["title"])}</h3>{completion}{switch}{steps}</article>')
+                         f'<h3>{html.escape(goal["title"])}</h3>{completion}{controls}{steps}</article>')
 
     for view, ids, css, heading in [('WBS box', ('wbs-blok', 'wbs'), 'fm-goal-box', 'WBS'),
                                     ('Kanban card', ('kanban',), 'kb-card fm-goal-box', 'Kanban')]:
@@ -418,6 +438,7 @@ def verify_goal_views(page, goals):
     expected_cards = {f'doel-{g["id"]}' for g in goals}
     expected_rings = {ring_id(g) for g in goals}
     expected_steps = {steps_id(g) for g in goals}
+    expected_pace = {f'fm-goal-pace-{g["id"]}' for g in goals if g['driven'] and g.get('pace') is not None}
     for node in parsed.nodes:
         if 'data-fm-goal-drive' in node.attrs and node.id not in expected_cards:
             problems.append(f'out-of-scope goal card: {node.id}')
@@ -425,6 +446,8 @@ def verify_goal_views(page, goals):
             problems.append(f'out-of-scope goal ring: {node.id}')
         if node.id and node.id.startswith('fm-goal-steps-') and node.id not in expected_steps:
             problems.append(f'out-of-scope goal steps: {node.id}')
+        if node.id and node.id.startswith('fm-goal-pace-') and node.id not in expected_pace:
+            problems.append(f'unexpected pace marker: {node.id}')
 
     def check_markup(expected, parent=None):
         model = GoalPage(expected).nodes[0]
@@ -449,6 +472,9 @@ def verify_goal_views(page, goals):
             problems.append(f'missing or stale goal card: {card_id}')
         else:
             card = cards[0]
+            pace = pace_marker(goal, card=True)
+            if pace:
+                check_markup(pace, card)
             ring = items_kpi([i['status'] for i in goal['items']], ring_id(goal))
             check_markup(ring, card)
             check_markup(goal_steps(goal, ring), card)
