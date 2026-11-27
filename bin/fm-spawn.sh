@@ -5544,12 +5544,13 @@ spawn_current_path() { # <target>
   hc) fm_backend_hc_current_path "$1" "$W" ;;
   esac
 }
-# spawn_treehouse_get_output <typed-line>: the non-blank pane lines after the
+# spawn_treehouse_get_output <typed-line> <captures>: the non-blank pane lines after the
 # last echo of <typed-line>, joined with " | ", or all non-blank lines when
-# the echo is not in the capture. Empty when the pane cannot be read.
-spawn_treehouse_get_output() { # <typed-line>
-  local screen
-  screen=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 120 "$W" 2>/dev/null) || return 0
+# the echo is not in the capture. Empty when no pane output was captured.
+spawn_treehouse_get_output() { # <typed-line> <captures>
+  local screen capture
+  capture=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 120 "$W" 2>/dev/null) || capture=
+  screen="$2"$'\n'"$capture"
   printf '%s\n' "$screen" | FM_TYPED_LINE=$1 awk '
     BEGIN { typed = ENVIRON["FM_TYPED_LINE"]; gsub(/[ \t\r]/, "", typed) }
     {
@@ -5560,7 +5561,7 @@ spawn_treehouse_get_output() { # <typed-line>
     }
     length(joined) >= length(typed) && substr(joined, length(joined) - length(typed) + 1) == typed { n = 0; next }
     /[^ \t]/ { out[++n] = $0 }
-    END { for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " | " : ""), out[i] }'
+    END { for (i = 1; i <= n; i++) if (!printed[out[i]]++) printf "%s%s", (written++ ? " | " : ""), out[i] }'
 }
 spawn_send_literal() { # <target> <text>
   case "$BACKEND" in
@@ -6202,6 +6203,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     candidate=""
     last_seen=""
     last_reason="the pane reported no path"
+    treehouse_screen=""
     for _ in $(seq 1 "$treehouse_wait"); do
       p=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$p" ] || last_seen="$p"
@@ -6217,13 +6219,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
+      treehouse_screen="$treehouse_screen"$'\n'"$(fm_backend_capture "$BACKEND" "$WT_TARGET" 120 "$W" 2>/dev/null || true)"
       sleep 1
     done
     if [ -z "$WT" ]; then
       echo "error: treehouse get did not enter an isolated worktree within ${treehouse_wait}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
       # Treehouse explains a full pool or a failed slot only in the pane, which
       # the refusal may close, so carry its output into the error here.
-      treehouse_tail=$(spawn_treehouse_get_output "$treehouse_get_line")
+      treehouse_tail=$(spawn_treehouse_get_output "$treehouse_get_line" "$treehouse_screen")
       [ -z "$treehouse_tail" ] || echo "error: pane output after '$treehouse_get_line': $treehouse_tail" >&2
       echo "hint: if treehouse was still creating a slot, raise FM_SPAWN_TREEHOUSE_TIMEOUT (seconds) and spawn again" >&2
       exit 1

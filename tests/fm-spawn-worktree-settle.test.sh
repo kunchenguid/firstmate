@@ -46,6 +46,10 @@ case "$*" in
     [ -f "$countfile" ] && n=$(cat "$countfile")
     n=$((n + 1))
     printf '%s\n' "$n" > "$countfile"
+    if [ -n "${FM_FAKE_CWD_PROBE:-}" ]; then
+      printf '__FM_%s_CWD_BEGIN__\n%s\n__FM_%s_CWD_END__\n' \
+        "$FM_FAKE_CWD_PROBE" "$FM_FAKE_PANE_STALE" "$FM_FAKE_CWD_PROBE" >> "$countfile.screen"
+    fi
     if [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
       printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
     else
@@ -55,7 +59,18 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
-  capture-pane) printf '%s\n' "${FM_FAKE_PANE_SCREEN:-}"; exit 0 ;;
+  capture-pane)
+    lines=200
+    previous=
+    for arg in "$@"; do
+      [ "$previous" != -S ] || lines=${arg#-}
+      previous=$arg
+    done
+    {
+      printf '%s\n' "${FM_FAKE_PANE_SCREEN:-}"
+      [ ! -f "$FM_FAKE_PANE_COUNTFILE.screen" ] || cat "$FM_FAKE_PANE_COUNTFILE.screen"
+    } | tail -n "$lines"
+    exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
   new-window)
@@ -280,6 +295,27 @@ test_treehouse_wait_is_configurable_and_reports_pane_output() {
   pass "the configured treehouse wait preserves diagnostics with wrapped, missing, or repeated echoes"
 }
 
+test_treehouse_diagnostic_survives_poll_output() {
+  local probe rec id out status screen final_capture
+  screen=$'user@host mate % treehouse get\ntreehouse: all 24 worktrees are in use (max_trees=24)\nuser@host mate %'
+  for probe in CMUX PASEO ZELLIJ; do
+    id="settle-probe-${probe}-z7"
+    rec=$(make_primary_case "settle-probe-$probe" "$id" 100000)
+    read_settle_record "$rec"
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+    out=$(FM_FAKE_CWD_PROBE="$probe" FM_FAKE_PANE_SCREEN="$screen" run_settle_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "$probe: spawn accepted a pane that never settled"
+    [ "$(cat "$COUNTFILE")" -eq 60 ] || fail "$probe: the default wait did not run all polls"
+    final_capture=$(FM_FAKE_PANE_SCREEN="$screen" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+      "$FAKEBIN_DIR/tmux" capture-pane -p -S -120)
+    assert_not_contains "$final_capture" 'all 24 worktrees are in use' "$probe: the fixture did not displace the diagnostic"
+    assert_contains "$out" 'all 24 worktrees are in use (max_trees=24)' "$probe: poll output erased the refusal diagnostic"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$probe: refused spawn published task metadata"
+  done
+  pass 'directory probes cannot erase the treehouse refusal diagnostic'
+}
+
 test_unborn_head_project_is_refused_at_once() {
   local rec id out status started elapsed
   id=settle-unborn-head-z5
@@ -306,6 +342,7 @@ test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_treehouse_wait_is_configurable_and_reports_pane_output
+test_treehouse_diagnostic_survives_poll_output
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"

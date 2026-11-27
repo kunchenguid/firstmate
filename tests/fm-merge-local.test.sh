@@ -30,8 +30,10 @@ make_case() {
 }
 
 record_done() {
+  local line='done [at=1790000000]: ready in branch fm/local-task'
+  [ "$#" -eq 0 ] || line="$line at $1"
   FM_HOME="$HOME_DIR" fm_dod_accept_ship_done ship local-only "$WT" "$PROJ" \
-    'done [at=1790000000]: ready in branch fm/local-task' \
+    "$line" \
     "$HOME_DIR/state" local-task "$META"
 }
 
@@ -103,16 +105,39 @@ test_landed_round_repins_next_done() {
   printf 'approved Z\n' > "$WT/approved.txt"
   git -C "$WT" commit -q -am Z
   z=$(git -C "$WT" rev-parse HEAD)
-  record_done || fail 'round-two done head was refused although round one landed'
+  record_done "$z" || fail 'round-two done head was refused although round one landed'
   [ "$(fm_dod_local_done_head "$META")" = "$z" ] || fail 'round-two done did not re-latch the new head'
   git -C "$WT" commit -q --allow-empty -m unlanded
-  record_done >/dev/null 2>&1 && fail 'an unlanded round-two head was replaced'
+  record_done "$(git -C "$WT" rev-parse HEAD)" >/dev/null 2>&1 && fail 'an unlanded round-two head was replaced'
   [ "$(fm_dod_local_done_head "$META")" = "$z" ] || fail 'the refused done changed the latched head'
   git -C "$WT" reset -q --hard "$z"
   land >/dev/null || fail 'round two did not land'
   [ "$(git -C "$PROJ" rev-parse HEAD)" = "$z" ] || fail 'round two did not land Z'
   [ "$(cat "$PROJ/approved.txt")" = 'approved Z' ] || fail 'round two did not update the checkout'
   pass 'a landed round re-latches the next done head, and an unlanded head stays latched'
+}
+
+test_stale_unnamed_done_cannot_repin_landed_head() {
+  local stale z out rc=0
+  make_case stale-unnamed-reader
+  stale='done [at=1790000000]: ready in branch fm/local-task'
+  record_done || fail 'round-one done head was not accepted'
+  land >/dev/null || fail 'round one did not land'
+  git -C "$WT" commit -q --allow-empty -m intermediate
+  out=$(FM_HOME="$HOME_DIR" fm_dod_accept_ship_done ship local-only "$WT" "$PROJ" \
+    "$stale" "$HOME_DIR/state" local-task "$META" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail 'a stale unnamed report accepted an unreported intermediate head'
+  assert_contains "$out" 'must name its head' 'the stale-reader refusal did not require a named head'
+  [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'a stale reader replaced the landed head'
+  printf 'approved Z\n' > "$WT/approved.txt"
+  git -C "$WT" commit -q -am Z
+  z=$(git -C "$WT" rev-parse HEAD)
+  record_done "$z" || fail 'the genuine next report was blocked by the stale reader'
+  land >/dev/null || fail 'the genuine next report did not land'
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$z" ] || fail 'the genuine next head did not land'
+  [ "$(cat "$PROJ/approved.txt")" = 'approved Z' ] || fail 'the genuine next report did not update the checkout'
+  [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail 'the next landing left a dirty checkout'
+  pass 'a stale unnamed reader cannot pin intermediate work or block the next named report'
 }
 
 test_named_next_round_latches_at_landing() {
@@ -124,7 +149,7 @@ test_named_next_round_latches_at_landing() {
     printf 'approved Y\n' > "$WT/approved.txt"
     git -C "$WT" commit -q -am Y
     if [ "$report" = unlanded ]; then
-      record_done || fail 'round-two done head was not accepted'
+      record_done "$(git -C "$WT" rev-parse HEAD)" || fail 'round-two done head was not accepted'
       git -C "$WT" commit -q --allow-empty -m Z
     fi
     next=$(git -C "$WT" rev-parse HEAD)
@@ -400,4 +425,4 @@ fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_d
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
   test_landed_round_repins_next_done test_named_done_line_latches_at_landing \
-  test_named_next_round_latches_at_landing
+  test_named_next_round_latches_at_landing test_stale_unnamed_done_cannot_repin_landed_head

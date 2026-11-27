@@ -1191,10 +1191,17 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
     return 1
   fi
-  if [ "$mode" = local-only ] && named=$(fm_dod_local_ready_note_head "$(status_line_note "$line")") \
-    && [ "$named" != "$sha" ]; then
-    printf '%s\n' "named head $named is not this copy's HEAD $sha"
-    return 1
+  if [ "$mode" = local-only ]; then
+    if named=$(fm_dod_local_ready_note_head "$(status_line_note "$line")"); then
+      if [ "$named" != "$sha" ]; then
+        printf '%s\n' "named head $named is not this copy's HEAD $sha"
+        return 1
+      fi
+    elif [ -n "$meta" ] && grep -q '^local_done_head=' "$meta" \
+      && [ "$(fm_dod_local_done_head "$meta")" != "$sha" ]; then
+      printf '%s\n' 'a replacement local-only done report must name its head'
+      return 1
+    fi
   fi
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
     if [ "$mode" = local-only ] && [ -n "$meta" ]; then
