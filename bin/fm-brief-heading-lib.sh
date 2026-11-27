@@ -93,3 +93,61 @@ fm_brief_task_heading_present() {  # <file> <heading>
   fm_brief_heading_parse - "$2" present >/dev/null <<<"$task"
 }
 
+# The four task fields a ship or scout brief must carry, in the order they
+# appear under `# Task`. bin/fm-brief.sh scaffolds each as a required section
+# with a fill placeholder; bin/fm-spawn.sh and bin/fm-promote.sh refuse a
+# brief whose field is missing, empty, or still a placeholder. This list is
+# the single owner of the field set and of the placeholder each field carries.
+FM_BRIEF_TASK_FIELDS="## Acceptance criteria|{ACCEPTANCE_CRITERIA}
+## Verification path|{VERIFICATION_PATH}
+## Required artifact|{REQUIRED_ARTIFACT}
+## Out of scope|{OUT_OF_SCOPE}"
+
+# Print the heading of one field, given its "heading|placeholder" token.
+fm_brief_task_field_heading() {  # <token>
+  printf '%s' "${1%%|*}"
+}
+
+# Print the placeholder of one field, given its "heading|placeholder" token.
+fm_brief_task_field_placeholder() {  # <token>
+  printf '%s' "${1##*|}"
+}
+
+# Print the first field that is absent, empty, or still its placeholder.
+#
+# A brief that carries none of the four field sections predates the contract
+# and stays valid, so a task dispatched before the contract landed can still
+# be relaunched or recovered. A brief that carries any of them is a brief
+# under the contract, and must carry and fill all four: a removed section is
+# as unfilled as an untouched placeholder.
+fm_brief_task_field_unfilled() {  # <file>
+  local file=$1 token heading placeholder body present=0
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    heading=$(fm_brief_task_field_heading "$token")
+    if fm_brief_task_heading_present "$file" "$heading"; then
+      present=$((present + 1))
+    fi
+  done <<<"$FM_BRIEF_TASK_FIELDS"
+  [ "$present" -gt 0 ] || return 1
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    heading=$(fm_brief_task_field_heading "$token")
+    placeholder=$(fm_brief_task_field_placeholder "$token")
+    if ! fm_brief_task_heading_present "$file" "$heading"; then
+      printf '%s' "$heading"
+      return 0
+    fi
+    body=$(fm_brief_task_heading_body "$file" "$heading")
+    if [ -z "$(printf '%s' "$body" | tr -d '[:space:]')" ]; then
+      printf '%s' "$heading"
+      return 0
+    fi
+    if [ "$(printf '%s' "$body" | tr -d '[:space:]')" = "$placeholder" ]; then
+      printf '%s' "$heading"
+      return 0
+    fi
+  done <<<"$FM_BRIEF_TASK_FIELDS"
+  return 1
+}
+
