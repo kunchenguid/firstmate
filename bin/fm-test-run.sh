@@ -737,7 +737,7 @@ list_portable_serial() {
   done < <(all_repo_tests)
 }
 
-# Measured portable-serial script durations in milliseconds, from the
+# Portable-serial duration hints in milliseconds, from the
 # committed CI timings file. A script with no row falls back to
 # PORTABLE_SERIAL_DEFAULT_WEIGHT_MS. These are balance hints only: the shard
 # partition stays complete and disjoint whatever they say, so a stale hint costs
@@ -746,9 +746,8 @@ portable_serial_weight_hints() {
   portable_ci_weight_hints
 }
 
-# The portable-serial scripts with no measured hint, one per line. These fall
-# back to PORTABLE_SERIAL_DEFAULT_WEIGHT_MS, so they are balanced on a guess
-# rather than on evidence; the coverage guard bounds how many there may be.
+# Portable-serial scripts with no committed hint, one per line. These use
+# PORTABLE_SERIAL_DEFAULT_WEIGHT_MS, and the coverage guard bounds their share.
 portable_serial_unhinted() {
   local tmp
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-unhinted.XXXXXX") || return 1

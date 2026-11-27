@@ -19,8 +19,8 @@ Measure that script through the focused Git Bash runner rather than a portable s
 
 A timed-out shard may upload no artifact, so a complete green run is what keeps the slowest scripts measured in the shard that needs them most.
 
-The 2026-11-13 `tests/fm-pi-bash-timeout.test.sh` serial hint is a provisional local measurement of 1486 ms, the slowest of five successful `bin/fm-test-run.sh tests/fm-pi-bash-timeout.test.sh` samples (1288-1486 ms) on a macOS arm64 host, collected separately from coverage and lint checks.
-Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
+On 2026-11-13, five successful local runs of `bin/fm-test-run.sh tests/fm-pi-bash-timeout.test.sh` took 1288-1486 ms on macOS arm64.
+The suite has no committed hint and uses the default weight until a green Ubuntu CI timing artifact supplies one.
 
 ## Parallel lanes
 
@@ -55,7 +55,7 @@ A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` 
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 The packing target is 15 minutes (`serial_budget_ms=900000`).
 `--check-coverage` refuses a modeled multi-script shard above that target; an indivisible suite may occupy a shard alone when its own hint is already above 15 minutes.
-`bin/fm-test-run.sh --check-coverage` reports the unmeasured share as `serial_unhinted=` and refuses past `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`.
+`bin/fm-test-run.sh --check-coverage` reports the share of scripts without a committed hint as `serial_unhinted=` and refuses past `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`.
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size and coverage rather than a copied inventory.
 [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_serial_packing_budget_boundary`, verifies acceptance exactly at the budget, a singleton overflow, and refusal of a multi-script overflow through the executable runner.
