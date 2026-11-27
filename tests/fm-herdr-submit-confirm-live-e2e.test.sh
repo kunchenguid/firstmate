@@ -199,15 +199,16 @@ verdict=$(fm_backend_herdr_send_text_submit "$TARGET" '/context' 3 0.4 1.2) \
 [ "$verdict" = empty ] \
   || fail "Claude Code ($VERSION) on $HERDR_VER: a typed /context behind its command popup must confirm empty, got '$verdict'"
 # Confirm /context ran, not merely that the composer cleared: its report opens
-# with a `Context Usage` heading, which the popup's lowercase description does
-# not match. The report can run to hundreds of rows, so the read reaches far
-# enough back to keep its heading.
+# with a `Context Usage` heading (`Context usage` from Claude Code 2.1.329),
+# which the popup's description (`Show what fills the context`) does not match.
+# The report can run to hundreds of rows, so the read reaches far enough back
+# to keep its heading.
 rendered=0
 i=0
 while [ "$i" -lt 45 ]; do
   screen=$(lab pane read "$PANE" --source recent --lines 1000 2>/dev/null || true)
   case "$screen" in
-    *'Context Usage'*) rendered=1; break ;;
+    *'Context Usage'*|*'Context usage'*) rendered=1; break ;;
   esac
   i=$((i + 1))
   sleep 1

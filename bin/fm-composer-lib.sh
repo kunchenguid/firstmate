@@ -124,12 +124,13 @@
 # (codex's `permissions: YOLO mode` startup banner) proves nothing and demotes
 # nothing.
 #
-# COVERAGE: this is exercised for the bordered box and the pi separator pair,
-# the two shapes claude 2.x renders. The opencode left bar is wired in for the
-# same treatment but is UNEXERCISED - every left-bar row this repo records
-# leads with plain text, and opencode's own prompt character is `>`, a SHELL
-# glyph deliberately outside the agent set, so no opencode shape recorded here
-# can prove a left-bar envelope and open a zone under it.
+# COVERAGE: tests/fm-composer-lib.test.sh exercises bordered boxes, solid
+# separator pairs, and titled/badge envelopes; the latter are pinned by
+# test_matrix_claude_titled_envelope_lower_candidates. The opencode left bar
+# is wired in for the same treatment but is UNEXERCISED - every left-bar row
+# this repo records leads with plain text, and opencode's own prompt character
+# is `>`, a SHELL glyph deliberately outside the agent set, so no opencode
+# shape recorded here can prove a left-bar envelope and open a zone under it.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -977,9 +978,12 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # The row must OPEN with the same 8-column dash run the strict separator
 # requires. Width is proven by comparing canonical space strings, never by
 # `${#row}`, which counts characters under UTF-8 and bytes under LC_ALL=C
-# (issue #1988). Title text is ASCII-printable only, the same boundary
-# _fm_composer_titled_bottom_ok holds; any other glyph leaves residue, and the
-# verdict stays `unknown`, the safe direction.
+# (issue #1988). Title text is ASCII-printable, with one non-ASCII exception:
+# Claude Code's single-column fast-mode badge `↯` (U+21AF) maps to one space
+# before the width comparison. Every other non-ASCII title glyph leaves
+# residue and refuses proof. The dated captures and refresh commands live in
+# docs/verification/runtime-backends.md, "claude fast-mode badge top rule
+# through Herdr".
 _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
   local row=$1 expected=$2 spaces
   case "$row" in
@@ -987,6 +991,7 @@ _fm_composer_titled_rule_row() {  # <trimmed-row> <plain-rule-spaces>
     *) return 1 ;;
   esac
   spaces=${row//─/ }
+  spaces=${spaces//↯/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
@@ -1015,6 +1020,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
   FM_COMPOSER_SCAN_UNSAFE=0
   FM_COMPOSER_SCAN_CURSOR_EDGE=0
   FM_COMPOSER_SCAN_BARE_ROW=-1
+  FM_COMPOSER_SCAN_BARE_RULE_ROW=-1
   FM_COMPOSER_SCAN_SHELL_ROW=-1
   FM_COMPOSER_SCAN_LEFTBAR_START=-1
   FM_COMPOSER_SCAN_LEFTBAR_END=-1
@@ -1082,6 +1088,11 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap] 
     # earlier transcript rule can never outrank the live bottom composer pair.
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
+      FM_COMPOSER_SCAN_BARE_RULE_ROW=-1
+      if [ -z "$cy" ] \
+         && _fm_composer_bare_rule_sandwich "$pane" "$FM_COMPOSER_SCAN_BARE_ROW"; then
+        FM_COMPOSER_SCAN_BARE_RULE_ROW=$FM_COMPOSER_SCAN_BARE_ROW
+      fi
       if [ "$pi_open" -ge 0 ]; then
         FM_COMPOSER_SCAN_PI_PAIR_FOUND=1
         FM_COMPOSER_SCAN_PI_OPEN=$pi_open
@@ -1926,6 +1937,14 @@ _fm_composer_locate_footer_zone() {  # <plain>
     FM_COMPOSER_FOOTER_GLYPH=$FM_COMPOSER_SCAN_PI_GLYPH_ROW
     proof=$FM_COMPOSER_SCAN_PI_GLYPH
   fi
+  if [ "$FM_COMPOSER_SCAN_BARE_RULE_ROW" -ge 0 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -ge "$FM_COMPOSER_FOOTER_AFTER" ]; then
+    FM_COMPOSER_FOOTER_AFTER=$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR
+    FM_COMPOSER_FOOTER_GLYPH=$FM_COMPOSER_SCAN_BARE_RULE_ROW
+    trimmed=$(_fm_composer_screen_row "$FM_COMPOSER_FOOTER_GLYPH" "$plain")
+    fm_composer_normalize_trim_var trimmed
+    fm_composer_leading_agent_glyph_var proof "$trimmed" || return 1
+  fi
   [ "$FM_COMPOSER_FOOTER_AFTER" -ge 0 ] || return 1
   # Nothing below the envelope can be demoted unless a bare candidate sits
   # there, so settle that from the scan's own record before walking any rows.
@@ -1984,24 +2003,39 @@ _fm_composer_bare_is_popup_selection() {  # <plain-screen> <screen> <styled> <ro
 }
 
 # _fm_composer_bare_rule_sandwich: 0 when bare agent-glyph <row> sits in its
-# own titled composer: a titled rule directly above it and the screen's only
-# unmatched separator directly below it, which is that composer's closing rule.
+# own titled composer: a width-proven titled rule directly above it and the
+# scan's last solid separator below it, which is its closing rule. Only
+# the draft's own wrapped continuation rows - indented, non-blank, edge-free,
+# the rows the bare wrap walk extracts - may sit between the glyph row and that
+# closing rule (a typed doorbell wraps on a 120-column Claude pane).
 #
-# The cursorless staleness rule reads an unmatched separator BELOW a candidate
-# as proof the candidate is scrollback. A titled top rule never opens the
-# separator pair, so the composer's own closing rule becomes that unmatched
-# separator and a genuinely idle composer read `unknown`. Adjacency on BOTH
-# edges keeps the staleness rule intact everywhere else: a glyph stranded in
-# scrollback has transcript rows, not its own rules, around it.
+# The scan records this local proof before lower footer or popup candidates
+# can replace the glyph row. It remains valid when an earlier transcript rule
+# pairs with the same closing separator: footer selection prefers the local
+# envelope's glyph over that broader pair's glyph. Without an earlier pair,
+# the proof also exempts this composer from unmatched-separator staleness.
+# Adjacency above and an unbroken continuation run below keep a glyph stranded
+# across transcript rows from receiving that exemption.
 _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
-  local plain=$1 row=$2 above below
+  local plain=$1 row=$2 above below next raw
   [ "$row" -ge 1 ] || return 1
-  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq "$((row + 1))" ] || return 1
-  below=$(_fm_composer_screen_row "$((row + 1))" "$plain")
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$row" ] || return 1
+  next=$((row + 1))
+  while [ "$next" -lt "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" ]; do
+    raw=$(_fm_composer_screen_row "$next" "$plain")
+    case "$raw" in [[:space:]]*) ;; *) return 1 ;; esac
+    below=$raw
+    fm_composer_normalize_trim_var below
+    [ -n "$below" ] || return 1
+    ! fm_composer_row_has_edge "$below" || return 1
+    next=$((next + 1))
+  done
+  below=$(_fm_composer_screen_row "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" "$plain")
   fm_composer_normalize_trim_var below
   _fm_composer_pi_separator_row "$below" || return 1
   above=$(_fm_composer_screen_row "$((row - 1))" "$plain")
   fm_composer_normalize_trim_var above
+  _fm_composer_pi_separator_row "$above" && return 1
   _fm_composer_titled_rule_row "$above" "${below//─/ }"
 }
 
@@ -2064,8 +2098,7 @@ _fm_composer_select_cursorless() {  # <plain-screen> <screen> <styled>
     # Spare only a bare glyph inside its own titled composer rules; see
     # _fm_composer_bare_rule_sandwich for why that shape is not scrollback.
     if ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
-           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_ROW" ] \
-           && _fm_composer_bare_rule_sandwich "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; }; then
+           && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_RULE_ROW" ]; }; then
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
