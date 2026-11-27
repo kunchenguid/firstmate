@@ -220,7 +220,7 @@ main_worker_json() {  # <id> <meta-file>
       FM_DATA_OVERRIDE="$DATA" \
       FM_SNAPSHOT_NOW_EPOCH="$now" \
       FM_CREW_STATE_NM_TIMEOUT="$(((FM_WORKER_TABLE_CREW_STATE_TIMEOUT + 1) / 2))" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null || true
+      "${FM_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}" "$id" 2>/dev/null || true
   )
   raw=$(printf '%s\n' "$raw" | head -1)
   sep=' · '
@@ -389,7 +389,7 @@ home_block() {  # <id> <home> <status> <reason> <observed-epoch|''> <workers-arr
 MAIN_WORKERS="$TABLE_TMP/main-workers.jsonl"
 : > "$MAIN_WORKERS"
 for meta in "$STATE"/*.meta; do
-  [ -f "$meta" ] || continue
+  [ -f "$meta" ] && [ ! -L "$meta" ] || continue
   grep -qx 'kind=secondmate' "$meta" 2>/dev/null && continue
   id=$(basename "$meta" .meta)
   main_worker_json "$id" "$meta" >> "$MAIN_WORKERS" || true

@@ -158,8 +158,9 @@
 #                          declared pause, not terminal done); the wake names
 #                          the floor, the working count and every idle lane;
 #                          drive_floor_tick owns the scan and its repeats; a
-#                          parked or live page host never counts as working
-#                          and startable goal items count as work waiting
+#                          parked or live page host never counts as working.
+#                          Goal-linked work gets a separate per-ON-goal floor
+#                          from the fleet worker table, with the same wake kind.
 #   check: goal stalled: <goal>: <item> (owner=<owner>) <age>s[, ...] (threshold <n>s)
 #                          config/drive-floor homes: an active goal item that
 #                          bin/fm-goal.sh startable lists, with no working
@@ -280,6 +281,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
 # the per-cycle reconcile itself runs as a separate process.
 # shellcheck source=bin/fm-procevent-lib.sh
@@ -3594,18 +3597,11 @@ EOF
 # first wake, then repeats once per PAUSE_RESURFACE_SECS while it stays put.
 # Recovering to the floor, losing the last startable lane, or removing the
 # config drops the row, so the next episode starts fresh.
-# GOAL AWARENESS (away autonomy G5). Two additions, both on the same config,
-# scan and hold: (1) a lane that is only a page host never counts as working -
-# a live Lavish listener or a parked host (STATE/<task>.page-host-parked)
-# is quiet by design and is neither working nor startable, and a dead host
-# is startable but not working - so a busy-looking pane polling a board cannot
-# hide an idle fleet; (2) an active goal item that bin/fm-goal.sh `startable`
-# lists, with no working lane on its task, is work waiting, and once it has
-# sat that way for the hold the tick queues `check: goal stalled`, even when
-# the floor is met. STATE/.goal-stall keeps <goal> TAB <item> TAB <first-seen>
-# TAB <last-escalated> per such item; an item that starts, closes or leaves the
-# record drops its row. This tick never decides what startable means: the goal
-# record's own projection does.
+# Goal work uses the same configured floor, but gets an independent fleet
+# episode per driven goal: STATE/.goal-drive-floor stores goal, first-seen
+# and last-wake (TSV). Non-goal lanes retain the local floor above.
+# The separate goal-stall wake still ages each startable item, even if its
+# goal meets the floor. The goal projection owns what startable means.
 DRIVE_FLOOR_SCAN_SECS=${FM_DRIVE_FLOOR_SCAN_SECS:-}
 case "$DRIVE_FLOOR_SCAN_SECS" in ''|*[!0-9]*) DRIVE_FLOOR_SCAN_SECS=300 ;; esac
 FM_GOAL_BIN=${FM_GOAL_BIN:-$SCRIPT_DIR/fm-goal.sh}
@@ -3618,12 +3614,6 @@ goal_probe_tick() {
 }
 
 FM_DRIVE_FLOOR_PROCEVENT_BIN=${FM_DRIVE_FLOOR_PROCEVENT_BIN:-$SCRIPT_DIR/fm-procevent.sh}
-# The ONE drive-floor gate for "work exists to drive": returns 0 while a sweep
-# has startable lanes or startable goal items to push forward.
-drive_floor_work_exists() {  # <startable-lane-count> [<startable-goal-item-count>]
-  [ "${1:-0}" -gt 0 ] || [ "${2:-0}" -gt 0 ]
-}
-
 # The page-host verdict per task, read once per scan from the process-event
 # source list: `<task> listening|dead|round-open`, one per line. An open round
 # is the host's owner acting on feedback, so only listening and dead matter.
@@ -3634,20 +3624,74 @@ drive_floor_page_hosts() {
         t = substr($3, 6); split(t, p, "/"); print p[1], p[2] }' || true
 }
 
-# Goal items waiting on someone, as `<goal><TAB><item><TAB><owner><TAB><task>`
-# rows: startable items, excluding tasks the local lane scan read as working.
-# Only match the scan against tasks in this home: task IDs are home-local.
-drive_floor_goal_items() {  # <working-tasks>
-  local rows goal item owner task since location
-  [ -x "$FM_GOAL_BIN" ] || return 0
-  rows=$("$FM_GOAL_BIN" startable --with-task-location 2>/dev/null) || return 0
-  while IFS=$'\t' read -r goal item owner task since location; do
-    [ -n "$goal" ] && [ -n "$item" ] || continue
-    if [ "$location" = local ] && [ "${task:--}" != - ] && printf '%s\n' "$1" | grep -qxF -- "$task"; then continue; fi
-    printf '%s\t%s\t%s\t%s\n' "$goal" "$item" "$owner" "${task:--}"
-  done <<EOF
-$rows
-EOF
+# Join the goal projection to the worker table by (home id, task id), not
+# task id alone. A fresh working verdict also vetoes an apparent orphan from
+# the goal projection. Never open another home's state directory here.
+drive_floor_goal_rows() {  # <goal-export> <worker-table> <non-working-local-hosts>
+  printf '%s\n' "$1" "$2" | jq -rs --arg quiet "$3" '
+    .[0].goals as $goals | .[1] as $table
+    | ($quiet | split("\n")) as $quiet_ids
+    | (reduce ($table.homes[]
+        # Allow one cache sweep plus its bounded refresh time; an old
+        # working row must not silence the floor indefinitely.
+        | select(.status == "local" or (.status == "cached" and .cache_age_s <= 600))
+        | .id as $home
+        | .workers[] | select(.state == "working")
+        | select($home != $table.home_id or (.id as $id | $quiet_ids | index($id) | not))
+        | [$home, .id]) as $key ({}; setpath($key; true))) as $working
+    | ($table.homes[] | select(.status == "local") | .workers[] | ["lane", .id, .state]),
+      ($goals[] | select(.driven) | .id as $goal
+       | [.items[] | . + {busy: ($working[.owner][.task // ""] == true)}] as $items
+       | [$items[] | select(.startable and (.busy | not))] as $waiting
+       | select($waiting | length > 0)
+       | (if $table.home_id == "main" then
+            ["floor", $goal,
+             ([$items[] | select(.busy and .state != "done" and .state != "dropped")
+               | [.owner, .task]] | unique | length),
+             ($waiting | map("goal:\($goal)/\(.id)=startable") | join(", "))]
+          else empty end),
+         ($waiting[] | ["stall", $goal, .id, .owner, (.task // "-")]))
+    | @tsv'
+}
+
+# The pusher is not installed yet, so unmet work uses the existing drive-floor
+# wake path. The pusher can gate this fallback when it owns dispatch decisions.
+drive_floor_goal_tick() {  # <now> <floor> <goal-count-waiting-rows>
+  local now=$1 floor=$2 ledger="$STATE/.goal-drive-floor" old='' rows='' tmp
+  local goal working idle since last og os ol reason hold=300 repeat=1800
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ] || return 1
+    old=$(cat "$ledger") || return 1
+  fi
+  while IFS=$'\t' read -r goal working idle; do
+    [ -n "$goal" ] && [ "$working" -lt "$floor" ] || continue
+    since=$now; last=0
+    while IFS=$'\t' read -r og os ol; do
+      [ "$og" = "$goal" ] || continue
+      case "$os:$ol" in *[!0-9:]*|:*|*:) continue ;; esac
+      [ "${#os}" -le 12 ] && [ "${#ol}" -le 12 ] || continue
+      [ "$now" -ge "$((10#$os))" ] && [ "$now" -ge "$((10#$ol))" ] || continue
+      since=$((10#$os)); last=$((10#$ol))
+      break
+    done <<< "$old"
+    if [ "$((now - since))" -ge "$hold" ] \
+      && { [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$repeat" ]; }; then
+      reason="check: drive floor: $working working < $floor $((now - since))s (threshold ${hold}s): idle: $idle"
+      fm_wake_append check drive-floor "$reason" || return 1
+      last=$now
+      DRIVE_FLOOR=$reason
+    fi
+    rows="$rows$goal"$'\t'"$since"$'\t'"$last"$'\n'
+  done <<< "$3"
+  if [ -z "$rows" ]; then
+    rm -f -- "$ledger"
+    return
+  fi
+  tmp=$(mktemp "$STATE/.goal-drive-floor.XXXXXX") || return 1
+  if ! printf '%s' "$rows" > "$tmp" || ! mv -f "$tmp" "$ledger"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 # The goal-stall half of the tick: age each waiting item from its first sight,
@@ -3717,7 +3761,7 @@ drive_floor_tick() {  # [now-epoch], for deterministic clock callers
   local ledger="$STATE/.drive-floor" scan="$STATE/.drive-floor-scan"
   local floor='' old='' rows='' since last idle='' idle_list='' reason
   local old_since old_last f task line state working=0 startable=0 tmp
-  local hosts='' host_state working_tasks='' goal_items='' goal_startable=0
+  local hosts host_state goals local_owner owner_rc=0 linked_tasks table='' quiet fleet_rows='' local_states goal_items
   DRIVE_FLOOR=
   GOAL_STALL=
   if [ -e "$CONFIG/drive-floor" ] || [ -L "$CONFIG/drive-floor" ]; then
@@ -3734,7 +3778,7 @@ drive_floor_tick() {  # [now-epoch], for deterministic clock callers
     esac
     [ "$floor" != invalid ] || { echo 'watcher: invalid drive-floor settings' >&2; return 1; }
   else
-    rm -f -- "$ledger" "$scan" "$STATE/.goal-stall"
+    rm -f -- "$ledger" "$scan" "$STATE/.goal-stall" "$STATE/.goal-drive-floor"
     return 0
   fi
   [ -n "$now" ] || fm_epoch_seconds_to now
@@ -3758,10 +3802,29 @@ drive_floor_tick() {  # [now-epoch], for deterministic clock callers
 $old
 EOF
   hosts=$(drive_floor_page_hosts)
+  goals=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$FM_GOAL_BIN" export) || return 1
+  local_owner=$(fm_parent_channel_home_id "$FM_HOME") || owner_rc=$?
+  if [ "$owner_rc" -eq 1 ]; then local_owner=main; fi
+  # Linked tasks cannot raise the generic lane floor, even when their goal
+  # is OFF. The goal's own floor is the only drive-floor path for those tasks.
+  linked_tasks=$(printf '%s\n' "$goals" | jq -r --arg owner "$local_owner" \
+    '.goals[].items[] | select(.owner == $owner) | .task // empty') || return 1
+  if printf '%s\n' "$goals" | jq -e 'any(.goals[] | select(.driven) | .items[]; .startable)' >/dev/null; then
+    table=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_WORKER_TABLE_NOW_EPOCH="$now" \
+      FM_CREW_STATE_NO_FORGE=1 "$SCRIPT_DIR/fm-worker-table.sh" --json) || return 1
+    quiet=$(printf '%s\n' "$hosts" | awk '$2 == "listening" || $2 == "dead" {print $1}'
+      for f in "$STATE"/*.page-host-parked; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        task=${f##*/}; printf '%s\n' "${task%.page-host-parked}"
+      done)
+    fleet_rows=$(drive_floor_goal_rows "$goals" "$table" "$quiet") || return 1
+  fi
+  local_states=$(printf '%s\n' "$fleet_rows" | awk -F'\t' '$1 == "lane" {print $2 " " $3}')
   for f in "$STATE"/*.meta; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
     grep -qx 'kind=secondmate' "$f" 2>/dev/null && continue
     task=${f##*/}; task=${task%.meta}
+    if [ -n "$linked_tasks" ] && grep -qxF -- "$task" <<< "$linked_tasks"; then continue; fi
     # A page host is quiet by design: parked (agent exited, notes kept) or
     # listening (its pane is a Lavish poll) it is neither working nor
     # startable; a dead host is startable (it needs re-hosting) but never
@@ -3774,11 +3837,16 @@ EOF
       parked|listening) continue ;;
       dead) idle="$idle$task=page-host-dead"$'\n'; startable=$((startable + 1)); continue ;;
     esac
-    line=$(FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
-    case "$line" in state:*) ;; *) line='state: unknown · source: none · no verdict' ;; esac
-    state=${line#state: }; state=${state%% *}
+    if [ -n "$table" ]; then
+      state=$(printf '%s\n' "$local_states" | awk -v t="$task" '$1 == t { print $2; exit }')
+      state=${state:-unknown}
+    else
+      line=$(FM_CREW_STATE_NO_FORGE=1 "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
+      case "$line" in state:*) ;; *) line='state: unknown · source: none · no verdict' ;; esac
+      state=${line#state: }; state=${state%% *}
+    fi
     case "$state" in
-      working) working=$((working + 1)); working_tasks="$working_tasks$task"$'\n' ;;
+      working) working=$((working + 1)) ;;
       paused) ;;
       *)
         idle="$idle$task=$state"$'\n'
@@ -3786,12 +3854,7 @@ EOF
         ;;
     esac
   done
-  goal_items=$(drive_floor_goal_items "$working_tasks")
-  if [ -n "$goal_items" ]; then
-    goal_startable=$(printf '%s\n' "$goal_items" | wc -l | tr -d ' ')
-    idle="$idle$(printf '%s\n' "$goal_items" | awk -F'\t' '{ printf "goal:%s/%s=startable\n", $1, $2 }')"$'\n'
-  fi
-  if [ "$working" -lt "$floor" ] && drive_floor_work_exists "$startable" "$goal_startable"; then
+  if [ "$working" -lt "$floor" ] && [ "$startable" -gt 0 ]; then
     if [ "$now" -ge "$since" ] && [ "$((now - since))" -ge "$hold" ] \
       && { [ "$last" -eq 0 ] || [ "$((now - last))" -ge "$PAUSE_RESURFACE_SECS" ]; }; then
       idle_list=$(printf '%s' "$idle" | LC_ALL=C sort | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')
@@ -3807,6 +3870,8 @@ EOF
     rm -f -- "$tmp"
     return 1
   fi
+  drive_floor_goal_tick "$now" "$floor" "$(printf '%s\n' "$fleet_rows" | awk '/^floor\t/ {sub(/^floor\t/, ""); print}')" || return 1
+  goal_items=$(printf '%s\n' "$fleet_rows" | awk '/^stall\t/ {sub(/^stall\t/, ""); print}')
   drive_floor_goal_stall "$now" "$hold" "$goal_items"
 }
 

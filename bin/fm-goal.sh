@@ -190,15 +190,12 @@
 # `startable` prints one tab-separated row per startable item of every driven
 # goal - goal, item, owner, task (- when none), since (the folded mark epoch, or
 # the goal's started epoch for an item no mark touched) - and nothing when no
-# item is startable; it is the machine read the watcher's goal-stall tick uses
-# (bin/fm-watch.sh), so that tick never invents what startable means. An
-# orphaned-running item (marked running with no live task behind it, see
-# PROJECTION above) is startable like an open one, so the tick ages it to the
-# same `check: goal stalled` wake instead of letting it sit unread for hours.
+# item is startable. An orphaned-running item (marked running with no live
+# task behind it, see PROJECTION above) is startable like an open one.
 # `--with-task-location` appends local or other for home-scoped lane matching.
 #
-# `export` is the JSON read of the same projection, for a renderer that is not
-# bash (bin/fm-drive-board.sh, the Miko cockpit panel). It prints one compact
+# `export` is the JSON read of the same projection, used by read-only views
+# and the watcher's per-goal floor and stall checks. It prints one compact
 # object {schema: "fm-goal-export.v1", goals: [...]} for every active goal, or
 # for the one named id (rc 1 when that id is not active), and an empty goals
 # array when none is active. A goal carries id, title, state, driven (boolean), named_by, plan,

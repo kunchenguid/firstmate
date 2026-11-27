@@ -10,6 +10,7 @@ set -eu
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-goal-stall)
+MATE_ROOT=$(fm_test_tmproot fm-watch-goal-stall-mate)
 export FM_HOME="$TMP_ROOT" FM_STATE_OVERRIDE="$TMP_ROOT/state"
 export FM_CONFIG_OVERRIDE="$TMP_ROOT/config" FM_DATA_OVERRIDE="$TMP_ROOT/data"
 mkdir -p "$FM_STATE_OVERRIDE" "$FM_CONFIG_OVERRIDE" "$FM_DATA_OVERRIDE"
@@ -136,7 +137,9 @@ test_idle_startable_item_wakes_after_the_hold() {
   floor 2
   lane w1 "$WORKING"
   lane w2 "$WORKING"
-  start_goal G1 'item [id=ship-ui] [owner=main]: ship the ui'
+  start_goal G1 'item [id=ship-ui] [owner=main]: ship the ui' \
+    'item [id=build] [owner=main] [task=w1]: build' \
+    'item [id=docs] [owner=main] [task=w2]: docs'
   drive_floor_tick 1000
   [ "$(count_wakes)" = 0 ] || fail "the stall fired at first sight"
   [ -f "$STATE/.goal-stall" ] || fail "no goal-stall episode was opened"
@@ -265,17 +268,91 @@ test_secondmate_task_home_and_parent_view() {
   pass 'two homes: live mate work is not orphaned; missing and failed tasks stall; mate reads only owned work; OFF suppresses drive'
 }
 
-test_goal_items_count_as_work_for_the_drive_floor() {
+mate_worker_cache() {  # <generated-epoch>
+  local mate="$MATE_ROOT" cache="$STATE/secondmate-summary-cache" key
+  mkdir -p "$mate/state" "$mate/data" "$mate/bin" "$cache"
+  printf 'miko\n' > "$mate/.fm-secondmate-home"
+  printf '# mate lab\n' > "$mate/AGENTS.md"
+  printf '#!/usr/bin/env bash\n' > "$mate/bin/true"
+  printf '%s\n' "- miko - Fixture mate (home: $mate; scope: fixture; projects: ; added 2026-10-28)" \
+    > "$FM_DATA_OVERRIDE/secondmates.md"
+  key=$(printf '%s\n%s\n%s\n' miko '' "$mate" | shasum -a 256 | awk '{print $1}')
+  jq -n --arg home "$mate" --argjson gen "$1" '
+    {schema:"fm-live-board-input.v1", fm_home:$home, generated_epoch:$gen,
+     tasks:[{id:"build-task", current_state:{state:"working"}}]}' > "$cache/$key.board-input.json"
+}
+
+test_mate_workers_meet_their_goal_floor() {
+  reset_case
+  floor 1
+  mate_worker_cache 1000
+  start_goal G1 'item [id=build] [owner=miko] [task=build-task]: build' \
+    'item [id=next] [owner=miko]: build the next part'
+  "$GOAL" mark G1 build running -- 'mate started it' >/dev/null
+  drive_floor_tick 1000
+  mate_worker_cache 1300
+  drive_floor_tick 1300
+  [ "$(count_wakes)" = 0 ] || fail "mate worker did not satisfy its goal floor"
+
+  # Same task id in a different home does not satisfy this other goal or
+  # suppress its waiting item. The first goal still meets the floor.
+  start_goal G2 'item [id=local] [owner=main] [task=build-task]: build locally'
+  drive_floor_tick 1300
+  mate_worker_cache 1600
+  drive_floor_tick 1600
+  [ "$(count_wakes)" = 1 ] || fail 'expected one wake for the other goal only'
+  [ "$DRIVE_FLOOR" = 'check: drive floor: 0 working < 1 300s (threshold 300s): idle: goal:G2/local=startable' ] \
+    || fail "the mate worker was credited to the wrong home or goal: $DRIVE_FLOOR"
+  pass 'the real worker table credits working mate lanes to their own ON goal, not a same-id lane in another home'
+}
+
+test_running_mate_item_is_not_waiting() {
   reset_case
   floor 8
-  lane w1 "$WORKING"
-  start_goal G1 'item [id=ship-ui] [owner=main]: ship the ui'
+  start_goal G1 'item [id=build] [owner=miko] [task=build-task]: build'
+  "$GOAL" mark G1 build running -- 'mate started it' >/dev/null
+  mate_worker_cache 1000
   drive_floor_tick 1000
-  drive_floor_tick 1900
-  [ "$DRIVE_FLOOR" = 'check: drive floor: 1 working < 8 900s (threshold 900s): idle: goal:G1/ship-ui=startable' ] \
-    || fail "startable goal work did not open the floor alarm: $DRIVE_FLOOR"
-  [ "$(count_wakes)" = 2 ] || fail "expected the floor and the stall wake, got $(count_wakes)"
-  pass "a startable goal item is work waiting: the floor wake names it with no startable lane at all"
+  mate_worker_cache 2000
+  drive_floor_tick 2000
+  [ "$(count_wakes)" = 0 ] || fail 'running mate item raised a floor or stall wake'
+  drive_floor_tick 2601
+  drive_floor_tick 2901
+  [ "$(grep -c 'drive-floor' "$FM_WAKE_QUEUE")" = 1 ] || fail 'an expired working verdict silenced the floor'
+  pass 'a working mate lane suppresses a false orphan wake, but an expired cache cannot silence the floor'
+}
+
+test_goal_floor_hold_and_repeat() {
+  reset_case
+  floor 1
+  lane unrelated "$WORKING"
+  lane off-linked "$PARKED"
+  start_goal G1 'item [id=ship-ui] [owner=main]: ship the ui'
+  start_goal G2 'item [id=off] [owner=main] [task=off-linked]: do not drive'
+  "$GOAL" pause G2 >/dev/null
+  drive_floor_tick 1000
+  drive_floor_tick 1299
+  [ "$(count_wakes)" = 0 ] || fail 'goal floor woke before its 300s hold'
+  drive_floor_tick 1300
+  [ "$DRIVE_FLOOR" = 'check: drive floor: 0 working < 1 300s (threshold 300s): idle: goal:G1/ship-ui=startable' ] \
+    || fail "expected the ON goal alone with no linked worker: $DRIVE_FLOOR"
+  drive_floor_tick 3099
+  [ "$(grep -c 'drive-floor' "$FM_WAKE_QUEUE")" = 1 ] || fail 'goal floor repeated early'
+  drive_floor_tick 3100
+  [ "$(grep -c 'drive-floor' "$FM_WAKE_QUEUE")" = 2 ] || fail 'goal floor did not repeat at 1800s'
+  "$GOAL" pause G1 >/dev/null
+  floor 8 # A generic alarm would now fire if the OFF goal's parked lane leaked.
+  drive_floor_tick 4000
+  drive_floor_tick 15000
+  [ "$(grep -c 'drive-floor' "$FM_WAKE_QUEUE")" = 2 ] || fail 'an OFF goal or its parked lane woke the floor'
+  [ ! -e "$STATE/.goal-drive-floor" ] || fail 'an OFF goal kept its floor episode'
+  "$GOAL" resume G1 >/dev/null
+  drive_floor_tick 15100
+  drive_floor_tick 15399
+  [ "$(grep -c 'drive-floor' "$FM_WAKE_QUEUE")" = 2 ] || fail 'a resumed goal reused the old hold'
+  drive_floor_tick 15400
+  [ "$(grep -c 'drive-floor' "$FM_WAKE_QUEUE")" = 3 ] || fail 'resumed goal did not wake on a fresh hold'
+  pass 'an empty ON goal wakes at 300s and repeats at 1800s; OFF goals stay silent and reset their clocks'
 }
 
 test_page_hosts_never_count_as_working() {
@@ -348,7 +425,8 @@ test_watcher_loop() {
   printf 'working [at=1000]: on it\n' > "$dir/state/worker.status"
   printf 'worktree=%s\nkind=ship\n' "$dir" > "$dir/state/worker.meta"
   printf '%s\n' "$WORKING" > "$dir/state/worker.crew-state-line"
-  printf '%s\n' 'item [id=ship-ui] [owner=main]: ship the ui' > "$dir/items"
+  printf '%s\n' 'item [id=ship-ui] [owner=main]: ship the ui' \
+    'item [id=worker] [owner=main] [task=worker]: keep working' > "$dir/items"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
     "$GOAL" start G1 --title t --done-when d --named-by n --plan p --items-file "$dir/items" >/dev/null \
     || fail "could not start the lab goal"
@@ -393,7 +471,8 @@ fm_test_run test_slow_cycle_probes_stages test_startable_command_lists_only_star
   test_idle_startable_item_wakes_after_the_hold \
   test_an_item_with_a_working_task_or_a_mark_is_not_stalled \
   test_an_orphaned_running_item_is_stalled_like_an_open_one \
-  test_secondmate_task_home_and_parent_view test_goal_items_count_as_work_for_the_drive_floor \
+  test_secondmate_task_home_and_parent_view test_mate_workers_meet_their_goal_floor \
+  test_running_mate_item_is_not_waiting test_goal_floor_hold_and_repeat \
   test_page_hosts_never_count_as_working test_only_idle_page_hosts_stay_silent \
   test_closing_or_removing_config_drops_the_ledger test_a_home_without_goals_stays_unchanged \
   test_watcher_loop
