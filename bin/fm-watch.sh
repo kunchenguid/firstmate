@@ -3635,15 +3635,15 @@ drive_floor_page_hosts() {
 }
 
 # Goal items waiting on someone, as `<goal><TAB><item><TAB><owner><TAB><task>`
-# rows: every row of `fm-goal.sh startable` whose task has no working lane.
-# <working-tasks> is the newline list of tasks the lane scan read as working.
+# rows: startable items, excluding tasks the local lane scan read as working.
+# Only match the scan against tasks in this home: task IDs are home-local.
 drive_floor_goal_items() {  # <working-tasks>
-  local rows goal item owner task since
+  local rows goal item owner task since location
   [ -x "$FM_GOAL_BIN" ] || return 0
-  rows=$("$FM_GOAL_BIN" startable 2>/dev/null) || return 0
-  while IFS=$'\t' read -r goal item owner task since; do
+  rows=$("$FM_GOAL_BIN" startable --with-task-location 2>/dev/null) || return 0
+  while IFS=$'\t' read -r goal item owner task since location; do
     [ -n "$goal" ] && [ -n "$item" ] || continue
-    if [ "${task:--}" != - ] && printf '%s\n' "$1" | grep -qxF -- "$task"; then continue; fi
+    if [ "$location" = local ] && [ "${task:--}" != - ] && printf '%s\n' "$1" | grep -qxF -- "$task"; then continue; fi
     printf '%s\t%s\t%s\t%s\n' "$goal" "$item" "$owner" "${task:--}"
   done <<EOF
 $rows

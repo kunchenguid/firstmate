@@ -195,6 +195,76 @@ test_an_orphaned_running_item_is_stalled_like_an_open_one() {
   pass "a running item with no task record or a dead one is stalled like an open item"
 }
 
+test_secondmate_task_home_and_parent_view() {
+  reset_case
+  floor 1
+  local mate out before
+  mate=$(mktemp -d "$TMP_ROOT/mate.XXXXXX")
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf 'terp\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$FM_HOME" > "$mate/.fm-secondmate-parent"
+  printf -- '- terp - lab mate (home: %s; scope: lab; projects: lab; added 2026-11-27)\n' "$mate" \
+    > "$FM_DATA_OVERRIDE/secondmates.md"
+  printf 'kind=ship\n' > "$mate/state/alive.meta"
+  printf '%s\n' "$WORKING" > "$mate/state/alive.crew-state-line"
+  printf 'kind=ship\n' > "$mate/state/dead.meta"
+  printf 'state: failed · source: status-log · the task died\n' > "$mate/state/dead.crew-state-line"
+  start_goal G1 'item [id=live] [owner=terp] [task=alive]: live mate lane' \
+    'item [id=lost] [owner=terp] [task=ghost]: missing mate lane' \
+    'item [id=failed] [owner=terp] [task=dead]: failed mate lane' \
+    'item [id=parent] [owner=main]: parent work' \
+    'item [id=next] [owner=terp] [after=parent]: blocked by parent work'
+  "$GOAL" mark G1 live running -- 'on it' >/dev/null
+  "$GOAL" mark G1 lost running -- 'on it' >/dev/null
+  "$GOAL" mark G1 failed running -- 'on it' >/dev/null
+  before=$(cksum "$STATE/goals/G1.goal" "$STATE/goals/G1.marks")
+
+  out=$("$GOAL" startable)
+  assert_not_contains "$out" $'G1\tlive\t' 'live mate item is not startable in parent'
+  assert_contains "$out" $'G1\tlost\tterp\tghost\t' 'missing mate task is startable'
+  assert_contains "$out" $'G1\tfailed\tterp\tdead\t' 'failed mate task is startable'
+  out=$("$GOAL" show G1)
+  assert_equals 2 "$(grep -c 'orphaned running, no live task' <<< "$out")" 'show labels only missing and failed tasks as orphaned'
+  out=$(FM_ROOT_OVERRIDE="$TMP_ROOT" "$ROOT/bin/fm-wake-drain.sh")
+  assert_contains "$out" 'running: live [terp, task alive' 'drain shows the running mate item'
+  assert_not_contains "$out" 'live [terp] (orphaned running' 'drain does not list live task as orphaned'
+  lane ghost "$WORKING" # A parent task with the same ID is not the mate's task.
+  drive_floor_tick 1000
+  drive_floor_tick 2000
+  assert_not_contains "$GOAL_STALL" 'live (owner=terp)' 'live mate item did not open a stall'
+  assert_contains "$GOAL_STALL" 'lost (owner=terp)' 'the parent namesake does not mask a true stall'
+  assert_contains "$GOAL_STALL" 'failed (owner=terp)' 'the failed mate task opens a stall'
+
+  mate_goal_command() {
+    FM_HOME="$mate" FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" FM_CONFIG_OVERRIDE="$mate/config" \
+      "$GOAL" "$@"
+  }
+  out=$(mate_goal_command startable)
+  assert_contains "$out" $'G1\tlost\tterp\tghost\t' 'mate sees its startable parent item'
+  assert_not_contains "$out" $'G1\tlive\t' 'mate sees its running task as not startable'
+  assert_not_contains "$out" $'G1\tparent\t' 'mate does not list parent-owned work'
+  assert_not_contains "$out" $'G1\tnext\t' 'mate honors the dependency on parent-owned work'
+  mate_goal_command export G1 | jq -e '.goals[0] | .progress.total == 4 and
+    ([.items[].owner] | all(. == "terp")) and
+    ([.items[] | select(.id == "live") | [.state, .startable]] == [["running", false]]) and
+    ([.items[] | select(.id == "next") | .waiting_on] == [["parent"]])' >/dev/null \
+    || fail 'mate export must retain folded state and dependencies, with owner-scoped counts'
+  assert_equals "$before" "$(cksum "$STATE/goals/G1.goal" "$STATE/goals/G1.marks")" 'mate and parent reads did not rewrite goal records'
+
+  "$GOAL" pause G1 >/dev/null
+  assert_equals '' "$("$GOAL" startable)" 'parent startable skips the OFF goal'
+  assert_equals '' "$(mate_goal_command startable)" 'mate startable skips the OFF parent goal'
+  mate_goal_command export | jq -e '.goals[0] | .driven == false and ([.items[].startable] | all(. == false))' >/dev/null \
+    || fail 'mate export must show the OFF switch without offering work'
+  drive_floor_tick 3000
+  [ ! -e "$STATE/.goal-stall" ] && [ -z "$GOAL_STALL" ] || fail 'OFF goal retained a stall episode'
+
+  mv "$STATE/goals" "$STATE/real-goals"
+  ln -s "$STATE/real-goals" "$STATE/goals"
+  assert_equals '{"schema":"fm-goal-export.v1","goals":[]}' "$(mate_goal_command export)" 'mate refuses a symlinked parent goal directory'
+  pass 'two homes: live mate work is not orphaned; missing and failed tasks stall; mate reads only owned work; OFF suppresses drive'
+}
+
 test_goal_items_count_as_work_for_the_drive_floor() {
   reset_case
   floor 8
@@ -323,7 +393,7 @@ fm_test_run test_slow_cycle_probes_stages test_startable_command_lists_only_star
   test_idle_startable_item_wakes_after_the_hold \
   test_an_item_with_a_working_task_or_a_mark_is_not_stalled \
   test_an_orphaned_running_item_is_stalled_like_an_open_one \
-  test_goal_items_count_as_work_for_the_drive_floor \
+  test_secondmate_task_home_and_parent_view test_goal_items_count_as_work_for_the_drive_floor \
   test_page_hosts_never_count_as_working test_only_idle_page_hosts_stay_silent \
   test_closing_or_removing_config_drops_the_ledger test_a_home_without_goals_stays_unchanged \
   test_watcher_loop

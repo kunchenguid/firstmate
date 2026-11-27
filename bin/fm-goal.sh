@@ -91,7 +91,7 @@
 # owns, read the way bin/fm-afk-return.sh's landed-work scan reads it;
 # otherwise a done [key=merged-<task>] line in an owner's stream). ORPHANED
 # RUNNING. An item marked running whose task is empty, has no readable
-# state/<task>.meta, or whose task bin/fm-crew-state.sh reads as done or
+# state/<task>.meta in the owner's home, or whose task bin/fm-crew-state.sh reads as done or
 # failed (the one owner of a task's current state, never re-derived here) is
 # orphaned-running: no live task is behind it, so it counts as startable -
 # carrying an `orphaned running, no live task` marker - exactly like an open
@@ -141,7 +141,7 @@
 #   fm-goal.sh show [<id>]
 #   fm-goal.sh brief
 #   fm-goal.sh active [--driven]
-#   fm-goal.sh startable
+#   fm-goal.sh startable [--with-task-location]
 #   fm-goal.sh export [<id>]
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
@@ -195,6 +195,7 @@
 # orphaned-running item (marked running with no live task behind it, see
 # PROJECTION above) is startable like an open one, so the tick ages it to the
 # same `check: goal stalled` wake instead of letting it sit unread for hours.
+# `--with-task-location` appends local or other for home-scoped lane matching.
 #
 # `export` is the JSON read of the same projection, for a renderer that is not
 # bash (bin/fm-drive-board.sh, the Miko cockpit panel). It prints one compact
@@ -208,6 +209,8 @@
 # target, stage, stage_at, since, until (each null when absent), after,
 # waiting_on and stop_on (lists), and the booleans startable, target_reached
 # and landing_hint. It is read-only, takes no lock, and needs jq.
+# In a secondmate home, startable and export read the local parent's goals and
+# list only items owned by this mate. Dependencies still use the full goal.
 #
 # Exit codes: 0 success; 1 operational refusal (unknown goal or item, items
 # still open, unwritable channel, no active goal); 2 usage error (bad flags,
@@ -224,6 +227,8 @@ FM_GOAL_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_GOAL_HOME/config}"
 
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$FM_GOAL_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$FM_GOAL_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$FM_GOAL_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
@@ -1231,26 +1236,52 @@ _fm_goal_item_target_reached() {  # <idx>
   [ "$cur" -ge "$want" ]
 }
 
-# 0 iff item <idx> is orphaned-running: its folded state is running but no
-# live task is behind it. The task is empty, has no readable
-# state/<task>.meta, or bin/fm-crew-state.sh - the one owner of a task's
-# current state, asked read-only with the forge fallback skipped, exactly as
-# the watcher's drive-floor scan asks it - reports it done or failed. Every
-# other verdict (working, parked, blocked, paused, unknown) may still be a
-# live task, so the item keeps its running state and is not startable.
-_fm_goal_item_orphaned_running() {  # <idx> [state-dir]
-  local idx=$1 state=${2:-$FM_GOAL_STATE}
-  local task line verdict key
+# Item task home, or empty for the calling home. Owners not named in the
+# registry retain local lookup; an unobservable route fails closed.
+_fm_goal_item_task_home() {  # <idx> <data-dir>
+  local owner=${FM_GOAL_ITEMS_OWNERS[$1]} data=$2 registry="$2/secondmates.md" home
+  [ "$owner" != main ] && [ "$(fm_parent_channel_home_id "$FM_GOAL_HOME")" != "$owner" ] || return 0
+  [ ! -L "$data" ] && [ ! -L "$registry" ] || return 1
+  [ -e "$registry" ] || return 0
+  [ -f "$registry" ] && [ -r "$registry" ] || return 1
+  if ! secondmate_registry_line_for_id "$registry" "$owner"; then
+    # An invalid or duplicate row is not permission to use a local namesake.
+    awk -v prefix="- $owner" '$0 == prefix || index($0, prefix " ") == 1 { exit 1 }' "$registry"
+    return $?
+  fi
+  [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || return 1
+  home=${SECONDMATE_REGISTRY_HOME%/}
+  case "$home/" in */../*|*/./*) return 1 ;; esac
+  case "$home" in /*) ;; *) return 1 ;; esac
+  [ ! -L "$home" ] && [ "$(fm_parent_channel_home_id "$home")" = "$owner" ] || return 1
+  printf '%s\n' "$home"
+}
+
+# 0 iff a running item's task is empty, missing in its owner's home, or
+# done/failed per the canonical read-only crew-state verdict. An unobservable
+# route or an unknown verdict is not proof of orphaning.
+_fm_goal_item_orphaned_running() {  # <idx> [state-dir] [data-dir]
+  local idx=$1 state=${2:-$FM_GOAL_STATE} data=${3:-$FM_GOAL_DATA}
+  local home config=$FM_GOAL_CONFIG task line verdict key
   [ "${FM_GOAL_M_STATES[$idx]}" = running ] || return 1
   task=${FM_GOAL_ITEMS_TASKS[$idx]}
   [ -n "$task" ] || return 0
+  home=$(_fm_goal_item_task_home "$idx" "$data") || return 1
+  if [ -n "$home" ]; then
+    state="$home/state" data="$home/data" config="$home/config"
+    [ -d "$state" ] && [ ! -L "$state" ] && [ ! -L "$data" ] && [ ! -L "$config" ] || return 1
+    [ ! -L "$state/$task.meta" ] && [ ! -L "$state/$task.status" ] || return 1
+  else
+    home=$FM_GOAL_HOME
+  fi
   [ "$( _fm_goal_regular_file_kind "$state/$task.meta" )" = 0 ] || return 0
   key="$state|$task"
   if [ -n "${_FM_GOAL_CREW_STATE_VERDICTS[$key]+x}" ]; then
     case "${_FM_GOAL_CREW_STATE_VERDICTS[$key]}" in done|failed) return 0 ;; esac
     return 1
   fi
-  line=$(FM_STATE_OVERRIDE="$state" FM_CREW_STATE_NO_FORGE=1 \
+  line=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_CREW_STATE_META_OVERRIDE='' FM_CREW_STATE_STATUS_OVERRIDE='' FM_CREW_STATE_NO_FORGE=1 \
     "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || true
   verdict=unknown
   case "$line" in
@@ -1266,12 +1297,12 @@ _fm_goal_item_orphaned_running() {  # <idx> [state-dir]
 # stay behind the class, until and after gates: a captain item is never
 # startable, an item past its until never is, and an item with unmet after ids
 # waits.
-_fm_goal_item_startable() {  # <idx> [state-dir]
+_fm_goal_item_startable() {  # <idx> [state-dir] [data-dir]
   [ "$FM_GOAL_REC_DRIVE" = driven ] || return 1
   [ "${FM_GOAL_ITEMS_CLASSES[$1]}" = drive ] || return 1
   case "${FM_GOAL_M_STATES[$1]}" in
     open) ;;
-    running) _fm_goal_item_orphaned_running "$1" "${2-}" || return 1 ;;
+    running) _fm_goal_item_orphaned_running "$@" || return 1 ;;
     *) return 1 ;;
   esac
   ! _fm_goal_item_expired "$1" || return 1
@@ -1342,8 +1373,8 @@ fm_goal_project() {  # <id> [state-dir] [data-dir] [now]
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i" "$state"; then startable=yes; else startable=no; fi
-    if _fm_goal_item_orphaned_running "$i" "$state"; then
+    if _fm_goal_item_startable "$i" "$state" "$data"; then startable=yes; else startable=no; fi
+    if _fm_goal_item_orphaned_running "$i" "$state" "$data"; then
       startable="$startable (orphaned running, no live task)"
     fi
     if _fm_goal_item_landing "$i" "$state"; then landing=yes; else landing=no; fi
@@ -1509,8 +1540,8 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i" "$state"; then startable=yes; else startable=no; fi
-    if _fm_goal_item_orphaned_running "$i" "$state"; then
+    if _fm_goal_item_startable "$i" "$state" "$data"; then startable=yes; else startable=no; fi
+    if _fm_goal_item_orphaned_running "$i" "$state" "$data"; then
       startable="$startable (orphaned running, no live task)"
     fi
     if _fm_goal_item_landing "$i" "$state"; then landing=yes; else landing=no; fi
@@ -1592,11 +1623,11 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
   i=0
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i" "$state"; then
+    if _fm_goal_item_startable "$i" "$state" "$data"; then
       if [ "$startable_n" -lt "$FM_GOAL_BRIEF_ITEM_LIST" ]; then
         if [ -n "$startable_list" ]; then startable_list="$startable_list, "; fi
         startable_list="$startable_list${FM_GOAL_ITEMS_IDS[$i]} [${FM_GOAL_ITEMS_OWNERS[$i]}]"
-        if _fm_goal_item_orphaned_running "$i" "$state"; then
+        if _fm_goal_item_orphaned_running "$i" "$state" "$data"; then
           startable_list="$startable_list (orphaned running, no live task)"
         fi
       else
@@ -1681,9 +1712,9 @@ _fm_goal_brief_block_mate() {  # <id> <state> <data> <mate> <away>
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$mate" ] || { i=$((i + 1)); continue; }
     _fm_goal_item_doneish "$i" && closed=$((closed + 1))
-    if _fm_goal_item_startable "$i" "$state"; then
+    if _fm_goal_item_startable "$i"; then
       line="  startable, nobody on it: ${FM_GOAL_ITEMS_IDS[$i]} [$mate]"
-      _fm_goal_item_orphaned_running "$i" "$state" \
+      _fm_goal_item_orphaned_running "$i" \
         && line="$line (orphaned running, no live task)"
       fm_cap_line_var "$line"
       printf '%s\n' "$FM_LINE_CAP_LINE"
@@ -1752,6 +1783,7 @@ fm_goal_render_brief() {
     [ -n "${FM_SECONDMATE_PARENT_HOME:-}" ] || return 0
     state="$FM_SECONDMATE_PARENT_HOME/state"
     data="$FM_SECONDMATE_PARENT_HOME/data"
+    [ ! -L "$FM_SECONDMATE_PARENT_HOME" ] && [ ! -L "$state" ] && [ ! -L "$data" ] || return 0
     mate=$FM_PARENT_CHANNEL_ID
     away_kind=''
     [ "$(_fm_goal_regular_file_kind "$state/.afk-contract")" = 0 ] && away_kind=present
@@ -2507,25 +2539,51 @@ cmd_apply_drive_answer() {
   return "$rc"
 }
 
+# Read-only inventory: the local records in main, or the local parent's
+# records filtered to this mate. Never fall back to mate-local goal records.
+_fm_goal_read_view() {
+  local rc=0
+  FM_GOAL_VIEW_STATE=$FM_GOAL_STATE FM_GOAL_VIEW_DATA=$FM_GOAL_DATA FM_GOAL_VIEW_OWNER=''
+  fm_parent_channel_destination "$FM_GOAL_HOME" "$FM_GOAL_STATE" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ] || return 0
+  [ "$rc" -eq 0 ] && [ "$FM_PARENT_CHANNEL_ROUTE" = local ] || return 1
+  FM_GOAL_VIEW_STATE="$FM_SECONDMATE_PARENT_HOME/state"
+  FM_GOAL_VIEW_DATA="$FM_SECONDMATE_PARENT_HOME/data"
+  FM_GOAL_VIEW_OWNER=$FM_PARENT_CHANNEL_ID
+  [ ! -L "$FM_SECONDMATE_PARENT_HOME" ] && [ ! -L "$FM_GOAL_VIEW_STATE" ] && [ ! -L "$FM_GOAL_VIEW_DATA" ]
+}
+
 cmd_startable() {
-  local path id i
-  [ "$#" -eq 0 ] || _fm_goal_usage_error 'startable takes no arguments'
+  local path id i with_location=0 location home
+  if [ "$#" -eq 1 ] && [ "$1" = --with-task-location ]; then
+    with_location=1
+  else
+    [ "$#" -eq 0 ] || _fm_goal_usage_error 'startable only accepts --with-task-location'
+  fi
+  _fm_goal_read_view || return 0
   while IFS= read -r path; do
     id=${path##*/}
     id=${id%.goal}
-    _fm_goal_open_record "$id" >/dev/null 2>&1 || continue
+    _fm_goal_open_record "$id" "$FM_GOAL_VIEW_STATE" >/dev/null 2>&1 || continue
     [ "$FM_GOAL_REC_DRIVE" = driven ] || continue
-    fm_goal_fold "$id" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$(date +%s)"
-    i=0
-    while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
-      if _fm_goal_item_startable "$i" "$FM_GOAL_STATE"; then
-        printf '%s\t%s\t%s\t%s\t%s\n' "$FM_GOAL_REC_ID" "${FM_GOAL_ITEMS_IDS[$i]}" \
+    fm_goal_fold "$id" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$(date +%s)"
+    for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
+      [ -z "$FM_GOAL_VIEW_OWNER" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$FM_GOAL_VIEW_OWNER" ] || continue
+      if _fm_goal_item_startable "$i"; then
+        location=''
+        if [ "$with_location" -eq 1 ]; then
+          if home=$(_fm_goal_item_task_home "$i" "$FM_GOAL_DATA") && [ -z "$home" ]; then
+            location=$'\tlocal'
+          else
+            location=$'\tother'
+          fi
+        fi
+        printf '%s\t%s\t%s\t%s\t%s%s\n' "$FM_GOAL_REC_ID" "${FM_GOAL_ITEMS_IDS[$i]}" \
           "${FM_GOAL_ITEMS_OWNERS[$i]}" "${FM_GOAL_ITEMS_TASKS[$i]:--}" \
-          "${FM_GOAL_M_ATS[$i]:-$FM_GOAL_REC_STARTED_EPOCH}"
+          "${FM_GOAL_M_ATS[$i]:-$FM_GOAL_REC_STARTED_EPOCH}" "$location"
       fi
-      i=$((i + 1))
     done
-  done < <(fm_goal_active_records 2>/dev/null)
+  done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE" 2>/dev/null)
   return 0
 }
 
@@ -2535,14 +2593,14 @@ cmd_startable() {
 _fm_goal_export_one() {  # <id>
   local now i startable reached landing stopon items=''
   now=$(date +%s)
-  _fm_goal_open_record "$1" || return 1
-  fm_goal_fold "$1" "$FM_GOAL_STATE" "$FM_GOAL_DATA" "$now"
-  i=0
-  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
+  _fm_goal_open_record "$1" "$FM_GOAL_VIEW_STATE" || return 1
+  fm_goal_fold "$1" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$now"
+  for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
+    [ -z "$FM_GOAL_VIEW_OWNER" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$FM_GOAL_VIEW_OWNER" ] || continue
     _fm_goal_item_waiting "$i"
-    if _fm_goal_item_startable "$i" "$FM_GOAL_STATE"; then startable=true; else startable=false; fi
+    if _fm_goal_item_startable "$i"; then startable=true; else startable=false; fi
     if _fm_goal_item_target_reached "$i"; then reached=true; else reached=false; fi
-    if _fm_goal_item_landing "$i" "$FM_GOAL_STATE"; then landing=true; else landing=false; fi
+    if _fm_goal_item_landing "$i" "$FM_GOAL_VIEW_STATE"; then landing=true; else landing=false; fi
     stopon=${FM_GOAL_ITEMS_STOPONS[$i]}
     items="$items$(jq -cn \
       --arg id "${FM_GOAL_ITEMS_IDS[$i]}" --arg owner "${FM_GOAL_ITEMS_OWNERS[$i]}" \
@@ -2567,8 +2625,8 @@ _fm_goal_export_one() {  # <id>
        after: ($after | csv), waiting_on: ($waiting | csv),
        until: ($until | epoch), stop_on: ($stopon | csv),
        startable: $startable, target_reached: $reached, landing_hint: $landing}')"$'\n'
-    i=$((i + 1))
   done
+  [ -z "$FM_GOAL_VIEW_OWNER" ] || [ -n "$items" ] || return 1
   printf '%s' "$items" | jq -cs \
     --arg id "$FM_GOAL_REC_ID" --arg title "$FM_GOAL_REC_TITLE" --arg state "$FM_GOAL_REC_STATE" \
     --arg drive "$FM_GOAL_REC_DRIVE" \
@@ -2590,15 +2648,16 @@ cmd_export() {
   [ "$#" -le 1 ] || _fm_goal_usage_error 'export takes at most one goal id'
   if [ "$#" -eq 1 ]; then
     fm_goal_id_valid "$1" || _fm_goal_usage_error "unsafe goal id: '$1'"
+    _fm_goal_read_view || exit 1
     one=$(_fm_goal_export_one "$1") || exit 1
     goals=$one$'\n'
-  else
+  elif _fm_goal_read_view; then
     while IFS= read -r path; do
       id=${path##*/}
       id=${id%.goal}
       one=$(_fm_goal_export_one "$id" 2>/dev/null) || continue
       goals="$goals$one"$'\n'
-    done < <(fm_goal_active_records 2>/dev/null)
+    done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE" 2>/dev/null)
   fi
   printf '%s' "$goals" | jq -cs '{schema: "fm-goal-export.v1", goals: .}'
 }
