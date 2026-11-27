@@ -675,27 +675,24 @@ test_handled_mv_dedups_by_sequence() {
   pass "inbox: the handled mv is the idempotent ack and sequences are never reissued"
 }
 
-# A record gets the mode an ordinary file created in the inbox folder gets, so
-# the folder's permissions (umask, or a default ACL that ignores the umask)
-# decide who can read it, never a fixed private staging mode.
+# A record stays private (mode 600) in a plain folder whatever the umask, while a
+# folder's default ACL, which ignores the umask, still decides who can read it.
 mode_of() {  # <path> -> permission string, portable across GNU and BSD
   # shellcheck disable=SC2012 # fixture names are plain; ls -ln is the portable mode read
   ls -ln "$1" | cut -c1-10
 }
 
-test_record_mode_matches_an_ordinary_file() {
-  local mask state rec ref
+test_record_stays_private_without_a_default_acl() {
+  local mask state rec
   for mask in 022 077; do
     state="$TMP_ROOT/mode-$mask/state"; mkdir -p "$state/t1.inbox"
     # A plain folder: drop any default ACL inherited from the temp root.
     ! command -v setfacl >/dev/null 2>&1 || setfacl -k "$state/t1.inbox" 2>/dev/null || :
     rec=$( umask "$mask"; inbox_lib "$state" fm_task_inbox_write "$state" t1 "hello" )
-    ref="$state/t1.inbox/ordinary"
-    ( umask "$mask"; : > "$ref" )
-    [ "$(mode_of "$rec")" = "$(mode_of "$ref")" ] \
-      || fail "umask $mask: record mode $(mode_of "$rec") differs from an ordinary file's $(mode_of "$ref")"
+    [ "$(mode_of "$rec")" = "-rw-------" ] \
+      || fail "umask $mask: record mode $(mode_of "$rec"), want -rw-------"
   done
-  pass "inbox: a record gets an ordinary file's mode under umask 022 and 077"
+  pass "inbox: a record stays mode 600 without a default ACL under umask 022 and 077"
 }
 
 test_record_inherits_an_effective_default_acl() {
@@ -1430,7 +1427,7 @@ test_idempotent_write_prefilter_error_preserves_retry
 test_idempotent_write_follows_ack_before_prefilter_open
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
-test_record_mode_matches_an_ordinary_file
+test_record_stays_private_without_a_default_acl
 test_record_inherits_an_effective_default_acl
 test_concurrent_writers_never_clobber
 test_writer_retries_after_a_vanished_lock_collision

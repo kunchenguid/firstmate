@@ -212,10 +212,11 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
   local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
-  # mktemp would create mode 600, which also empties an inherited default ACL
-  # mask; create the name exclusively (noclobber is O_EXCL) as an ordinary
-  # file instead, so the umask or the folder's default ACL decides its mode.
-  tmp=$(mktemp -u "$dir/.staging.XXXXXX") && ( set -C; : > "$tmp" ) || return 1
+  # mktemp's explicit mode 600 also empties an inherited default ACL mask.
+  # Create the name exclusively (noclobber is O_EXCL) under umask 077 instead:
+  # a plain folder still gets 600, while a default ACL ignores the umask and
+  # decides the mode, so its entries stay effective.
+  tmp=$(mktemp -u "$dir/.staging.XXXXXX") && ( umask 077; set -C; : > "$tmp" ) || return 1
   {
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
