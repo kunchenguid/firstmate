@@ -398,7 +398,9 @@ PY
 projection_lock_holder_child() {
   export PATH="$A/fakebin:$PATH" FM_FAKE_DIR="$D" FM_HOME="$A/home"
   export FM_PROJECTION_FAKE="$ROOT/tests/fixtures/herdr-projection-fake.py"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-wake-lib.sh"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/backends/herdr.sh"
   local lock
   lock=$(fm_backend_herdr_presentation_session_lock_path default) || exit 1
