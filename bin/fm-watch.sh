@@ -357,7 +357,7 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
 # Rate-limit mid-cycle progress writes without forking for the clock.
 WATCHER_CHECKPOINT_SECS=${FM_WATCHER_CHECKPOINT_SECS:-30}
-case "$WATCHER_CHECKPOINT_SECS" in ''|*[!0-9]*) WATCHER_CHECKPOINT_SECS=30 ;; esac
+case "$WATCHER_CHECKPOINT_SECS" in ''|*[!0-9]*|0) WATCHER_CHECKPOINT_SECS=30 ;; esac
 WATCHER_BEAT_AT=$SECONDS
 watcher_beat_touch() {
   touch "$STATE/.last-watcher-beat"

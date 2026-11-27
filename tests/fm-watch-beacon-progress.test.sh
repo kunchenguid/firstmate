@@ -146,11 +146,11 @@ test_wedged_step_still_reads_down() {
   pass "a watcher stuck inside one step still goes stale and reads down (max age ${OBSERVED_MAX_AGE}s)"
 }
 
-# A cycle shorter than the checkpoint interval keeps the cycle-top beacon
-# semantics other suites wait on: the beacon moves once per cycle, at its top.
-test_short_cycle_touches_once_per_cycle() {
+# Zero uses the default interval, so this short cycle keeps the cycle-top
+# beacon semantics other suites wait on.
+test_zero_checkpoint_uses_default() {
   local dir state fakebin beat first now i
-  dir=$(make_case short-cycle)
+  dir=$(make_case zero-checkpoint)
   state="$dir/state"
   fakebin="$dir/fakebin"
   # Three windows at 0.6s each make a 1.8s cycle: long enough that a checkpoint
@@ -160,7 +160,7 @@ test_short_cycle_touches_once_per_cycle() {
   for i in 1 2 3; do printf 'window=sb:fm-w%s\nkind=ship\n' "$i" > "$state/w$i.meta"; done
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_POLL=3 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_SECONDMATE_LIVENESS_SECS=99999999 FM_WATCHER_CHECKPOINT_SECS=3600 "$WATCH" > "$dir/watch.out" 2>&1 &
+    FM_SECONDMATE_LIVENESS_SECS=99999999 FM_WATCHER_CHECKPOINT_SECS=0 "$WATCH" > "$dir/watch.out" 2>&1 &
   CASE_PID=$!
   beat="$state/.last-watcher-beat"
   first=
@@ -171,11 +171,11 @@ test_short_cycle_touches_once_per_cycle() {
   now=$(file_mtime "$beat")
   stop_case
   [ "$now" = "$first" ] \
-    || fail "a checkpoint touched the beacon inside a cycle shorter than its interval ($first -> $now)"
-  pass "a cycle shorter than the checkpoint interval touches the beacon only at its top"
+    || fail "zero checkpoint touched the beacon inside the short cycle ($first -> $now)"
+  pass "zero checkpoint preserves cycle-top-only beacon writes"
 }
 
 test_slow_cycle_keeps_beacon_fresh
 test_wedged_step_still_reads_down
-test_short_cycle_touches_once_per_cycle
+test_zero_checkpoint_uses_default
 printf 'ok - all watcher beacon progress tests passed\n'
