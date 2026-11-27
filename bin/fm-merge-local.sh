@@ -20,6 +20,8 @@
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
 # A per-checkout lock in the project's Git directory serializes different
 # tasks across the checks, checkout update, ref transaction, and rollback.
+# Once the task record is read, every exit records this attempt's outcome in it
+# for teardown; bin/fm-merge-attempt-lib.sh owns that record.
 # tests/fm-merge-local.test.sh covers pinned-head landing and race refusals.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
@@ -34,6 +36,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-merge-attempt-lib.sh
+. "$SCRIPT_DIR/fm-merge-attempt-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
@@ -65,11 +69,6 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
-MERGE_EXPECTED_HEAD=$(fm_dod_local_done_head "$META") || {
-  echo "error: missing or malformed local done head for task $ID; report readiness before approval" >&2
-  exit 1
-}
-
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=
 MERGE_PROJECT_LOCK=
@@ -77,8 +76,25 @@ merge_control_cleanup() {
   [ -z "$MERGE_PROJECT_LOCK" ] || fm_lock_release "$MERGE_PROJECT_LOCK" || true
   [ -z "$MERGE_META_LOCK" ] || fm_lock_release "$MERGE_META_LOCK" || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
+  MERGE_PROJECT_LOCK=
+  MERGE_META_LOCK=
+  MERGE_CONTROL_LOCK=
 }
-trap merge_control_cleanup EXIT
+MERGE_CONFIRMED=false
+# Locks are released first: the attempt record takes the meta lock itself.
+merge_attempt_exit() {
+  local rc=$?
+  merge_control_cleanup
+  fm_merge_attempt_report_exit "$STATE" "$ID" "$MERGE_EXPECTED_SPAWN_GEN" \
+    fm-merge-local "$rc" "$MERGE_CONFIRMED"
+  return "$rc"
+}
+trap merge_attempt_exit EXIT
+MERGE_EXPECTED_HEAD=$(fm_dod_local_done_head "$META") || {
+  echo "error: missing or malformed local done head for task $ID; report readiness before approval" >&2
+  exit 1
+}
+
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
 fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
 MERGE_META_LOCK=$(fm_meta_lock_path "$META")
@@ -200,6 +216,7 @@ MERGE_META_LOCK=
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
+MERGE_CONFIRMED=true
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 fm_lock_release "$MERGE_PROJECT_LOCK" || true
 MERGE_PROJECT_LOCK=

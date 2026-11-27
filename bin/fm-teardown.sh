@@ -82,6 +82,11 @@
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
+# When the task's latest recorded merge attempt was refused
+# (bin/fm-merge-attempt-lib.sh), commits that are only on a remote no longer
+# count as landed: teardown refuses, naming that record, until the work is in
+# the local default branch (local-only) or a merged PR or content-in-default
+# proof shows it landed; --force still overrides.
 # Safety is proved again after task processes are reaped, before backlog-close
 # publication, branch deletion, or worktree return.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
@@ -405,6 +410,7 @@ for _teardown_source in \
   fm-cursor-lib.sh \
   fm-nm-run-lib.sh \
   fm-dod-lib.sh \
+  fm-merge-attempt-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
   fm-lease-lib.sh
@@ -439,6 +445,8 @@ unset _teardown_source
 # The bounded remote-ref refresh is shared with the done-claim gate.
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-merge-attempt-lib.sh
+. "$SCRIPT_DIR/fm-merge-attempt-lib.sh"
 # Archive paths live only in teardown; presentation/wake readers stay unaware.
 teardown_archive_directory() {  # <directory>
   if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
@@ -2200,7 +2208,7 @@ read_worktree_dirt() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch refused
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2277,6 +2285,38 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+
+  # Every branch above that saw unpushed commits already demanded landed proof.
+  # Commits that are only on a remote prove nothing about a merge whose latest
+  # attempt was refused (bin/fm-merge-attempt-lib.sh owns that record).
+  if [ -z "$unpushed" ] && refused=$(fm_merge_attempt_refused "$META"); then
+    if ! refused_merge_superseded; then
+      echo "REFUSED: the latest merge attempt for task $ID was refused (recorded: $refused), and nothing shows its work landed since." >&2
+      [ -z "${CONTENT_LANDED_PROOF_ERROR:-}" ] || echo "content-landed proof unavailable: $CONTENT_LANDED_PROOF_ERROR." >&2
+      echo "Re-run the merge on its own to see why it refused, land the work, or get the captain's explicit OK to discard, then --force." >&2
+      return 1
+    fi
+  fi
+}
+
+# Has a refused merge attempt been superseded by the work actually reaching the
+# default branch? A local-only ship must be contained in local $DEFAULT, where
+# bin/fm-merge-local.sh lands it; any other ship needs work_is_landed's merged-PR
+# or content-in-default proof.
+refused_merge_superseded() {
+  local DEFAULT unmerged branch
+  if [ "$MODE" = local-only ]; then
+    DEFAULT=$(default_branch) || return 1
+    unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null) || return 1
+    [ -z "$unmerged" ]
+    return
+  fi
+  branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+  if [ -z "$branch" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+  fi
+  work_is_landed "$branch"
 }
 
 # Fix 1 (see script header): does the active-or-most-recent no-mistakes run in

@@ -152,6 +152,25 @@ SH
   pass 'approval and branch changes during the hold read refuse without moving main'
 }
 
+# Every attempt after the task record is read leaves exactly one record of its
+# outcome for teardown (bin/fm-merge-attempt-lib.sh), even when a pipe hides
+# the exit status from the caller.
+test_attempt_outcome_is_recorded() {
+  make_case attempt-outcome
+  record_done || fail 'attempt fixture done was not accepted'
+  git -C "$PROJ" commit -q --allow-empty -m diverged
+  BASE=$(git -C "$PROJ" rev-parse HEAD)
+  land 2>&1 | tail -n 1 >/dev/null
+  grep -Eq '^last_merge_attempt=refused [0-9]+ fm-merge-local exit=1$' "$META" \
+    || fail 'a refused landing was not recorded'
+  git -C "$PROJ" reset -q --hard "$X^"
+  land >/dev/null || fail 'the approved head did not land after the default was restored'
+  [ "$(grep -c '^last_merge_attempt=' "$META")" = 1 ] || fail 'attempt records accumulated'
+  grep -Eq '^last_merge_attempt=merged [0-9]+ fm-merge-local$' "$META" \
+    || fail 'a successful landing did not replace the refusal'
+  pass 'each landing attempt records its outcome, replacing the previous one'
+}
+
 test_snapshot_cannot_pin_a_replacement_task() {
   local captured
   make_case stale-snapshot
@@ -311,4 +330,5 @@ SH
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_attempt_outcome_is_recorded

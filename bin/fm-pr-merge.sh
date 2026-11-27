@@ -229,6 +229,8 @@
 # destination, normal-case deduplication, and at-least-once recovery.
 # A landed merge whose outcome cannot be written is reported loudly rather than
 # misreported as a failed merge.
+# Once the task record is read, every exit also records this attempt's outcome
+# in it for teardown; bin/fm-merge-attempt-lib.sh owns that record.
 set -eu
 
 usage() {
@@ -257,6 +259,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-merge-attempt-lib.sh
+. "$SCRIPT_DIR/fm-merge-attempt-lib.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -668,8 +672,19 @@ merge_control_cleanup() {
   [ -z "$MERGE_META_LOCK" ] || fm_lock_release "$MERGE_META_LOCK" || true
   fm_afk_contract_lock_release || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
+  MERGE_META_LOCK=
+  MERGE_CONTROL_LOCK=
 }
-trap merge_control_cleanup EXIT
+MERGE_CONFIRMED=false
+# Locks are released first: the attempt record takes the meta lock itself.
+merge_attempt_exit() {
+  local rc=$?
+  merge_control_cleanup
+  fm_merge_attempt_report_exit "$STATE" "$ID" "$MERGE_EXPECTED_SPAWN_GEN" \
+    fm-pr-merge "$rc" "$MERGE_CONFIRMED"
+  return "$rc"
+}
+trap merge_attempt_exit EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
 fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
@@ -2031,6 +2046,7 @@ esac
 # Reached only after the forge confirmed the merge landed: set -e exits on a
 # refused or failed merge above, and a queued forge merge exits without an
 # outcome while its existing poll remains armed.
+MERGE_CONFIRMED=true
 outcome_rc=0
 fm_merge_outcome_report "$FM_HOME" "$STATE" "$ID" "$URL" self \
   "${FM_PR_MERGE_AUTHORITY:-}" || outcome_rc=$?
