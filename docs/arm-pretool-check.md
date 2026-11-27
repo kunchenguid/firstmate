@@ -33,17 +33,17 @@ The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
 It passes both roots and the exact command string to the Node policy owner.
 
-The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
+The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch`, `pkill`, or `killall` byte sequence even after the classifier's decoders run.
 The fast path may allow only when both of these hold:
 
-1. The stripped text lacks the `fm-watch` watcher substring, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
+1. The stripped text lacks the `fm-watch` watcher substring and the `pkill` and `killall` pattern-kill substrings, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
 2. The raw command carries no quoting-decoder marker: a `$` immediately followed by a single quote (ANSI-C `$'...'`) or a double quote (bash locale `$"..."`).
 
-Any `fm-watch` match or any quoting-decoder marker delegates to the classifier.
+Any `fm-watch`, `pkill`, or `killall` match, or any quoting-decoder marker, delegates to the classifier.
 Normalizing first keeps this a strict superset: a protected watcher path obfuscated as `fm-watc\<newline>h-arm.sh` or `fm-"watch"-arm.sh` still delegates, and stripping only those non-alphanumeric bytes can never destroy an existing `fm-watch` run.
 The quoting-decoder marker closes the case the byte strip cannot: `bin/fm-$'\x77'atch-arm.sh` and `bin/fm-$"watch"-arm.sh` both resolve to `bin/fm-watch-arm.sh` only after the classifier decodes the encoded character, so a cheap byte strip would otherwise lose the `fm-watch` bytes and fast-allow them.
 This marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending this marker set in the same change, or the prefilter stops being a strict superset.
-The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher command, so it never flips a classification and the classifier remains the single owner of every decision.
+The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely neither a watcher command nor a pattern kill, so it never flips a classification and the classifier remains the single owner of every decision.
 
 The seatbelt's threat model is agent mistakes: no one accidentally writes an ANSI-C- or locale-obfuscated watcher path, and deliberate obfuscation is the post-arm liveness guard's territory.
 The marker guard closes the static gap anyway because it is cheap and provable per encoding class.
