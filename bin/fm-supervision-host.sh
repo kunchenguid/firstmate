@@ -125,9 +125,8 @@
 # owner delivers as an ordinary wake; main drains, acknowledges, and ends its
 # turn, and that turn end starts the next park. When that stop leaves an
 # acknowledged episode, the host hands it back as announced downtime before
-# the line. If that hand-back cannot take the marker lock within
-# FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND (default 2 seconds) or the marker
-# write fails, the host prints a watcher FAILED line and exits 1, and it does
+# the line. If that hand-back cannot take the marker lock within two seconds
+# or the marker write fails, the host prints a watcher FAILED line and exits 1, and it does
 # not print the boundary line. The successor hand-back uses that same bound and
 # that same failure, so a close that stops the successor cycle cannot wait
 # without a deadline or hide a failed restore. The verified Codex asynchronous owner sets
@@ -187,8 +186,7 @@
 # the boundary), FM_SUPERVISION_HOST_TURN_TIMEOUT (1200), FM_SUPERVISION_HOST_ROTATE_TURNS (20:
 # a new engine conversation after this many turns; every main session start
 # also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
-# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1),
-# FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND (2; requires a positive integer).
+# successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
 # Park duration uses Bash's process-relative SECONDS counter (including Bash
 # 3.2), while durable timestamps still use epoch time. This is not a portable
 # monotonic-clock guarantee. Arm exit probes use ordinary 0.5-second child
@@ -250,7 +248,6 @@ TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
 READY_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_READY_TIMEOUT:-}" 25)
 POLL=$(numeric_or "${FM_SUPERVISION_HOST_POLL:-}" 1)
-HANDBACK_LOCK_BOUND=$(numeric_or "${FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND:-}" 2)
 WARM_COMPACT_TICK=$(numeric_or "${FM_WARM_COMPACT_TICK:-}" 60)
 COOLDOWN=$FM_SUPERVISION_HOST_COOLDOWN
 COOLDOWN_MAX=3600
@@ -569,7 +566,7 @@ boundary_exit() {
   ARM_OUT=
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  if ! hand_back_acknowledged_episode "$HANDBACK_LOCK_BOUND"; then
+  if ! hand_back_acknowledged_episode; then
     fail_handback
   fi
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
@@ -712,10 +709,10 @@ emit() {  # [line...]
   [ -z "$text" ] || printf '%s\n' "$text"
 }
 
-hand_back_acknowledged_episode() {  # [lock-bound-seconds]
+hand_back_acknowledged_episode() {
   fm_recovery_marker_read "$STATE/.watcher-down" || return 0
   case "$FM_RECOVERY_MARKER_TOKEN" in
-    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" "${1:-}" >/dev/null 2>&1 ;;
+    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" 2 >/dev/null 2>&1 ;;
   esac
 }
 
@@ -733,7 +730,7 @@ retire_successor() {
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  if ! hand_back_acknowledged_episode "$HANDBACK_LOCK_BOUND"; then
+  if ! hand_back_acknowledged_episode; then
     fail_handback
   fi
 }

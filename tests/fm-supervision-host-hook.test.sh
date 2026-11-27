@@ -447,7 +447,7 @@ test_park_boundary_handback_reports_a_lock_wait_that_expires() {
   local home
   home=$(make_primary_home hook-boundary-lock)
   echo 0 > "$home/park-clock"
-  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND=1 \
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 \
     FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "boundary lock: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
@@ -456,7 +456,7 @@ test_park_boundary_handback_reports_a_lock_wait_that_expires() {
   watcher_live "$home" || fail "boundary lock: the watcher exited before the boundary"
   hold_marker_lock "$home"
   echo 60 > "$home/park-clock"
-  wait_until 40 hook_exited "$home" \
+  wait_until_deadline 60 hook_exited "$home" \
     || fail "boundary lock: the park did not end while the marker lock was held: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
   [ -e "$home/release-marker-lock" ] && fail "boundary lock: the holder was released before the hook returned"
   assert_park_boundary_handback_failure_notifies "$home" "boundary lock"
@@ -473,8 +473,7 @@ test_successor_handback_reports_a_lock_wait_that_expires() {
   home=$(make_primary_home hook-successor-lock)
   ln -s "$ROOT/.agents" "$home/.agents"
   echo hang > "$home/stub-mode"
-  FM_SUPERVISION_HOST_TURN_TIMEOUT=15 FM_SUPERVISION_HOST_HANDBACK_LOCK_BOUND=1 \
-    start_hook_session "$home"
+  FM_SUPERVISION_HOST_TURN_TIMEOUT=15 start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "successor lock: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
   append_status "$home" 'first actionable wake'
@@ -486,7 +485,7 @@ test_successor_handback_reports_a_lock_wait_that_expires() {
     || fail "successor lock: its watcher did not close during the engine turn: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
   seed_acked_downtime "$home"
   hold_marker_lock "$home"
-  wait_until 200 hook_exited "$home" \
+  wait_until_deadline 60 hook_exited "$home" \
     || fail "successor lock: the park did not end while the marker lock was held: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
   [ -e "$home/release-marker-lock" ] && fail "successor lock: the holder was released before the hook returned"
   assert_park_boundary_handback_failure_notifies "$home" "successor lock"
@@ -990,8 +989,8 @@ test_presented_status_history_stays_quiet_on_rearm() {
     [ "$task" != mixed ] || printf 'note: directly presented with the completion\n' >> "$state/$task.status"
     append_wake "$state" signal "$task.status" "signal: $task.status" || fail "fixture: could not queue old status"
   done
-  # This receipt covers only a note from another file. The watcher must still
-  # deliver the preceding scout completion, which did not reach that drain.
+  # The drain presents only the note from this file. The watcher must still
+  # deliver the preceding scout completion.
   printf 'done [at=2]: completion behind a note\nnote: visible incidental note\n' > "$state/buried.status"
   main_drain "$home" > "$home/history.out"
   assert_no_re 'completion behind a note' "$home/history.out" "fixture: the first drain already showed the buried event"
@@ -1002,10 +1001,6 @@ test_presented_status_history_stays_quiet_on_rearm() {
   # shellcheck disable=SC2086 # Execute the exact bound printed by main_drain.
   FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@"' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK || fail "fixture: could not acknowledge old signals"
   [ ! -s "$state/.wake-queue" ] || fail "fixture: old wakes still queued"
-  # Leave this one file with only its pre-upgrade presentation cursor.
-  if [ -e "$state/.archived.status.direct-presentation" ]; then
-    mv "$state/.archived.status.direct-presentation" "$home/archived.receipt"
-  fi
   printf 'needs-decision [at=%s]: new question after restart\n' "$(date +%s)" >> "$state/completed.status"
   start_hook_session "$home"
   turn_end "$home"

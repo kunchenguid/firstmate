@@ -627,7 +627,8 @@ stop_home_watcher() {
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   fm_pid_alive "$lock_pid" || return 0
   if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-    fm_watcher_planned_stop_record "$STATE" "$lock_pid" "$FM_WATCHER_MATCHED_IDENTITY" || return 1
+    # A failed record leaves the stop on the ordinary downtime recovery path.
+    fm_watcher_planned_stop_record "$STATE" "$lock_pid" "$FM_WATCHER_MATCHED_IDENTITY" || true
     kill -TERM "$lock_pid" 2>/dev/null || true
     i=0
     while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do

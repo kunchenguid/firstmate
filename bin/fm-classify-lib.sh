@@ -1679,7 +1679,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
-status_presentation_cursor_offset() {  # <status-file> [manifest-only]
+status_presentation_cursor_offset() {  # <status-file>
   local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
@@ -1708,7 +1708,6 @@ EOF
     fi
     ident=$cur_ident
   else
-    [ "${2:-}" != manifest-only ] || { printf '0'; return 0; }
     legacy=$(_fm_open_decisions_cursor_path "$f")
     if [ -e "$legacy" ] || [ -L "$legacy" ]; then
       status_open_decisions_cursor_offset "$f"
@@ -1894,41 +1893,15 @@ status_direct_presentation_marker() {  # <status-file>
   printf '%s/.%s.direct-presentation' "${1%/*}" "${1##*/}"
 }
 
-# A fleet presentation can advance its annotation cursor across a mixed span
-# when it printed only its informational lines. Without a direct receipt, a
-# homogeneous span is unambiguous: either all lines were informational, or
-# only direct annotations could have advanced the cursor past them.
-_status_presentation_span_unambiguous() {  # <status-file> <start> <end>
-  local span line info=0 other=0
-  span=$(_fm_status_read_span "$1" "$2" "$(($3 - $2))") || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    [ -n "$line" ] || continue
-    if status_line_is_unread_surface "$line"; then info=1; else other=1; fi
-    [ "$info" -eq 0 ] || [ "$other" -eq 0 ] || return 1
-  done <<< "$span"
-}
-
-# Catch an observer up to a completed presentation of the same file. The
-# annotation cursor alone is available for homes that predate direct receipts.
+# Catch an observer up to a completed direct presentation of the same file.
 status_watcher_adopt_presentation() {  # <observer-marker> <status-file> <classified-offset>
-  local marker=$1 file=$2 classified=$3 ident size direct=0 presented receipt
-  [ -f "${file%/*}/.status-presentation-cursor" ] || return 1
+  local marker=$1 file=$2 classified=$3 ident size direct receipt
+  receipt=$(status_direct_presentation_marker "$file")
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
   _fm_status_read_ident_size "$file" || return 1
   ident=$_FM_STAT_IDENTITY size=$_FM_STAT_SIZE
-  [ "$classified" -lt "$size" ] || return 1
-  receipt=$(status_direct_presentation_marker "$file")
-  if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
-    direct=$(status_presentation_marker_offset "$receipt" "$file")
-    [ "$direct" -le "$size" ] || direct=0
-  fi
-  if [ "$direct" -lt "$size" ]; then
-    presented=$(status_presentation_cursor_offset "$file" manifest-only) || presented=0
-    if [ "$presented" -gt "$direct" ] && [ "$presented" -gt "$classified" ] \
-      && _status_presentation_span_unambiguous "$file" "$direct" "$presented"; then
-      direct=$presented
-    fi
-  fi
-  [ "$direct" -gt "$classified" ] || return 1
+  direct=$(status_presentation_marker_offset "$receipt" "$file")
+  [ "$direct" -gt "$classified" ] && [ "$direct" -le "$size" ] || return 1
   status_presentation_marker_commit "$marker" "$file" "$direct" "$ident"
 }
 
@@ -2254,7 +2227,7 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
 status_line_is_unread_surface() {  # <status-line>
   local line=$1 verb key note resolve held prefix
   [ -n "$line" ] || return 1
-  status_line_verb "$line" verb
+  verb=$(status_line_verb "$line")
   [ "$verb" = note ] && return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}

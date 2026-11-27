@@ -1231,14 +1231,29 @@ test_moved_generation_acknowledgement_is_self_healing() {
 # stop without a re-arm, and the stopped watcher publishes downtime as any
 # close does, so the owner's rewake can commit.
 test_stop_ends_the_home_watcher_and_publishes_downtime() {
-  local dir home state fakebin out status
-  dir="$TMP_ROOT/stop-home-watcher"
+  local scenario=${1:-normal} dir home state fakebin out status real_mktemp
+  dir="$TMP_ROOT/stop-home-watcher-$scenario"
   home="$dir/home"
   state="$home/state"
-  fakebin=$(make_case stop-home-watcher-bin)/fakebin
+  fakebin=$(make_case "stop-home-watcher-bin-$scenario")/fakebin
   mkdir -p "$state"
   FM_HOME="$home" start_seed_watcher "$state" "$fakebin" "$dir/watch.out"
+  if [ "$scenario" = record-failure ]; then
+    printf 'acked:downtime:seeded.1\n' > "$state/.watcher-down"
+    real_mktemp=$(command -v mktemp)
+    cat > "$fakebin/mktemp" <<SH
+#!/bin/sh
+case "\${1:-}" in
+  */.watcher-planned-stop.tmp.*)
+    : > "$dir/record-refused"
+    exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+    chmod +x "$fakebin/mktemp"
+  fi
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop 2>&1); status=$?
+  [ "$scenario" != record-failure ] || [ -e "$dir/record-refused" ] || fail "fixture: the stop record was not refused"
   expect_code 0 "$status" "--stop of a live home watcher must succeed"
   assert_contains "$out" "watcher: stopped pid=$SEED_PID" "--stop must name the watcher it stopped"
   wait_for_exit "$SEED_PID" 50 >/dev/null 2>&1 || true
@@ -1250,7 +1265,7 @@ test_stop_ends_the_home_watcher_and_publishes_downtime() {
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop 2>&1); status=$?
   expect_code 0 "$status" "--stop with no watcher must succeed"
   assert_contains "$out" "watcher: none running" "--stop with no watcher must say so"
-  pass "watch-arm: --stop ends only this home's watcher, publishes downtime, and reports when none runs"
+  pass "watch-arm: --stop ends only this home's watcher and publishes downtime ($scenario)"
 }
 
 # --take-over stops only a watcher that the named arm itself owns. The seed
@@ -2461,6 +2476,7 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_stop_ends_the_home_watcher_and_publishes_downtime
+test_stop_ends_the_home_watcher_and_publishes_downtime record-failure
 test_handling_delivered_accepts_already_acked_generation
 test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
