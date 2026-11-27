@@ -373,6 +373,57 @@ test_retry_is_serialized_and_bounded() {
   pass "a tick offers at most the bounded number of held starts and loses none"
 }
 
+test_enforced_retry_budget_and_paused_goals() {
+  local home=$TMP_ROOT/goal-retry/home dir=$TMP_ROOT/goal-retry out id mode
+  local stub=$TMP_ROOT/goal-retry/spawn log=$TMP_ROOT/goal-retry/log itemfile=$TMP_ROOT/goal-retry/items
+  local goal="$ROOT/bin/fm-goal.sh"
+  local -a probes
+  mkdir -p "$home/state" "$home/config" "$home/data" "$dir/cpu"
+  make_probes "$dir" 1 60 16 20971520 68719476736 >/dev/null
+  probes=(PATH="$dir/fakebin:$BASE_PATH" FM_CPU_PROC_DIR="$dir/cpu" FM_DATA_OVERRIDE="$home/data")
+  printf '2\n' > "$home/config/lane-capacity"
+  make_spawn_stub "$stub" "$log"
+  printf '%s\n' 'item [id=a] [owner=main] [task=job-0]: wait for goal ON' > "$itemfile"
+  queue_env "$home" "${probes[@]}" "$goal" start launch --title 'Fixture goal' --done-when 'fixture done' \
+    --named-by 'test retry' --plan plan.md --items-file "$itemfile" >/dev/null || fail 'goal fixture failed'
+  queue_env "$home" "${probes[@]}" "$goal" pause launch >/dev/null || fail 'goal did not pause'
+  assert_equals 2 "$(queue_env "$home" "${probes[@]}" "$CAPACITY" --start-budget)" 'free lanes cap the budget'
+  printf '10\nmax-load1 4\n' > "$home/config/lane-capacity"
+  assert_equals 1 "$(queue_env "$home" "${probes[@]}" "$CAPACITY" --start-budget)" 'load headroom caps the budget'
+  printf '10\n' > "$home/config/lane-capacity"
+  assert_equals 3 "$(queue_env "$home" "${probes[@]}" "$CAPACITY" --start-budget)" 'ample headroom still ramps at three'
+  printf '2\n' > "$home/config/lane-capacity"
+
+  queue_env "$home" FM_ADMISSION_AUTO_DISPATCH=1 "$QUEUE" add job-0 -- job-0 || fail 'add failed'
+  # A re-add must retain the automatic origin even without the launch environment.
+  queue_env "$home" "$QUEUE" add job-0 -- job-0 || fail 'refresh failed'
+  for id in job-1 job-2 job-3 job-4 job-5; do
+    queue_env "$home" "$QUEUE" add "$id" -- "$id" || fail 'add failed'
+  done
+  for mode in off shadow; do
+    printf '%s\n' "$mode" > "$home/config/auto-dispatch"
+    out=$(queue_env "$home" "${probes[@]}" FM_ADMISSION_SPAWN="$stub" "$QUEUE" retry)
+    assert_equals 1 "$(printf '%s\n' "$out" | grep -c '^admission: started ')" "$mode keeps the manual retry pace"
+    assert_not_contains "$out" 'started job-0' "$mode must not replay an automatic start"
+  done
+  printf 'enforce\n' > "$home/config/auto-dispatch"
+  out=$(queue_env "$home" "${probes[@]}" FM_ADMISSION_SPAWN="$stub" "$QUEUE" retry)
+  assert_equals 2 "$(printf '%s\n' "$out" | grep -c '^admission: started ')" 'two free lanes admit two starts'
+  assert_not_contains "$out" 'started job-0' 'the OFF goal is never replayed'
+  assert_contains "$(queue_env "$home" "$QUEUE" list)" 'job-0 held' 'the paused entry is preserved'
+  queue_env "$home" "${probes[@]}" "$goal" resume launch >/dev/null || fail 'goal did not resume'
+
+  printf '10\n' > "$home/config/lane-capacity"
+  # After the first start, available RAM falls below the reserve. A tick
+  # that never rereads headroom would replay the other leftover task too.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" 8589934592 > %q\n' "$dir/fakebin/memsize" > "$stub"
+  out=$(queue_env "$home" "${probes[@]}" FM_ADMISSION_SPAWN="$stub" "$QUEUE" retry)
+  assert_equals 'admission: started job-0' "$out" 'resume replays the goal, then fresh RAM stops the ramp'
+  assert_equals '' "$(queue_env "$home" "${probes[@]}" FM_ADMISSION_SPAWN="$stub" "$QUEUE" retry)" 'no ordinary start at zero RAM headroom'
+  assert_contains "$(queue_env "$home" "$QUEUE" list)" 'job-5 held' 'RAM hold preserves the leftover entry'
+  pass 'retry scales to free lanes, keeps OFF automatic starts queued, and resamples RAM after each start'
+}
+
 # --- real spawn cases -----------------------------------------------------------
 
 make_spawn_case() {  # <name> <task-id>...
@@ -686,6 +737,7 @@ test_ram_is_not_a_limit_while_plenty_is_available
 test_queue_records_lists_and_drops_a_held_start
 test_retry_offers_held_starts_and_survives_every_verdict
 test_retry_is_serialized_and_bounded
+test_enforced_retry_budget_and_paused_goals
 test_a_held_spawn_is_queued_then_admitted_by_retry
 test_load_guard_and_project_capacity_holds_are_queued_too
 test_reserved_review_admission

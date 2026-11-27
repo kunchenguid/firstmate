@@ -927,7 +927,8 @@ A hold is a spawn deferral like the load guard's: nothing is created, the backlo
 Every held start is also written to the durable admission queue, `state/admission-queue/<task-id>.start`, with the exact arguments and directory it was given, before the spawn exits.
 That covers the load guard and project capacity holds as well as the admission verdict, so a hold survives the exit and is never forgotten.
 `bin/fm-watch.sh` runs `bin/fm-admission-queue.sh retry` detached at most once a minute while the queue holds anything, so a held start is offered again at every wake and heartbeat with no daemon of its own.
-A retry runs reserved reviews first, then ordinary starts, oldest first within each group, and starts at most one task per tick, so a host that has just recovered takes starts one at a time instead of all at once.
+A retry runs reserved reviews first, then ordinary starts, oldest first within each group.
+The watcher starts at most one task per tick unless [auto-dispatch](#auto-dispatch-configauto-dispatch) is in `enforce`, when the retry budget follows host headroom and stays capped at three.
 A start that launches is removed and announced with one `check:` wake row, and one that already has a task record is dropped.
 A start that fails for any reason other than a hold stays in the queue as `failed`, is announced the same way, and is never retried until `bin/fm-admission-queue.sh drop <task-id>` forgets it.
 The wake drain and the session-start digest print an `ADMISSION:` section listing reserved reviews separately from ordinary starts, including how long each is held and why.
@@ -2778,21 +2779,24 @@ It is a dry run that prints counts by kind unless given `--apply`, and its heade
 
 ## Auto-dispatch (config/auto-dispatch)
 
-A queued backlog row whose brief is written no longer waits for a firstmate turn to start: while `config/auto-dispatch` exists, session start arms `bin/fm-auto-dispatch.sh` as the watcher check `state/auto-dispatch.check.sh`, which dispatches such rows through `bin/fm-dispatch.sh new` on the normal `FM_CHECK_INTERVAL` cadence.
+A queued backlog row whose brief is written and linked to a startable item of an ON goal can start without a firstmate turn.
+While `config/auto-dispatch` exists, session start arms `bin/fm-auto-dispatch.sh` as the watcher check `state/auto-dispatch.check.sh`, which dispatches eligible rows through `bin/fm-dispatch.sh new` on the normal `FM_CHECK_INTERVAL` cadence.
 `bin/fm-dispatch.sh new` durably submits a start and returns before resolution or launch; its `--wait` option requests the final verdict synchronously.
 The existing admission queue owns completion and held-start retries, while auto-dispatch selects only rows with neither a task record nor a pending admission request.
 The detached auto-dispatch runner uses the synchronous verdict so a submission is never mistaken for an actual start.
 
 | `config/auto-dispatch` | Behavior |
 | --- | --- |
-| absent | Off; `bin/fm-auto-dispatch.sh list` still shows every verdict. |
-| `shadow` | One `check:` wake names the dispatchable rows when that set changes; nothing starts. Run a shadow week before enforcing. |
-| `enforce` | At most `FM_AUTODISPATCH_MAX_STARTS` (default 1) dispatches per pass, through the same front door firstmate uses. |
+| absent or `off` | No auto-dispatch; `bin/fm-auto-dispatch.sh list` still shows pre-enforce verdicts. |
+| `shadow` | One `check:` wake names the pre-enforce candidates when that set changes; nothing auto-dispatches. Run a shadow week before enforcing. |
+| `enforce` | Only startable ON-goal items owned by this home qualify; at most `FM_AUTODISPATCH_MAX_STARTS` (default 1) dispatches per pass. |
 
 A row is dispatched only when every gate holds: `tasks-axi` lists it as ready (no open blocker, no active hold - which is also how captain calls and money calls stay undispatched), it is not secondmate- or captain-class, it has no task record yet, its brief exists, is filled in, and carries a crewmate delivery contract, and its project clone is present.
 The launch passes only recorded decisions to `fm-dispatch.sh`: the mode, branch prefix, base branch and upstream consent from the brief's own contract lines, `--scout` for a SCOUT brief, and `--yolo` from the project's registered standing posture (`bin/fm-project-mode.sh`); a per-task deviation is firstmate's to hold or dispatch by hand.
 Every existing guard keeps its verdict unchanged: the resolver's weekly start guard and receipts, the capacity and load guard, and the project delivery mode agreement - a start held by spawn admission lands in the admission queue exactly as a firstmate start would.
 A weekly-guard hold is retried at most every `FM_AUTODISPATCH_RETRY_SECS` (default 900) without a wake; a launch that ends in anything but a start or a hold is parked with one wake row naming the evidence and never retried blind - firstmate fixes it and runs `bin/fm-auto-dispatch.sh drop <id>`, or rewrites the brief, which clears the mark itself.
+The admission queue keeps an automatically deferred start queued if the link stops qualifying or enforce is disabled.
+`bin/fm-admission-queue.sh --help` owns retry pacing and `bin/fm-capacity.sh --help` owns the headroom calculation.
 The default is OFF: a dispatch spends quota, so the switch is provably safe only where a home turned it on deliberately.
 `bin/fm-auto-dispatch.sh --help` owns the per-home shadow rollout and captain-approved enablement procedure, including the live evidence required before enabling Miko; portable shadow fixtures alone do not authorize it.
 

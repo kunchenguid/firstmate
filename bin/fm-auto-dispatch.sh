@@ -27,6 +27,8 @@
 #              also how money calls stay undispatched (a money call is a
 #              captain hold of category money, bin/fm-captain-hold.sh), and a
 #              hold with --until keeps the row out until its date gate clears.
+#   goal       in enforce, linked to a startable ON goal item owned by this
+#              home, and not linked to an OFF item. Off/shadow report as before.
 #   kind       not secondmate and not captain: persistent homes and
 #              captain-class rows are never dispatched here.
 #   unstarted  no state/<id>.meta exists; a row with a record is live work.
@@ -230,12 +232,26 @@ verdict() {  # <id> <kind> <repo>
   return 0
 }
 
+goal_can_start() {  # <id> <launch-links rows>
+  awk -v id="$1" '$1 == id && $2 == "startable" { on=1 }
+                  $1 == id && $2 == "off" { off=1 }
+                  END { exit !(on && !off) }' <<< "$2"
+}
+
 # One "<id> <verdict>" line per ready row.
 verdicts() {
-  local id kind repo v
+  local id kind repo v m links=''
+  m=$(mode)
+  if [ "$m" = enforce ]; then
+    links=$("$SCRIPT_DIR/fm-goal.sh" launch-links) || links=''
+  fi
   while read -r id kind repo; do
     [ -n "${id:-}" ] || continue
-    v=$(verdict "$id" "$kind" "$repo")
+    if [ "$m" = enforce ] && ! goal_can_start "$id" "$links"; then
+      v='skip: no eligible ON goal link'
+    else
+      v=$(verdict "$id" "$kind" "$repo")
+    fi
     printf '%s %s\n' "$id" "$v"
   done < <(ready_rows | cut -d' ' -f1,3,4)
 }
@@ -251,7 +267,7 @@ dispatch_one() {  # <id> <project-dir> <flag>...
   date +%s > "$ATTEMPT/$id" 2>/dev/null || true
   rc=0
   out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
-    FM_PROJECTS_OVERRIDE="$PROJECTS" \
+    FM_PROJECTS_OVERRIDE="$PROJECTS" FM_ADMISSION_AUTO_DISPATCH=1 \
     "$DISPATCH" new "$id" "$project" --wait "$@" < /dev/null 2>&1) || rc=$?
   case "$rc" in
     0)
@@ -285,7 +301,7 @@ dispatch_one() {  # <id> <project-dir> <flag>...
 }
 
 cmd_run() {
-  local mode started=0 id v
+  local mode started=0 id v links
   mode=$(mode)
   [ "$mode" = enforce ] || die 'run dispatches only in enforce mode (config/auto-dispatch)'
   mkdir "$LOCK" 2>/dev/null || { printf 'auto-dispatch: a run is already in progress\n'; return 0; }
@@ -298,6 +314,10 @@ cmd_run() {
     [ "$started" -lt "$MAX_STARTS" ] || break
     case "$v" in
       'start '*)
+        # Verdicts can be buffered while the previous launch is in progress.
+        [ "$(mode)" = enforce ] || break
+        links=$("$SCRIPT_DIR/fm-goal.sh" launch-links "$id") || continue
+        goal_can_start "$id" "$links" || continue
         v=${v#start }
         # shellcheck disable=SC2086 # verdict output is flag words, never evaluated
         dispatch_one "$id" $v

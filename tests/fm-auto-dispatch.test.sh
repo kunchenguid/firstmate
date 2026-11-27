@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# fm-auto-dispatch.sh: a queued brief with no hold and no record is dispatched
-# by the watcher once config/auto-dispatch enforces; every other row waits for
+# fm-auto-dispatch.sh: a queued startable ON-goal brief with no hold or record
+# is dispatched once config/auto-dispatch enforces; every other row waits for
 # firstmate, and a dispatch that does not start or hold is parked with one wake
 # row, never retried blind.
 set -u
@@ -138,12 +138,31 @@ pass 'off refuses to run, shadow reports a changed set once and dispatches nothi
 # bound puts its outcome on that row.
 printf 'enforce\n' > "$HOME_DIR/config/auto-dispatch"
 : > "$DISPATCH_ARGS"
-out=$(env "${AD_ENV[@]}" "$AD" run)
+GOAL="$ROOT/bin/fm-goal.sh"
+goal_start() {
+  "$GOAL" start "$1" --title 'Fixture goal' --done-when 'fixture done' \
+    --named-by 'exercise auto-dispatch' --plan plan.md --items-file "$TMP_ROOT/items"
+}
+printf '%s\n' 'item [id=linked] [owner=main]: drive a queued brief' \
+  'item [id=dependent] [owner=main] [task=dep] [after=linked]: wait on a dependency' \
+  'item [id=mate] [owner=miko] [task=mate-job]: drive in the owner home' > "$TMP_ROOT/items"
+goal_start enabled >/dev/null || fail 'could not create enabled goal'
+"$GOAL" mark enabled linked open --task t1 -- 'brief ready' >/dev/null || fail 'could not link t1'
+printf '%s\n' 'item [id=paused] [owner=main] [task=paused-job]: do not start' > "$TMP_ROOT/items"
+goal_start disabled >/dev/null || fail 'could not create disabled goal'
+"$GOAL" pause disabled >/dev/null || fail 'could not turn goal OFF'
+for id in unlinked paused-job dep mate-job; do brief "$id"; done
+printf '%s\n' 'unlinked,queued,ship,firstmate,Unrelated' \
+  'paused-job,queued,ship,firstmate,OFF goal' 'dep,queued,ship,firstmate,Blocked dependency' \
+  'mate-job,queued,ship,firstmate,Other owner' 't1,queued,ship,firstmate,ON goal' > "$READY_LIST"
+out=$(env "${AD_ENV[@]}" FM_AUTODISPATCH_MAX_STARTS=5 "$AD" run)
+assert_equals 'started t1' "$out" 'only the ready ON link owned by this home may start'
+printf '%s\n' 't1,queued,ship,firstmate,ON goal' > "$READY_LIST"
 assert_contains "$out" 'started t1' 'a dispatchable row is started'
 assert_equals 1 "$(wc -l < "$DISPATCH_ARGS")" 'one dispatch per pass, like the admission retry'
 assert_contains "$(cat "$DISPATCH_ARGS")" 'new t1 '"$HOME_DIR"'/projects/firstmate --wait --mode direct-PR --yolo off' 'the dispatch goes through fm-dispatch.sh new with derived flags'
 assert_contains "$(cat "$HOME_DIR/state/.wake-queue")" 'auto-dispatch: started t1' 'a start is announced as a durable wake row'
-pass 'enforce dispatches through fm-dispatch.sh and announces the start'
+pass 'enforce starts the ON goal link, skips unrelated, OFF, blocked and other-owner rows'
 
 printf 'weekly-hold\n' > "$DISPATCH_MODE"
 rm -f "$HOME_DIR/state/.wake-queue"
@@ -191,6 +210,21 @@ out=$(env "${AD_ENV[@]}" "$AD" run)
 assert_contains "$out" 'started t1 (the task record appeared during the launch)' 'a launch whose record appeared counts as started'
 assert_not_contains "$(cat "$HOME_DIR/state/.wake-queue" 2>/dev/null)" 'parked for firstmate' 'a raced launch never parks'
 pass 'spawn holds hand off to the admission queue and a raced launch parks nothing'
+
+# The mate must use the parent's goal switch but only its own item links.
+MATE="$TMP_ROOT/mate"
+mkdir -p "$MATE/state" "$MATE/config"
+printf 'miko\n' > "$MATE/.fm-secondmate-home"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$HOME_DIR" > "$MATE/.fm-secondmate-parent"
+printf 'enforce\n' > "$MATE/config/auto-dispatch"
+printf '%s\n' 't1,queued,ship,firstmate,Parent item' 'mate-job,queued,ship,firstmate,Mate item' > "$READY_LIST"
+MATE_ENV=(FM_HOME="$MATE" FM_CONFIG_OVERRIDE="$MATE/config" FM_STATE_OVERRIDE="$MATE/state")
+printf 'start\n' > "$DISPATCH_MODE"
+out=$(env "${AD_ENV[@]}" "${MATE_ENV[@]}" "$AD" run)
+assert_equals 'started mate-job' "$out" 'the mate does not start the parent item'
+"$GOAL" pause enabled >/dev/null || fail 'could not turn parent goal OFF'
+assert_equals '' "$(env "${AD_ENV[@]}" "${MATE_ENV[@]}" "$AD" run)" 'parent OFF stops mate dispatch'
+pass 'a local secondmate starts only its own items and honors the parent goal switch'
 
 # --- arm ---------------------------------------------------------------------
 env "${AD_ENV[@]}" "$AD" arm >/dev/null 2>&1 || true

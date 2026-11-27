@@ -29,10 +29,13 @@
 #   fm-admission-queue.sh drop <task-id>
 #                                 forget an entry (a failed one Firstmate gave up on)
 #
-# retry starts at most N tasks per run (default 1), so a recovered host takes
-# starts one tick at a time instead of all at once: that pacing is the
-# hysteresis, because every start raises the load the next verdict reads. It
-# tries at most FM_ADMISSION_RETRY_ATTEMPTS held entries per run (default 4),
+# With auto-dispatch off or in shadow, retry starts at most N tasks (default
+# 1). Under enforce, --max-starts only lowers the three-start ramp limit and
+# fm-capacity.sh --start-budget bounds ordinary starts, resampled after each
+# success. A reserved review can still use its own admission at zero ordinary
+# headroom. Enforce skips OFF goal links; auto-dispatch-originated entries also
+# require enforce and a currently startable link before replay.
+# Retry tries at most FM_ADMISSION_RETRY_ATTEMPTS held entries per run (default 4),
 # reserved reviews first then oldest first, because a project-specific hold must not block the entries
 # behind it. A start that exits 0 is removed and announced to Firstmate with one
 # durable `check:` wake row; an entry whose task already has a record is
@@ -43,7 +46,7 @@
 # State: state/admission-queue/<task-id>.start, one `key=value` record per file
 # (mode 0600, written atomically) with queued_epoch, last_epoch, attempts,
 # state (held|failed), reason, cwd, command (spawn|dispatch; absent is spawn),
-# and one `arg=` line per argument.
+# optional auto_dispatch=1 set by auto-dispatch, and one `arg=` line per argument.
 # retry serializes on state/.admission-queue.lock and exits 0 when another run
 # holds it. Arguments and directories containing a newline are refused.
 #
@@ -57,6 +60,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 QUEUE="$STATE/admission-queue"
 SPAWN="${FM_ADMISSION_SPAWN:-$SCRIPT_DIR/fm-spawn.sh}"
 DISPATCH="${FM_ADMISSION_DISPATCH:-$SCRIPT_DIR/fm-dispatch.sh}"
@@ -84,6 +88,7 @@ read_entry() {  # <file>
   ENTRY_ARGS=()
   ENTRY_COMMAND=spawn
   ENTRY_ALLOWANCE=ordinary
+  ENTRY_AUTO_DISPATCH=0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       queued_epoch=*) ENTRY_QUEUED=${line#*=} ;;
@@ -93,6 +98,7 @@ read_entry() {  # <file>
       reason=*) ENTRY_REASON=${line#*=} ;;
       cwd=*) ENTRY_CWD=${line#*=} ;;
       command=*) ENTRY_COMMAND=${line#*=} ;;
+      auto_dispatch=1) ENTRY_AUTO_DISPATCH=1 ;;
       arg=*)
         ENTRY_ARGS+=("${line#arg=}")
         [ "$line" != arg=--merge-review ] || ENTRY_ALLOWANCE=reserved-review
@@ -120,6 +126,9 @@ write_entry() {  # <id> <queued> <attempts> <state> <reason> <cwd> <arg>...
     printf 'reason=%s\n' "$reason"
     printf 'cwd=%s\n' "$cwd"
     printf 'command=%s\n' "${WRITE_COMMAND:-spawn}"
+    if [ "${ENTRY_AUTO_DISPATCH:-0}" = 1 ] || [ "${FM_ADMISSION_AUTO_DISPATCH:-0}" = 1 ]; then
+      printf 'auto_dispatch=1\n'
+    fi
     for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
   } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the queue entry for $id"; }
   mv -f -- "$tmp" "$QUEUE/$id.start" || { rm -f -- "$tmp"; die "cannot publish the queue entry for $id"; }
@@ -229,8 +238,22 @@ announce() {  # <key> <text>
   fm_wake_append check "$1" "check: $2" >/dev/null 2>&1 || true
 }
 
+auto_dispatch_enforced() {
+  local value=''
+  [ -f "$CONFIG/auto-dispatch" ] || return 1
+  read -r value < "$CONFIG/auto-dispatch" || true
+  [ "$value" = enforce ]
+}
+
+start_budget() {
+  local budget
+  budget=$("$SCRIPT_DIR/fm-capacity.sh" --start-budget) && is_uint "$budget" || budget=0
+  printf '%s\n' "$budget"
+}
+
 cmd_retry() {
-  local max=1 attempts_cap f id out rc reason started=0 tried=0 lock command resolver_retry
+  local max='' attempts_cap f id out rc reason started=0 tried=0 lock command resolver_retry
+  local enforce=0 links remaining=0 budget
   resolver_retry=${FM_ADMISSION_RESOLVER_RETRY_SECS:-900}
   is_uint "$resolver_retry" || resolver_retry=900
   while [ "$#" -gt 0 ]; do
@@ -250,6 +273,14 @@ cmd_retry() {
   _FM_WAKE_LIB_LOADED=1
   lock="$STATE/.admission-queue.lock"
   fm_lock_try_acquire "$lock" || return 0
+  if auto_dispatch_enforced; then
+    enforce=1
+    max=${max:-3}
+    [ "$max" -le 3 ] || max=3
+    [ "$max" -eq 0 ] || remaining=$(start_budget)
+  else
+    max=${max:-1}
+  fi
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ "$started" -lt "$max" ] && [ "$tried" -lt "$attempts_cap" ] || break
@@ -271,6 +302,17 @@ cmd_retry() {
       echo "admission: $id failed: the saved start is unusable"
       continue
     }
+    if [ "$ENTRY_AUTO_DISPATCH" = 1 ] || [ "$enforce" = 1 ]; then
+      auto_dispatch_enforced || continue
+      links=$("$SCRIPT_DIR/fm-goal.sh" launch-links "$id") || continue
+      ! grep -Fqx -- "$id"$'\toff' <<< "$links" || continue
+      if [ "$ENTRY_AUTO_DISPATCH" = 1 ]; then
+        grep -Fqx -- "$id"$'\tstartable' <<< "$links" || continue
+      fi
+      if [ "$remaining" -eq 0 ]; then
+        [ "$ENTRY_ALLOWANCE" = reserved-review ] && [ "$started" -eq 0 ] || continue
+      fi
+    fi
     tried=$((tried + 1))
     rc=0
     case "$ENTRY_COMMAND" in
@@ -286,6 +328,11 @@ cmd_retry() {
     if [ "$rc" -eq 0 ]; then
       rm -f -- "$f"
       started=$((started + 1))
+      if [ "$enforce" = 1 ]; then
+        [ "$remaining" -eq 0 ] || remaining=$((remaining - 1))
+        budget=$(start_budget)
+        [ "$remaining" -le "$budget" ] || remaining=$budget
+      fi
       echo "admission: started $id"
       announce "admission-started:$id" "held start $id was admitted and started"
     elif [ "$rc" -eq 3 ] && [ "$ENTRY_COMMAND" = dispatch ] && printf '%s\n' "$out" | grep -q '^[[:space:]]*status: held'; then

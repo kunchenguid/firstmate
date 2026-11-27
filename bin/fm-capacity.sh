@@ -8,6 +8,7 @@
 #   fm-capacity.sh --publish  write that document to state/lane-capacity.json
 #   fm-capacity.sh --admit [--project DIR]
 #                             the admission verdict as an exit status
+#   fm-capacity.sh --start-budget  number of ordinary starts that fit now (0-3)
 #   fm-capacity.sh --load-guard  whether machine load holds a fresh worker start
 #   fm-capacity.sh --review-reserved [--project DIR]
 #                             reserved review admission with available-RAM floor
@@ -145,6 +146,11 @@
 # turns one off). Memory is never a limit while 8 GB or more is available, the
 # AVAILABLE column of free -m (MemAvailable), whatever the free percentage.
 #
+# --start-budget is the whole number of ordinary starts that fit below the
+# lane cap, 30 load1 and 8 GiB RAM reserve (or tighter configured limits).
+# Assume 2 load and 2 GiB per start, ramp at most three, and return zero on
+# a capacity hold or unknown headroom. This never replaces per-start admission.
+#
 # --load-guard is the check bin/fm-spawn.sh enforces on a fresh worker start. It
 # exits 75 with one `deferred:` line on stderr while this host's own load1 is
 # above 2 per logical core, and 0 otherwise. A max-load1 in config/lane-capacity
@@ -198,7 +204,7 @@ CPU_BRAKE_PER_CORE=3
 
 mode=report
 ADMIT_PROJECT=
-USAGE="usage: fm-capacity.sh [--json|--publish|--admit [--project DIR]|--load-guard|--review-reserved [--project DIR]|--help]"
+USAGE="usage: fm-capacity.sh [--json|--publish|--admit [--project DIR]|--start-budget|--load-guard|--review-reserved [--project DIR]|--help]"
 case "${1:-}" in
   -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
   "") ;;
@@ -206,6 +212,7 @@ case "${1:-}" in
   --publish) mode=publish ;;
   --admit) mode=admit ;;
   --load-guard) mode=load-guard ;;
+  --start-budget) mode=start-budget ;;
   --review-reserved) mode=review-reserved ;;
   *) echo "$USAGE" >&2; exit 2 ;;
 esac
@@ -725,6 +732,30 @@ case "$target" in
     fi
     ;;
 esac
+
+if [ "$mode" = start-budget ]; then
+  # Prefer fresh host probes for the ramp rather than reusing a beat across
+  # launches. The normal verdict above still honors all fresh beat holds.
+  budget_load=$load1
+  [ "$budget_load" != unknown ] || budget_load=$lim_load1
+  budget_ram=${probe_avail_gb:-$lim_avail}
+  if [ "$admit" != true ] || ! is_num "$budget_load" || ! is_num "$budget_ram"; then
+    echo 0
+  else
+    awk -v lanes="$free_lanes" -v l1="$budget_load" -v ram="$budget_ram" \
+      -v max_load="$max_load1" -v cores="$cores" -v per_core="$LOAD_GUARD_PER_CORE" \
+      -v min_ram="$min_avail_gb" -v reserve="$ADMIT_RAM_ENOUGH_GB" '
+      function min(a,b) { return a < b ? a : b }
+      BEGIN {
+        if (max_load == "" && cores != "unknown") max_load = cores * per_core
+        load_limit = max_load == "" ? 30 : min(30, max_load)
+        if (min_ram > reserve) reserve = min_ram
+        n = int(min(min(3, lanes), min((load_limit - l1) / 2, (ram - reserve) / 2)))
+        print (n > 0 ? n : 0)
+      }'
+  fi
+  exit $?
+fi
 
 # --- admit ------------------------------------------------------------------
 if [ "$mode" = admit ] || [ "$mode" = review-reserved ]; then

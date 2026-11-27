@@ -142,6 +142,7 @@
 #   fm-goal.sh brief
 #   fm-goal.sh active [--driven]
 #   fm-goal.sh startable [--with-task-location]
+#   fm-goal.sh launch-links [task]
 #   fm-goal.sh export [<id>|--driven]
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
@@ -193,6 +194,10 @@
 # item is startable. An orphaned-running item (marked running with no live
 # task behind it, see PROJECTION above) is startable like an open one.
 # `--with-task-location` appends local or other for home-scoped lane matching.
+#
+# `launch-links [task]` prints tab-separated task and verdict (startable,
+# blocked, or off) for linked items owned by this home. It uses local parent
+# goal records for secondmates, and refuses remote or unreadable routes.
 #
 # `export` is the JSON read of the same projection, used by read-only views
 # and the watcher's per-goal floor and stall checks. It prints one compact
@@ -2594,6 +2599,34 @@ cmd_startable() {
   return 0
 }
 
+cmd_launch_links() {
+  local path id i task verdict now owner
+  [ "$#" -le 1 ] || _fm_goal_usage_error 'launch-links takes at most one task id'
+  [ "$#" -eq 0 ] || fm_goal_id_valid "$1" || _fm_goal_usage_error 'unsafe task id'
+  _fm_goal_read_view || return 1
+  [ ! -L "$(fm_goal_dir "$FM_GOAL_VIEW_STATE")" ] || return 1
+  owner=${FM_GOAL_VIEW_OWNER:-main}
+  now=$(date +%s) || return 1
+  while IFS= read -r path; do
+    id=${path##*/}; id=${id%.goal}
+    _fm_goal_open_record "$id" "$FM_GOAL_VIEW_STATE" >/dev/null 2>&1 || continue
+    fm_goal_fold "$id" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$now"
+    for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
+      [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$owner" ] || continue
+      task=${FM_GOAL_ITEMS_TASKS[$i]}
+      [ -n "$task" ] && [ "${1:-$task}" = "$task" ] || continue
+      verdict=blocked
+      if [ "$FM_GOAL_REC_DRIVE" = off ]; then
+        verdict=off
+      elif _fm_goal_item_startable "$i"; then
+        verdict=startable
+      fi
+      printf '%s\t%s\n' "$task" "$verdict"
+    done
+  done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE" 2>/dev/null)
+  return 0
+}
+
 # One active goal as a JSON object on stdout: the record fields, the folded
 # progress counts, and one object per item carrying its projection (see the
 # `export` paragraph in the header for the contract).
@@ -3154,6 +3187,7 @@ main() {
   shift
   case "$cmd" in
     start|edit|mark|evidence|probe|show|brief|active|startable|export|exists|window|driven|close|pause|resume) ;;
+    launch-links) cmd_launch_links "$@"; return ;;
     apply-drive-answer) cmd_apply_drive_answer "$@"; return ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;
