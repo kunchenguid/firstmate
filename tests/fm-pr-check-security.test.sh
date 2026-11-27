@@ -1194,6 +1194,15 @@ test_scan_reads_the_ready_line_past_a_wait_on_the_same_pr() {
   printf '%s\n' \
     'done [at=2]: PR https://github.com/o/r/pull/10 checks green' \
     'paused [at=3]: https://github.com/o/r/pull/10 waits on https://github.com/o/r/pull/11 until 2026-12-01T00:00Z' > "$state/task-both.status"
+  write_task_meta "$dir" task-punct
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/13 checks green' \
+    'paused [at=3]: run starting for https://github.com/o/r/pull/13, waiting on drive call' \
+    'paused [at=4]: waiting for review (https://github.com/o/r/pull/13#issuecomment-1) on "https://github.com/o/r/pull/13".' > "$state/task-punct.status"
+  write_task_meta "$dir" task-other-punct
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/14 checks green' \
+    'paused [at=3]: https://github.com/o/r/pull/14 waits on https://github.com/o/r/pull/15, until 2026-12-01T00:00Z' > "$state/task-other-punct.status"
   write_task_meta "$dir" task-working
   printf '%s\n' \
     'done [at=2]: PR https://github.com/o/r/pull/12 checks green' \
@@ -1204,7 +1213,10 @@ test_scan_reads_the_ready_line_past_a_wait_on_the_same_pr() {
   grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-same.meta" \
     || fail "a wait on the same PR withdrew the ready line: $(cat "$dir/stdout")"
   fm_pr_poll_artifacts_valid "$state" task-same "$POLL" || fail "the PR behind a wait on it armed no merge poll"
-  for id in task-other task-both task-working; do
+  grep -qxF 'pr=https://github.com/o/r/pull/13' "$state/task-punct.meta" \
+    || fail "a wait naming the same PR beside punctuation withdrew the ready line: $(cat "$dir/stdout")"
+  fm_pr_poll_artifacts_valid "$state" task-punct "$POLL" || fail "the PR behind a punctuated wait on it armed no merge poll"
+  for id in task-other task-other-punct task-both task-working; do
     ! grep -q '^pr=' "$state/$id.meta" || fail "$id registered a PR a later line withdrew"
     [ ! -e "$state/$id.check.sh" ] || fail "$id armed a poll a later line withdrew"
   done

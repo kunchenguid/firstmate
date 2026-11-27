@@ -47,6 +47,7 @@
 # line each leave nothing to record. The one later crew line read past is a
 # paused: line whose every PR URL is that ready PR and that names it at least
 # once, because a worker declares its review wait right after reporting ready.
+# Punctuation around a PR URL in that line and a #fragment after it are ignored.
 # A candidate is a task record that is not a
 # secondmate or scout and has no pr= line, has the reported pr= but no valid
 # published poll, or has a pr= that its status log named and the reported PR now
@@ -94,7 +95,7 @@ DEGRADED_WATCH_ENABLED=0
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 pr_check_reported_url() (  # <status-file>
-  local line url rest='' n wait word named words waits=()
+  local line url rest='' n wait word edge named words waits=()
   [ -f "$1" ] && [ ! -L "$1" ] || exit 1
   line=$(last_crew_status_line "$1")
   if [ "$(status_line_verb "$line")" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
@@ -119,6 +120,11 @@ pr_check_reported_url() (  # <status-file>
       named=0
       read -r -a words <<< "$wait"
       for word in "${words[@]}"; do
+        word=${word%%#*}
+        edge=${word%%[!\(\[\<\"\']*}
+        word=${word#"$edge"}
+        edge=${word##*[!.,\;:\!?\)\]\>\"\']}
+        word=${word%"$edge"}
         fm_pr_url_parse "$word" || continue
         [ "$FM_PR_URL" = "$url" ] || exit 1
         named=1
