@@ -799,8 +799,8 @@ test_signal_paths_checkpoint_between_workers() {
     signal_turnend_panes_churned "$state/a.turn-ended" "$state/b.turn-ended" \
       || fail "the churn classifier rejected churning workers"
   ) || fail "signal checkpoint regression setup failed"
-  [ "$(wc -l < "$count_file" | tr -d ' ')" = 2 ] \
-    || fail "expected one checkpoint between each two-worker signal path"
+  [ "$(wc -l < "$count_file" | tr -d ' ')" = 3 ] \
+    || fail "expected checkpoints between workers in each signal phase"
   pass "signal paths checkpoint between workers"
 }
 

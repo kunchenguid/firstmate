@@ -853,6 +853,9 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
   done
   for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
+    if [ "$i" -gt 0 ] && command -v watcher_checkpoint >/dev/null 2>&1; then
+      watcher_checkpoint || return 1
+    fi
     task=${signal_tasks[$i]}
     crew_is_provably_working "$task" && continue
     task_index=${signal_indexes[$i]}
