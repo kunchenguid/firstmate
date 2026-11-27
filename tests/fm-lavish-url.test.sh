@@ -563,6 +563,8 @@ class Output(HTMLParser):
             self.disabled_owners["inline"] = (tag, attrs.get("media"))
         if attrs.get("id") == "disabled-link":
             self.disabled_owners["link"] = (tag, attrs.get("media"))
+            assert "stylesheet" in attrs.get("rel", "").split(), attrs
+            assert attrs.get("href") == "https://external.test/disabled.css", attrs
             assert "disabled" in attrs
         self.in_style = tag == "style"
     def handle_endtag(self, tag):
