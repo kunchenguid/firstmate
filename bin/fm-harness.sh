@@ -83,6 +83,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "${SCRIPT_DIR:-/}/fm-hermes-process-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${SCRIPT_DIR:-/}/fm-omp-process-lib.sh"
+# shellcheck source=bin/fm-agy-process-lib.sh
+. "${SCRIPT_DIR:-/}/fm-agy-process-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -165,13 +167,13 @@ harness_marker() {
   return 0
 }
 
-# True when an omp process sits within eight parents of this one. The same
+# True when an omp process sits within sixteen parents of this one. The same
 # identity as the ancestry walk below (bin/fm-omp-process-lib.sh), kept separate
 # so the marker precedence above can demand real process evidence before
 # trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
   local pid=$$ comm args
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null) || args=
     fm_omp_process_matches "$comm" "$args" && return 0
@@ -215,6 +217,12 @@ harness_process_verdict() {  # <pid>
     echo "comm omp"
     return
   fi
+  # agy CLI or T3 Code's bundled `antigravity acp` server
+  # (bin/fm-agy-process-lib.sh owns both anchored shapes).
+  if fm_agy_process_matches "$comm" "$args"; then
+    echo "comm agy"
+    return
+  fi
   case "$(basename -- "$comm")" in
     # gemini precedes claude here for the same precedence reason as the
     # marker layer above, so a gemini worker under a claude primary is never
@@ -246,15 +254,6 @@ harness_process_verdict() {  # <pid>
     # is why detect_own keeps a marker that agrees on the family.
     pi-signed) echo "comm pi"; return ;;
     pi) echo "comm pi"; return ;;
-    # agy (Antigravity CLI) is a Go-compiled single binary whose process name
-    # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
-    # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
-    # *agy*, so unrelated commands cannot be misread as this harness. agy
-    # publishes no harness-identity marker of its own (a live 1.2.0 TUI
-    # carries no AGY_* or ANTIGRAVITY_* variable; AGENT=1 seen there is an
-    # inherited launcher value, not an agy identity), so like muse it is
-    # detected by ancestry alone.
-    agy) echo "comm agy"; return ;;
     # polytoken (Polytoken CLI) is a daemon-plus-TUI whose per-session daemon
     # process name is exactly `polytoken` (verified live on 0.8.19: a TUI
     # session's daemon runs as comm `polytoken` at ppid 1, and a shell tool
@@ -310,12 +309,15 @@ harness_process_verdict() {  # <pid>
   esac
 }
 
-# Print the verdict for the NEAREST harness process in the parent chain, or
-# nothing when the walk finds none. The nearest match wins, so a worker nested
-# inside another harness resolves to its own harness.
+# Print the verdict for the NEAREST harness process in the parent chain (up to
+# 16 hops, matching bin/fm-session-lock-lib.sh so deep hook call chains such as
+# SessionStart still reach the owning harness process instead of falling back to
+# a retained foreign marker), or nothing when the walk finds none. The nearest
+# match wins, so a worker nested inside another harness resolves to its own
+# harness.
 harness_ancestry() {  # [<pid>]
   local pid=${1:-$$} verdict
-  for _ in 1 2 3 4 5 6 7 8; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -335,7 +337,7 @@ harness_ancestry() {  # [<pid>]
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
-# is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
+# is eligible. Bounded to eight levels, so a deep
 # or pathological tree cannot make this walk unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict

@@ -119,10 +119,23 @@ SH
 }
 
 test_agy_claims_no_inherited_launcher_marker() {
-  local fakebin out
+  local fakebin blindbin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  # Blind ps so running the suite from inside a live agy session does not leak
+  # the real agy ancestor into a marker-only assertion.
+  blindbin=$(fm_fakebin "$TMP_ROOT/anc-agent-marker")
+  cat > "$blindbin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+  *"ppid="*) printf '%s\n' 1; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$blindbin/ps"
+  out=$(AGENT=1 PATH="$blindbin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -143,6 +156,123 @@ SH
   [ "$out" = agy ] \
     || fail "a structural agy ancestor must outrank an inherited CLAUDECODE, got '$out'"
   pass "fm-harness.sh: no inherited launcher marker claims the agy identity"
+}
+
+test_agy_ancestry_detects_antigravity_acp_and_rejects_other_shapes() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-acp")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:?}"; exit 0 ;;
+  *"args="*) printf '%s\n' "${FAKE_PS_ARGS:?}"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+
+  # Positive: macOS full-path comm with and without inherited CLAUDECODE=1
+  out=$(FAKE_PS_COMM='/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity' \
+    FAKE_PS_ARGS='/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity acp --gemini-dir /tmp/g' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "macOS antigravity acp process must detect as agy, got '$out'"
+
+  out=$(CLAUDECODE=1 \
+    FAKE_PS_COMM='/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity' \
+    FAKE_PS_ARGS='/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity acp --gemini-dir /tmp/g' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "macOS antigravity acp ancestor must outrank an inherited CLAUDECODE, got '$out'"
+
+  # Positive: Linux bare comm with full-path args
+  out=$(FAKE_PS_COMM=antigravity \
+    FAKE_PS_ARGS='/Users/u/.t3/tools/antigravity-acp/linux-x64/versions/abc/antigravity acp --gemini-dir /tmp/g' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "Linux antigravity acp process must detect as agy, got '$out'"
+
+  # Positive: spaced executable path under both macOS full-path comm and Linux bare comm
+  out=$(FAKE_PS_COMM='/opt/Agent Tools/antigravity' \
+    FAKE_PS_ARGS='/opt/Agent Tools/antigravity acp --dir /tmp' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "macOS spaced-path antigravity acp must detect as agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=antigravity \
+    FAKE_PS_ARGS='/opt/Agent Tools/antigravity acp --dir /tmp' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "Linux spaced-path antigravity acp must detect as agy, got '$out'"
+
+  # Negative: Electron Antigravity.app, non-acp invocations, and trailing arguments
+  out=$(FAKE_PS_COMM='/Applications/Antigravity.app/Contents/MacOS/Antigravity' \
+    FAKE_PS_ARGS='/Applications/Antigravity.app/Contents/MacOS/Antigravity acp' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "Electron Antigravity app process must not detect as agy, got '$out'"
+
+  out=$(FAKE_PS_COMM='/usr/local/bin/antigravity' \
+    FAKE_PS_ARGS='/usr/local/bin/antigravity --version' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "antigravity --version without acp must not detect as agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=antigravity \
+    FAKE_PS_ARGS='antigravity serve acp' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "antigravity serve acp must not detect as agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=antigravity \
+    FAKE_PS_ARGS='/opt/foo /tmp/antigravity acp' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "a non-antigravity executable with /tmp/antigravity acp args must not detect as agy, got '$out'"
+
+  out=$(FAKE_PS_COMM=bash \
+    FAKE_PS_ARGS='bash -c "antigravity acp"' \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != agy ] \
+    || fail "a bash invocation mentioning antigravity acp must not detect as agy, got '$out'"
+
+  local deepbin
+  deepbin=$(fm_fakebin "$TMP_ROOT/anc-acp-deep")
+  cat > "$deepbin/ps" <<'SH'
+#!/usr/bin/env bash
+pid=${!#}
+case "$*" in
+  *"comm="*)
+    case "$pid" in
+      11) printf '%s\n' '/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity' ;;
+      1) printf '%s\n' 'launchd' ;;
+      *) printf '%s\n' 'bash' ;;
+    esac
+    exit 0 ;;
+  *"args="*)
+    case "$pid" in
+      11) printf '%s\n' '/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity acp --gemini-dir /tmp/g' ;;
+      1) printf '%s\n' '/sbin/launchd' ;;
+      *) printf '%s\n' 'bash' ;;
+    esac
+    exit 0 ;;
+  *"ppid="*)
+    case "$pid" in
+      2|3|4|5|6|7|8|9|10) printf '%s\n' "$((pid + 1))" ;;
+      11) printf '%s\n' '1' ;;
+      1) printf '%s\n' '0' ;;
+      *) printf '%s\n' '2' ;;
+    esac
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$deepbin/ps"
+  out=$(CLAUDECODE=1 PATH="$deepbin:$PATH" "$HARNESS")
+  [ "$out" = agy ] \
+    || fail "10-hop antigravity acp ancestor must outrank an inherited CLAUDECODE, got '$out'"
+
+  pass "fm-harness.sh: ancestry detects T3 Code antigravity acp and rejects non-acp shapes"
 }
 
 test_agy_control_mechanics_are_the_verified_ones() {
@@ -917,6 +1047,7 @@ test_agy_spawn_arms_no_busy_wiring() {
 test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
+test_agy_ancestry_detects_antigravity_acp_and_rejects_other_shapes
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped

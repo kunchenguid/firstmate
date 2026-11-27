@@ -27,6 +27,8 @@ _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-omp-process-lib.sh"
+# shellcheck source=bin/fm-agy-process-lib.sh
+. "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-agy-process-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp and
@@ -138,6 +140,8 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 #   5. omp's structural identity, owned by bin/fm-omp-process-lib.sh, which
 #      also covers the bun-package install whose process name is `bun`.
+#   6. agy's structural identity, owned by bin/fm-agy-process-lib.sh, covering
+#      both standalone `agy` and T3 Code's bundled `antigravity acp` server.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
@@ -168,6 +172,7 @@ fm_harness_process_matches() {  # <comm> <args>
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   fm_omp_process_matches "$comm" "$args" && return 0
+  fm_agy_process_matches "$comm" "$args" && return 0
   return 1
 }
 

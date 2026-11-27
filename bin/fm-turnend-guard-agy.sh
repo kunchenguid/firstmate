@@ -22,6 +22,10 @@
 #     stood down, ends the turn with {}.
 #   - When the park cannot establish supervision after bounded attempts, the
 #     shared bin/fm-turnend-guard.sh --agy owns the bounded repair nag.
+#   - Antigravity ACP sessions (T3 Code's bundled `antigravity acp` server)
+#     await Stop hooks before completing the prompt turn, so parking synchronously
+#     blocks incoming user messages. Those sessions delegate immediately to
+#     bin/fm-turnend-guard.sh --agy without parking.
 #
 # Guard rails before parking:
 #   - Stand down in crewmate/scout linked worktrees (fm_primary_scope_matches).
@@ -108,6 +112,15 @@ fi
 if ! fm_supervision_needed "$STATE" "$GRACE"; then
   rm -f "$STATE/.turnend-blocks" 2>/dev/null || true
   allow_stop
+fi
+
+# Antigravity ACP (for example T3 Code's bundled `antigravity acp` server)
+# awaits Stop hooks before ending the ACP prompt turn, so parking synchronously
+# on Stop blocks incoming user messages until timeout. Delegate immediately to
+# the non-parking bounded turn-end guard instead.
+if fm_agy_acp_in_ancestry; then
+  printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --agy
+  exit 0
 fi
 
 mkdir -p "$STATE" 2>/dev/null || true

@@ -8,6 +8,41 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-supervision-instructions)
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
 
+# Standalone agy assertions run with a ps that finds no process, so an ambient
+# antigravity acp parent never flips them to the ACP protocol. ACP assertions
+# run with a ps that reports every ancestor as T3 Code's antigravity acp server.
+BLIND_PS_BIN="$TMP_ROOT/blind-ps-bin"
+ACP_PS_BIN="$TMP_ROOT/acp-ps-bin"
+mkdir -p "$BLIND_PS_BIN" "$ACP_PS_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$BLIND_PS_BIN/ps"
+cat > "$ACP_PS_BIN/ps" <<'SH'
+#!/bin/sh
+exe='/Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity'
+for arg in "$@"; do
+  case "$arg" in
+    comm=) printf '%s\n' "$exe"; exit 0 ;;
+    args=) printf '%s acp --gemini-dir /tmp/g --app-data-dir antigravity-acp\n' "$exe"; exit 0 ;;
+    ppid=) printf '1\n'; exit 0 ;;
+  esac
+done
+exit 1
+SH
+chmod +x "$BLIND_PS_BIN/ps" "$ACP_PS_BIN/ps"
+
+render_harness() {  # <harness> [args...]
+  local harness=$1
+  shift
+  if [ "$harness" = agy ]; then
+    PATH="$BLIND_PS_BIN:$PATH" "$RENDER" --harness agy "$@"
+  else
+    "$RENDER" --harness "$harness" "$@"
+  fi
+}
+
+render_agy_acp() {  # [args...]
+  PATH="$ACP_PS_BIN:$PATH" "$RENDER" --harness agy "$@"
+}
+
 test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
@@ -60,17 +95,17 @@ test_supervision_host_protocol_on_every_arm_owner() {
   mkdir -p "$home/state" "$config"
   for harness in claude cursor agy opencode omp grok codex; do
     : > "$config/supervision-host-off"
-    plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
+    plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_harness "$harness")
     assert_not_contains "$plain" "Supervision host" "$harness: a home opted out by config/supervision-host-off rendered the host protocol"
     assert_not_contains "$plain" "__FM_" "$harness: a placeholder leaked into the rendered block"
     if [ "$harness" != claude ]; then
       rm -f "$config/supervision-host" "$config/supervision-host-off"
-      assert_equals "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")" "$plain" \
+      assert_equals "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_harness "$harness")" "$plain" \
         "$harness: a home without config/supervision-host must render the plain block"
     fi
     rm -f "$config/supervision-host-off"
     : > "$config/supervision-host"
-    hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
+    hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_harness "$harness")
     assert_contains "$hosted" "- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block)." \
       "$harness: an opted-in home did not render the host state line naming both postures it takes"
     body=$(printf '%s\n' "$hosted" | sed -n '/^Supervision host: on for this home/,$p')
@@ -101,6 +136,57 @@ test_supervision_host_protocol_on_every_arm_owner() {
   assert_contains "$hosted" 'FM_CODEX_WATCH_CHECKPOINT_AWAY' "codex must learn that an away checkpoint holds longer"
   assert_contains "$hosted" 'checkpoint: no actionable wake within' "codex must learn how the park boundary arrives"
   pass "renderer gives each non-Pi arm owner the host protocol in its own terms, and grok arms the host"
+}
+
+# Under antigravity acp the Stop hook never parks, so both the plain block and
+# the supervision-host addendum must direct a background run_command arm and
+# never promise a Stop-hook park that will not start.
+test_agy_acp_renders_background_arm_protocol_and_host_lines() {
+  local home config out ordinary body cli_body
+  home="$TMP_ROOT/agy-acp-home"
+  config="$TMP_ROOT/agy-acp-config"
+  mkdir -p "$home/state" "$config"
+  : > "$config/supervision-host-off"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_agy_acp)
+  assert_contains "$out" "primary harness: agy" "agy-acp heading missing"
+  assert_contains "$out" "Mode: Antigravity ACP background-notify supervision." "antigravity acp did not select the ACP protocol"
+  assert_contains "$out" 'exec bin/fm-watch-arm.sh`' "antigravity acp without the host must arm the plain watcher"
+  assert_not_contains "$out" "__FM_" "agy-acp: a placeholder leaked into the rendered block"
+  ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
+  assert_contains "$ordinary" "background run_command" "agy-acp ordinary-wake line must re-arm a background run_command"
+  assert_not_contains "$ordinary" "Stop-hook park" "agy-acp ordinary-wake line must not leave continuity to the Stop-hook park"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_agy_acp --repair-line)
+  assert_contains "$out" "bin/fm-watch-arm.sh as its own background run_command task" "agy-acp repair line must arm a background run_command"
+
+  rm -f "$config/supervision-host-off"
+  : > "$config/supervision-host"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_agy_acp)
+  assert_contains "$out" "Mode: Antigravity ACP background-notify supervision." "the host protocol replaced the ACP protocol"
+  assert_contains "$out" 'exec bin/fm-supervision-host.sh park`' "antigravity acp with the host must arm the supervision host in the background"
+  assert_not_contains "$out" "__FM_" "agy-acp host: a placeholder leaked into the rendered block"
+  body=$(printf '%s\n' "$out" | sed -n '/^Supervision host: on for this home/,$p')
+  [ -n "$body" ] || fail "agy-acp: the host protocol is missing"
+  printf '%s\n' "$body" | grep -E '^\{[a-z,-]+\} ' >/dev/null && fail "agy-acp: a harness tag leaked into the rendered protocol: $body"
+  assert_contains "$body" "(\`bin/fm-supervision-host.sh park\`) in the plain arm's place" "agy-acp host protocol must name the background host arm"
+  assert_contains "$body" "background-task-completed notification" "agy-acp host protocol must deliver handed-back wakes as the background task's completion"
+  assert_contains "$body" "re-arm the same background host call" "agy-acp host protocol must re-arm the background host on a cycle boundary"
+  assert_contains "$body" "keep it exactly the one background call above" "agy-acp host protocol must keep the host call unbundled"
+  assert_not_contains "$body" "Stop-hook park" "agy-acp host protocol must not mention the disabled Stop-hook park"
+  assert_not_contains "$body" "watcher\` follow-up" "agy-acp host protocol must not promise a watcher follow-up"
+  assert_not_contains "$out" "the next park starts at that turn end" "agy-acp must not promise a park at turn end"
+  [ "$(printf '%s\n' "$body" | grep -c 'runs the supervision host')" -eq 1 ] || fail "agy-acp: the protocol must name exactly one arm owner: $body"
+  [ "$(printf '%s\n' "$body" | grep -c '^ *Only a wake the host hands back reaches you')" -eq 1 ] || fail "agy-acp: the protocol must name exactly one wake path: $body"
+  [ "$(printf '%s\n' "$body" | grep -c '^3\. ')" -eq 1 ] || fail "agy-acp: the protocol must say once how the park boundary arrives: $body"
+  [ "$(printf '%s\n' "$body" | grep -c '^1\. Attended')" -eq 1 ] || fail "agy-acp: the shared agy attended line is missing: $body"
+  [ "$(printf '%s\n' "$body" | grep -c '^6\. ./afk. writes only the record here')" -eq 1 ] || fail "agy-acp: the shared agy /afk line is missing: $body"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_agy_acp --repair-line)
+  assert_contains "$out" "bin/fm-supervision-host.sh park as its own background run_command task" "agy-acp host repair line must arm the host in the background"
+
+  cli_body=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" render_harness agy | sed -n '/^Supervision host: on for this home/,$p')
+  assert_contains "$cli_body" "The Stop-hook park runs the supervision host" "standalone agy host protocol lost its Stop-hook park owner"
+  assert_contains "$cli_body" "the next park starts at that turn end" "standalone agy host protocol lost its turn-end park boundary"
+  assert_not_contains "$cli_body" "background-task-completed notification" "standalone agy host protocol borrowed the ACP background wake path"
+  pass "antigravity acp renders the background-arm protocol and host lines, while standalone agy keeps the Stop-hook park"
 }
 
 test_unknown_fallback() {
@@ -253,14 +339,14 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
   assert_not_contains "$out" "is broken" "claude recovery line claimed failure before verification"
   assert_not_contains "$out" "bin/fm-watch-arm.sh" "claude recovery line must not create a repeatable manual arm loop"
 
-  out=$("$RENDER" --harness agy)
+  out=$(render_harness agy)
   assert_contains "$out" "primary harness: agy" "agy heading missing"
   assert_contains "$out" "Mode: Antigravity Stop-hook-owned supervision." "agy mode line missing"
   assert_contains "$out" "bin/fm-turnend-guard-agy.sh" "agy block lost the Stop-hook park script name"
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
   assert_contains "$ordinary" "bin/fm-turnend-guard-agy.sh" "agy ordinary-wake line lost the Stop-hook park script name"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "agy ordinary-wake line must not call the manual arm"
-  out=$("$RENDER" --harness agy --repair-line)
+  out=$(render_harness agy --repair-line)
   assert_contains "$out" "Stop-hook park" "agy recovery line lost its Stop-hook park guidance"
 
   out=$("$RENDER" --harness grok)
@@ -399,6 +485,7 @@ test_literal_paths_in_rendered_snippets() {
 test_literal_paths_in_rendered_snippets
 test_supervision_host_protocol_on_a_claude_home_unless_off
 test_supervision_host_protocol_on_every_arm_owner
+test_agy_acp_renders_background_arm_protocol_and_host_lines
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas

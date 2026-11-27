@@ -23,6 +23,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
+AGY_ACP=0
 READ_ONLY=0
 AFK=0
 AFK_MODE=away
@@ -120,6 +121,15 @@ if [ "$HARNESS" = codex ]; then
     SNIPPET="$DOC_DIR/codex-checkpoint.md"
   fi
 fi
+if [ "$HARNESS" = agy ] && [ -f "$SCRIPT_DIR/fm-agy-process-lib.sh" ]; then
+  # shellcheck source=bin/fm-agy-process-lib.sh
+  . "$SCRIPT_DIR/fm-agy-process-lib.sh"
+  if fm_agy_acp_in_ancestry; then
+    AGY_ACP=1
+    SNIPPET="$DOC_DIR/agy-acp.md"
+    [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/agy.md"
+  fi
+fi
 HOST_SNIPPET=
 grok_arm='bin/fm-watch-arm.sh'
 case "$HARNESS" in
@@ -168,8 +178,9 @@ if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
 fi
 
 render_snippet() {  # [snippet]
-  local line tags snippet=${1:-$SNIPPET} codex_tag=codex-checkpoint
+  local line tags snippet=${1:-$SNIPPET} codex_tag=codex-checkpoint agy_tag=agy-cli
   [ "$CODEX_PARK" -eq 0 ] || codex_tag=codex-park
+  [ "$AGY_ACP" -eq 0 ] || agy_tag=agy-acp
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       '{'*'} '*)
@@ -178,6 +189,7 @@ render_snippet() {  # [snippet]
         case ",$tags," in
           *",$HARNESS,"*) ;;
           *",$codex_tag,"*) [ "$HARNESS" = codex ] || continue ;;
+          *",$agy_tag,"*) [ "$HARNESS" = agy ] || continue ;;
           *) continue ;;
         esac
         line=${line#*\} }
@@ -192,6 +204,7 @@ render_snippet() {  # [snippet]
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
     line=${line//__FM_GROK_ARM__/$grok_arm}
+    line=${line//__FM_AGY_ACP_ARM__/$grok_arm}
     printf '%s\n' "$line"
   done < "$snippet"
 }
@@ -250,7 +263,9 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
     agy)
-      if [ -n "$HOST_SNIPPET" ]; then
+      if [ "$AGY_ACP" -eq 1 ]; then
+        printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$grok_arm" ' as its own background run_command task (WaitMsBeforeAsync: 500), never shell &.'
+      elif [ -n "$HOST_SNIPPET" ]; then
         printf '%s%s\n' "$prefix" 'supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh running the supervision host); inspect the hook registration and supervision host startup path before ending the turn.'
       else
         printf '%s%s\n' "$prefix" 'watcher supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh); inspect the hook registration and watcher startup path before ending the turn.'
@@ -290,7 +305,11 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     agy)
-      printf '%s\n' '- Ordinary wake: the Stop-hook park (bin/fm-turnend-guard-agy.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      if [ "$AGY_ACP" -eq 1 ]; then
+        printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$grok_arm" ' background run_command task (WaitMsBeforeAsync: 500) as directed below.'
+      else
+        printf '%s\n' '- Ordinary wake: the Stop-hook park (bin/fm-turnend-guard-agy.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      fi
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

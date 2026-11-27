@@ -156,6 +156,31 @@ test_bun_run_omp_is_identified_on_both_platforms() {
   pass "session-lock: a bun-run omp script is identified under both platforms' comm reporting"
 }
 
+test_antigravity_acp_is_identified_on_both_platforms() {
+  local comm fakebin bad_args
+  fakebin=$(fm_fakebin "$TMP_ROOT/antigravity-acp")
+  # macOS reports the executable path in comm, procps on Linux the exec name.
+  for comm in antigravity /Users/u/.t3/tools/antigravity-acp/darwin-arm64/versions/abc/antigravity '/opt/Agent Tools/antigravity'; do
+    lib_eval "$fakebin" "fm_harness_process_matches '$comm' '$comm acp --gemini-dir /tmp/g'" \
+      || fail "$comm running acp must be identified"
+    if [ "$comm" = antigravity ]; then
+      lib_eval "$fakebin" "fm_harness_process_matches '$comm' '/Users/u/.t3/tools/antigravity-acp/linux-x64/versions/abc/antigravity acp --gemini-dir /tmp/g'" \
+        || fail "bare comm antigravity with full-path acp args must be identified"
+      lib_eval "$fakebin" "fm_harness_process_matches '$comm' '/opt/Agent Tools/antigravity acp --dir /tmp'" \
+        || fail "bare comm antigravity with spaced-path acp args must be identified"
+    fi
+    for bad_args in "$comm --version" "$comm serve acp" '/opt/foo /tmp/antigravity acp'; do
+      if lib_eval "$fakebin" "fm_harness_process_matches '$comm' '$bad_args'"; then
+        fail "$comm with '$bad_args' was wrongly identified as a harness"
+      fi
+    done
+  done
+  if lib_eval "$fakebin" "fm_harness_process_matches '/Applications/Antigravity.app/Contents/MacOS/Antigravity' '/Applications/Antigravity.app/Contents/MacOS/Antigravity acp'"; then
+    fail "capitalized Electron Antigravity was identified as a harness"
+  fi
+  pass "session-lock: antigravity acp is identified under both platforms' comm reporting"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -882,6 +907,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-omp-process-lib.sh" "$dir/bin/fm-omp-process-lib.sh"
+  cp "$ROOT/bin/fm-agy-process-lib.sh" "$dir/bin/fm-agy-process-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   # Launch probe sibling of fm-cursor-lib.sh; keep it next to the copy so a
   # fixture that ever verifies an executable does not source a missing file.
@@ -1770,6 +1796,7 @@ SH
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_bun_run_omp_is_identified_on_both_platforms
+test_antigravity_acp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live

@@ -43,12 +43,48 @@ C
   || fail "could not build the fake agy process"
 FAKE_AGY="$FAKEBIN/agy"
 
+cat > "$TMP_ROOT/fake-antigravity.c" <<'C'
+#include <errno.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+  int status;
+  pid_t child;
+  if (argc != 4 || strcmp(argv[1], "acp") != 0 || strcmp(argv[2], "-c") != 0) return 64;
+  child = fork();
+  if (child < 0) return 70;
+  if (child == 0) {
+    execl("/bin/bash", "bash", "-c", argv[3], (char *)0);
+    _exit(127);
+  }
+  while (waitpid(child, &status, 0) < 0) {
+    if (errno != EINTR) return 71;
+  }
+  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+  return 72;
+}
+C
+"$CC_BIN" -o "$FAKEBIN/antigravity" "$TMP_ROOT/fake-antigravity.c" \
+  || fail "could not build the fake antigravity process"
+FAKE_ANTIGRAVITY="$FAKEBIN/antigravity"
+
 run_under_agy() {
   env -u CLAUDECODE -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI \
       -u PI_CODING_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GROK_AGENT \
       "$@" "$FAKE_AGY" -c "$AGY_CHILD_CMD"
+}
+
+run_under_antigravity_acp() {
+  env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
+      -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI \
+      -u PI_CODING_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u GROK_AGENT \
+      "$@" "$FAKE_ANTIGRAVITY" acp -c "$AGY_CHILD_CMD"
 }
 
 install_scripts() {
@@ -59,7 +95,7 @@ install_scripts() {
            fm-arm-pretool-check.sh fm-cd-pretool-check.sh fm-subagent-pretool-check.sh \
            fm-claude-stop-autoarm.sh fm-hook-host-lib.sh \
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
-           fm-session-lock-lib.sh fm-omp-process-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh fm-operational-input.sh \
+           fm-session-lock-lib.sh fm-omp-process-lib.sh fm-agy-process-lib.sh fm-cursor-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
            fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
            fm-supervision-engine-lib.sh fm-lease-lib.sh; do
@@ -599,7 +635,8 @@ test_session_lock_agy_ancestry_and_supervision_model() {
   model=$(run_under_agy FM_HOME="$dir" 2>/dev/null)
   assert_equals "autoarm" "$model" "fm_supervision_model must return autoarm when fm-harness.sh detects agy"
 
-  block=$("$ROOT/bin/fm-supervision-instructions.sh" --harness agy 2>/dev/null || true)
+  AGY_CHILD_CMD='"$FM_HOME/bin/fm-supervision-instructions.sh" --harness agy'
+  block=$(run_under_agy FM_HOME="$dir" 2>/dev/null || true)
   assert_contains "$block" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: agy" \
     "fm-supervision-instructions.sh --harness agy must emit the agy header"
   assert_contains "$block" "Mode: Antigravity Stop-hook-owned supervision." \
@@ -607,11 +644,82 @@ test_session_lock_agy_ancestry_and_supervision_model() {
   assert_contains "$block" "bin/fm-turnend-guard-agy.sh" \
     "fm-supervision-instructions.sh --harness agy must reference bin/fm-turnend-guard-agy.sh"
 
-  repair=$("$ROOT/bin/fm-supervision-instructions.sh" --harness agy --repair-line 2>/dev/null || true)
+  AGY_CHILD_CMD='"$FM_HOME/bin/fm-supervision-instructions.sh" --harness agy --repair-line'
+  repair=$(run_under_agy FM_HOME="$dir" 2>/dev/null || true)
   assert_contains "$repair" "Stop-hook park" \
     "fm-supervision-instructions.sh --harness agy --repair-line must mention Stop-hook park"
 
   pass "session-lock & supervision model: agy ancestry, autoarm model, and supervision instructions verified"
+}
+
+test_antigravity_acp_real_process_detection_lock_and_sessionstart() {
+  local dir harness_out model hook_out msg lock_pid expected_pid
+  dir=$(make_primary_dir "$TMP_ROOT/antigravity-acp-real")
+  install_digest_fixture "$dir"
+
+  AGY_CHILD_CMD='"$FM_HOME/bin/fm-harness.sh"'
+  harness_out=$(run_under_antigravity_acp CLAUDECODE=1 FM_HOME="$dir")
+  assert_equals "agy" "$harness_out" \
+    "real antigravity acp process must detect as agy even with CLAUDECODE=1"
+
+  AGY_CHILD_CMD='. "$FM_HOME/bin/fm-wake-lib.sh"; fm_supervision_model'
+  model=$(run_under_antigravity_acp CLAUDECODE=1 FM_HOME="$dir")
+  assert_equals "persistent" "$model" \
+    "fm_supervision_model must return persistent under antigravity acp"
+
+  AGY_CHILD_CMD='printf "%s\n" "$PPID" > "$FM_HOME/state/expected-pid"; "$FM_HOME/bin/fm-sessionstart-agy.sh"'
+  hook_out=$(printf '{"sessionId":"s-acp","conversationId":"c-acp","workspacePaths":["%s"],"source":"new"}' "$dir" \
+    | run_under_antigravity_acp CLAUDECODE=1 FM_HOME="$dir" 2>/dev/null)
+  [ -f "$dir/state/.lock" ] || fail "fm-sessionstart-agy.sh under antigravity acp must acquire state/.lock"
+  lock_pid=$(tr -d '[:space:]' < "$dir/state/.lock")
+  expected_pid=$(tr -d '[:space:]' < "$dir/state/expected-pid")
+  assert_equals "$expected_pid" "$lock_pid" \
+    "state/.lock must record the real antigravity acp process pid"
+  msg=$(printf '%s' "$hook_out" | jq -r '.injectSteps[0].systemMessage.systemMessage // empty' 2>/dev/null)
+  assert_contains "$msg" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: agy" \
+    "SessionStart under antigravity acp must inject agy supervision instructions"
+  assert_contains "$msg" "Mode: Antigravity ACP background-notify supervision." \
+    "SessionStart under antigravity acp must select the non-parking ACP supervision protocol"
+  assert_contains "$msg" "bin/fm-watch-arm.sh" \
+    "SessionStart under antigravity acp must instruct background run_command watcher arming"
+  pass "fm-harness & fm-sessionstart-agy: real antigravity acp process detects as agy, locks its pid, and injects agy ACP instructions"
+}
+
+test_turnend_guard_agy_acp_does_not_park() {
+  local dir payload out decision reason i
+  dir=$(make_primary_dir "$TMP_ROOT/stop-acp-nonpark")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" slow
+  payload='{"sessionId":"s-acp","conversationId":"c-acp","executionNum":1,"terminationReason":"NO_TOOL_CALL"}'
+  AGY_CHILD_CMD='
+    printf "%s\n" "$PPID" > "$FM_HOME/state/.lock"
+    "$FM_HOME/bin/fm-turnend-guard-agy.sh"
+  '
+
+  for i in 1 2 3; do
+    out=$(printf '%s' "$payload" | run_under_antigravity_acp FM_HOME="$dir" 2>/dev/null)
+    [ ! -e "$dir/state/arm-ran" ] || fail "antigravity acp Stop hook must not park on fm-watch-arm.sh (attempt $i)"
+    decision=$(printf '%s' "$out" | jq -r '.decision // empty' 2>/dev/null)
+    reason=$(printf '%s' "$out" | jq -r '.reason // empty' 2>/dev/null)
+    assert_equals "continue" "$decision" "antigravity acp Stop with unguarded tasks must emit bounded continue nag (attempt $i)"
+    if [ "$i" -eq 1 ]; then
+      assert_contains "$reason" "TURN WOULD END BLIND" \
+        "antigravity acp Stop nag must warn TURN WOULD END BLIND"
+      assert_contains "$reason" "run_command" \
+        "antigravity acp Stop nag must instruct background run_command supervision"
+    fi
+  done
+
+  out=$(printf '%s' "$payload" | run_under_antigravity_acp FM_HOME="$dir" 2>/dev/null)
+  assert_equals "{}" "$out" "antigravity acp Stop past 3 blocks must fail open with {}"
+  [ ! -e "$dir/state/arm-ran" ] || fail "antigravity acp Stop fail-open must never park"
+
+  make_healthy_watcher "$dir" "$$"
+  out=$(printf '%s' "$payload" | run_under_antigravity_acp FM_HOME="$dir" 2>/dev/null)
+  assert_equals "{}" "$out" "antigravity acp Stop with a healthy watcher must return {}"
+  [ ! -e "$dir/state/.turnend-blocks" ] || fail "healthy watcher must clear state/.turnend-blocks under antigravity acp"
+  [ ! -e "$dir/state/arm-ran" ] || fail "healthy antigravity acp Stop must never run fm-watch-arm.sh"
+  pass "fm-turnend-guard-agy: antigravity acp never parks on Stop and enforces the non-parking bounded guard"
 }
 
 fm_test_run \
@@ -628,4 +736,6 @@ fm_test_run \
   test_arm_pretool_check_agy \
   test_cd_pretool_check_agy \
   test_subagent_pretool_check_agy \
-  test_session_lock_agy_ancestry_and_supervision_model
+  test_session_lock_agy_ancestry_and_supervision_model \
+  test_antigravity_acp_real_process_detection_lock_and_sessionstart \
+  test_turnend_guard_agy_acp_does_not_park
