@@ -115,6 +115,44 @@ test_landed_round_repins_next_done() {
   pass 'a landed round re-latches the next done head, and an unlanded head stays latched'
 }
 
+test_named_next_round_latches_at_landing() {
+  local report next pinned out rc
+  for report in named unnamed moved unlanded; do
+    make_case "direct-second-round-$report"
+    record_done || fail 'round-one done head was not accepted'
+    land >/dev/null || fail 'round one did not land'
+    printf 'approved Y\n' > "$WT/approved.txt"
+    git -C "$WT" commit -q -am Y
+    if [ "$report" = unlanded ]; then
+      record_done || fail 'round-two done head was not accepted'
+      git -C "$WT" commit -q --allow-empty -m Z
+    fi
+    next=$(git -C "$WT" rev-parse HEAD)
+    pinned=$(fm_dod_local_done_head "$META")
+    if [ "$report" = unnamed ]; then
+      printf 'done: ready in branch fm/local-task\n' > "$HOME_DIR/state/local-task.status"
+    else
+      printf 'done: ready in branch fm/local-task at %s\n' "$next" > "$HOME_DIR/state/local-task.status"
+    fi
+    [ "$report" != moved ] || git -C "$WT" commit -q --allow-empty -m moved
+    rc=0
+    out=$(land 2>&1) || rc=$?
+    if [ "$report" = named ]; then
+      [ "$rc" -eq 0 ] || fail "direct round-two approval did not land: $out"
+      [ "$(git -C "$PROJ" rev-parse HEAD)" = "$next" ] || fail 'round two did not land its named head'
+      [ "$(fm_dod_local_done_head "$META")" = "$next" ] || fail 'round two did not latch its named head'
+      [ "$(cat "$PROJ/approved.txt")" = 'approved Y' ] || fail 'round two did not update the checkout'
+    else
+      [ "$rc" -ne 0 ] || fail "$report: direct round-two approval unexpectedly landed"
+      [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail "$report: refusal moved main"
+      [ "$(fm_dod_local_done_head "$META")" = "$pinned" ] || fail "$report: refusal changed the recorded head"
+      [ "$(cat "$PROJ/approved.txt")" = 'approved X' ] || fail "$report: refusal changed the checkout"
+    fi
+    [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail "$report: landing left a dirty checkout"
+  done
+  pass 'direct approval re-latches a named next round and refuses unnamed, moved, or unlanded replacements'
+}
+
 test_missing_and_malformed_head_refuse() {
   local value
   for value in missing empty abbreviated expression duplicate; do
@@ -361,4 +399,5 @@ fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_d
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
-  test_landed_round_repins_next_done test_named_done_line_latches_at_landing
+  test_landed_round_repins_next_done test_named_done_line_latches_at_landing \
+  test_named_next_round_latches_at_landing

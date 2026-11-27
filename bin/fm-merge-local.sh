@@ -69,10 +69,7 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
-# No reader latched the head yet: accept the task's current done line here when
-# it names its head, so the latched identity is the one the report carried.
-if ! grep -q '^local_done_head=' "$META" \
-  && [ "$(fm_dod_meta_value "$META" mode)" = local-only ]; then
+if [ "$(fm_dod_meta_value "$META" mode)" = local-only ]; then
   MERGE_DONE_LINE=$(status_current_line "$STATE/$ID.status" ship)
   if fm_dod_local_ready_note_head "$(status_line_note "$MERGE_DONE_LINE")" >/dev/null; then
     MERGE_DONE_REASON=$(FM_HOME="$FM_HOME" fm_dod_accept_ship_done ship local-only \

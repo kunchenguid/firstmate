@@ -241,23 +241,43 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 # the refusal carries treehouse's own output after the typed command, because
 # the refusal closes the window that holds it.
 test_treehouse_wait_is_configurable_and_reports_pane_output() {
-  local rec id out status screen
-  id=settle-pool-cap-z6
-  rec=$(make_primary_case settle-pool-cap "$id" 100000)
-  read_settle_record "$rec"
-  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
-  screen=$'earlier output\nuser@host mate % treehouse get\ntreehouse: all 24 worktrees are in use (max_trees=24)\nuser@host mate %'
+  local rec id out status screen format command_echo diagnostic expected typed_line parent
+  diagnostic=$'treehouse: all 24 worktrees are in use (max_trees=24)\nuser@host mate %'
+  for format in single wrapped-word wrapped-space missing repeated root; do
+    id="settle-pool-cap-$format-z6"
+    rec=$(make_primary_case "settle-pool-cap-$format" "$id" 100000)
+    read_settle_record "$rec"
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+    expected="treehouse: all 24 worktrees are in use (max_trees=24) | user@host mate %"
+    typed_line='treehouse get'
+    case "$format" in
+      single) command_echo='user@host mate % treehouse get' ;;
+      wrapped-word) command_echo=$'user@host mate % treeho\nuse g\net' ;;
+      wrapped-space) command_echo=$'user@host mate % treehouse\nget' ;;
+      missing) command_echo='partial command echo'; expected="partial command echo | $expected" ;;
+      repeated) command_echo=$'user@host mate % treehouse get\nearlier output\nuser@host mate % treehouse g\net' ;;
+      root)
+        parent="$TMP_ROOT/pool-cap-parent"
+        mkdir -p "$parent/state" "$parent/config"
+        printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" > "$HOME_DIR/.fm-secondmate-parent"
+        typed_line="treehouse --root '$TREEHOUSE_ROOT/fm-secondmate/$(printf '%s' "$HOME_DIR" | git hash-object --stdin)' get"
+        command_echo=$'user@host mate % treehouse --ro\not '"${typed_line#treehouse --root }"
+        ;;
+    esac
+    screen="$command_echo"$'\n'"$diagnostic"
+    [ "$format" = missing ] || screen=$'earlier output\n'"$screen"
 
-  out=$(FM_SPAWN_TREEHOUSE_TIMEOUT=4 FM_FAKE_PANE_SCREEN="$screen" run_settle_spawn "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
-  assert_contains "$out" "within 4s" "the refusal did not report the configured wait"
-  [ "$(cat "$COUNTFILE")" -eq 4 ] || fail "configured wait polled the pane $(cat "$COUNTFILE") times, expected 4"
-  assert_contains "$out" "pane output after 'treehouse get': treehouse: all 24 worktrees are in use (max_trees=24) | user@host mate %" \
-    "the refusal did not carry treehouse's own pane output"$'\n'"$out"
-  assert_not_contains "$out" "earlier output" "the refusal carried pane output from before treehouse get"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
-  pass "the treehouse wait is configurable and the refusal carries treehouse's pane output"
+    out=$(FM_SPAWN_TREEHOUSE_TIMEOUT=4 FM_FAKE_PANE_SCREEN="$screen" run_settle_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "$format: spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+    assert_contains "$out" "within 4s" "the refusal did not report the configured wait"
+    [ "$(cat "$COUNTFILE")" -eq 4 ] || fail "configured wait polled the pane $(cat "$COUNTFILE") times, expected 4"
+    assert_contains "$out" "pane output after '$typed_line': $expected" \
+      "$format: the refusal did not carry treehouse's own pane output"$'\n'"$out"
+    assert_not_contains "$out" "earlier output" "$format: the refusal carried pane output from before treehouse get"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  done
+  pass "the configured treehouse wait preserves diagnostics with wrapped, missing, or repeated echoes"
 }
 
 test_unborn_head_project_is_refused_at_once() {

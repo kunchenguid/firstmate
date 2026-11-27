@@ -5545,20 +5545,22 @@ spawn_current_path() { # <target>
   esac
 }
 # spawn_treehouse_get_output <typed-line>: the non-blank pane lines after the
-# last echo of <typed-line>, joined with " | ", or the last non-blank line when
+# last echo of <typed-line>, joined with " | ", or all non-blank lines when
 # the echo is not in the capture. Empty when the pane cannot be read.
 spawn_treehouse_get_output() { # <typed-line>
   local screen
   screen=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 120 "$W" 2>/dev/null) || return 0
   printf '%s\n' "$screen" | FM_TYPED_LINE=$1 awk '
-    BEGIN { typed = ENVIRON["FM_TYPED_LINE"] }
-    { sub(/[ \t\r]+$/, "") }
-    length($0) >= length(typed) && substr($0, length($0) - length(typed) + 1) == typed { n = 0; seen = 1; next }
-    /[^ \t]/ { last = $0; if (seen) out[++n] = $0 }
-    END {
-      if (seen) { for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " | " : ""), out[i] }
-      else if (last != "") printf "%s", last
-    }'
+    BEGIN { typed = ENVIRON["FM_TYPED_LINE"]; gsub(/[ \t\r]/, "", typed) }
+    {
+      row = $0
+      gsub(/[ \t\r]/, "", row)
+      joined = joined row
+      sub(/[ \t\r]+$/, "")
+    }
+    length(joined) >= length(typed) && substr(joined, length(joined) - length(typed) + 1) == typed { n = 0; next }
+    /[^ \t]/ { out[++n] = $0 }
+    END { for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " | " : ""), out[i] }'
 }
 spawn_send_literal() { # <target> <text>
   case "$BACKEND" in
