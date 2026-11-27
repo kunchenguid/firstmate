@@ -29,7 +29,16 @@ STATUSES = {
 ATTRIBUTE = re.compile(r' data-fm-goal-drive="(?:on|off)"(?=>)|'
                        r' data-fm-goal-status="(?:' + '|'.join(STATUSES) + r')"(?=>)')
 STYLE = '''<style>
-[data-fm-goal-drive="off"] { filter: grayscale(1); }
+[data-fm-goal-drive="off"], .fm-goal-kpi-off { filter: grayscale(1); }
+#fm-goal-kpis { list-style:none; margin:4px 0 8px; padding:0; }
+#fm-goal-kpis > li { display:flex; align-items:baseline; gap:4px 8px; margin:0 0 4px;
+    border:1px solid #465369; border-radius:6px; padding:3px 6px; background:#141821;
+    color:#f2f4f8; font-size:.875rem; }
+.fm-goal-kpi-title { flex:1 1 0; min-inline-size:0; color:inherit;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fm-goal-kpi-metrics { flex:none; max-inline-size:75%; display:flex; flex-wrap:wrap;
+    gap:2px 4px; font-size:.75rem; }
+.fm-goal-kpi-metrics > span { white-space:nowrap; color:var(--fm-goal-color); }
 .fm-goal-drive { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; margin:2px 0 4px; }
 .fm-goal-drive button { font:inherit; color:inherit; background:#202633; border:1px solid #546074;
                         border-radius:6px; padding:4px 8px; cursor:pointer; }
@@ -121,6 +130,24 @@ def items_kpi(statuses, element_id='doel-item-kpi'):
 def drive_kpi(goals):
     return ('<p class="small mute" id="doel-drive-kpi">'
             f'{sum(bool(g["driven"]) for g in goals)} van {len(goals)} doelen actief gedreven</p>')
+
+
+def goal_kpis(goals):
+    if not goals:
+        return ''
+    rows = []
+    for goal in goals:
+        items = goal['items']
+        counts = Counter(i['status'] for i in items)
+        metrics = []
+        for state in ('done', 'running', 'waiting', 'open-captain'):
+            count = f'{counts[state]}/{len(items)}' if state == 'done' else counts[state]
+            metrics.append(f'<span data-fm-goal-status="{state}">{count} {STATUSES[state][0]}</span>')
+        gid, title = html.escape(goal['id']), html.escape(goal['title'])
+        off = '' if goal['driven'] else ' class="fm-goal-kpi-off"'
+        rows.append(f'<li{off}><a class="fm-goal-kpi-title" href="#doel-{gid}" title="{title}">{title}</a>'
+                    f'<span class="fm-goal-kpi-metrics">{"".join(metrics)}</span></li>')
+    return f'<ul id="fm-goal-kpis" role="list" aria-label="Status per doel">{"".join(rows)}</ul>'
 
 
 def drive_switch(goal):
@@ -341,7 +368,7 @@ def render_truth(page, goals):
             patches.append((card.end, generated(label_slot(key, items[key]['status']))))
             covered['Kanban card'].add(key)
 
-    overview = STYLE + drive_kpi(goals) + items_kpi([i['status'] for i in items.values()])
+    overview = STYLE + goal_kpis(goals) + drive_kpi(goals) + items_kpi([i['status'] for i in items.values()])
     for goal in goals:
         gid = goal['id']
         switch = drive_switch(goal)
@@ -356,8 +383,10 @@ def render_truth(page, goals):
             patches.extend([(card.close, generated(steps)), (card.end - 1, f' data-fm-goal-drive="{drive}"'),
                             (card.end, generated(switch))])
         else:
+            done_when = html.escape(goal.get('done_when', ''))
+            completion = f'<p class="small mute">{done_when}</p>' if done_when else ''
             overview += (f'<article id="doel-{gid}" data-fm-goal-drive="{drive}">'
-                         f'<h3>{html.escape(goal["title"])}</h3>{switch}{steps}</article>')
+                         f'<h3>{html.escape(goal["title"])}</h3>{completion}{switch}{steps}</article>')
 
     for view, ids, css, heading in [('WBS box', ('wbs-blok', 'wbs'), 'fm-goal-box', 'WBS'),
                                     ('Kanban card', ('kanban',), 'kb-card fm-goal-box', 'Kanban')]:
@@ -404,6 +433,10 @@ def verify_goal_views(page, goals):
                 or (parent and not found[0].ancestor(lambda n: n is parent))):
             problems.append(f'missing or stale goal rendering: {model.id}')
 
+    if goals:
+        check_markup(goal_kpis(goals))
+    elif parsed.by_id['fm-goal-kpis']:
+        problems.append('out-of-scope goal KPI lines')
     if goals or parsed.by_id['doelen'] or parsed.by_id['doel-item-kpi']:
         check_markup(drive_kpi(goals))
         check_markup(items_kpi([i['status'] for i in items.values()]))

@@ -8,9 +8,10 @@ Modes (read-only on the firstmate homes and on the forge):
   verify a built page cockpit-sync.py --verify-page BUILT.html --out truth.json
   mark a page failed  cockpit-sync.py --banner-only "reason" --page LIVE.html
 
-Scope (each flag has an environment fallback; lists in the environment are comma separated):
+Scope (environment fallbacks are shown where available; environment lists are comma separated):
   --goal-home DIR      COCKPIT_GOAL_HOME  home that owns the goal records (required for sync)
-  --goal-id ID         COCKPIT_GOAL_IDS   only these goals (repeatable; default every goal)
+  --goal-id ID         COCKPIT_GOAL_IDS   replace the goal selection with these ids (repeatable)
+  --also-goal-id ID                       add a goal to the existing selection (repeatable)
   --exclude-goal RE    COCKPIT_GOAL_EXCLUDE  drop goals whose id matches this regular expression
   --home DIR           COCKPIT_HOMES      extra home read for tasks, holds and decisions (repeatable);
                                           the goal home and its registered local secondmate homes are always read
@@ -30,7 +31,7 @@ Exit codes: 0 ok, 1 verify found a stale page, 2 a source could not be read (tru
 Mismatches between goal marks and reality are findings, not failures: sync still exits 0 and lists them.
 
 truth JSON (schema fm-cockpit-truth.v1; no timestamps, so an unchanged world writes nothing):
-  goals[]      {id, title, driven, items[]}
+  goals[]      {id, title, done_when, driven, items[]}
     items[]    {id, title, owner, class, task, mark, status, task_state, last_line, flags[],
                 pr: null | {url, state: merged|open|closed|unknown, draft, checks: passing|failing|pending|conflict|none}}
                status: done|running|startable|waiting|open-captain|dropped
@@ -47,9 +48,11 @@ Page contract checked by --verify-page:
   - every must and can entry appears in the section as data-lavish-question="<key or alias>" or
     data-cockpit-captain="<key or alias> ..."
   - every such value in the section belongs to an entry that is still open, and no entry appears twice
-  - the goal cards, drive KPI, and all ring counts match the scoped truth. Each card has a closed
-    "Alle stappen (N)" disclosure with its compact per-goal ring and every item, using goal_item_title
-    if set or the text before the first " - " in title. The closed contents count as rendered.
+  - the goal cards, drive KPI, per-goal KPI lines and all ring counts match the scoped truth.
+    The lines show done/total, running, waiting and waits on you; total includes every item.
+    Each card has a closed "Alle stappen (N)" disclosure with its compact per-goal ring and every
+    item, using goal_item_title if set or the text before the first " - " in title.
+    The closed contents count as rendered.
   - every item, including dropped, has a status in its goal list, WBS box and Kanban card
   - span or SVG text slots with class fm-goal-item-status and data-fm-goal-item="GOAL/ITEM"
     show the verified status and label. WBS slots belong in a g[data-id] or .fm-goal-box
@@ -268,7 +271,7 @@ def project_names(names):
     return {name.rstrip('/').rsplit('/', 1)[-1].casefold() for name in names if name}
 
 
-def export_goals(goal_home, ids, exclude, scope, mates):
+def export_goals(goal_home, ids, also_ids, exclude, scope, mates):
     out = run(['bash', str(ROOT / 'bin' / 'fm-goal.sh'), 'export'], 'goal export', env=home_env(goal_home))
     try:
         snapshot = json.loads(out)
@@ -291,7 +294,7 @@ def export_goals(goal_home, ids, exclude, scope, mates):
     goals, dropped = [], []
     for goal in snapshot['goals']:
         selected = goal['id'] in ids if ids else not scope or any(map(in_scope, goal['items']))
-        wanted = selected and not (exclude and re.search(exclude, goal['id']))
+        wanted = (selected or goal['id'] in also_ids) and not (exclude and re.search(exclude, goal['id']))
         (goals if wanted else dropped).append(goal)
     return goals, dropped
 
@@ -398,7 +401,8 @@ def build_goals(goals, homes, deciding_tasks):
                     and item['status'] == 'waiting' and item['mark'] == 'open'
                     and item['class'] == 'drive' and item['after'] and set(item['after']) <= closed):
                 item['status'] = 'startable'
-        out.append({'id': goal['id'], 'title': goal['title'], 'driven': goal.get('driven'), 'items': items})
+        out.append({'id': goal['id'], 'title': goal['title'], 'done_when': goal['done_when'],
+                    'driven': goal.get('driven'), 'items': items})
     return out, mismatches
 
 
@@ -652,7 +656,8 @@ def build_truth(args):
             raise SyncError(f'home {home} ({name}) has no state directory')
         if home not in [h for _, h in unique]:
             unique.append((name, home))
-    goals, dropped = export_goals(goal_home, set(args.goal_id), args.exclude_goal, args.scope, mates)
+    goals, dropped = export_goals(goal_home, set(args.goal_id), set(args.also_goal_id),
+                                  args.exclude_goal, args.scope, mates)
     decisions = {home: open_decisions(home) for _, home in unique}
     deciding_tasks = {(home, task) for home, (_, rows) in decisions.items() for task, _, _ in rows}
     verified, mismatches = build_goals(goals, unique, deciding_tasks)
@@ -760,6 +765,7 @@ def main(argv=None):
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--goal-home', default=os.environ.get('COCKPIT_GOAL_HOME'))
     parser.add_argument('--goal-id', action='append')
+    parser.add_argument('--also-goal-id', action='append', default=[])
     parser.add_argument('--exclude-goal', default=os.environ.get('COCKPIT_GOAL_EXCLUDE'))
     parser.add_argument('--home', action='append')
     parser.add_argument('--scope', action='append')

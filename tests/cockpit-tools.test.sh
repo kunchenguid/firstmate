@@ -256,10 +256,20 @@ from html.parser import HTMLParser
 import json
 from pathlib import Path
 import sys
+from xml.etree import ElementTree
 
 page = Path(sys.argv[1]).read_text()
 assert '1 van 2 doelen actief gedreven' in page
-assert '[data-fm-goal-drive="off"] { filter: grayscale(1); }' in page
+assert '[data-fm-goal-drive="off"], .fm-goal-kpi-off { filter: grayscale(1); }' in page
+kpi_start = page.index('<ul id="fm-goal-kpis"')
+kpis = ElementTree.fromstring(page[kpi_start:page.index('</ul>', kpi_start) + len('</ul>')])
+assert len(kpis) == 2
+alpha, beta = kpis
+assert alpha[0].text == 'Doel alpha' and alpha[0].get('href') == '#doel-alpha'
+assert [metric.text for metric in alpha[1]] == ['1/9 Klaar', '1 Bezig', '3 Wacht', '1 Aan jou']
+assert not alpha.get('class')
+assert beta[0].text == 'Doel beta' and beta.get('class') == 'fm-goal-kpi-off'
+assert [metric.text for metric in beta[1]] == ['0/1 Klaar', '0 Bezig', '1 Wacht', '0 Aan jou']
 assert 'wordt gedreven' in page and '>uit</span>' in page
 assert 'Alpha steps' in page and 'Beta steps' in page
 
@@ -340,6 +350,7 @@ grep -q 'Kanban card does not match WBS box I5:EXTRA' "$TMP_ROOT/swapped.out" ||
 pass 'cockpit goal status: six aggregate counts and shared WBS/rich/mini labels from verified truth, stable rebuild'
 pass 'cockpit verify: a Kanban card cannot claim a different item from its linked WBS box'
 pass 'cockpit goal switches: grey off card, 1-of-2 KPI and both keyed answers applied'
+pass 'cockpit goal KPI lines: verified counts include dropped in the total; paused goal is grey'
 
 # ---- a page can show just one goal from the shared home ----
 printf '%s\n' '<h2 id="doelen">Doelen</h2><div id="doel-alpha">Alpha steps</div>' \
@@ -521,11 +532,18 @@ pass 'cockpit sync: a second run changes nothing'
 printf '%s\n' 'item [id=check] [owner=miko]: New check' > "$TMP_ROOT/items-extra"
 in_sync_home bash "$ROOT/bin/fm-goal.sh" start extra --title 'Doel extra' --done-when 'demo complete' \
   --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-extra" >/dev/null || fail 'could not start extra'
-printf '%s\n' 'item [id=check] [owner=miko] [project=geris]: Other check' > "$TMP_ROOT/items-other"
-in_sync_home bash "$ROOT/bin/fm-goal.sh" start other --title 'Doel other' --done-when 'demo complete' \
+printf '%s\n' 'item [id=check] [owner=miko] [project=geris]: Controleer de uitkomst' > "$TMP_ROOT/items-other"
+in_sync_home bash "$ROOT/bin/fm-goal.sh" start other --title 'Controle & afronding' --done-when 'De uitkomst is gecontroleerd' \
   --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-other" >/dev/null || fail 'could not start other'
 sync --scope miko-systems/miko --out "$TMP_ROOT/miko-truth.json" > "$TMP_ROOT/scope.out" 2>&1 || fail 'project sync failed'
 jq -e '[.goals[].id] == ["extra"]' "$TMP_ROOT/miko-truth.json" >/dev/null || fail 'Miko truth contains foreign goals'
+sync --scope miko-systems/miko --also-goal-id gamma --also-goal-id other --also-goal-id extra \
+  --out "$TMP_ROOT/added-truth.json" > "$TMP_ROOT/scope.out" 2>&1 || fail "additive goal sync failed: $(cat "$TMP_ROOT/scope.out")"
+jq -e '([.goals[].id] | sort) == ["extra", "gamma", "other"]' "$TMP_ROOT/added-truth.json" >/dev/null \
+  || fail 'explicit additions did not union with project scope without duplicates'
+sync --scope miko-systems/miko --also-goal-id gamma --exclude-goal '^gamma$' \
+  --out "$TMP_ROOT/excluded-truth.json" > "$TMP_ROOT/scope.out" 2>&1 || fail 'additive goal sync with exclusion failed'
+jq -e '[.goals[].id] == ["extra"]' "$TMP_ROOT/excluded-truth.json" >/dev/null || fail 'addition bypassed exclusion'
 sync --scope geris --out "$TMP_ROOT/geris-truth.json" > "$TMP_ROOT/scope.out" 2>&1 || fail 'project sync failed'
 jq -e '[.goals[].id] == ["other"]' "$TMP_ROOT/geris-truth.json" >/dev/null || fail 'Geris truth contains foreign goals'
 for project in miko geris; do
@@ -536,11 +554,20 @@ for project in miko geris; do
   grep -Fq '1 van 1 doelen actief gedreven' "$scoped" || fail 'scoped page drive denominator is wrong'
   grep -Fq '<strong>1</strong> taken' "$scoped" || fail 'scoped page ring total is wrong'
 done
-pass 'cockpit scope: per-project truths and rendered pages exclude foreign goals and add missing goal cards'
+pass 'cockpit scope: project scope and repeatable additions form a union; exclusions still apply'
+pass 'cockpit scope: per-project rendered pages exclude foreign goals and add missing goal cards'
+
+added="$TMP_ROOT/added.html"
+printf '%s\n' '<section id="captain-door"></section><section id="doelen-nu"><h2 id="doelen">Doelen</h2></section>' > "$added"
+python3 -I "$TOOLS/goal_drive.py" --truth "$TMP_ROOT/added-truth.json" --page "$added" || fail 'added goal render failed'
+grep -Fq 'id="doel-gamma"' "$added" || fail 'outside-scope goal did not get a generated card'
+grep -Fq '<h3>Controle &amp; afronding</h3>' "$added" || fail 'record title missing from fallback card'
+grep -Fq '>De uitkomst is gecontroleerd</p>' "$added" || fail 'record completion text missing from fallback card'
+grep -Fq '<li>Controleer de uitkomst ' "$added" || fail 'record step title missing from fallback card'
 
 SYNC_PAGE="$TMP_ROOT/sync-page.html"
 sync_page() { # sync_page <section-inner>
-  printf '<html><body><section id="captain-door">%s</section><h2 id="doelen">Doelen</h2></body></html>\n' \
+  printf '<html><body><section id="captain-door">%s</section><section id="doelen-nu"><h2 id="doelen">Doelen</h2></section></body></html>\n' \
     "$1" > "$SYNC_PAGE"
   python3 -I "$TOOLS/goal_drive.py" --truth "$TRUTH" --page "$SYNC_PAGE" || fail 'render from truth failed'
 }
@@ -554,6 +581,8 @@ import re
 import sys
 
 page = Path(sys.argv[1]).read_text()
+assert re.search(r'<section id="doelen-nu"><h2 id="doelen">Doelen</h2>[^\n]*<style>.*?</style>'
+                 r'<ul id="fm-goal-kpis"', page, re.S), 'KPI lines are not first under Doelen'
 steps = re.search(r'<details\b([^>]*\bid="fm-goal-steps-gamma"[^>]*)>(.*?)</details>', page, re.S)
 assert steps, 'no goal step disclosure'
 attrs, body = steps.groups()
@@ -571,7 +600,7 @@ verify || fail "a correct page was rejected: $(cat "$TMP_ROOT/verify.out")"
 pass 'cockpit goal list: closed disclosure, complete counts and short/overridden titles; WBS and Kanban unchanged'
 cp "$SYNC_PAGE" "$TMP_ROOT/complete.html"
 for defect in 'goal item' 'WBS box' 'Kanban card' 'aggregate ring' 'goal ring' 'visible label' 'foreign item' \
-  'open steps' 'stale step count' 'raw step title'; do
+  'open steps' 'stale step count' 'raw step title' 'goal KPI'; do
   python3 -I - "$TMP_ROOT/complete.html" "$SYNC_PAGE" "$defect" <<'PY' || fail 'fixture mutation failed'
 from pathlib import Path
 import re
@@ -589,6 +618,8 @@ elif defect in ('aggregate ring', 'goal ring'):
     start = page.index(f'id="{ident}"')
     at = page.index('<strong>11</strong>', start)
     page = page[:at] + page[at:].replace('<strong>11</strong>', '<strong>10</strong>', 1)
+elif defect == 'goal KPI':
+    page = page.replace('1/11 Klaar', '0/11 Klaar', 1)
 elif defect == 'open steps':
     page = page.replace('id="fm-goal-steps-gamma">', 'id="fm-goal-steps-gamma" open>', 1)
 elif defect == 'stale step count':
@@ -607,6 +638,7 @@ PY
   case "$defect" in
     'aggregate ring') expected='missing or stale goal rendering: doel-item-kpi' ;;
     'goal ring') expected='missing or stale goal rendering: doel-ring-gamma' ;;
+    'goal KPI') expected='missing or stale goal rendering: fm-goal-kpis' ;;
     'open steps'|'stale step count'|'raw step title') expected='missing or stale goal rendering: fm-goal-steps-gamma' ;;
     'visible label') expected='stale status of gamma/ship' ;;
     'foreign item') expected='out-of-scope or unknown goal item: other/check' ;;
