@@ -20,8 +20,8 @@
 # Registered poll generations bind to their original hashes and file objects,
 # so a repository template update does not invalidate an armed poll. The watcher
 # executes the current repository poll with validated data, never the registered
-# state-file copy. Control relaunch metadata may follow the preserved PR identity
-# fields.
+# state-file copy. Control relaunch metadata and the merge-attempt record
+# (bin/fm-merge-attempt-lib.sh) may follow the preserved PR identity fields.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -486,8 +486,9 @@ fm_pr_metadata_identity_parse() {
           fm_pr_head_valid "$value" || post_pr_invalid=1
         fi
         ;;
-      control_relaunch_tx=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
-        # Lifecycle and relay fields may be appended after the PR identity.
+      control_relaunch_tx=*|last_merge_attempt=*|x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
+        # Lifecycle, merge-attempt, and relay fields may be appended after the
+        # PR identity.
         ;;
       *)
         [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
