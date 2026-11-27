@@ -3947,7 +3947,7 @@ JS
 }
 
 test_working_spaceship_modes_and_selection() {
-  local fixture out status version
+  local fixture out output_file status version
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi Calm working-spaceship test"
     return 0
@@ -3978,7 +3978,13 @@ test_working_spaceship_modes_and_selection() {
   printf '%s\n' on >"$fixture/home/config/calm"
   printf '%s\n' spaceship >"$fixture/home/config/calm-ship"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  # The harness is attached to a group command instead of being wrapped in
+  # $(...): stock macOS Bash 3.2 lexes a heredoc body nested in a command
+  # substitution as shell text, so a prose apostrophe there opens shell
+  # quoting and an unbalanced parenthesis can end the substitution early.
+  # Every other node harness in this file already uses this shape.
+  output_file="$fixture/node-output"
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -4887,8 +4893,8 @@ check(liveTimers === 0 && ui.widgets.size === 0, "the default-boat cycle did not
 globalThis.setInterval = realSetInterval;
 globalThis.clearInterval = realClearInterval;
 JS
-)
   status=$?
+  out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi Calm working-spaceship checks failed: $out"
   [ -z "$out" ] || fail "Pi Calm working-spaceship test printed output: $out"
   pass "Pi Calm spaceship variant drifts slowly left to right across the banner in the two-row resting pose, the three-cell (|) saucer directly over the three-cell |^| hull, with a starfield that slides left past it and a marquee wrap at the right edge; warps as the single-row compact =( * ) saucer sweeping continuously across the full track at one column per 880ms with a two-phase-per-tick streak field, never parking while thinking; eases back into the drift within its bounded settle window without teleporting; freezes and resumes across hide/show including mid-drift and mid-warp; clamps visible and hidden resizes; degrades to a bare streak field when narrow; installs as an ambient banner under the shared Calm working-row slot while config/calm-ship names spaceship, so a dual Calm install still shows one animation, and is present while idle; drives its mode from the run signal and clears on session shutdown; and keeps the boat, run-scoped, for every other value"
