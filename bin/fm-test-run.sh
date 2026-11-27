@@ -34,11 +34,12 @@
 #                   exit, duration, whether it gate-skipped, and the reason it
 #                   gave (empty when it ran), so a lane can say which harness or
 #                   tool this host could not exercise.
-#                   Every record also carries failed_invocation,
-#                   skipped_after_failure and unexecuted_invocations from the
-#                   registered suite's abort report in tests/lib.sh. Without a
-#                   report, these are "", 0 and [], including for unregistered suites;
-#                   empty values alone do not prove suite completion.
+#                   Every record also carries failed_invocation (the function
+#                   active at abort), skipped_after_failure (the count of later
+#                   invocations), and unexecuted_invocations (their names in
+#                   registration order). Without a suite abort report, these are
+#                   "", 0, and [], including for unregistered suites. Empty
+#                   values alone do not prove suite completion.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0.
@@ -96,6 +97,10 @@
 #     When the selected suite's shell reports an abort, appends
 #     failed_invocation=<name>, skipped_after_failure=<n> and
 #     unexecuted=<comma-separated-names>.
+#     These fields describe test progress independently of the exit code.
+#     Use FM_TEST_END for attribution because raw FM_TEST_ABORT lines in the
+#     console can also come from nested fixtures. See fm_test_run in tests/lib.sh
+#     for the suite's abort report contract.
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
@@ -131,7 +136,7 @@
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
-# duration-balanced partition of that exact set, packed from the measured hints
+# duration-balanced partition of that exact set, packed from the committed hints
 # in tests/fm-test-ci-timings.tsv (see docs/fm-test-portable-shards.md).
 # --check-coverage reports parallel_max_ms (the larger lane hint sum),
 # parallel_imbalance_ms (the absolute difference between the sums), and
