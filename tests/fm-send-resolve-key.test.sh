@@ -1169,6 +1169,215 @@ test_refusal_keyed_resend_keeps_the_accepted_keys() {
   pass "fm-send --resolve-key: a refused key's keyed resend keeps every accepted key in order"
 }
 
+# A secondmate's own captain hold publishes `captain-hold-<task>-<n>` as an open
+# decision in the parent's copy of its ledger. Answering that key with
+# --resolve-key must also close the hold in the MATE's home, through the real
+# keyed-answer intake. Real tasks-axi against synthetic homes; transport stubbed.
+setup_mate_hold_homes() {  # <name> <task>... -> sets MH_PARENT, MH_MATE, MH_FB; holds each task in the mate
+  local name=$1 task; shift
+  MH_PARENT=$(setup_home "$name-parent")
+  MH_MATE="$TMP_ROOT/$name-mate-home"
+  mkdir -p "$MH_MATE/data" "$MH_MATE/state" "$MH_MATE/config" "$MH_MATE/projects"
+  fm_test_tasks_toml "$MH_MATE/.tasks.toml"
+  printf '# Synthetic secondmate home\n' > "$MH_MATE/AGENTS.md"
+  printf 'domain\n' > "$MH_MATE/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$MH_PARENT" \
+    > "$MH_MATE/.fm-secondmate-parent"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$MH_MATE/data/backlog.md"
+  MH_FB=$(make_stubs "$TMP_ROOT/$name")
+  fm_write_secondmate_meta "$MH_PARENT/state/domain.meta" "$MH_MATE" "sess:fm-domain"
+  for task in "$@"; do
+    (cd "$MH_MATE" && tasks-axi add "$task" "Call $task" --kind ship --repo sample >/dev/null) \
+      || fail "could not create the mate's task $task"
+    PATH="$MH_FB:$PATH" FM_HOME="$MH_MATE" FM_STATE_OVERRIDE="$MH_MATE/state" \
+      FM_DATA_OVERRIDE="$MH_MATE/data" FM_CONFIG_OVERRIDE="$MH_MATE/config" \
+      "$ROOT/bin/fm-captain-hold.sh" hold "$task" --reason "$task needs the captain" >/dev/null \
+      || fail "could not hold the mate's task $task"
+  done
+}
+
+# run_mate_send <stderr-file> <fm-send args...>: the real fm-send from the parent home.
+run_mate_send() {
+  local err=$1; shift
+  env PATH="$MH_FB:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MH_PARENT" \
+    FM_SEND_LOG="$TMP_ROOT/mate-send.log" FM_SEND_SETTLE=0 \
+    "$SEND" "$@" 2>"$err"
+}
+
+test_mate_hold_answer_closes_in_mate_home() {
+  local err rc show
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return 0; }
+  setup_mate_hold_homes mate-hold mate-call
+  grep -qF 'needs-decision [key=captain-hold-mate-call-1]' "$MH_PARENT/state/domain.status" \
+    || fail "precondition: the mate's hold did not open a parent decision: $(cat "$MH_PARENT/state/domain.status")"
+  err="$TMP_ROOT/mate-hold.err"
+  run_mate_send "$err" fm-domain --resolve-key captain-hold-mate-call-1 "ship it"; rc=$?
+  expect_code 0 "$rc" "a keyed answer to a mate-owned hold should succeed: $(cat "$err")"
+  show=$(cd "$MH_MATE" && tasks-axi show mate-call --full)
+  assert_contains "$show" "state: done" "the answer did not close the hold in the mate's home"
+  [ "$(printf '%s\n' "$show" | grep -c 'Captain answered this call through')" = 1 ] \
+    || fail "the mate-home hold was not closed exactly once: $show"
+  assert_contains "$show" "Answer: ship it" "the closing record lost the answer"
+  case "$show" in
+    *"Answer as shown to the captain"*) fail "the closing record carries a label line the captain never saw: $show" ;;
+  esac
+  if grep -q 'notice:' "$err"; then fail "a clean feed should print no notice: $(cat "$err")"; fi
+  pass "fm-send --resolve-key: a keyed answer closes the mate-owned hold in the mate's home exactly once"
+}
+
+test_mate_hold_feed_failure_keeps_exit_status() {
+  local err rc
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return 0; }
+  setup_mate_hold_homes mate-hold-fail mate-call
+  printf 'needs-decision [key=captain-hold-ghost-1]: captain hold ghost: no such task in the mate home\n' \
+    >> "$MH_PARENT/state/domain.status"
+  err="$TMP_ROOT/mate-hold-fail.err"
+  run_mate_send "$err" fm-domain --resolve-key captain-hold-ghost-1 "go ahead"; rc=$?
+  expect_code 0 "$rc" "a failed best-effort feed must not change the send's exit status"
+  assert_grep 'notice: the answer was delivered to domain' "$err" "a failed feed should print a notice on stderr"
+  assert_grep 'Do not resend' "$err" "the notice should warn against a duplicate resend"
+  [ "$(find "$MH_PARENT/state/domain.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the answer should be delivered exactly once"
+  pass "fm-send --resolve-key: a failing mate-hold feed leaves the send exit 0 with a notice"
+}
+
+test_steer_to_mate_with_open_holds_prints_one_notice() {
+  local err rc show
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return 0; }
+  setup_mate_hold_homes mate-hold-steer call-a call-b
+  err="$TMP_ROOT/mate-hold-steer.err"
+  run_mate_send "$err" fm-domain "carry on"; rc=$?
+  expect_code 0 "$rc" "a plain steer should succeed"
+  [ "$(grep -c 'notice:' "$err")" = 1 ] || fail "expected exactly one notice: $(cat "$err")"
+  assert_grep 'captain-hold-call-a-1' "$err" "the notice should name the first open call"
+  assert_grep 'captain-hold-call-b-1' "$err" "the notice should name the second open call"
+  show=$(cd "$MH_MATE" && tasks-axi show call-a --full)
+  assert_not_contains "$show" "state: done" "a plain steer closed a mate-owned hold"
+  pass "fm-send: a steer to a mate with open captain calls prints one notice and closes none"
+}
+
+# run_mate_hold <args...>: the real fm-captain-hold.sh in the mate's home.
+run_mate_hold() {
+  PATH="$MH_FB:$PATH" FM_HOME="$MH_MATE" FM_STATE_OVERRIDE="$MH_MATE/state" \
+    FM_DATA_OVERRIDE="$MH_MATE/data" FM_CONFIG_OVERRIDE="$MH_MATE/config" \
+    "$ROOT/bin/fm-captain-hold.sh" "$@"
+}
+
+# The mate released its first call and re-held the task before the parent's
+# ledger copy heard about either, so the parent still shows occurrence 1 open
+# while the mate's open call is occurrence 2. The captain's answer to call 1
+# must not close call 2, which nobody has answered.
+test_mate_hold_older_answer_skips_a_reheld_call() {
+  local err rc show decision
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return 0; }
+  setup_mate_hold_homes mate-hold-reheld mate-call
+  mv "$MH_MATE/.fm-secondmate-parent" "$MH_MATE/.fm-secondmate-parent.away"
+  decision="$TMP_ROOT/mate-hold-reheld.decision"
+  printf 'Released by the mate.\n' > "$decision"
+  run_mate_hold answer mate-call --decision-file "$decision" --release >/dev/null 2>&1 \
+    || fail "could not release the mate's first call"
+  run_mate_hold hold mate-call --reason "mate-call needs the captain again" >/dev/null 2>&1 \
+    || fail "could not re-hold the mate's task"
+  mv "$MH_MATE/.fm-secondmate-parent.away" "$MH_MATE/.fm-secondmate-parent"
+  grep -qF 'captain-hold-mate-call-2' "$MH_PARENT/state/domain.status" \
+    && fail "precondition: the parent's ledger copy already heard about the re-hold"
+  err="$TMP_ROOT/mate-hold-reheld.err"
+  run_mate_send "$err" fm-domain --resolve-key captain-hold-mate-call-1 "ship it"; rc=$?
+  expect_code 0 "$rc" "a skipped feed must not change the send's exit status: $(cat "$err")"
+  show=$(cd "$MH_MATE" && tasks-axi show mate-call --full)
+  assert_not_contains "$show" "state: done" "an answer to the first call closed the newer re-held call"
+  assert_not_contains "$show" "Answer: ship it" "an answer to the first call was recorded on the newer call"
+  assert_grep 'notice: the answer was delivered to domain' "$err" "a skipped feed should print a notice"
+  assert_grep 'occurrence 1, but the open hold is occurrence 2' "$err" "the notice should name the occurrence mismatch"
+  pass "fm-send --resolve-key: an answer to an earlier mate call never closes a newer re-hold of that task"
+}
+
+# `complete` has already moved the mate's open call out of this home's status
+# log into a captain-held task here, so the status log no longer owns the key.
+# The answer must still reach the mate's home and close the mate's own call.
+test_mate_hold_transferred_call_still_closes_in_mate_home() {
+  local err rc show
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return 0; }
+  setup_mate_hold_homes mate-hold-transfer mate-call
+  mkdir -p "$MH_PARENT/data" "$MH_PARENT/config"
+  fm_test_tasks_toml "$MH_PARENT/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$MH_PARENT/data/backlog.md"
+  PATH="$MH_FB:$PATH" FM_HOME="$MH_PARENT" "$ROOT/bin/fm-captain-hold.sh" hold captain-hold-mate-call-1 \
+    --title "The mate's call" --reason "transferred mate call" --repo sample >/dev/null 2>&1 \
+    || fail "could not hold the parent's transfer task"
+  PATH="$MH_FB:$PATH" FM_HOME="$MH_PARENT" "$ROOT/bin/fm-captain-hold.sh" complete domain captain-hold-mate-call-1 \
+    >/dev/null 2>&1 || fail "could not transfer the mate's call to the parent's captain-held task"
+  grep -qF 'captain-held [key=captain-hold-mate-call-1]' "$MH_PARENT/state/domain.status" \
+    || fail "precondition: complete did not transfer the key: $(cat "$MH_PARENT/state/domain.status")"
+  err="$TMP_ROOT/mate-hold-transfer.err"
+  run_mate_send "$err" fm-domain --resolve-key captain-hold-mate-call-1 "ship it"; rc=$?
+  expect_code 0 "$rc" "a keyed answer to a transferred mate call should succeed: $(cat "$err")"
+  show=$(cd "$MH_MATE" && tasks-axi show mate-call --full)
+  assert_contains "$show" "state: done" "the transferred call stayed open in the mate's home"
+  assert_contains "$show" "Answer: ship it" "the mate's closing record lost the answer"
+  if grep -q 'notice:' "$err"; then fail "a clean feed should print no notice: $(cat "$err")"; fi
+  pass "fm-send --resolve-key: a mate call already transferred to a captain-held task still closes in the mate's home"
+}
+
+# A large batch of mate calls answered with one long answer, sent to a REMOTE
+# mate, must reach the mate's intake through stdin (an argument that large would
+# bust the transport's per-argument limit). The ssh stub records each call's argv
+# and stdin; the recorded keyed lines are then fed to the real intake in the
+# mate's home, where every call must close.
+test_remote_mate_hold_large_batch_rides_stdin() {
+  local dir fb ssh_log home rc err i task show n_args big_lines line
+  command -v tasks-axi >/dev/null 2>&1 || { pass "skipped: tasks-axi not found"; return 0; }
+  setup_mate_hold_homes mate-hold-big call-a call-b call-c call-d
+  dir="$TMP_ROOT/remote-mate-hold-big"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  cat > "$fb/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+n=$(( $(cat "$FM_SSH_LOG.count" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "$n" > "$FM_SSH_LOG.count"
+cat > "$FM_SSH_LOG.stdin.$n"
+printf '%s\n' "$*" >> "$FM_SSH_LOG"
+exit 0
+SH
+  home=$(setup_remote_home remote-mate-hold-big)
+  for task in call-a call-b call-c call-d; do
+    printf 'needs-decision [key=captain-hold-%s-1]: captain hold %s\n' "$task" "$task" >> "$home/state/rsm.status"
+  done
+  err="$dir/send.err"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$dir/send.log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" \
+    "$SEND" rsm \
+      --resolve-key captain-hold-call-a-1 --resolve-key captain-hold-call-b-1 \
+      --resolve-key captain-hold-call-c-1 --resolve-key captain-hold-call-d-1 \
+      "$(head -c 40000 /dev/zero | tr '\0' 'x')" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a large remote mate-hold batch should send: $(head -c 400 "$err")"
+  # The answers call is the one whose base64 argv (the last ssh word) names the answers verb.
+  n_args=0 i=0
+  while read -r line; do
+    i=$((i + 1))
+    if [ "$(printf '%s' "${line##* }" | base64 -d 2>/dev/null | tr '\0' ' ')" = 'fm-remote-secondmate-control.sh answers rsm ' ]; then n_args=$i; break; fi
+  done < "$ssh_log"
+  [ "$n_args" -gt 0 ] || n_args=
+  [ -n "$n_args" ] || fail "no answers call crossed the transport: $(cat "$ssh_log")"
+  big_lines="$ssh_log.stdin.$n_args"
+  [ "$(wc -c < "$big_lines" | tr -d ' ')" -gt 131072 ] \
+    || fail "the keyed batch should exceed 128 KiB, got $(wc -c < "$big_lines")"
+  [ "$(wc -c < "$ssh_log" | tr -d ' ')" -lt 8192 ] \
+    || fail "the transport command line carried the batch instead of stdin"
+  for task in call-a call-b call-c call-d; do
+    grep -q "^$task	" "$big_lines" || fail "keyed line for $task missing from the stdin batch"
+  done
+  PATH="$MH_FB:$PATH" FM_HOME="$MH_MATE" FM_STATE_OVERRIDE="$MH_MATE/state" \
+    FM_DATA_OVERRIDE="$MH_MATE/data" FM_CONFIG_OVERRIDE="$MH_MATE/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answers --source "test relay" < "$big_lines" >/dev/null 2>&1 \
+    || fail "the mate's intake rejected the transported batch"
+  for task in call-a call-b call-c call-d; do
+    show=$(cd "$MH_MATE" && tasks-axi show "$task" --full)
+    assert_contains "$show" "state: done" "the large batch left $task open in the mate's home"
+  done
+  pass "fm-send --resolve-key: a large remote mate-hold batch rides stdin and closes every call"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
@@ -1198,3 +1407,9 @@ test_stamped_close_line_stays_within_the_status_line_cap
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record
+test_mate_hold_answer_closes_in_mate_home
+test_mate_hold_feed_failure_keeps_exit_status
+test_steer_to_mate_with_open_holds_prints_one_notice
+test_mate_hold_older_answer_skips_a_reheld_call
+test_mate_hold_transferred_call_still_closes_in_mate_home
+test_remote_mate_hold_large_batch_rides_stdin
