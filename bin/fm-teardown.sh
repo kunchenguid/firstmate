@@ -2208,7 +2208,7 @@ read_worktree_dirt() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch refused
+  local dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch refused superseded_rc
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -2290,7 +2290,11 @@ validate_worktree_teardown_safety() {
   # Commits that are only on a remote prove nothing about a merge whose latest
   # attempt was refused (bin/fm-merge-attempt-lib.sh owns that record).
   if [ -z "$unpushed" ] && refused=$(fm_merge_attempt_refused "$META"); then
-    if ! refused_merge_superseded; then
+    if refused_merge_superseded; then
+      :
+    else
+      superseded_rc=$?
+      [ "$superseded_rc" -ne "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED" ] || return "$superseded_rc"
       echo "REFUSED: the latest merge attempt for task $ID was refused (recorded: $refused), and nothing shows its work landed since." >&2
       [ -z "${CONTENT_LANDED_PROOF_ERROR:-}" ] || echo "content-landed proof unavailable: $CONTENT_LANDED_PROOF_ERROR." >&2
       echo "Re-run the merge on its own to see why it refused, land the work, or get the captain's explicit OK to discard, then --force." >&2
@@ -2307,7 +2311,12 @@ refused_merge_superseded() {
   local DEFAULT unmerged branch
   if [ "$MODE" = local-only ]; then
     DEFAULT=$(default_branch) || return 1
-    unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null) || return 1
+    if ! unmerged=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+        return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
+      fi
+      return 1
+    fi
     [ -z "$unmerged" ]
     return
   fi

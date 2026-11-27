@@ -953,6 +953,63 @@ test_refused_merge_attempt_local_only_refuses_until_landed() {
   pass "a refused local-only merge blocks cleanup until the work is on local main"
 }
 
+add_git_default_log_lock_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+if [ "${1:-}" = -C ] && [ "${3:-}" = log ] && [ "${6:-}" = --not ]; then
+  case "${7:-}" in
+    --exclude=*|--remotes) ;;
+    *)
+      lock=$("$real" -C "$2" rev-parse --git-path index.lock 2>/dev/null || true)
+      case "$lock" in
+        /*|'') ;;
+        *) lock="$2/$lock" ;;
+      esac
+      if [ -n "$lock" ] && [ -e "$lock" ]; then
+        echo "fatal: Unable to create '$lock': File exists." >&2
+        exit 128
+      fi
+      ;;
+  esac
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+test_refused_merge_attempt_lock_retries_instead_of_refusing() {
+  local case_dir rc lock wt_head
+  case_dir=$(make_case refused-merge-lock)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "finished fix"
+  add_fork_with_pushed_branch "$case_dir"
+  record_merge_attempt "$case_dir" 'refused 1790000000 fm-merge-local exit=1'
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  add_git_default_log_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "refused-merge-lock: a stale lock should be cleared and the landed work allowed: $(cat "$case_dir/stderr")"
+  assert_not_contains "$(cat "$case_dir/stderr")" "latest merge attempt for task task-x1 was refused" \
+    "refused-merge-lock: a git lock was reported as an unlanded refused merge"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "refused-merge-lock: teardown did not take the lock retry path"
+  pass "a git lock during the refused-merge check retries instead of refusing"
+}
+
 test_refused_merge_attempt_force_still_discards() {
   local case_dir rc
   case_dir=$(make_case refused-merge-force)
@@ -6735,6 +6792,7 @@ test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_refused_merge_attempt_local_only_refuses_until_landed
+test_refused_merge_attempt_lock_retries_instead_of_refusing
 test_refused_merge_attempt_force_still_discards
 test_refused_merge_attempt_pr_refuses_until_superseded
 test_later_merged_attempt_supersedes_a_refusal
