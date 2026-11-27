@@ -16,9 +16,11 @@
 # new task/approval record. Once the latched head is contained in the project's
 # local default branch (that round landed), the next accepted done head replaces
 # it, so a further round of the same task reports readiness for approval again.
-# The local-only done line names its head (`ready in branch <branch> at <sha>`);
-# a named head that is not the worker copy's HEAD is refused, and
-# bin/fm-merge-local.sh latches a named head that no reader latched before.
+# The local-only done line names its head (`ready in branch <branch> at <sha>`).
+# Acceptance refuses a named head that is not the worker copy's HEAD.
+# Replacing a recorded head requires a report that names the new head, so an
+# old unnamed report cannot latch an intermediate commit after a round lands.
+# bin/fm-merge-local.sh's header owns acceptance at landing.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.

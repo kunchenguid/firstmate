@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # project's default branch to local_done_head= in state/<task-id>.meta,
-# recorded when the done report was accepted by bin/fm-dod-lib.sh. When no
-# reader latched it yet, the task's current done line is accepted here if it
-# names its head (`ready in branch <branch> at <sha>`), which latches that head.
-# Missing or malformed heads otherwise refuse. Legacy tasks with no head must
-# report readiness again before approval. The recorded ship branch must still
-# point at that exact commit.
+# recorded under bin/fm-dod-lib.sh's readiness contract. Before reading that
+# identity, accept the task's current head-naming done report through that
+# contract, so approval need not wait for another reader in any round.
+# Missing or malformed recorded heads otherwise refuse. Legacy tasks with no
+# head must report readiness again before approval. The recorded ship branch
+# must still point at that exact commit.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
 # rule #1 "never run state-changing git in projects/", and it is narrow: it only
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
 # auto-approves), and only as a clean fast-forward. A diverged branch needs a
-# rebase and a new task/approval record under bin/fm-dod-lib.sh's head-latching
-# contract before landing; a further round of an already-landed task re-latches
-# its next done head under that contract instead. See AGENTS.md prime directives,
-# project management, and task lifecycle.
+# rebase and renewed readiness under bin/fm-dod-lib.sh's head-latching contract
+# before landing. See AGENTS.md prime directives, project management, and task
+# lifecycle.
 # The task's existing per-task control lock serializes the captain-hold check
 # through that fast-forward. A still-held or unreadable row refuses before the
 # merge, so a captain approval must be recorded as an `answer --release` before
