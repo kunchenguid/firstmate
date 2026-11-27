@@ -2110,6 +2110,17 @@ printf 'signal: fixture.status\n'
 printf 'supervision-host: branch-outcome: fixture\n'
 SH
         ;;
+      outcome-ended-fleet|boundary-ended-fleet)
+        cat <<'SH'
+printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+rm -f "$FM_HOME/state/task.meta"
+SH
+        if [ "$kind" = outcome-ended-fleet ]; then
+          printf "printf 'supervision-host: branch-outcome: fixture\\\\n'\\n"
+        else
+          printf "printf 'supervision-host: cycle boundary - fixture\\\\n'\\n"
+        fi
+        ;;
       handed-back-many)
         cat <<'SH'
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
@@ -2267,6 +2278,41 @@ test_host_stand_down_is_silent() {
   [ "$(wc -l < "$dir/state/host-ran" | tr -d ' ')" -eq 1 ] || fail "a host stand-down was retried"
   [ "$(epoch_outcome "$dir")" = clean ] || fail "a host stand-down must record outcome=clean, got: $(epoch_outcome "$dir")"
   pass "auto-arm: a host that stood down closes silently without a retry"
+}
+
+# The handled turn that recorded a captain outcome is often the one that cleaned
+# up the last task, so the host's branch-outcome hand-back still rewakes main
+# after the need vanished, through a paced StopFailure wait too. Any other host
+# close whose need vanished still closes quietly.
+test_host_branch_outcome_rewakes_after_the_need_vanished() {
+  local case_name dir out status payload kind
+  for case_name in stop stopfailure boundary; do
+    dir=$(make_primary_dir "$TMP_ROOT/host-ended-fleet-$case_name")
+    rm -f "$dir/config/supervision-host-off"
+    : > "$dir/state/task.meta"
+    payload='{"session_id":"sess-autoarm","stop_hook_active":false}'
+    kind='outcome-ended-fleet'
+    case "$case_name" in
+      stopfailure)
+        payload='{"session_id":"sess-autoarm","hook_event_name":"StopFailure","error":"connection_failed","transcript_path":"/tmp/sess.jsonl"}'
+        : > "$dir/state/.claude-autoarm-stopfailure-rewake"
+        ;;
+      boundary) kind='boundary-ended-fleet' ;;
+    esac
+    write_host_fixture "$dir" "$kind"
+    out=$(FM_CLAUDE_STOPFAILURE_REWAKE_COOLDOWN=2 run_autoarm "$dir" "$payload" 2>/dev/null); status=$?
+    assert_absent "$dir/state/task.meta" "$case_name: fixture: the host left the task in flight"
+    if [ "$case_name" = boundary ]; then
+      expect_code 0 "$status" "a host boundary after the need vanished must not rewake main"
+      [ -z "$out" ] || fail "a host boundary after the need vanished printed to main: $out"
+      [ "$(epoch_outcome "$dir")" = clean ] || fail "a host boundary after the need vanished must record outcome=clean, got: $(epoch_outcome "$dir")"
+      continue
+    fi
+    expect_code 2 "$status" "$case_name: a branch-outcome hand-back must rewake main after the need vanished"
+    assert_contains "$out" "supervision-host: branch-outcome: fixture" "$case_name: the rewake must carry the hand-back"
+    [ "$(epoch_outcome "$dir")" = rewake ] || fail "$case_name: the hand-back must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  done
+  pass "auto-arm: a branch-outcome hand-back rewakes main after its turn ended the need, and nothing else does"
 }
 
 # Main already drained and acknowledged the wake, so the rewake is refused on a
@@ -2454,6 +2500,7 @@ test_host_handback_beside_a_quiet_record_carries_no_away_note
 test_plain_arm_banner_keeps_its_wake_line_cap
 test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
+test_host_branch_outcome_rewakes_after_the_need_vanished
 test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
 test_host_lost_announced_handback_notifies_once_per_episode
