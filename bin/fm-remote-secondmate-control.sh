@@ -455,18 +455,6 @@ cmd_observe() {
   validate_home "$id"
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
-  case "$harness" in
-    pi|pi-signed)
-      # This command runs on the remote host that owns the pane. Pass the
-      # version read there so the adapter never trusts the parent's PATH.
-      export FM_COMPOSER_PI_REMOTE_TARGET=1
-      FM_COMPOSER_PI_HOST_VERSION=$(
-        command -v "$harness" >/dev/null 2>&1 \
-          && "$harness" --version 2>/dev/null | head -1 || :
-      )
-      export FM_COMPOSER_PI_HOST_VERSION
-      ;;
-  esac
   fm_pending_reply_backend_observation "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "fm-$id" "$harness"
   printf '\n'
 }
