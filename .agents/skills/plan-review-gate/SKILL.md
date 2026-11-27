@@ -19,12 +19,12 @@ Every participant is an ordinary scout, scaffolded with `bin/fm-brief.sh <id> <r
 Every launch gate applies unchanged: the resolver's profile, quota and account choice, lane and project capacity, the load guard, and captain holds.
 A refused or deferred launch is handled by that command's own rule and is never bypassed with a raw launch.
 
-- The **plan scout** writes the plan, later merges the reviews into one report, and revises the plan at most once.
+- The **plan scout** writes the plan, later merges the reviews into one report, and revises it within the cap in step 5.
   Firstmate drafts neither, per section 1.
 - Each **reviewer** is a fresh scout with one lens, given the review packet below and its own worktree of the project.
   It never sees the plan scout's chat, brief, full history, or merged review report.
 
-The default gate is three runs: the plan scout plus the `claims` and `buildable` reviewers.
+The default initial round is three runs: the plan scout plus the `claims` and `buildable` reviewers.
 
 ## 1. Plan scout
 
@@ -34,7 +34,7 @@ Fill the plan scout's `## Firstmate spec` with the following.
 - The plan carries, in order: goal; a "Prior art checked" line; numbered steps, each naming every file it touches marked `Create`, `Modify` or `Delete`, the concrete change, and the command that verifies it; interfaces, signatures, and data shapes touched; risks (security, data loss, rollback); low-confidence choices and open questions.
 - When the plan is written, append `paused [at=<epoch>]: plan ready at <path>; waiting for reviewer reports` and stay live for the merge and any revision.
 - On the merge steer, write the merged report described in step 4 without editing `plan.md`, then append `needs-decision [key=plan-review] [at=<epoch>]: ...` naming `data/<id>/plan-review.md`.
-- On a revise answer, revise `plan.md` and append `paused` again for the one re-review.
+- On a revise answer within the cap, revise `plan.md` and append `paused` again for re-review.
 - When the captain's decision closes the gate, write `report.md` as a short pointer to `plan.md` and `plan-review.md` plus its follow-ups, and report done.
 
 ## 2. Reviewers
@@ -91,11 +91,12 @@ The merged `data/<id>/plan-review.md` has:
 
 Relay the `plan-review` decision to the captain through `captain-hold-lifecycle`, leading with Blockers and Majors; Nits stay in the file.
 
-## 5. Captain decision and the one re-review
+## 5. Captain decision and revision cap
 
 The captain proceeds, revises, or drops the ship.
-On revise, the plan scout revises `plan.md`, and firstmate runs at most one re-review: fresh reviewers with ids `<id>-<lens>-r2`, only for lenses that raised a Blocker or Major, merged by the plan scout as a second round in `plan-review.md`.
-After that round the plan goes to the captain as it stands; there is no further review loop.
+After the initial review, run at most three serial revision rounds.
+For each revision, run fresh reviewers in parallel for the lenses that raised a Blocker or Major, using ids `<id>-<lens>-r2` through `-r4`, and merge their reports into `plan-review.md`.
+After the third revision, stop reviewing, surface any unresolved findings, and ship the current plan if approved; do not start a fourth revision round.
 
 ## 6. Ship
 

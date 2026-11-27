@@ -196,7 +196,14 @@ test_brief() {
   out=$(mate_goal brief)
   assert_contains "$out" 'PARENT GOAL I3' 'mate parent goal'
   assert_not_contains "$out" 'needs the captain: c' 'mate filters other owners'
+  assert_contains "$out" 'start every startable and merge-after item of your ON goals at once in parallel' 'mate parallel drive duty'
+  assert_contains "$out" 'report pace hourly' 'mate pace duty'
   assert_contains "$out" 'after every landing or item change' 'mate progress duty'
+  for i in I1 I2 I3; do goal pause "$i" >/dev/null; done
+  out=$(mate_goal brief)
+  assert_contains "$out" 'after every landing or item change' 'paused goals retain mate progress duty'
+  assert_not_contains "$out" 'start every startable' 'paused goals do not ask a mate to start work'
+  assert_not_contains "$out" 'report pace hourly' 'paused goals do not ask a mate for pace'
   printf 'drive_goals: Missing\n' > "$H/state/.afk-contract"
   assert_contains "$(goal brief)" 'GOAL Missing: named by the away record but no goal record exists' 'missing named record visible'
   pass 'brief bounds three goals, preserves named order and filters mate ownership'

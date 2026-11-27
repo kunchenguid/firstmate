@@ -726,6 +726,15 @@ One task per worker: this session carries only this task; finish it and stop, an
 EOF
 WORK_ECONOMY_SECTION=${WORK_ECONOMY_SECTION%$'\n'}
 WORK_ECONOMY_SECTION+=$'\n'"Keep short notes in \`$DATA/$ID/notes.md\` and update them at each milestone: decisions, open work, and next steps, so conversation compaction loses no essential task state."
+
+# Goal links can be recorded after scaffolding, so the duty is conditional.
+IFS= read -r -d '' GOAL_SECTION <<'EOF' || true
+# Goal duty
+If your task is linked to a goal item, record evidence marks for item changes and landings with `bin/fm-goal.sh evidence <goal> <item> -- <evidence>` through the owning home.
+While the goal is ON, never idle on a startable part of your item: continue independent work while review runs or a `merge-after` predecessor is unmerged, keeping the landing gate intact.
+Give firstmate any real wait condition for its `waiting --on` mark and say what remains; suggest other parallel steps rather than starting another item yourself.
+EOF
+WORK_ECONOMY_SECTION+=$'\n\n'"${GOAL_SECTION%$'\n'}"
 # One shared string keeps the ship and scout infrastructure rule identical.
 # Rule 2 governs file edits, so it does not prohibit pool administration.
 # The secondmate charter deliberately omits this rule because a secondmate

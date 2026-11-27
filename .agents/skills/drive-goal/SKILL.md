@@ -1,7 +1,7 @@
 ---
 name: drive-goal
 description: >-
-  Load when the captain names a goal to keep driving, on "show goal" or "close goal", when /afk words name a goal, when writing or editing a goal's items from its plan, and when steering an owner's marks, closing a goal, or applying a cockpit goal-drive answer through bin/fm-goal.sh.
+  Load when the captain names a goal to keep driving, on an ON goal's pace wake or "show goal" or "close goal", when /afk words name a goal, when writing or editing a goal's items from its plan, and when steering an owner's marks, closing a goal, or applying a cockpit goal-drive answer through bin/fm-goal.sh.
 user-invocable: false
 metadata:
   internal: true
@@ -21,21 +21,24 @@ Record the captain's naming words verbatim through `--named-by` and the plan's p
 When the plan lives in a secondmate's own material, ask that secondmate for the item file with `bin/fm-send.sh` instead of inventing the items here; for Miko I1 the plan lives on the secondmate's page.
 Then run `bin/fm-goal.sh start <id> --title <t> --done-when <t> --named-by "<his words>" --plan <path> --items-file <path>`; the script refuses unsafe ids, duplicate item ids, unknown `after` ids, dependency cycles and unknown classes, so a refusal is a plan defect to fix, not a flag to force.
 
-Write items so a cold reader can act on each line: one item names its owner and its next step on that one line, `after` orders the dependencies, and `task` names the child task so a landing is detected mechanically.
+Write items so a cold reader can act on each line: one item names its owner and its next step, and `task` names the child task so a landing is detected mechanically.
+Plan parallel by default: use `merge-after` for dependencies that only order landings, and reserve `after` for work that genuinely cannot start until its predecessor is done.
 Make the last item the done-when check itself, with explicit evidence, because closing requires every item done or dropped.
 When the plan names where an item must end up, give it `project=<project>` and `target=<stage>`, where the stage is a rung of that project's home-local ladder (`config/stage-ladders/<project>`), so the drive carries it past the merge.
 `until=<epoch>` stops an item being startable after that time, and `stop-on=<words>` carries the plan's stop conditions to whoever drives it.
-Class each item honestly: `drive` is the default for reversible in-plan steps, and `captain` marks anything that needs the captain: money, a real architecture deviation, or credentials and logins.
-A destructive, irreversible, or security-sensitive step is `drive` only behind the away limits' written analyse-first gate (an analysis recorded before the action, showing nothing crucial breaks) and `captain` whenever that gate cannot clear - anything shared by other lanes, unpushed or unmerged work, credentials, and production data are always crucial.
-A `captain` item is never advanced while the captain is away; when one is reached, hold it for the captain under the captain-hold lifecycle with its category named in the hold reason.
+Class an item `captain` only for money, destructive or irreversible steps, real security, or Geris PROD; otherwise use `drive` within existing authority.
+The classification does not waive the away limits' written analyse-first rule or any approval gate.
+Split the captain-only step from build work that can proceed without it, and never make unrelated items depend on it.
+A `captain` item is never advanced while the captain is away; when one is reached, hold it under the captain-hold lifecycle with its category named in the hold reason.
 When the plan changes later, `bin/fm-goal.sh edit <id> --items-file <path>` keeps every mark, and an item dropped while it still has marks shows as unplanned drift in `show`.
 
 ## Driving it
 
-Attended or away, the drain's GOAL section is the live state and its GOAL DUTY line is the standing duty: start or advance every startable item nobody is on.
-An item listed as `orphaned running, no live task` is such an item: its `running` mark has nothing live behind it, so dispatch a fresh task for it or re-mark it honestly, and never leave the mark standing.
-Steer the owning second mate with `bin/fm-send.sh`, or, for an item this home owns, dispatch it within the spend cap from a backlog item filed for exactly that step.
-Before acting on a goal as standing drive duty, use the current GOAL section rather than an older instruction; a goal labeled drive off is not a drive mandate.
+Attended or away, use the drain's live GOAL and PACE sections, not a stale instruction; drive OFF is not a mandate to start work.
+The owner home's pusher starts linked work and records landings within headroom; main handles what it cannot.
+When startable or `merge-after` work has been idle for 10 minutes with headroom, act in the same turn: batch missing briefs for main-owned items, steer the owning secondmate with exact item ids, or follow the recovery protocol if the mate is stuck.
+If a `running` mark is orphaned, check the owner and re-mark it honestly rather than leaving it standing.
+On a pace wake, do not leave idle work with headroom unattended, and queue captain-only cards for the morning without holding up independent items.
 The afk skill owns how `/afk` passes named goals; `bin/fm-goal.sh --help` owns their switch semantics.
 
 A merged PR is not the end of an item with a target: the GOAL section lists it as short of target until its stage mark reaches the target.
@@ -45,6 +48,7 @@ At each drive turn run `bin/fm-goal.sh probe <id>` so the stage marks follow the
 ## Marks and the secondmate duty
 
 After every landing, and after any change to one of its items, the item's owner runs `bin/fm-goal.sh mark <id> <item> <state> [--task <task-id>] -- <note>`; in a secondmate home that same command routes the mark to the parent channel itself, so a second mate never writes the parent's record.
+Mark a real wait as `waiting --on <kind>:<ref>` when there is a concrete condition to track.
 Steer by that duty, not by hope: an `unrecorded landing` line in the GOAL section is the gap, and the owner's next mark closes it.
 Before retiring a second mate that owns items, reassign those items first through `edit`, so no item's owner stream disappears underneath the projection.
 

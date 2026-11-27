@@ -304,13 +304,19 @@ test_work_economy_in_all_worker_briefs() {
     assert_grep "Keep short notes in \`$home/data/$kind/notes.md\` and update them at each milestone: decisions, open work, and next steps" "$brief" "$kind: missing task-specific durable notes instruction"
     assert_grep 'One task per worker: this session carries only this task' "$brief" "$kind: missing one-task-per-worker rule"
     assert_grep 'Never poll the GitHub REST API in a loop' "$brief" "$kind: missing GitHub REST polling ban"
+    [ "$(grep -cx '# Goal duty' "$brief")" -eq 1 ] || fail "$kind: expected exactly one goal duty block"
+    assert_grep 'If your task is linked to a goal item, record evidence marks' "$brief" "$kind: missing conditional goal marks"
+    assert_grep 'bin/fm-goal.sh evidence <goal> <item> -- <evidence>' "$brief" "$kind: missing worker-authorized evidence command"
+    assert_grep 'While the goal is ON, never idle on a startable part of your item' "$brief" "$kind: missing goal drive duty"
+    assert_grep "continue independent work while review runs or a \`merge-after\` predecessor is unmerged" "$brief" "$kind: missing parallel work duty"
   done
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
     "$ROOT/bin/fm-brief.sh" supervisor --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed"
   assert_no_grep '# Work economy' "$home/data/supervisor/brief.md" "secondmate charter received worker execution guidance"
+  assert_no_grep '# Goal duty' "$home/data/supervisor/brief.md" "secondmate charter received worker goal duty"
   assert_no_grep 'One task per worker' "$home/data/supervisor/brief.md" "secondmate charter received the worker one-task rule"
   assert_grep 'Keeping a wake to few calls' "$home/data/supervisor/brief.md" "secondmate charter missing one-step wake handling"
-  pass "fm-brief.sh: every ship/scout variant carries harness-neutral work economy; secondmate does not"
+  pass "fm-brief.sh: every ship/scout variant carries harness-neutral work economy and goal duty; secondmate does not"
 }
 
 # The fast lane and preview-on-push are retired. This parser ignores any flag it

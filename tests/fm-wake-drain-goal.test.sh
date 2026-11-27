@@ -62,7 +62,7 @@ test_active_goal_prints_state_and_duty_on_an_empty_queue() {
   lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail "drain failed: $(cat "$out")"
   grep -Fq 'GOAL I1 (active since' "$out" || fail "no GOAL section for an active goal: $(cat "$out")"
   grep -Fq 'startable, nobody on it: build [main]' "$out" || fail "the startable item was not named: $(cat "$out")"
-  grep -Fq 'GOAL DUTY: start every startable item now' "$out" || fail "the GOAL DUTY line is missing: $(cat "$out")"
+  grep -Fq 'GOAL DUTY: the pusher drives ON goals; main uses PACE to steer what it cannot.' "$out" || fail "the main GOAL DUTY line is missing: $(cat "$out")"
   pass "an active goal prints its live state and the GOAL DUTY line on an empty queue"
 }
 

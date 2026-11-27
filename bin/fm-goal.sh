@@ -1770,8 +1770,8 @@ _fm_goal_brief_block_mate() {  # <id> <state> <data> <mate> <away>
 fm_goal_render_brief() {
   local home=$FM_GOAL_HOME state=$FM_GOAL_STATE data=$FM_GOAL_DATA
   local rc=0 id block out='' used=0 named='' away_kind='' mate away
-  local block_len path paths duty invalid=0 drive_duty=0
-  duty='GOAL DUTY: start every startable item now, in driven goals only (steer its owner or dispatch it); record with bin/fm-goal.sh mark <goal> <item> <state> -- <note>; full view: bin/fm-goal.sh show <goal>'
+  local block_len path paths duty mark_duty='' invalid=0 drive_duty=0
+  duty='GOAL DUTY: the pusher drives ON goals; main uses PACE to steer what it cannot. Full view: bin/fm-goal.sh show <goal>'
   local -a order=()
   fm_parent_channel_destination "$home" "$state" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -1786,7 +1786,8 @@ fm_goal_render_brief() {
     mate=$FM_PARENT_CHANNEL_ID
     away_kind=''
     [ "$(_fm_goal_regular_file_kind "$state/.afk-contract")" = 0 ] && away_kind=present
-    duty='GOAL DUTY: after every landing or item change run bin/fm-goal.sh mark <goal> <item> <state> -- <note>'
+    mark_duty='after every landing or item change run bin/fm-goal.sh mark <goal> <item> <state> -- <note>'
+    duty="GOAL DUTY: start every startable and merge-after item of your ON goals at once in parallel, within headroom, and report pace hourly. Batch missing briefs, linking each with open --task <id>; mark tracked waits with waiting --on. Record progress: $mark_duty"
   elif [ "$rc" -ne 1 ]; then
     fm_goal_log "the secondmate identity of this home is unreadable; no goal brief"
     return 0
@@ -1839,7 +1840,10 @@ fm_goal_render_brief() {
       block="GOAL $id: named by the away record but no goal record exists"
     fi
     [ -n "$block" ] || continue
-    case "$block" in "GOAL $id (active, drive off):"*) ;; *) drive_duty=1 ;; esac
+    case "$block" in
+      "GOAL $id (active, drive off):"*|"PARENT GOAL $id (active, drive off):"*) ;;
+      *) drive_duty=1 ;;
+    esac
     block_len=$(printf '%s' "$block" | wc -c | tr -d ' ')
     if [ "$block_len" -gt "$FM_GOAL_BRIEF_PER_GOAL_BYTES" ]; then
       block=$(printf '%s' "$block" | head -c "$((FM_GOAL_BRIEF_PER_GOAL_BYTES - 40))")$'\n  (more items in the full goal view)'
@@ -1860,7 +1864,11 @@ fm_goal_render_brief() {
   done
   [ -n "$out" ] || return 0
   printf '%s' "$out"
-  if [ -n "${mate:-}" ] || [ "$drive_duty" -eq 1 ]; then printf '%s\n' "$duty"; fi
+  if [ "$drive_duty" -eq 1 ]; then
+    printf '%s\n' "$duty"
+  elif [ -n "$mark_duty" ]; then
+    printf 'GOAL DUTY: %s\n' "$mark_duty"
+  fi
   return 0
 }
 
