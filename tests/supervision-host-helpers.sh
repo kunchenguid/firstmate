@@ -191,7 +191,16 @@ unset FM_SUPERVISION_ACTOR FM_BRANCH_REPORT_TURN FM_LEASE_HOLDER_PID PI_CODING_A
 HOMES_FILE="$TMP_ROOT/homes"
 # Stop whatever a case left running, by the exact pids its home recorded.
 stop_home_processes() {  # <home>
-  local home=$1 pid arms='' i=0
+  local home=$1 pid arms='' i=0 hook
+  # A session end also stops its running Stop hook, as Claude does; otherwise
+  # the hook retries the host stopped below and parks on a quiet successor.
+  if [ -e "$home/session.stop" ]; then
+    while IFS= read -r pid; do
+      for hook in $(pgrep -P "$pid" -f fm-claude-stop-autoarm.sh 2>/dev/null || true); do
+        kill -TERM "$hook" 2>/dev/null || true
+      done
+    done < <(cat "$home/claude-pids" 2>/dev/null)
+  fi
   pid=$(cut -f1 "$home/state/.supervision-handoff-owner" 2>/dev/null || true)
   [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
   if [ -f "$home/state/.supervision-host" ]; then
@@ -752,10 +761,11 @@ no_home_arms() { [ -z "$(home_arms "$1")" ]; }
 mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 
-# Park again after a host was stopped mid-park: the new cycle's first close is
-# the watcher's downtime resurface, which main drains before the next park.
-# That close can end the park before its cycle is ever seen live, so this
-# waits for the exit itself.
+# Park again after a host was stopped mid-park. A stop that left a wake queued
+# makes the new cycle's first close the watcher's downtime resurface, which
+# main drains before the next park; that close can end the park before its
+# cycle is ever seen live, so this waits for the exit itself. With nothing
+# queued the restart is quiet and the new cycle simply supervises.
 # The resurface pass-through leaves its successor running. Stop that watcher
 # and acknowledge the downtime its exit records, so the next park starts a
 # watcher it owns. Attaching instead would not observe the exit until the
@@ -784,6 +794,10 @@ quiet_pass_through_successor() {  # <home>
 
 
 park_after_stop() {  # <home>
+  if [ ! -s "$1/state/.wake-queue" ]; then
+    park_again "$1"
+    return
+  fi
   rm -f "$1/host.rc"
   : > "$1/park.go"
   wait_until_deadline 60 host_exited "$1" || fail "the watcher's downtime resurface did not reach main: $(cat "$1/host.out")"
