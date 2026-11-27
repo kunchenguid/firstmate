@@ -343,13 +343,19 @@ fi
 # markers, while bin/fm-wake-lib.sh owns their wake-facing routing, the legacy
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
+fm_watch_settings_load
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
-# transitively above) is the single owner of the max(300, poll+60)
-# derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
+# The liveness beacon (BEAT, assigned before the poll loop) is touched at the top
+# of every cycle and refreshed again from inside a cycle's own sweeps by
+# fm_watch_beacon_progress (bin/fm-wake-lib.sh), so its age tracks progress
+# rather than whole-cycle length: a deep pending-reply backlog or a long check
+# sweep keeps it fresh while the watcher is demonstrably working, and a cycle
+# that genuinely stops progressing - the state this beacon exists to catch -
+# ages exactly as it did before. docs/turnend-guard.md "Cycle progress keeps
+# the beacon fresh" owns the contract.
+# fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced transitively above)
+# is the single owner of the max(300, poll+60) derivation - see
+# docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
 # POLL is known.
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
@@ -1173,6 +1179,7 @@ secondmate_liveness_tick() {
   local now=$(( $(date +%s) )) meta id kind
   local bound_marker attempts notify_key reason queued err first_reason='' failed=0
   for meta in "$STATE"/*.meta; do
+    fm_watch_beacon_progress
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
     [ "$kind" = secondmate ] || continue
@@ -2899,6 +2906,7 @@ task_captain_call_open() {  # <task>
   local task=$1
   CAPTAIN_CALL_IDENTITY=
   [ -n "$task" ] || return 1
+  fm_watch_beacon_progress
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
     open "$task" --identity 2>/dev/null) || return 1
   return 0
@@ -3244,6 +3252,7 @@ scan_signals() {
   # status_scan_parent_channel_exclude (fm-classify-lib.sh).
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+    fm_watch_beacon_progress
     [ "$f" = "$exclude" ] && continue
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
@@ -3444,11 +3453,14 @@ fm_capture_output_cleanup() {
 
 # watcher_waited: <command...> into WATCHER_CAPTURE with its exit status. The
 # command runs as a waited background process group rather than inside $(...),
-# so a stop is not held for a blocked read (watcher_stop_signals): pane reads
-# (watcher_capture) and the event wait that spans a whole POLL
-# (event_wait_or_sleep) both run here. The group is recorded like a check's, so
-# watcher_cleanup stops one still in flight. Its own setup failures return 2,
-# which the event wait reads as an unusable event path (sleep the budget).
+# so a stop is not held for a blocked read (watcher_stop_signals) and
+# watcher_wait_child_progress can relay the progress marker the child running it
+# updates into a beacon refresh. Pane reads (watcher_capture), the event wait that spans
+# a whole POLL (event_wait_or_sleep), and the per-signal and pause-classification
+# reads that shell out per record all run here. The group is recorded like a
+# check's, so watcher_cleanup stops one still in flight. Its own setup failures
+# return 2, which the event wait reads as an unusable event path (sleep the
+# budget).
 watcher_waited() {  # <command...>
   local rc pgid
   fm_capture_output_cleanup
@@ -3472,7 +3484,7 @@ watcher_waited() {  # <command...>
     fm_capture_output_cleanup
     return 2
   fi
-  wait "$FM_ACTIVE_CHECK_PID"
+  watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID"
   rc=$?
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || { fm_capture_output_cleanup; return 2; }
@@ -3483,7 +3495,58 @@ watcher_waited() {  # <command...>
 
 # watcher_capture: fm_backend_capture through watcher_waited.
 watcher_capture() {  # <backend> <target> <lines> [expected-label]
+  fm_watch_beacon_progress
   watcher_waited fm_backend_capture "$@"
+}
+
+# watcher_wait_child_progress <pid>
+# Wait for a child sweep process while advancing the watcher liveness beacon
+# ($BEAT) as the child reports progress. Child subprocesses update
+# $PROGRESS_MARKER instead of touching $BEAT directly, so a frozen watcher parent
+# (e.g. SIGSTOP) cannot execute this loop and stops refreshing $BEAT.
+watcher_wait_child_progress() {
+  local pid=$1 last_seen=0 current rc=0 beat=${BEAT:-} marker=${PROGRESS_MARKER:-}
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ -n "$marker" ] && [ -e "$marker" ]; then
+      current=$(fm_path_mtime "$marker" 2>/dev/null || true)
+      if [ -n "$current" ] && [ "$current" != "$last_seen" ]; then
+        last_seen=$current
+        if [ -n "$beat" ]; then fm_watch_beacon_tick "$beat"; fi
+      fi
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+  wait "$pid" 2>/dev/null || rc=$?
+  if [ -n "$beat" ]; then fm_watch_beacon_tick "$beat"; fi
+  return "$rc"
+}
+
+# watcher_display_sync <helper>
+# Run one opt-in display sweep (Herdr project groups, Rex marks) as a managed
+# child: the helper leads a process group recorded in
+# FM_ACTIVE_CHECK_PID/FM_ACTIVE_CHECK_PGID, so a stop runs watcher_cleanup's
+# fm_active_check_stop on that whole group before the singleton lock is released.
+# Its progress-marker updates are what watcher_wait_child_progress propagates to
+# the liveness beacon, so the sweep stays observable without touching it.
+watcher_display_sync() {
+  local pgid
+  FM_CHECK_SIGNAL_PENDING=
+  trap 'FM_CHECK_SIGNAL_PENDING=1' HUP INT TERM
+  set -m
+  { FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$@" sync >/dev/null 2>&1 & } 2>/dev/null
+  FM_ACTIVE_CHECK_PID=$!
+  FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
+  set +m
+  watcher_stop_signals
+  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
+  if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
+    fm_active_check_stop || exit 1
+    return 1
+  fi
+  watcher_wait_child_progress "$FM_ACTIVE_CHECK_PID" || true
+  FM_ACTIVE_CHECK_PID=
+  fm_active_check_stop || exit 1
 }
 
 # The event wait's scratch directory, given to it as TMPDIR. A stop kills the
@@ -3584,6 +3647,9 @@ heartbeat_scan_finds_actionable() {
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
+    # The heartbeat runs on its own FM_HEARTBEAT cadence and walks every status
+    # log, so it is one of the sweeps that must keep the beacon fresh.
+    fm_watch_beacon_progress
     [ -e "$f" ] || [ -L "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
@@ -3650,6 +3716,7 @@ event_wait_or_sleep() {
   fi
 
   if [ "${#windows[@]}" -eq 0 ]; then
+    fm_watch_beacon_progress
     sleep "$POLL"
     return
   fi
@@ -3666,6 +3733,7 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
+    fm_watch_beacon_progress
     sleep "$POLL"
     return
   fi
@@ -3674,6 +3742,7 @@ event_wait_or_sleep() {
   # signal for all of it (watcher_waited).
   fm_wait_tmp_cleanup
   WATCHER_WAIT_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-watch-wait.XXXXXX") || WATCHER_WAIT_TMP=
+  fm_watch_beacon_progress
   TMPDIR=${WATCHER_WAIT_TMP:-${TMPDIR:-/tmp}} FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 watcher_waited \
     fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}"
   rc=$?
@@ -3690,6 +3759,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
+      fm_watch_beacon_progress
       sleep "$POLL"
       ;;
     *)
@@ -3745,6 +3815,23 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
+# Cycle boundary, kept separate from the liveness beacon: CYCLE_MARK advances
+# exactly once per cycle, while the beacon also advances between the units of a
+# long cycle (below). A test or observer that wants to count completed poll
+# cycles waits on this, never on the beacon.
+CYCLE_MARK="$STATE/.watch-cycle"
+# Child sweep progress marker: child processes and command-substitution
+# subshells update this rather than BEAT directly, and the parent relays it
+# through watcher_wait_child_progress, so a frozen watcher parent (e.g. SIGSTOP)
+# stops refreshing the beacon regardless of descendant activity.
+PROGRESS_MARKER="$STATE/.last-watcher-progress"
+# Sweeps inside a cycle refresh this same beacon between units
+# (fm_watch_beacon_progress); exporting it is what tells those libraries a live
+# watcher owns them, so the same code stays inert in a one-shot command.
+FM_WATCH_BEACON_PATH=$BEAT
+FM_WATCH_PROGRESS_PATH=$PROGRESS_MARKER
+FM_WATCHER_PID=$$
+export FM_WATCH_BEACON_PATH FM_WATCH_PROGRESS_PATH FM_WATCHER_PID
 while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
     # The reclaim helper releases its steal and marker locks on publish
@@ -3787,7 +3874,7 @@ while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   fi
   exit 0
 done
-rm -f "$BEAT"
+rm -f "$BEAT" "$CYCLE_MARK"
 if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
@@ -4110,21 +4197,30 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # The cycle's own sweeps refresh it again between units, so a long but
+  # progressing cycle never reads as a dead supervisor (above).
+  fm_watch_beacon_tick "$BEAT"
+  # The cycle boundary is its own marker, so counting completed cycles never
+  # has to interpret the liveness beacon's progress refreshes as cycle ticks.
+  : > "$CYCLE_MARK" 2>/dev/null || true
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
   # Opt-in Herdr project groups (docs/herdr-backend.md "Project groups"):
   # display-only tags and agents view, never a wake. Off costs one file test.
-  [ ! -e "$CONFIG/herdr-project-groups" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-herdr-groups.sh" sync || true
+  if [ -e "$CONFIG/herdr-project-groups" ]; then
+    fm_watch_beacon_progress
+    watcher_display_sync "$SCRIPT_DIR/fm-herdr-groups.sh"
+  fi
   # Opt-in Rex attention marks, validation progress, and tint (docs/rex-backend.md
   # "Attention marks"): display and desktop notification only, never a wake.
   # Off (no config file and no cached record) costs two file tests and a glob.
   if [ -e "$CONFIG/rex-status-marks" ] || [ -e "$CONFIG/rex-tint" ] \
     || compgen -G "$STATE/.rex-mark-*" >/dev/null || compgen -G "$STATE/.rex-progress-*" >/dev/null \
     || compgen -G "$STATE/.rex-tint-*" >/dev/null; then
-    FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-rex-marks.sh" sync >/dev/null 2>&1 || true
+    fm_watch_beacon_progress
+    watcher_display_sync "$SCRIPT_DIR/fm-rex-marks.sh"
   fi
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
@@ -4222,6 +4318,10 @@ while :; do
       [ -z "$FM_CHECK_CUT" ] || fm_wake_append check pr-register "check: pr-register: $FM_CHECK_CUT" || exit 1
     fi
     for c in "$STATE"/*.check.sh; do
+      # A check sweep runs every registered check under its own timeout, so it
+      # can outlast the guard grace on a busy home; keep the beacon fresh
+      # between checks so a working sweep is never read as a dead supervisor.
+      fm_watch_beacon_progress
       [ -e "$c" ] || continue
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -4445,11 +4545,13 @@ EOF
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
   reconcile_overdue_pauses
-  pending=$(scan_signals)
+  watcher_waited scan_signals
+  pending=$WATCHER_CAPTURE
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     reconcile_overdue_pauses
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    watcher_waited scan_signals
+    pending=$(printf '%s\n%s' "$pending" "$WATCHER_CAPTURE")
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see
@@ -4572,6 +4674,9 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    # Per-window crew-state reads shell out per endpoint, so this loop is the
+    # cycle's other long stretch: refresh the beacon per window.
+    fm_watch_beacon_progress
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -4619,7 +4724,8 @@ EOF
         # The pane is idle/stale at hash $h. Triage decides whether this wakes
         # firstmate. Detection itself is unchanged from above.
         if [ "$kind" = secondmate ]; then
-          case "$(pause_state_class "$w" "$task")" in
+          watcher_waited pause_state_class "$w" "$task"
+          case "$WATCHER_CAPTURE" in
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
@@ -4731,7 +4837,8 @@ EOF
           #     wait out the timer.
           if [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             task=$(window_to_task "$w" "$STATE")
-            case "$(pause_state_class "$w" "$task")" in
+            watcher_waited pause_state_class "$w" "$task"
+            case "$WATCHER_CAPTURE" in
               working)
                 clear_pause_tracking "$key"
                 printf '%s' "$h" > "$sf"
@@ -4751,7 +4858,8 @@ EOF
           else
             task=$(window_to_task "$w" "$STATE")
             if [ -e "$pf" ] || status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")"; then
-              case "$(pause_state_class "$w" "$task")" in
+              watcher_waited pause_state_class "$w" "$task"
+              case "$WATCHER_CAPTURE" in
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
@@ -4802,7 +4910,8 @@ EOF
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(status_declared_wait_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        case "$(pause_state_class "$w" "$task")" in
+        watcher_waited pause_state_class "$w" "$task"
+        case "$WATCHER_CAPTURE" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           # Inconclusive, but the declared wait itself still stands, so only the
           # per-hash bookkeeping resets. The re-surface throttle bounds the

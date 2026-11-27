@@ -213,6 +213,7 @@ resolve_state() {
   STATE_LABEL=running
   STATE_RANK=3
   load_status_libs || return 0
+  fm_watch_beacon_progress
   line=$(status_current_line "$STATE/$1.status" "$2" 2>/dev/null) || line=
   verb=$(status_line_verb "$line" 2>/dev/null) || verb=
   case "$verb" in

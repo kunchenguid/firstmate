@@ -53,7 +53,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
-GRACE=${FM_GUARD_GRACE:-300}
 queue_pending=false
 queue_branch_held=false
 READ_ONLY=${FM_GUARD_READ_ONLY:-0}
@@ -72,6 +71,11 @@ STALE_BANNER_MARKER="$STATE/.guard-watcher-stale-banner"
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# Beacon freshness is judged with the cadence the watcher itself declares
+# (bin/fm-wake-lib.sh fm_beacon_grace: an explicit FM_GUARD_GRACE, else the
+# poll-derived default), so this warning and the arm that replaces a stalled
+# cycle agree on what "fresh" means.
+GRACE=$(fm_beacon_grace)
 
 # The current actor (fm_lease_actor is the one owner of that identity); a
 # malformed value is a wiring bug elsewhere, so the guard just warns as main.

@@ -907,7 +907,7 @@ cmd_ready() {
     consumer_reason="no-wake-lib"
   else
     FM_SUPERVISION_MODEL=$resolved_model \
-      fm_watcher_supervision_verdict "$STATE" "$watch" "${FM_GUARD_GRACE:-300}" \
+      fm_watcher_supervision_verdict "$STATE" "$watch" "$(fm_beacon_grace)" \
         "$FM_HOME" "$FM_ROOT"
     if [ "$FM_WATCHER_VERDICT_OK" = true ]; then
       consumer_state=healthy

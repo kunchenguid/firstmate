@@ -22,9 +22,10 @@
 #
 # This script forks the watcher as a tracked child, then VERIFIES the outcome
 # before it settles in. It confirms a watcher process is genuinely alive AND the
-# liveness beacon (state/.last-watcher-beat) is fresh within FM_GUARD_GRACE (the
-# single source of truth, shared with fm-watch.sh and fm-guard.sh), and prints
-# exactly one unambiguous status line:
+# liveness beacon (state/.last-watcher-beat) is fresh within the shared beacon
+# grace (an explicit FM_GUARD_GRACE, else the poll-derived default from
+# fm_beacon_grace in bin/fm-wake-lib.sh, which fm-watch.sh and fm-guard.sh use
+# too), and prints exactly one unambiguous status line:
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
@@ -154,11 +155,7 @@ fi
 # Home-local watcher tuning is independent of Relay's generated cadence
 # artifact. Relay, when active, is sourced second so its required 30s cadence
 # remains authoritative for an opted-in home.
-CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-# shellcheck source=/dev/null
-[ -f "$CONFIG/watch.env" ] && . "$CONFIG/watch.env"
-# shellcheck source=/dev/null
-[ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+fm_watch_settings_load
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 ARM_SCRIPT="$SCRIPT_DIR/${BASH_SOURCE[0]##*/}"
@@ -167,7 +164,9 @@ ARM_HOME_EXISTED=0
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
-GRACE=${FM_GUARD_GRACE:-300}
+# fm_beacon_grace (bin/fm-wake-lib.sh, sourced above) owns it: an explicit
+# FM_GUARD_GRACE, else the poll-derived default the watcher itself uses.
+GRACE=$(fm_beacon_grace)
 case "$GRACE" in
   ''|*[!0-9]*) GRACE=300 ;;
   *) GRACE=$((10#$GRACE)) ;;

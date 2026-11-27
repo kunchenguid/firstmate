@@ -61,7 +61,7 @@ PENDING="$STATE/.supervision-handoff-pending"
 OWNER="$STATE/.supervision-handoff-owner"
 LEFT="$STATE/.supervision-host-left"
 LOG="$STATE/.supervision-handoff.log"
-GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+GRACE=$(fm_beacon_grace)
 RETRY=${FM_SUPERVISION_HANDOFF_RETRY_SECONDS:-300}
 case "$RETRY" in ''|0*|*[!0-9]*) RETRY=300 ;; esac
 fm_session_lock_owned_by_self "$STATE" || exit 1
