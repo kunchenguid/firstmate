@@ -717,7 +717,7 @@ fm_state_reap_orphans() {
     done
   done
   for name in home-summary.json home-summary-error claude-autoarm-output \
-    watch-arm-output fm-check-output fm-custom-check claude-autoarm-epoch.tmp; do
+    watch-arm-output fm-check-output fm-custom-check; do
     for path in "$state/.$name."*; do
       [ -f "$path" ] && [ ! -L "$path" ] || continue
       rest=${path#"$state/.$name."}
