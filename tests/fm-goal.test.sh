@@ -21,8 +21,10 @@ goal() {
     bash "$ROOT/bin/fm-goal.sh" "$@"
 }
 start() {
-  goal start "${1-I1}" --title 'Production goal' --done-when 'small e2e passes' \
-    --named-by 'finish I1' --plan plan.md --items-file "$ITEMS"
+  local id=${1-I1}
+  if [ "$#" -gt 0 ]; then shift; fi
+  goal start "$id" --title 'Production goal' --done-when 'small e2e passes' \
+    --named-by 'finish I1' --plan plan.md --items-file "$ITEMS" "$@"
 }
 project() {
   FM_ROOT_OVERRIDE="$H" FM_HOME="$H" FM_STATE_OVERRIDE="$H/state" FM_DATA_OVERRIDE="$H/data" \
@@ -60,6 +62,61 @@ test_start() {
   assert_equals '' "$(find "$H/state/goals" -name '.goal.*')" 'no staged record left'
   expect_rc 1 start
   pass 'start installs a valid record atomically and refuses duplicate active ids'
+}
+
+test_drive_readiness() {
+  fixture; local_mate
+  local before out registry=$H/data/secondmates.md
+  printf '%s\n' "- terp - Lab mate (home: $M; scope: test; projects: ; added 2026-11-27)" > "$registry"
+  printf '%s\n' \
+    'item [id=build] [owner=main] [task=builder]: build' \
+    'item [id=verify] [owner=main] [brief-source=qa] [after=pay] [merge-after=sign]: verify' \
+    'item [id=mate] [owner=terp] [task=child]: secondmate work' \
+    'item [id=pay] [owner=main] [class=captain] [captain-reason=money]: approve payment' \
+    'item [id=sign] [owner=main] [class=captain] [captain-reason=captain-test]: captain runs his own test' > "$ITEMS"
+  mkdir -p "$H/data/builder" "$H/data/qa" "$M/data/child"
+  printf 'Build brief\n' > "$H/data/builder/brief.md"
+  printf 'QA brief\n' > "$H/data/qa/brief.md"
+  printf 'Mate brief\n' > "$M/data/child/brief.md"
+  expect_rc 0 start I1 --require-briefs
+  assert_equals '3 of 3 items drive-ready' "$(goal ready I1)" 'parent checks all drive items, including a reachable mate and a named brief source'
+  assert_equals '1 of 1 items drive-ready' "$(mate_goal ready I1)" 'mate checks its own items using its own brief data'
+
+  printf '%s\n' 'item [id=verify] [owner=main] [brief-source=qa] [merge-after=sign]: verify' \
+    'item [id=sign] [owner=main] [class=captain]: routine signoff' >> "$H/items.gaps"
+  before=$(cksum "$H/state/goals/I1.goal")
+  expect_rc 1 goal edit I1 --items-file "$H/items.gaps" --require-briefs
+  assert_contains "$(<"$TMP_ROOT/out")" 'WARN I1/sign: gates verify: change to [class=drive]' 'flags an unjustified captain dependency even with all briefs present'
+  assert_equals "$before" "$(cksum "$H/state/goals/I1.goal")" 'strict edit leaves the existing goal intact'
+  expect_rc 0 goal edit I1 --items-file "$H/items.gaps"
+  assert_contains "$(<"$TMP_ROOT/out")" 'WARN I1/sign: gates verify' 'ordinary edit warns without refusing'
+  local marker
+  for marker in '{TASK}' '{FIRSTMATE_SPEC}'; do
+    printf 'Replace me: %s\n' "$marker" > "$H/data/qa/brief.md"
+    expect_rc 1 goal ready I1
+    assert_contains "$(<"$TMP_ROOT/out")" '0 of 1 items drive-ready' "$marker prevents readiness"
+    assert_contains "$(<"$TMP_ROOT/out")" "verify: replace {TASK}/{FIRSTMATE_SPEC} placeholders in $H/data/qa/brief.md" 'names the incomplete brief'
+  done
+
+  printf '%s\n' 'item [id=build] [owner=main] [task=missing]: build' \
+    'item [id=mate] [owner=terp] [task=child]: secondmate work' > "$ITEMS"
+  mkdir -p "$H/data/child"
+  printf 'Wrong home brief\n' > "$H/data/child/brief.md"
+  printf '%s\n' "- terp - Lab mate (home: $M/unreachable; scope: test; projects: ; added 2026-11-27)" > "$registry"
+  expect_rc 1 start I2 --require-briefs
+  assert_absent "$H/state/goals/I2.goal" 'strict start publishes nothing on a gap'
+  expect_rc 0 start I2
+  assert_contains "$(<"$TMP_ROOT/out")" "WARN I2/build: write a readable, nonempty brief at $H/data/missing/brief.md" 'ordinary start warns with the exact path'
+  expect_rc 1 goal ready I2
+  assert_contains "$(<"$TMP_ROOT/out")" '0 of 2 items drive-ready' 'missing and unreachable both stay out of the numerator'
+  assert_contains "$(<"$TMP_ROOT/out")" 'mate: not checked: owner terp is unreachable' 'an unreachable mate never resolves to a local namesake'
+
+  goal mark I2 build open --task builder -- 'brief linked after creation' >/dev/null
+  goal pause I2 >/dev/null
+  out=$(goal ready I2) || [ "$?" -eq 1 ] || fail 'readiness failed unexpectedly'
+  assert_contains "$out" '1 of 2 items drive-ready' 'OFF goal still reports readiness and uses the folded task link'
+  assert_not_contains "$out" 'build:' 'linked ready item has no gap'
+  pass 'drive readiness checks briefs and owner routes, warns on writes, enforces strict preflight, and includes OFF goals'
 }
 
 test_validation() {
@@ -796,7 +853,7 @@ test_wait_conditions() {
   pass 'structured waits resolve from evidence, external waits remain manual, and OFF suppresses resolution'
 }
 
-fm_test_run test_merge_after test_wait_conditions test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \
+fm_test_run test_drive_readiness test_merge_after test_wait_conditions test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \
   test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
   test_probe_pr_merged test_limits test_orphaned_running test_target_close_and_brief test_export test_driven

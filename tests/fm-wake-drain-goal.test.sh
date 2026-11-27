@@ -152,7 +152,8 @@ test_pace_reports_idle_on_goals_only() {
   start_goal "$dir" I2
   lab_env "$dir" "$GOAL" pause I2 >/dev/null || fail 'could not switch I2 OFF'
   lab_env "$dir" "$GOAL" mark I1 build running --task abandoned -- 'lab orphan' >/dev/null || fail 'could not mark running'
-  mkdir -p "$dir/config"
+  mkdir -p "$dir/config" "$dir/data/abandoned"
+  printf 'Lab task brief\n' > "$dir/data/abandoned/brief.md"
   printf '12\n' > "$dir/config/lane-capacity"
   now=$(date +%s)
   out="$dir/drain.out"
@@ -165,7 +166,8 @@ test_pace_reports_idle_on_goals_only() {
   jq -e --argjson now "$now" '
     .schema == "fm-goal-pace.v1" and .host.lane_target == 12 and (.host.free_lanes | type == "number") and
     (.goals | length == 1 and .[0].id == "I1" and .[0].behind_after == ["verify"] and
-      .[0].idle_minutes == 0 and (.[0].startable_idle | map([.id, .idle_since_epoch])) == [["build", $now]])
+      .[0].drive_ready == {ready:1, total:2} and .[0].idle_minutes == 0 and
+      (.[0].startable_idle | map([.id, .idle_since_epoch])) == [["build", $now]])
   ' "$snapshot" >/dev/null || fail "incorrect first snapshot: $(cat "$snapshot")"
 
   # Preload a full window, then prove the next sample keeps only the latest 2048.

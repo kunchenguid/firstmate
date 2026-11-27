@@ -13,6 +13,7 @@
 # none. The first observation starts the clock; a drive switch resets it even
 # if no OFF sample was taken. Waiting groups carry counts and oldest ages in
 # seconds. Null host fields mean unknown, not zero. Capacity is for this home.
+# drive_ready carries the goal export readiness counts {ready, total}.
 # merge_after_ready counts work ready to START, not permission to merge a PR.
 # It consumes optional goal-export items[].merge_after (ids); typed waits use
 # items[].wait_on.kind. Never infer either field from an item's title or note.
@@ -49,7 +50,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-goals=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-goal.sh" export --driven | jq -ec '
+goals=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-goal.sh" export --driven --with-drive-ready | jq -ec '
   select(.schema == "fm-goal-export.v1") | .goals')
 # No initial files (or host probes) for a home that has never had ON work.
 if [ "$goals" = '[]' ] && [ ! -e "$current" ] && [ ! -L "$current" ] && [ ! -e "$history" ] && [ ! -L "$history" ]; then
@@ -116,7 +117,7 @@ printf '%s\n' "$goals" | jq -ec --argjson now "$at" \
           wait_since:(if $kind == "wait:fleet" then $w.wait_since else .since // $goal.started_epoch end)}] as $items
      | idle([$items[] | select(.bucket == "start")]; $old.startable_idle) as $start
      | idle([$items[] | select(.bucket == "merge")]; $old.merge_after_ready) as $merge
-     | {id, started_epoch, drive_revision,
+     | {id, started_epoch, drive_revision, drive_ready,
         running_by_home: ([$items[] | select(.bucket == "running")] | group_by(.owner)
           | map({key:.[0].owner, value:length}) | from_entries),
         startable_idle:$start, merge_after_ready:$merge,

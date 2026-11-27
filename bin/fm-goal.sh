@@ -30,7 +30,7 @@
 #     item [id=node-refresh] [owner=terp] [class=drive] [task=miko-node-refresh]: refresh control-1 node bundle
 #     item [id=grafana-secret] [owner=main] [class=captain]: rotate the grafana secret
 #
-# Item grammar: `item [id=<id>] [owner=<owner>] [after=<ids>] [merge-after=<ids>] [class=<drive|captain>] [task=<task-id>] [project=<p>] [target=<stage>] [until=<epoch>] [stop-on=<words>]: <title>`.
+# Item grammar: `item [id=<id>] [owner=<owner>] [after=<ids>] [merge-after=<ids>] [class=<drive|captain>] [task=<task-id>] [project=<p>] [target=<stage>] [until=<epoch>] [stop-on=<words>] [brief-source=<task-id>] [captain-reason=<reason>]: <title>`.
 # id and owner are required; after lists item ids (comma separated) that must
 # reach done or dropped before work starts. Prefer merge-after for independent
 # work: its predecessors must be done (not dropped) before completion or PR
@@ -46,8 +46,8 @@
 #   projection:
 #     <the item projection lines as fm_goal_project printed them at close>
 #
-# SCHEMA V2. The four trailing item fields are optional and independent of
-# version 1 items: a record whose items use none of them is written as version
+# SCHEMA V2. The optional project, target, until, stop-on, brief-source and
+# captain-reason fields extend version 1 items. A record using none is written as version
 # 1 unless it has a drive mark, and old records without drive marks keep working.
 # project names the project the item's
 # work lands in; target is the stage (a rung of that project's ladder, see
@@ -137,8 +137,9 @@
 #
 # Usage:
 #   fm-goal.sh start <id> --title <text> --done-when <text> --named-by <text> \
-#                      --plan <path-or-url> --items-file <path>
-#   fm-goal.sh edit <id> --items-file <path> [--title <text>] [--done-when <text>]
+#                      --plan <path-or-url> --items-file <path> [--require-briefs]
+#   fm-goal.sh edit <id> --items-file <path> [--title <text>] [--done-when <text>] [--require-briefs]
+#   fm-goal.sh ready <id>
 #   fm-goal.sh mark <id> <item> <state> [--stage <stage>] [--task <task-id>] [--on <condition>] -- <note>
 #   fm-goal.sh mark <id> <item> stage=<stage> [--task <task-id>] -- <note>
 #   fm-goal.sh can-merge <task-id>
@@ -152,7 +153,7 @@
 #   fm-goal.sh active [--driven]
 #   fm-goal.sh startable [--with-task-location]
 #   fm-goal.sh launch-links [task]
-#   fm-goal.sh export [<id>|--driven]
+#   fm-goal.sh export [<id>|--driven] [--with-drive-ready]
 #   fm-goal.sh exists <id>
 #   fm-goal.sh window <id> --since <epoch>
 #   fm-goal.sh driven --since <epoch>
@@ -208,6 +209,17 @@
 # blocked, or off) for linked items owned by this home. It uses local parent
 # goal records for secondmates, and refuses remote or unreadable routes.
 #
+# `ready` checks every drive item in scope, even when drive is OFF. It looks
+# for a readable nonempty data/<task>/brief.md in the item's owner home with
+# neither {TASK} nor {FIRSTMATE_SPEC} left in it. A path-safe brief-source names
+# an alternate task directory in that same home, not a launch task binding.
+# An unreachable owner is not checked and does not count as ready. Captain
+# items are outside the count, but a captain item gating drive work via after
+# or merge-after needs a captain-reason attesting to a captain-only action:
+# money, destructive, security, geris-prod, or captain-test. Do not use these
+# as substitutes for writing a brief. `ready` returns 1 on any gap. `start`
+# and `edit` warn about those same gaps, or refuse with --require-briefs.
+#
 # `export` is the JSON read of the same projection, used by read-only views
 # and the watcher's per-goal floor and stall checks. It prints one compact
 # object {schema: "fm-goal-export.v1", goals: [...]} for every active goal, or
@@ -222,8 +234,9 @@
 # (condition or null), and the booleans startable, target_reached, landing_hint,
 # wait_stale, wait_cleared and orphaned_running (a running mark without a live task).
 # drive_revision counts drive marks; --driven exports only active ON goals.
+# --with-drive-ready adds drive_ready {ready, total} counts to each goal.
 # It is read-only, takes no lock, and needs jq.
-# In a secondmate home, startable and export read the local parent's goals and
+# In a secondmate home, ready, startable and export read the local parent's goals and
 # list only items owned by this mate. Dependencies still use the full goal.
 #
 # Exit codes: 0 success; 1 operational refusal (unknown goal or item, items
@@ -445,7 +458,7 @@ _fm_goal_wait_valid() {
 # FM_GOAL_ITEM_CLASS (drive when absent), FM_GOAL_ITEM_TASK (or ''),
 # FM_GOAL_ITEM_PROJECT, FM_GOAL_ITEM_TARGET, FM_GOAL_ITEM_UNTIL,
 # FM_GOAL_ITEM_STOPON (each '' when absent; the schema v2 fields),
-# FM_GOAL_ITEM_TITLE.
+# FM_GOAL_ITEM_BRIEF_SOURCE, FM_GOAL_ITEM_CAPTAIN_REASON, FM_GOAL_ITEM_TITLE.
 fm_goal_item_parse() {  # <line>
   local line=$1 head rest token key value title
   local seen_id=0 seen_owner=0 seen_after=0 seen_merge_after=0 seen_class=0 seen_task=0
@@ -453,7 +466,7 @@ fm_goal_item_parse() {  # <line>
   FM_GOAL_ITEM_ID=''; FM_GOAL_ITEM_OWNER=''; FM_GOAL_ITEM_AFTER=''; FM_GOAL_ITEM_MERGE_AFTER=''
   FM_GOAL_ITEM_CLASS=''; FM_GOAL_ITEM_TASK=''; FM_GOAL_ITEM_TITLE=''
   FM_GOAL_ITEM_PROJECT=''; FM_GOAL_ITEM_TARGET=''; FM_GOAL_ITEM_UNTIL=''
-  FM_GOAL_ITEM_STOPON=''
+  FM_GOAL_ITEM_STOPON=''; FM_GOAL_ITEM_BRIEF_SOURCE=''; FM_GOAL_ITEM_CAPTAIN_REASON=''
   case "$line" in
     'item '*) ;;
     *) return 1 ;;
@@ -535,6 +548,15 @@ fm_goal_item_parse() {  # <line>
         _fm_goal_after_list_valid "$value" || return 1
         FM_GOAL_ITEM_STOPON=$value
         ;;
+      brief-source)
+        [ -z "$FM_GOAL_ITEM_BRIEF_SOURCE" ] && fm_goal_id_valid "$value" || return 1
+        FM_GOAL_ITEM_BRIEF_SOURCE=$value
+        ;;
+      captain-reason)
+        [ -z "$FM_GOAL_ITEM_CAPTAIN_REASON" ] || return 1
+        case "$value" in money|destructive|security|geris-prod|captain-test) ;; *) return 1 ;; esac
+        FM_GOAL_ITEM_CAPTAIN_REASON=$value
+        ;;
       *) return 1 ;;
     esac
   done
@@ -542,6 +564,8 @@ fm_goal_item_parse() {  # <line>
   # a target names a rung of a project's ladder, so it needs the project
   [ -z "$FM_GOAL_ITEM_TARGET" ] || [ -n "$FM_GOAL_ITEM_PROJECT" ] || return 1
   [ -n "$FM_GOAL_ITEM_CLASS" ] || FM_GOAL_ITEM_CLASS=drive
+  [ -z "$FM_GOAL_ITEM_CAPTAIN_REASON" ] || [ "$FM_GOAL_ITEM_CLASS" = captain ] || return 1
+  [ -z "$FM_GOAL_ITEM_BRIEF_SOURCE" ] || [ "$FM_GOAL_ITEM_CLASS" = drive ] || return 1
   FM_GOAL_ITEM_TITLE=$(printf '%s' "$title" | cut -c1-$FM_GOAL_ITEM_TITLE_MAX)
   return 0
 }
@@ -569,6 +593,8 @@ _fm_goal_item_line() {  # <idx>
   [ -z "${FM_GOAL_ITEMS_TARGETS[$i]}" ] || out="$out [target=${FM_GOAL_ITEMS_TARGETS[$i]}]"
   [ -z "${FM_GOAL_ITEMS_UNTILS[$i]}" ] || out="$out [until=${FM_GOAL_ITEMS_UNTILS[$i]}]"
   [ -z "${FM_GOAL_ITEMS_STOPONS[$i]}" ] || out="$out [stop-on=${FM_GOAL_ITEMS_STOPONS[$i]}]"
+  [ -z "${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]}" ] || out="$out [brief-source=${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]}]"
+  [ -z "${FM_GOAL_ITEMS_CAPTAIN_REASONS[$i]}" ] || out="$out [captain-reason=${FM_GOAL_ITEMS_CAPTAIN_REASONS[$i]}]"
   printf '%s: %s' "$out" "${FM_GOAL_ITEMS_TITLES[$i]}"
 }
 
@@ -583,7 +609,7 @@ FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=() FM_GOAL_ITE
 FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
 FM_GOAL_ITEMS_PRS=()
 FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
-FM_GOAL_ITEMS_STOPONS=()
+FM_GOAL_ITEMS_STOPONS=() FM_GOAL_ITEMS_BRIEF_SOURCES=() FM_GOAL_ITEMS_CAPTAIN_REASONS=()
 _FM_GOAL_READ_ERROR=''
 FM_GOAL_PROJECTION=()
 
@@ -594,7 +620,7 @@ _fm_goal_items_reset() {
   FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
   FM_GOAL_ITEMS_PRS=()
   FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
-  FM_GOAL_ITEMS_STOPONS=()
+  FM_GOAL_ITEMS_STOPONS=() FM_GOAL_ITEMS_BRIEF_SOURCES=() FM_GOAL_ITEMS_CAPTAIN_REASONS=()
 }
 
 # Append the item fm_goal_item_parse just parsed to the loaded arrays.
@@ -611,6 +637,8 @@ _fm_goal_items_append() {
   FM_GOAL_ITEMS_TARGETS[${#FM_GOAL_ITEMS_TARGETS[@]}]=$FM_GOAL_ITEM_TARGET
   FM_GOAL_ITEMS_UNTILS[${#FM_GOAL_ITEMS_UNTILS[@]}]=$FM_GOAL_ITEM_UNTIL
   FM_GOAL_ITEMS_STOPONS[${#FM_GOAL_ITEMS_STOPONS[@]}]=$FM_GOAL_ITEM_STOPON
+  FM_GOAL_ITEMS_BRIEF_SOURCES[${#FM_GOAL_ITEMS_BRIEF_SOURCES[@]}]=$FM_GOAL_ITEM_BRIEF_SOURCE
+  FM_GOAL_ITEMS_CAPTAIN_REASONS[${#FM_GOAL_ITEMS_CAPTAIN_REASONS[@]}]=$FM_GOAL_ITEM_CAPTAIN_REASON
   FM_GOAL_ITEM_COUNT=$((FM_GOAL_ITEM_COUNT + 1))
 }
 
@@ -1414,6 +1442,67 @@ _fm_goal_item_task_home() {  # <idx> <data-dir>
   printf '%s\n' "$home"
 }
 
+# Print one fix, or nothing when the brief is ready. Never render brief contents.
+_fm_goal_brief_fix() {  # <idx> <registry-data>
+  local i=$1 home data task path owner rc=0
+  owner=${FM_GOAL_ITEMS_OWNERS[$i]}
+  if ! home=$(_fm_goal_item_task_home "$i" "$2"); then
+    printf 'not checked: owner %s is unreachable; verify the brief in that home\n' "$owner"
+    return
+  fi
+  data=$FM_GOAL_DATA
+  [ -z "$home" ] || data=$home/data
+  if [ -L "$data" ] || [ ! -d "$data" ] || [ ! -x "$data" ]; then
+    printf 'not checked: restore access to the owner data directory %s\n' "$data"
+    return
+  fi
+  task=${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]:-${FM_GOAL_ITEMS_TASKS[$i]}}
+  if [ -z "$task" ]; then
+    printf 'set [task=<task-id>] or [brief-source=<task-id>] and write data/<task-id>/brief.md in %s\n' "$owner"
+    return
+  fi
+  path=$data/$task/brief.md
+  if [ -L "$data/$task" ] || [ -L "$path" ]; then
+    printf 'replace the symlink with a regular task directory and brief at %s\n' "$path"
+    return
+  fi
+  if [ ! -f "$path" ] || [ ! -r "$path" ] || [ ! -s "$path" ]; then
+    printf 'write a readable, nonempty brief at %s\n' "$path"
+    return
+  fi
+  LC_ALL=C grep -Fq -e '{TASK}' -e '{FIRSTMATE_SPEC}' -- "$path" 2>/dev/null || rc=$?
+  case "$rc" in
+    0) printf 'replace {TASK}/{FIRSTMATE_SPEC} placeholders in %s\n' "$path" ;;
+    1) ;; # No template markers.
+    *) printf 'not checked: restore read access to %s\n' "$path" ;;
+  esac
+}
+
+_fm_goal_drive_readiness() {  # <registry-data> [owner filter]
+  local i j id fix refs
+  FM_GOAL_READY=0 FM_GOAL_READY_TOTAL=0 FM_GOAL_READY_GAPS=()
+  for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
+    [ -z "${2-}" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$2" ] || continue
+    id=${FM_GOAL_ITEMS_IDS[$i]}
+    fix=''
+    if [ "${FM_GOAL_ITEMS_CLASSES[$i]}" = drive ]; then
+      FM_GOAL_READY_TOTAL=$((FM_GOAL_READY_TOTAL + 1))
+      fix=$(_fm_goal_brief_fix "$i" "$1")
+      [ -n "$fix" ] || FM_GOAL_READY=$((FM_GOAL_READY + 1))
+    elif [ -z "${FM_GOAL_ITEMS_CAPTAIN_REASONS[$i]}" ]; then
+      for ((j=0; j<FM_GOAL_ITEM_COUNT; j++)); do
+        [ "${FM_GOAL_ITEMS_CLASSES[$j]}" = drive ] || continue
+        refs=",${FM_GOAL_ITEMS_AFTERS[$j]},${FM_GOAL_ITEMS_MERGE_AFTERS[$j]},"
+        if [[ "$refs" == *",$id,"* ]]; then
+          fix="gates ${FM_GOAL_ITEMS_IDS[$j]}: change to [class=drive] and write its brief, or document the captain-only action with [captain-reason=<money|destructive|security|geris-prod|captain-test>]"
+          break
+        fi
+      done
+    fi
+    if [ -n "$fix" ]; then FM_GOAL_READY_GAPS[${#FM_GOAL_READY_GAPS[@]}]="$id: $fix"; fi
+  done
+}
+
 # 0 iff a running item's task is empty, missing in its owner's home, or
 # done/failed per the canonical read-only crew-state verdict. An unobservable
 # route or an unknown verdict is not proof of orphaning.
@@ -2142,7 +2231,7 @@ _fm_goal_record_version() {
   local i=0
   if [ -n "$FM_GOAL_REC_DRIVE_MARKS" ]; then printf 3; return 0; fi
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
-    if [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}${FM_GOAL_ITEMS_TARGETS[$i]}${FM_GOAL_ITEMS_UNTILS[$i]}${FM_GOAL_ITEMS_STOPONS[$i]}" ]; then
+    if [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}${FM_GOAL_ITEMS_TARGETS[$i]}${FM_GOAL_ITEMS_UNTILS[$i]}${FM_GOAL_ITEMS_STOPONS[$i]}${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]}${FM_GOAL_ITEMS_CAPTAIN_REASONS[$i]}" ]; then
       printf 2
       return 0
     fi
@@ -2184,8 +2273,19 @@ _fm_goal_write_atomic() {  # <path> (content on stdin)
   return 0
 }
 
+# Use a subshell so folded task links inform the check but never rewrite the
+# declared items when edit renders the proposed record.
+_fm_goal_check_before_write() (  # <goal-id> <require-briefs 0|1> [edit]
+  local gap
+  if [ "${3-}" = edit ]; then fm_goal_fold "$1"; fi
+  _fm_goal_drive_readiness "$FM_GOAL_DATA"
+  [ "${#FM_GOAL_READY_GAPS[@]}" -gt 0 ] || return 0
+  for gap in "${FM_GOAL_READY_GAPS[@]}"; do fm_goal_log "WARN $1/$gap"; done
+  [ "$2" -eq 0 ] || { fm_goal_log "refused: $1 has drive-readiness gaps (--require-briefs)"; return 1; }
+)
+
 cmd_start() {
-  local id='' title='' done_when='' named_by='' plan='' items_file=''
+  local id='' title='' done_when='' named_by='' plan='' items_file='' require_briefs=0
   local flag value now started staged path
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'start needs a goal id'
   id=$1
@@ -2205,6 +2305,7 @@ cmd_start() {
         esac
         shift 2
         ;;
+      --require-briefs) require_briefs=1; shift ;;
       *) _fm_goal_usage_error "unknown flag for start: $flag" ;;
     esac
   done
@@ -2224,6 +2325,7 @@ cmd_start() {
     fm_goal_log "refused: a record for goal '$id' already exists at $path"
     exit 1
   fi
+  _fm_goal_check_before_write "$id" "$require_briefs" || exit 1
   now=$(date +%s)
   started=$(fm_goal_epoch_iso "$now")
   FM_GOAL_REC_ID=$id
@@ -2258,7 +2360,7 @@ cmd_start() {
 }
 
 cmd_edit() {
-  local id='' items_file='' title='' done_when=''
+  local id='' items_file='' title='' done_when='' require_briefs=0
   local flag value path staged
   local r_id r_title r_started r_started_epoch r_named_by r_plan r_done_when old_count
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'edit needs a goal id'
@@ -2278,6 +2380,7 @@ cmd_edit() {
         [ "$flag" = --title ] && title=$value || done_when=$value
         shift 2
         ;;
+      --require-briefs) require_briefs=1; shift ;;
       *) _fm_goal_usage_error "unknown flag for edit: $flag" ;;
     esac
   done
@@ -2296,6 +2399,7 @@ cmd_edit() {
   r_done_when=$FM_GOAL_REC_DONE_WHEN
   old_count=$FM_GOAL_ITEM_COUNT
   _fm_goal_load_items_file "$items_file" || { fm_goal_lock_release; exit 2; }
+  _fm_goal_check_before_write "$id" "$require_briefs" edit || { fm_goal_lock_release; exit 1; }
   FM_GOAL_REC_ID=$r_id
   FM_GOAL_REC_TITLE=$(_fm_goal_clean_field "${title:-$r_title}")
   FM_GOAL_REC_STATE=active
@@ -2754,6 +2858,21 @@ _fm_goal_read_view() {
   [ ! -L "$FM_SECONDMATE_PARENT_HOME" ] && [ ! -L "$FM_GOAL_VIEW_STATE" ] && [ ! -L "$FM_GOAL_VIEW_DATA" ]
 }
 
+cmd_ready() {
+  local gap
+  if [ "$#" -ne 1 ] || ! fm_goal_id_valid "$1"; then
+    _fm_goal_usage_error 'ready needs a safe goal id'
+  fi
+  _fm_goal_read_view || _fm_goal_die 1 'goal readiness not checked: parent home is not reachable'
+  _fm_goal_open_record "$1" "$FM_GOAL_VIEW_STATE" || exit 1
+  fm_goal_fold "$1" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA"
+  _fm_goal_drive_readiness "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
+  printf '%s of %s items drive-ready\n' "$FM_GOAL_READY" "$FM_GOAL_READY_TOTAL"
+  [ "${#FM_GOAL_READY_GAPS[@]}" -gt 0 ] || return 0
+  for gap in "${FM_GOAL_READY_GAPS[@]}"; do printf '%s\n' "$gap"; done
+  return 1
+}
+
 # Read-only preflight used before Firstmate requests a forge merge or arm.
 # Only the goal-owning home and its local mates can see a task's goal binding.
 # Preserve legacy merge behavior when a mate has no readable parent binding.
@@ -2847,13 +2966,17 @@ cmd_launch_links() {
 # One active goal as a JSON object on stdout: the record fields, the folded
 # progress counts, and one object per item carrying its projection (see the
 # `export` paragraph in the header for the contract).
-_fm_goal_export_one() {  # <id> [--driven]
-  local now i startable reached landing orphan stopon marks items=''
+_fm_goal_export_one() {  # <id> <selector> <with-drive-ready 0|1>
+  local now i startable reached landing orphan stopon marks items='' drive_ready=null
   now=$(date +%s)
   _fm_goal_open_record "$1" "$FM_GOAL_VIEW_STATE" || return 1
   [ "${2-}" != --driven ] || [ "$FM_GOAL_REC_DRIVE" = driven ] || return 1
   marks=${FM_GOAL_REC_DRIVE_MARKS//[^$'\n']/}
   fm_goal_fold "$1" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$now"
+  if [ "$3" -eq 1 ]; then
+    _fm_goal_drive_readiness "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
+    drive_ready="{\"ready\":$FM_GOAL_READY,\"total\":$FM_GOAL_READY_TOTAL}"
+  fi
   _fm_goal_project_waits "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
   for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
     [ -z "$FM_GOAL_VIEW_OWNER" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$FM_GOAL_VIEW_OWNER" ] || continue
@@ -2899,32 +3022,39 @@ _fm_goal_export_one() {  # <id> [--driven]
     --arg drive "$FM_GOAL_REC_DRIVE" --argjson drive_revision "${#marks}" \
     --arg named_by "$FM_GOAL_REC_NAMED_BY" --arg plan "$FM_GOAL_REC_PLAN" \
     --arg done_when "$FM_GOAL_REC_DONE_WHEN" --argjson started "$FM_GOAL_REC_STARTED_EPOCH" \
-    --arg last "${FM_GOAL_FOLD_LAST_AT:-}" '
+    --arg last "${FM_GOAL_FOLD_LAST_AT:-}" --argjson drive_ready "$drive_ready" '
     {id: $id, title: $title, state: $state, driven: ($drive == "driven"), named_by: $named_by, plan: $plan,
      done_when: $done_when, started_epoch: $started, drive_revision: $drive_revision,
      last_progress_epoch: (if $last == "" then null else ($last | tonumber) end),
      progress: {total: length, closed: ([.[] | select(.state == "done" or .state == "dropped")] | length),
                 at_target: ([.[] | select(.target_reached)] | length),
                 with_target: ([.[] | select(.target != null)] | length)},
-     items: .}'
+     items: .} + (if $drive_ready == null then {} else {drive_ready:$drive_ready} end)'
 }
 
 cmd_export() {
-  local path id goals='' one
+  local path id goals='' one selector='' with_drive_ready=0 arg
   command -v jq >/dev/null 2>&1 || _fm_goal_die 1 'export needs jq'
-  [ "$#" -le 1 ] || _fm_goal_usage_error 'export takes at most one goal id'
-  if [ "$#" -eq 1 ] && [ "$1" != --driven ]; then
-    fm_goal_id_valid "$1" || _fm_goal_usage_error "unsafe goal id: '$1'"
+  for arg in "$@"; do
+    if [ "$arg" = --with-drive-ready ] && [ "$with_drive_ready" -eq 0 ]; then
+      with_drive_ready=1
+    elif [ -z "$selector" ] && { [ "$arg" = --driven ] || fm_goal_id_valid "$arg"; }; then
+      selector=$arg
+    else
+      _fm_goal_usage_error "invalid export argument: '$arg'"
+    fi
+  done
+  if [ -n "$selector" ] && [ "$selector" != --driven ]; then
     _fm_goal_read_view || exit 1
-    one=$(_fm_goal_export_one "$1") || exit 1
+    one=$(_fm_goal_export_one "$selector" '' "$with_drive_ready") || exit 1
     goals=$one$'\n'
   elif _fm_goal_read_view; then
     while IFS= read -r path; do
       id=${path##*/}
       id=${id%.goal}
-      one=$(_fm_goal_export_one "$id" "${1-}" 2>/dev/null) || continue
+      one=$(_fm_goal_export_one "$id" "$selector" "$with_drive_ready" 2>/dev/null) || continue
       goals="$goals$one"$'\n'
-    done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE" "${1-}" 2>/dev/null)
+    done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE" "$selector" 2>/dev/null)
   fi
   printf '%s' "$goals" | jq -cs '{schema: "fm-goal-export.v1", goals: .}'
 }
@@ -3410,7 +3540,7 @@ main() {
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'needs a subcommand'
   shift
   case "$cmd" in
-    start|edit|mark|evidence|probe|show|brief|active|startable|export|exists|window|driven|close|pause|resume) ;;
+    start|edit|mark|evidence|probe|show|brief|active|ready|startable|export|exists|window|driven|close|pause|resume) ;;
     launch-links) cmd_launch_links "$@"; return ;;
     can-merge) cmd_can_merge "$@"; return ;;
     apply-drive-answer) cmd_apply_drive_answer "$@"; return ;;
