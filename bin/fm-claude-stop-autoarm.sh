@@ -207,10 +207,10 @@ esac
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
-# A healthy watcher's beacon can legitimately age up to FM_POLL seconds beyond
-# its longest single step (docs/turnend-guard.md "Guard grace and the poll
-# cadence"). fm_poll_derived_grace (bin/fm-wake-lib.sh) is the single owner of
-# that max(300, poll+60) derivation.
+# A healthy watcher's beacon can legitimately age through its longest single
+# step, checkpoint interval, and poll wait (docs/turnend-guard.md "Guard grace
+# and the poll cadence"). fm_poll_derived_grace (bin/fm-wake-lib.sh) is the
+# single owner of that max(300, poll+60) derivation.
 GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 
 # Consume the Stop payload once. The decisions below are state-based; the
