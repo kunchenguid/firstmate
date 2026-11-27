@@ -44,7 +44,11 @@
 # bin/fm-classify-lib.sh) is a done: line in a ready shape
 # (fm_dod_ready_note_url in bin/fm-dod-lib.sh) naming a supported PR URL, so
 # prose around the URL, a line saying the PR is not ready, and any later crew
-# line each leave nothing to record. A candidate is a task record that is not a
+# line each leave nothing to record. The one later crew line read past is a
+# paused: line whose every PR URL is that ready PR and that names it at least
+# once, because a worker declares its review wait right after reporting ready.
+# Punctuation around a PR URL in that line and a #fragment after it are ignored.
+# A candidate is a task record that is not a
 # secondmate or scout and has no pr= line, has the reported pr= but no valid
 # published poll, or has a pr= that its status log named and the reported PR now
 # replaces; a pr= the log never named is the supervisor's own choice and stays,
@@ -90,15 +94,46 @@ DEGRADED_WATCH_ENABLED=0
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-pr_check_reported_url() {  # <status-file>
-  local line url
-  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+pr_check_reported_url() (  # <status-file>
+  local line url rest='' n wait word edge named words waits=()
+  [ -f "$1" ] && [ ! -L "$1" ] || exit 1
   line=$(last_crew_status_line "$1")
-  [ "$(status_line_verb "$line")" = "done" ] || return 1
-  url=$(fm_dod_ready_note_url "$(status_line_note "$line")") || return 1
-  fm_pr_url_parse "$url" || return 1
-  printf '%s\n' "$FM_PR_URL"
-}
+  if [ "$(status_line_verb "$line")" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
+    rest=$(mktemp) || exit 1
+    trap 'rm -f -- "$rest" "$rest.next"' EXIT
+    cp -- "$1" "$rest" || exit 1
+    while [ "$(status_line_verb "$line")" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; do
+      waits+=("$(status_line_note "$line")")
+      n=$(grep -nFx -- "$line" "$rest" | tail -1 | cut -d: -f1)
+      [ -n "$n" ] && head -n "$((n - 1))" "$rest" > "$rest.next" && mv -f -- "$rest.next" "$rest" || exit 1
+      line=$(last_crew_status_line "$rest")
+    done
+  fi
+  [ "$(status_line_verb "$line")" = "done" ] || exit 1
+  url=$(fm_dod_ready_note_url "$(status_line_note "$line")") || exit 1
+  fm_pr_url_parse "$url" || exit 1
+  url=$FM_PR_URL
+  # A later wait keeps the ready report only when every PR it names is this one.
+  if [ -n "$rest" ]; then
+    for wait in "${waits[@]}"; do
+      [ -n "$wait" ] || exit 1
+      named=0
+      read -r -a words <<< "$wait"
+      for word in "${words[@]}"; do
+        word=${word%%#*}
+        edge=${word%%[!\(\[\<\"\']*}
+        word=${word#"$edge"}
+        edge=${word##*[!.,\;:\!?\)\]\>\"\']}
+        word=${word%"$edge"}
+        fm_pr_url_parse "$word" || continue
+        [ "$FM_PR_URL" = "$url" ] || exit 1
+        named=1
+      done
+      [ "$named" = 1 ] || exit 1
+    done
+  fi
+  printf '%s\n' "$url"
+)
 
 pr_check_rotate() {  # <last-id>: start the lines on stdin just after the line for last-id, wrapping
   awk -v last="$1" '{ a[NR] = $0; split($0, f, " "); if (f[1] == last) s = NR } END { for (i = 0; i < NR; i++) print a[(i + s) % NR + 1] }'
