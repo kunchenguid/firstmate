@@ -47,6 +47,14 @@ make_lease_case() {
 set -u
 D=$FM_FAKE_DIR
 printf '%s\n' "$*" >> "$D/treehouse-log"
+[ "${1:-}" != --root ] || shift 2
+if [ -f "$D/model.json" ] && [ "${1:-}" = get ]; then
+  id=${4:-}
+  printf 'allocated %s\n' "$id" > "$D/events"
+  if [ -p "$D/release-$id" ]; then
+    read -r -t 60 _ < "$D/release-$id" || exit 1
+  fi
+fi
 case "$*" in
   'get --lease '*) [ ! -f "$D/lease-fails" ] || { echo 'lease failed' >&2; exit 1; }
     printf '%s\n' "$FM_FAKE_SLOT" ;;
@@ -59,6 +67,9 @@ SH
 #!/usr/bin/env bash
 set -u
 D=$FM_FAKE_DIR
+if [ -f "$D/model.json" ]; then
+  exec python3 "$FM_PROJECTION_FAKE" "$@"
+fi
 printf '%s\n' "$*" >> "$D/herdr-log"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
   printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true}}\n'
@@ -140,7 +151,7 @@ run_lease_spawn() {  # <case-dir> <id> [extra spawn args...]
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     FM_FAKE_SLOT="$dir/slot" HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
-    FM_SPAWN_NO_GUARD=1 \
+    FM_SPAWN_NO_GUARD=1 FM_PROJECTION_FAKE="$ROOT/tests/fixtures/herdr-projection-fake.py" \
     "$SPAWN" "$id" "$dir/project" --backend herdr --mode no-mistakes --yolo off "$@" 2>&1
 }
 
@@ -150,8 +161,8 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
   out=$(run_lease_spawn "$dir" "$id")
   status=$?
   expect_code 0 "$status" "spawn should succeed"$'\n'"$out"
-  assert_grep "get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
-    "the task copy was not leased durably under the task id"
+  grep -Fqx -- "get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
+    || fail "the task copy was not leased durably from Treehouse's default pool under the task id"
   ! grep -qx 'get' "$dir/fake/treehouse-log" \
     || fail "the interactive treehouse get opened a nested shell the restore cannot see"
   [ "$(cat "$dir/fake/cwd")" = "$dir/slot" ] \
@@ -159,6 +170,24 @@ test_fresh_spawn_leases_and_moves_the_top_level_shell() {
   [ "$(cat "$dir/fake/cd-sends")" = 1 ] || fail "an immediately ready pane received a redundant cd"
   assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
   pass "a fresh herdr spawn leases the copy and moves the pane's top-level shell into it"
+}
+
+test_local_secondmate_leases_from_its_own_pool() {
+  local id=lease-secondmate-pool dir out status root
+  dir=$(make_lease_case "$id")
+  mkdir -p "$dir/parent-home/state"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$dir/parent-home" > "$dir/home/.fm-secondmate-parent"
+  root=$(FM_HOME="$dir/home" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$dir/home")
+  [ -n "$root" ] || fail "a local secondmate spawn root was empty"
+  out=$(run_lease_spawn "$dir" "$id")
+  status=$?
+  expect_code 0 "$status" "a local secondmate's herdr spawn should succeed"$'\n'"$out"
+  grep -Fqx -- "--root $root get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
+    || fail "a local secondmate's lease did not come from its own outside-home pool: $(cat "$dir/fake/treehouse-log")"
+  assert_grep "worktree=$dir/slot" "$dir/home/state/$id.meta" "meta did not record the leased copy"
+  pass "a local secondmate's herdr spawn leases its copy from a pool of its own clone"
 }
 
 test_failed_lease_refuses_without_a_record() {
@@ -289,11 +318,202 @@ test_never_moving_worktree_entry() {
   pass "Herdr refuses a never-moving pane with diagnostic context and no launch"
 }
 
+# Recovery lock contract (issue #6454): layout mutations serialize, unrelated
+# allocation does not; default contention refuses, explicit waiting recovers.
+# The oracle is the recorded exact task identity and the boundary command log,
+# not implementation text. In particular a late release must fail the overlap.
+PROJECTION_PIDS=()
+projection_cleanup() {
+  # Unblock every disposable child even when an assertion fails.
+  printf 'release\n' >&7 2>/dev/null || true
+  printf 'release\n' >&8 2>/dev/null || true
+  local pid
+  for pid in "${PROJECTION_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+  fm_test_cleanup
+}
+
+make_projection_pair() {
+  A=$(make_lease_case "$1-a")
+  B=$(make_lease_case "$1-b")
+  rm -rf "$B/fake"
+  ln -s "$A/fake" "$B/fake"
+  D="$A/fake"
+  mkfifo "$D/events" "$D/release-$1-a" "$D/release-$1-b"
+  exec 9<>"$D/events" 8<>"$D/release-$1-a" 7<>"$D/release-$1-b"
+  PROJECTION_PIDS=()
+  trap projection_cleanup EXIT
+  : > "$A/home/config/herdr-presentation-spaces"
+  : > "$B/home/config/herdr-presentation-spaces"
+  # Seed the serialized restart contract, not a previous invocation's output.
+  FM_FAKE_DIR="$D" python3 "$ROOT/tests/fixtures/herdr-projection-fake.py" \
+    seed "$1-b" "$B/home" "$B/project" bbbbbbbbbbbbbbbbbbbbbb >/dev/null
+}
+
+projection_event() {
+  local event
+  # Timeout is only a deadlock guard; all ordering is FIFO-driven.
+  read -r -t 60 event <&9 || fail "missing event: $1"
+  [ "$event" = "$1" ] || fail "expected '$1', got '$event': $(cat "$A/out" "$B/out" 2>/dev/null)"
+}
+
+projection_start() {
+  local dir=$1 id=$2
+  shift 2
+  (run_lease_spawn "$dir" "$id" "$@" > "$dir/out"; status=$?
+   printf 'done %s %s\n' "$id" "$status" > "$D/events"
+   exit "$status") &
+  PROJECTION_PIDS+=("$!")
+}
+
+projection_finish() {
+  local pid
+  for pid in "${PROJECTION_PIDS[@]}"; do
+    wait "$pid" || fail "projection child failed: $(cat "$A/out" "$B/out" 2>/dev/null)"
+  done
+  PROJECTION_PIDS=()
+  exec 7>&- 8>&- 9>&-
+  trap fm_test_cleanup EXIT
+}
+
+projection_assert_replaced() {
+  local dir=$1 id=$2
+  grep -Fxq "herdr_workspace_id=husk-$id" "$dir/home/state/$id.meta" || fail "recovery flattened its workspace"
+  grep -Fxq "pane close old-pane-$id" "$D/herdr-log" || fail "recovery did not close its exact old husk"
+  python3 - "$dir/home/state/$id.meta" "$dir/home/state/$id.herdr-presentation" "$D/model.json" "$id" <<'PY' || fail "replacement endpoint contract failed"
+import json, sys
+meta, journal = [dict(line.rstrip('\n').split('=', 1) for line in open(p) if '=' in line) for p in sys.argv[1:3]]
+state = json.load(open(sys.argv[3]))
+ident = sys.argv[4]
+pane = meta['herdr_pane_id']
+assert pane != 'old-pane-' + ident, 'recovery kept its husk'
+assert journal['pane_id'] == pane, 'journal did not advance to the published endpoint'
+assert journal['tab_id'] == meta['herdr_tab_id']
+assert any(p['pane_id'] == pane and p['workspace_id'] == 'husk-' + ident for p in state['panes'])
+assert not any(p['pane_id'] == 'old-pane-' + ident for p in state['panes'])
+PY
+}
+
+# Runs only as a background child, so its exports and sourced libraries stay
+# out of the test shell.
+projection_lock_holder_child() {
+  export PATH="$A/fakebin:$PATH" FM_FAKE_DIR="$D" FM_HOME="$A/home"
+  export FM_PROJECTION_FAKE="$ROOT/tests/fixtures/herdr-projection-fake.py"
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/backends/herdr.sh"
+  local lock
+  lock=$(fm_backend_herdr_presentation_session_lock_path default) || exit 1
+  fm_lock_try_acquire "$lock" || exit 1
+  printf 'held\n' > "$D/events"
+  read -r -t 60 _ <&8
+  fm_lock_release "$lock"
+  printf 'released\n' > "$D/events"
+}
+
+projection_lock_holder() {
+  projection_lock_holder_child &
+  PROJECTION_PIDS+=("$!")
+  projection_event held
+}
+
+test_exact_recovery_during_sibling_allocation() {
+  local A B D
+  make_projection_pair overlap
+  projection_start "$A" overlap-a
+  projection_event 'allocated overlap-a'
+  # A has published its exact projection but is still inside Treehouse.
+  grep -Fxq 'version=2' "$A/home/state/overlap-a.herdr-presentation" || fail "A did not finish binding its projection: $(cat "$A/out")"
+  projection_start "$B" overlap-b
+  projection_event 'allocated overlap-b'
+  printf 'release\n' >&7
+  projection_event 'done overlap-b 0'
+  projection_assert_replaced "$B" overlap-b
+  # B completed without A's allocation ever being released.
+  printf 'release\n' >&8
+  projection_event 'done overlap-a 0'
+  projection_finish
+  pass "exact recovery reaches allocation while a sibling projected spawn is held in Treehouse"
+}
+
+test_default_exact_recovery_refuses_contention() {
+  local A B D out status
+  make_projection_pair refuse
+  cp "$B/home/state/refuse-b.meta" "$B/meta-before"
+  cp "$B/home/state/refuse-b.herdr-presentation" "$B/journal-before"
+  projection_lock_holder
+  : > "$D/herdr-log"
+  out=$(run_lease_spawn "$B" refuse-b); status=$?
+  [ "$status" -ne 0 ] || fail "default recovery accepted actual lock contention"
+  assert_contains "$out" 'could not acquire its session lock' "missing default refusal"
+  ! grep -E '^(workspace|tab|pane) (create|close|move|rename) ' "$D/herdr-log" \
+    || fail "refused recovery mutated the projection"
+  cmp "$B/meta-before" "$B/home/state/refuse-b.meta" || fail "refusal changed metadata"
+  cmp "$B/journal-before" "$B/home/state/refuse-b.herdr-presentation" || fail "refusal changed journal"
+  printf 'release\n' >&8
+  projection_event released
+  projection_finish
+  pass "default exact recovery refuses a held session lock without projection mutations"
+}
+
+test_opt_in_exact_recoveries_wait_and_replace_own_husks() {
+  local A B D
+  make_projection_pair wait
+  FM_FAKE_DIR="$D" python3 "$ROOT/tests/fixtures/herdr-projection-fake.py" \
+    seed wait-a "$A/home" "$A/project" aaaaaaaaaaaaaaaaaaaaaa >/dev/null
+  projection_lock_holder
+  # Observe an actual failed acquire at the sleep boundary, then park that
+  # retry on the task's FIFO. Never infer contention from elapsed time.
+  cat > "$A/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = 0.1 ] && [ ! -f "$FM_FAKE_DIR/retried-$FM_WAIT_ID" ]; then
+  : > "$FM_FAKE_DIR/retried-$FM_WAIT_ID"
+  printf 'waiting %s\n' "$FM_WAIT_ID" > "$FM_FAKE_DIR/events"
+  read -r -t 60 _ < "$FM_FAKE_DIR/retry-$FM_WAIT_ID" || exit 1
+fi
+SH
+  cp "$A/fakebin/sleep" "$B/fakebin/sleep"
+  mkfifo "$D/retry-wait-a" "$D/retry-wait-b"
+  exec 5<>"$D/retry-wait-a" 6<>"$D/retry-wait-b"
+  FM_WAIT_ID=wait-a projection_start "$A" wait-a --herdr-resume-lock-wait
+  projection_event 'waiting wait-a'
+  FM_WAIT_ID=wait-b projection_start "$B" wait-b --herdr-resume-lock-wait
+  projection_event 'waiting wait-b'
+  printf 'release\n' >&8
+  projection_event released
+  cp "$B/home/state/wait-b.meta" "$B/meta-before"
+  cp "$B/home/state/wait-b.herdr-presentation" "$B/journal-before"
+  printf 'retry\n' >&5
+  projection_event 'allocated wait-a'
+  cmp "$B/meta-before" "$B/home/state/wait-b.meta" || fail "A changed B's metadata"
+  cmp "$B/journal-before" "$B/home/state/wait-b.herdr-presentation" || fail "A changed B's journal"
+  ! grep -q '^pane close old-pane-wait-b' "$D/herdr-log" || fail "A closed B's husk"
+  # A's allocation shares the holder's release FIFO; release it anew.
+  printf 'release\n' >&8
+  projection_event 'done wait-a 0'
+  projection_assert_replaced "$A" wait-a
+  cp "$A/home/state/wait-a.meta" "$A/meta-before"
+  cp "$A/home/state/wait-a.herdr-presentation" "$A/journal-before"
+  printf 'retry\n' >&6
+  projection_event 'allocated wait-b'
+  printf 'release\n' >&7
+  projection_event 'done wait-b 0'
+  projection_assert_replaced "$B" wait-b
+  cmp "$A/meta-before" "$A/home/state/wait-a.meta" || fail "B changed A's metadata"
+  cmp "$A/journal-before" "$A/home/state/wait-a.herdr-presentation" || fail "B changed A's journal"
+  projection_finish
+  exec 5>&- 6>&-
+  pass "opt-in concurrent recoveries wait for the session lock and replace only their own husks"
+}
+
+test_exact_recovery_during_sibling_allocation
+test_default_exact_recovery_refuses_contention
+test_opt_in_exact_recoveries_wait_and_replace_own_husks
+
 test_delayed_worktree_entry
 test_dropped_worktree_entry
 test_never_moving_worktree_entry
 
 test_fresh_spawn_leases_and_moves_the_top_level_shell
+test_local_secondmate_leases_from_its_own_pool
 test_failed_lease_refuses_without_a_record
 test_aborted_spawn_names_the_lease_it_keeps
 test_rolled_back_spawn_after_launch_names_the_lease_it_keeps

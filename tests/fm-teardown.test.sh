@@ -2295,6 +2295,42 @@ test_forced_secondmate_dirty_child_return_warns_and_completes() {
   pass "a forced secondmate teardown warns about a dirty child return and still completes"
 }
 
+test_secondmate_teardown_removes_its_pool_root_and_leaves_a_sibling() {
+  local case_dir home sibling pool_root sibling_root rc
+  case_dir=$(make_case secondmate-pool-root)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  sibling="$case_dir/sibling-home"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" \
+    "$sibling/state" "$sibling/data" "$sibling/config" "$sibling/projects"
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf '%s\n' sibling-x > "$sibling/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$case_dir" > "$home/.fm-secondmate-parent"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$case_dir" > "$sibling/.fm-secondmate-parent"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  pool_root=$(FM_HOME="$home" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$home")
+  sibling_root=$(FM_HOME="$sibling" /bin/bash -c '. "$1" && fm_treehouse_spawn_root "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$sibling")
+  [ -n "$pool_root" ] || fail "secondmate-pool-root: spawn root for the home under teardown was empty"
+  [ -n "$sibling_root" ] || fail "secondmate-pool-root: spawn root for the sibling home was empty"
+  [ "$pool_root" != "$sibling_root" ] || fail "secondmate-pool-root: sibling home shared the teardown home's pool root"
+  mkdir -p "$pool_root" "$sibling_root"
+  printf 'drop\n' > "$pool_root/marker"
+  printf 'keep\n' > "$sibling_root/marker"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "secondmate-pool-root: forced secondmate teardown should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$home" "secondmate-pool-root: secondmate home was not removed"
+  assert_absent "$pool_root" "secondmate-pool-root: per-home pool root survived teardown"
+  assert_present "$sibling_root/marker" "secondmate-pool-root: sibling home's pool root was removed"
+  pass "secondmate teardown removes that home's pool root and leaves a sibling's untouched"
+}
+
 test_return_that_removes_copy_warns_cannot_verify() {
   local case_dir wt rc
   case_dir=$(make_case return-removes-copy)
@@ -3210,7 +3246,8 @@ test_secondmate_pr_registration_publishes_ready_line() {
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
     PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
     || fail "main-pr-ready: fm-pr-check failed"
   ! grep -q '^actionable:' "$case_dir/pr-check.err" \
@@ -6668,6 +6705,7 @@ test_dirty_return_warns_which_slot_was_lost
 test_dirty_return_warns_even_when_a_later_step_refuses
 test_forced_secondmate_child_scout_nested_clone_returns_clean
 test_forced_secondmate_dirty_child_return_warns_and_completes
+test_secondmate_teardown_removes_its_pool_root_and_leaves_a_sibling
 test_return_that_removes_copy_warns_cannot_verify
 test_scout_ignored_files_survive_scratch_clean
 test_gh_error_and_content_absent_refuses

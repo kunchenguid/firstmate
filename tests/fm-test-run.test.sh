@@ -1037,12 +1037,22 @@ test_tern_family_selection() {
 test_list_scheduled_proven_isolated_uses_serial_weights() {
   local tmp
   tmp=$(fm_test_tmproot fm-test-run-proven-schedule)
-  "$RUNNER" --list --proven-isolated | LC_ALL=C sort >"$tmp/expected"
+  "$RUNNER" --list --proven-isolated >"$tmp/members" \
+    || fail "--list --proven-isolated failed"
+  awk -F '\t' '
+    NR == FNR {
+      if (NF >= 2 && $1 !~ /^#/ && $1 != "path" && $2 ~ /^[0-9]+$/) hint[$1] = $2 + 0
+      next
+    }
+    NF { print hint[$1] + 0 "\t" $1 }
+  ' "$ROOT/tests/fm-test-ci-timings.tsv" "$tmp/members" \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 \
+    | awk -F '\t' '{ print $2 }' >"$tmp/expected"
   "$RUNNER" --list-scheduled --proven-isolated >"$tmp/actual" \
     || fail "--list-scheduled --proven-isolated failed"
   cmp -s "$tmp/expected" "$tmp/actual" \
-    || fail "proven-isolated scheduling must break serial-default ties by path"
-  pass "proven-isolated scheduling ignores parallel hints"
+    || fail "proven-isolated scheduling must use committed duration weights, longest first"
+  pass "proven-isolated scheduling uses committed CI duration weights"
 }
 
 test_list_scheduled_non_lane_selections_use_serial_weights() {
@@ -1059,6 +1069,8 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  mkdir -p "$repo/tests"
+  cp "$ROOT/tests/fm-test-ci-timings.tsv" "$repo/tests/fm-test-ci-timings.tsv"
   for script in "${scripts[@]}"; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
     chmod +x "$repo/$script"
@@ -1070,11 +1082,11 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
     printf '\n' >>"$repo/$script"
   done
   printf '%s\n' \
+    tests/fm-captain-hold-lifecycle.test.sh \
+    tests/fm-lint.test.sh \
     tests/fm-kimi-harness.test.sh \
     tests/fm-muse-harness.test.sh \
     tests/fm-brief.test.sh \
-    tests/fm-captain-hold-lifecycle.test.sh \
-    tests/fm-lint.test.sh \
     tests/fm-operational-input.test.sh >"$tmp/expected"
   for selection in family all changed scripts; do
     case "$selection" in
@@ -1222,18 +1234,36 @@ test_portable_serial_hint_coverage_is_reported_and_bounded() {
     || fail "$unhinted of $serial portable serial scripts lack a measured hint; refresh them"
   # A complete partition can still overflow a CI job. Assert the runner's
   # modeled packing target through its executable interface, not source hints.
+  # An indivisible suite may exceed the 15-minute target when it occupies a
+  # shard alone; the guard still refuses a multi-script overflow.
   max=$(printf '%s\n' "$out" | sed -n 's/.*serial_max_ms=\([0-9][0-9]*\).*/\1/p')
   budget=$(printf '%s\n' "$out" | sed -n 's/.*serial_budget_ms=\([0-9][0-9]*\).*/\1/p')
   [ -n "$max" ] && [ -n "$budget" ] \
     || fail "coverage summary must carry serial packing and budget: $out"
-  [ "$budget" -eq 1200000 ] || fail "packing must leave ten minutes of the normal CI tier"
-  [ "$max" -gt 0 ] && [ "$max" -le "$budget" ] \
-    || fail "largest serial shard packs ${max}ms above the ${budget}ms target"
-  pass "coverage guard bounds the unmeasured share and serial packing within twenty minutes"
+  [ "$budget" -eq 900000 ] || fail "packing target must be fifteen minutes, got $budget"
+  [ "$max" -gt 0 ] || fail "largest serial shard packed ${max}ms"
+  pass "coverage guard bounds the unmeasured share and serial packing within fifteen minutes"
+}
+
+write_fixture_timings() {  # <repo> <triage-ms> [second-script] [second-ms]
+  local repo=$1 triage_ms=$2 second=${3:-} second_ms=${4:-1}
+  local script
+  {
+    printf 'path\tduration_ms\n'
+    while IFS= read -r script; do
+      if [ "$script" = "tests/fm-watch-triage.test.sh" ]; then
+        printf '%s\t%s\n' "$script" "$triage_ms"
+      elif [ -n "$second" ] && [ "$script" = "$second" ]; then
+        printf '%s\t%s\n' "$script" "$second_ms"
+      else
+        printf '%s\t1\n' "$script"
+      fi
+    done < <("$RUNNER" --list --all)
+  } >"$repo/tests/fm-test-ci-timings.tsv"
 }
 
 test_portable_serial_packing_budget_boundary() {
-  local tmp repo script weight out rc
+  local tmp repo out rc
   tmp=$(fm_test_tmproot fm-test-run-packing-boundary)
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
@@ -1243,53 +1273,44 @@ test_portable_serial_packing_budget_boundary() {
   while IFS= read -r script; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
   done < <("$RUNNER" --list --all)
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
 
-  for weight in 1200000 1200001; do
-    cp "$RUNNER" "$repo/bin/fm-test-run.sh"
-    python3 - "$repo/bin/fm-test-run.sh" "$weight" <<'PY' \
-      || fail "could not seed the fixture's measured timing input"
+  write_fixture_timings "$repo" 900000
+  out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
+  expect_code 0 "$rc" "packing exactly at the budget must be accepted"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "boundary coverage did not pass"
+  assert_contains "$out" "serial_max_ms=900000" "fixture did not pack exactly at the budget"
+  assert_contains "$out" "serial_budget_ms=900000" "fixture changed the packing budget"
+
+  write_fixture_timings "$repo" 900001
+  out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
+  expect_code 0 "$rc" "an indivisible suite one millisecond above the budget must occupy its own shard"
+  assert_contains "$out" "FM_TEST_COVERAGE ok" "singleton overflow coverage did not pass"
+  assert_contains "$out" "serial_max_ms=900001" "singleton overflow did not keep the script's own hint"
+
+  python3 - "$repo/bin/fm-test-run.sh" <<'PY' || fail "could not pin the fixture to one serial shard"
 from pathlib import Path
 import re, sys
 runner = Path(sys.argv[1])
-weight = sys.argv[2]
 text = runner.read_text()
-scripts = sorted(
-    f"tests/{path.name}" for path in (runner.parent.parent / "tests").glob("*.test.sh")
-)
-if "tests/fm-watch-triage.test.sh" not in scripts:
-    sys.exit("fixture inventory lost tests/fm-watch-triage.test.sh")
-# Longest real serial member stays at the budget boundary; every other script
-# gets 1ms so longest-processing-time packing cannot fill that shard.
-lines = [
-    f"{script} {weight if script == 'tests/fm-watch-triage.test.sh' else '1'}"
-    for script in scripts
-]
-table = "\n".join(lines)
 new, n = re.subn(
-    r"(portable_serial_weight_hints\(\) \{\n  cat <<'EOF'\n).*?(\nEOF\n)",
-    lambda match: match.group(1) + table + match.group(2),
+    r"^PORTABLE_SERIAL_SHARDS=[0-9]+$",
+    "PORTABLE_SERIAL_SHARDS=1",
     text,
     count=1,
-    flags=re.S,
+    flags=re.M,
 )
 if n != 1:
-    sys.exit("serial hint table not found")
+    sys.exit("serial shard count not found")
 runner.write_text(new)
 PY
-    out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
-    if [ "$weight" -eq 1200000 ]; then
-      expect_code 0 "$rc" "packing exactly at the budget must be accepted"
-      assert_contains "$out" "FM_TEST_COVERAGE ok" "boundary coverage did not pass"
-      assert_contains "$out" "serial_max_ms=1200000" "fixture did not pack exactly at the budget"
-      assert_contains "$out" "serial_budget_ms=1200000" "fixture changed the packing budget"
-    else
-      expect_code 1 "$rc" "packing one millisecond above the budget must be refused"
-      assert_contains "$out" "largest portable serial shard packs 1200001ms above the 1200000ms target" \
-        "over-budget refusal did not explain the modeled excess"
-      assert_not_contains "$out" "FM_TEST_COVERAGE ok" "over-budget packing reported success"
-    fi
-  done
-  pass "serial packing accepts the exact budget and refuses one millisecond above it"
+  write_fixture_timings "$repo" 450001 tests/fm-watch-triage-pause.test.sh 450001
+  out=$(bash "$repo/bin/fm-test-run.sh" --check-coverage 2>&1) && rc=0 || rc=$?
+  expect_code 1 "$rc" "a multi-script shard above the budget must be refused"
+  assert_contains "$out" "packs above the 900000ms target with more than one script" \
+    "over-budget refusal did not explain the modeled excess"
+  assert_not_contains "$out" "FM_TEST_COVERAGE ok" "over-budget packing reported success"
+  pass "serial packing accepts the exact budget, keeps an indivisible overflow, and refuses a multi-script overflow"
 }
 
 test_portable_serial_shard_lane_refusals() {
@@ -1922,6 +1943,59 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+test_ci_budget_warn_annotates_over_budget_lanes_without_failing() {
+  local tmp out rc
+  tmp=$(fm_test_tmproot fm-ci-budget-warn)
+  cat >"$tmp/aggregate.json" <<'JSON'
+{
+  "kind": "aggregate",
+  "lanes": [
+    {"selection": "lane=portable-serial-1of18;fail-on-gate-skip=1", "summary": {"duration_ms": 1200000}},
+    {"selection": "lane=portable-parallel-1", "summary": {"duration_ms": 1199999}}
+  ]
+}
+JSON
+  mkdir -p "$tmp/lint"
+  printf 'partition\t2\nwall_seconds\t1200\n' >"$tmp/lint/partition-2.tsv"
+  printf 'partition\t1\nwall_seconds\t1199\n' >"$tmp/lint/partition-1.tsv"
+
+  rc=0
+  out=$(GITHUB_ACTIONS=true bash "$ROOT/bin/fm-ci-budget-warn.sh" \
+    "$tmp/aggregate.json" "$tmp/lint" 2>"$tmp/err") || rc=$?
+  [ "$rc" -eq 0 ] || fail "budget warn must not fail, got $rc"$'\n'"$out"$'\n'"$(cat "$tmp/err")"
+  assert_contains "$out" "::warning title=CI budget::lane portable-serial-1of18 command time was 20.0 minutes, above the 20-minute healthy budget" \
+    "over-budget lane did not emit a GitHub warning annotation"
+  printf '%s\n' "$out" | grep -q 'fail-on-gate-skip' \
+    && fail "budget warning printed runner flags instead of the lane name"$'\n'"$out"
+  assert_contains "$out" "::warning title=CI budget::lint partition 2 command time was 20.0 minutes, above the 20-minute healthy budget" \
+    "over-budget lint partition did not emit a GitHub warning annotation"
+  printf '%s\n' "$out" | grep -q 'portable-parallel-1' \
+    && fail "a lane one millisecond under budget was warned"
+  printf '%s\n' "$out" | grep -q 'lint partition 1' \
+    && fail "a lint partition under budget was warned"
+
+  rc=0
+  out=$(GITHUB_ACTIONS=true bash "$ROOT/bin/fm-ci-budget-warn.sh" \
+    "$tmp/missing.json" 2>"$tmp/missing.err") || rc=$?
+  [ "$rc" -eq 0 ] || fail "missing aggregate must still exit 0, got $rc"
+  assert_contains "$out" "::warning title=CI budget::no aggregate timing JSON" \
+    "missing aggregate did not warn"
+  pass "budget warn annotates 20-minute overruns and never fails the job"
+}
+
+test_jobs_lists_a_portable_parallel_lane() {
+  local tmp rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-jobs-parallel.XXXXXX")
+  set +e
+  "$RUNNER" --jobs 2 --lane portable-parallel-1 --list >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "--jobs 2 --lane portable-parallel-1 --list must succeed, got $rc: $(cat "$tmp/err")"
+  [ -s "$tmp/out" ] || fail "portable parallel 1 listed no scripts under --jobs 2"
+  rm -rf "$tmp"
+  pass "--jobs 2 is accepted on a portable parallel lane"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1955,6 +2029,7 @@ test_portable_serial_hint_coverage_is_reported_and_bounded
 test_portable_serial_packing_budget_boundary
 test_portable_serial_shard_lane_refusals
 test_jobs_requires_proven_isolated
+test_jobs_lists_a_portable_parallel_lane
 test_jobs_admits_a_concurrent_safe_family
 test_unmapped_new_test_never_inherits_family_concurrency
 test_changed_shared_fixture_selects_its_readers
@@ -1966,3 +2041,4 @@ test_max_wall_ms_is_a_result_not_advice
 test_jobs_parallel_scheduler_and_failure_propagation
 test_herdr_ci_family_run_has_a_step_timeout
 test_aggregate_json
+test_ci_budget_warn_annotates_over_budget_lanes_without_failing

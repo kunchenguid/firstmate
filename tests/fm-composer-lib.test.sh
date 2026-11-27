@@ -223,6 +223,26 @@ test_matrix_claude_named_session_titled_rule() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed")
   [ "$out" = 'fix the login bug' ] \
     || fail "named claude composer content should extract the typed text, got '$out'"
+  # Typed text longer than the pane wraps onto rows below the glyph row, so the
+  # glyph no longer sits directly on the closing rule. The composer still
+  # reads pending and its whole text reads back, or a backend that proves its
+  # own typed payload before Enter withholds Enter on every narrow named pane.
+  wrapped="transcript line"$'\n'"$titled"$'\n'"❯ list the inbox, read each msg"$'\n'"in numeric order, then mv it"$'\n'"into handled/"$'\n'"$rule"$'\n  ⏵⏵ auto mode on (shift+tab to cycle)'
+  assert_screen "named claude wrapped typed on herdr" pending "$CAPS_STYLED" "$wrapped" '' "$claude_idle"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$wrapped")
+  [ "$out" = 'list the inbox, read each msg in numeric order, then mv it into handled/' ] \
+    || fail "named claude wrapped composer should extract the whole typed text, got '$out'"
+  # Different pending text in the same composer reads back as itself, so a
+  # payload comparison still refuses Enter on it.
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "${wrapped/in numeric order/captain draft}")
+  [ "$out" = 'list the inbox, read each msg captain draft, then mv it into handled/' ] \
+    || fail "named claude wrapped composer should extract other pending text as-is, got '$out'"
+  # A glyph under a titled rule with a blank row, or more rows than a composer
+  # holds, before the next rule is not proven to be that rule's composer.
+  assert_screen "named claude glyph over a blank row stays unknown" unknown "$CAPS_STYLED" \
+    "transcript line"$'\n'"$titled"$'\n'"❯ old prompt"$'\n\n'"reply"$'\n'"$rule" '' "$claude_idle"
+  assert_screen "named claude glyph over a long region stays unknown" unknown "$CAPS_STYLED" \
+    "transcript line"$'\n'"$titled"$'\n'"❯ old prompt"$'\n'"r1"$'\n'"r2"$'\n'"r3"$'\n'"r4"$'\n'"r5"$'\n'"r6"$'\n'"r7"$'\n'"r8"$'\n'"$rule" '' "$claude_idle"
   # Pi non-regression: a titled rule over a blank row never proves a pi
   # composer, even with a live idle pi identity.
   assert_screen "titled pair over a blank row is not pi" unknown "$CAPS_STYLED" \

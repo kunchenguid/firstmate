@@ -26,6 +26,8 @@
 # is discarded), and shown only as a bounded tail.
 # Provision also stops waiting as soon as the server process exits, and prints
 # the log tail when the session never reports running.
+# On timeout it terminates and reaps the server launch before returning failure;
+# the fleet-state tripwire remains for guarded teardown.
 # Every Herdr call made here carries --session <session>: trailing, or
 # immediately before the first -- delimiter so it stays a Herdr option instead
 # of becoming a passthrough argument such as an agent start argument.
@@ -96,18 +98,24 @@ fm_herdr_lab_tripwire_path() { # <session>
   printf '%s/%s.fleet-state.json' "$(fm_herdr_lab_state_dir)" "$1"
 }
 
-fm_herdr_lab_raw() { # <session> <herdr arguments...>
+# Replaces the calling shell with herdr, so a backgrounded call's $! is the
+# herdr process itself on every bash, including builds that keep a subshell
+# for an async function instead of exec'ing its last command.
+fm_herdr_lab_raw_exec() { # <session> <herdr arguments...>
   local name=$1 i
   shift
-  local -a args=("$@")
+  local -a args=("$@") herdr_args=("$@" --session "$name")
   for ((i = 0; i < ${#args[@]}; i++)); do
     [ "${args[i]}" = -- ] || continue
-    env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
-      HERDR_SESSION="$name" herdr "${args[@]:0:i}" --session "$name" "${args[@]:i}"
-    return
+    herdr_args=("${args[@]:0:i}" --session "$name" "${args[@]:i}")
+    break
   done
-  env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
-    HERDR_SESSION="$name" herdr "$@" --session "$name"
+  exec env -u HERDR_SOCKET_PATH -u HERDR_PANE_ID -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    HERDR_SESSION="$name" herdr "${herdr_args[@]}"
+}
+
+fm_herdr_lab_raw() { # <session> <herdr arguments...>
+  (fm_herdr_lab_raw_exec "$@")
 }
 
 fm_herdr_lab_session_list() { # <session>
@@ -508,7 +516,7 @@ fm_herdr_lab_provision() { # <session>
   server_log=$(fm_herdr_lab_server_log_path "$name")
   mkdir -p "$(dirname "$server_log")"
   : > "$server_log"
-  fm_herdr_lab_raw "$name" server > >(exec >/dev/null 2>&1; head -c "$fm_herdr_lab_server_log_cap" > "$server_log"; cat) 2>&1 &
+  fm_herdr_lab_raw_exec "$name" server > >(exec >/dev/null 2>&1; head -c "$fm_herdr_lab_server_log_cap" > "$server_log"; cat) 2>&1 &
   server_pid=$!
   attempt=0
   max_attempts=300

@@ -627,7 +627,7 @@ It proves that a live foreign owner still prevents arming while repeated non-own
 `tests/fm-guard-stale-banner.test.sh` covers the pull-guard predicate for each supervision model:
 
 - The persistent model's fresh-leftover-beacon negative control.
-- The auto-arm model's healthy fresh-beacon-without-a-watcher case, session-and-recovery-bound long-turn rewake tolerance, independently broken tolerance signals, open-claim negative control, stale-beacon alarm, and isolation from other models.
+- The auto-arm model's healthy fresh-beacon-without-a-watcher case, a beacon stamped slightly ahead of the guard's clock read staying fresh, session-and-recovery-bound long-turn rewake tolerance, independently broken tolerance signals, open-claim negative control, stale-beacon alarm, and isolation from other models.
 - The extension model's live-watcher path, ownership-qualified fresh hand-off, held-lock failures, independently broken ownership signals, stale-beacon alarm, queued-wake warning, and Pi and pi-signed harness routing.
 
 It also covers true-reason banner wording and reason-keyed episode dedup surviving a beacon mtime change.

@@ -80,6 +80,27 @@ The portable regression asserts both directions of that case: a host-shaped pid 
 
 Run on the host under Claude Code 2.1.252 with the same two markers set, the same probe reports `claude`, `comm claude`, and Claude's Stop-owned protocol, so the correction does not trade one misidentification for its inverse.
 
+### Ancestry reach across the Codex SessionStart hook
+
+Codex publishes no marker, so its session start digest identifies Codex only if the ancestry walk reaches the native `codex` process from where the hook runs.
+Verified on 2026-11-04 with codex-cli 0.166.0 on Linux 6.12.113 (arm64), through the installed `codex app-server` against a loopback model fixture with an isolated `CODEX_HOME`, `HOME`, and lab checkout:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+The tracked SessionStart wrapper ran as `codex app-server` -> `bash -lc` -> `fm-codex-stop-park.sh` -> `fm-sessionstart-run.sh` -> `fm-session-start.sh` -> `timeout` -> `bash -c` -> `fm-session-start.sh` -> `fm-session-start.sh`, which puts the digest's harness probe nine parents below the native process, the wake drain's probe eleven, and the guard's probe thirteen.
+With an eight-process walk the digest model context read `SUPERVISION OPERATING INSTRUCTIONS - primary harness: unknown`; with the current walk the same run reads:
+
+```text
+ok - codex codex-cli 0.166.0: the SessionStart hook digest detects the installed Codex and renders its protocol
+```
+
+`tests/fm-harness-precedence.test.sh` pins the measured reach portably at depths 1, 7, 9, and 15, with and without a retained `CLAUDECODE`, plus the bound one process beyond it, and `tests/fm-session-start.test.sh` runs the tracked hook command under a renamed `codex` process.
+That run proves the extended reach live for Codex only.
+Claude 2.1.316 and Pi 1.4.0 were installed on the same host, but no live guard exercised their session-open paths under the extended reach, so their live behavior under it is unverified; each publishes a marker, so ancestry is not their only evidence.
+tmux was not installed, so `tests/fm-harness-liveness-drift-live-e2e.test.sh` gate-skipped and refreshed no per-harness process-name evidence here.
+
 ### Real harness process names behind the walk
 
 The detection half of the opt-in drift guard asks the ancestry walk what it makes of each INSTALLED harness's real running process:
@@ -667,11 +688,22 @@ None of these three runs ever answered its dialog (Escape only, never Enter), so
 
 ## Worker account pin sign-in check
 
-`bin/fm-worker-account-lib.sh` decides whether a pinned account is signed in from vendor output: the exit status of `claude auth status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.
+`bin/fm-worker-account-lib.sh` decides whether a pinned or declared account is signed in from vendor output: the exit status of `claude auth status` and `codex login status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.
 `tests/fm-worker-account-live-e2e.test.sh` asks the real installed runners about synthetic roots that need no login and no network, under a throwaway `HOME`.
-A Claude root whose `settings.json` names an `apiKeyHelper` reports `loggedIn: true`, a Pi root holding a stored API key reports `ready`, and a provider registered by an extension in the Pi root's `extensions/` answers `pi auth check` with `not_ready`/`provider_not_found` while `pi --list-models` lists it.
+A Claude root whose `settings.json` names an `apiKeyHelper` reports `loggedIn: true`, a Codex home holding a key stored by `codex login --with-api-key` reports `Logged in using an API key`, a Pi root holding a stored API key reports `ready`, and a provider registered by an extension in the Pi root's `extensions/` answers `pi auth check` with `not_ready`/`provider_not_found` while `pi --list-models` lists it.
 Each refusal is paired with the divergence it depends on: the same runner, given `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or the extension's key variable, answers signed in for the empty root, so the refusal proves the check's cleared environment.
 Replacing `env -i` with `env` in the check makes the guard fail on the Claude refusal.
+`codex login status` reads only the selected `CODEX_HOME`: an empty home with `CODEX_API_KEY` in the environment still reports `Not logged in`, so the Codex refusal holds with or without the cleared environment, and the guard prints a note if a later Codex starts honoring that variable.
+
+Verified 2026-11-13 for Codex on codex-cli 0.163.0 on macOS, alongside Claude Code 2.1.325 and pi 1.0.0; pi-signed was not installed.
+
+```
+ok - claude 2.1.325 (Claude Code): the pin check accepts a signed-in root and refuses an empty one despite an ambient API key
+ok - codex-cli 0.163.0: the account check accepts a signed-in CODEX_HOME and refuses an empty one despite an ambient API key
+ok - pi 1.0.0: the pin check reads auth check and the model listing, and refuses what only an ambient credential signs in
+skip-runner: pi-signed is not installed, so its pin check was not exercised
+# worker account live guard checked: claude codex pi
+```
 
 Verified 2026-09-22 on Claude Code 2.1.278 and pi 0.86.1 on Linux; pi-signed was not installed.
 
@@ -686,7 +718,7 @@ skip-runner: pi-signed is not installed, so its pin check was not exercised
 # worker account live guard checked: claude pi
 ```
 
-The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude or Pi upgrade.
+The guard submits no prompt and spends no tokens, so it runs by default wherever a runner is installed; rerun it after every Claude, Codex, or Pi upgrade.
 
 ## Claude worker tool exclusions
 
@@ -1049,9 +1081,9 @@ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude -n <name> herdr: unknown
 claude -n <name>                                            tmux:  empty (typed text: pending)
 ```
 
-The classifier now accepts a bare agent-glyph row sandwiched between a width-proven titled top rule and its solid closing rule (`_fm_composer_titled_rule_row` and `_fm_composer_bare_rule_sandwich` in `bin/fm-composer-lib.sh`, issues #5601 and #5558).
+The classifier accepts a bare agent-glyph row beneath a width-proven titled top rule when the intervening rows to its solid closing rule form a contiguous, non-blank, edge-free wrap region bounded by `FM_COMPOSER_PI_MAX_LINES` (`_fm_composer_titled_rule_row` and `_fm_composer_bare_rule_sandwich` in `bin/fm-composer-lib.sh`, issues #5601 and #5558).
 After the fix the named Herdr pane read `empty`, and the daemon's real injection path wrote the operational record, typed the doorbell, sent Enter, and confirmed the submit on that pane.
-`test_matrix_claude_named_session_titled_rule` in `tests/fm-composer-lib.test.sh` pins idle, ghost-suggestion, typed, and extraction cases on every capability profile, the unnamed ghost case, and the Pi blank-row non-regression.
+`test_matrix_claude_named_session_titled_rule` in `tests/fm-composer-lib.test.sh` pins idle, ghost-suggestion, typed, extraction, and wrapped typed-line cases on every capability profile, the unnamed ghost case, and the Pi blank-row non-regression; blank and overlong regions remain unknown.
 The composer-matrix guard's `claude-named` arm requires the cursorless read of a real named Claude pane to be exactly `empty`:
 
 ```sh
@@ -1217,7 +1249,8 @@ Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-30
 =120000,ARo=600000;
 ```
 
-Pi's bash tool runs a command with no time limit unless the call passes `timeout`, so the brief asks for at most 2700 seconds, which stays under the watcher's 3600-second busy-turn bound.
+Pi's native bash tool has no default timeout, so the worker brief asks for at most 2700 seconds, which stays under the watcher's 3600-second busy-turn bound.
+For sessions loading Firstmate's primary extension, see the [opt-in Bash timeout cap](../configuration.md#pi-bash-timeout-cap).
 Codex yields a still-running command back to the model, and one empty `write_stdin` poll then waits up to 300000 ms.
 Claude Code's Bash tool defaults to 120000 ms and accepts at most 600000 ms; `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` override those two values.
 
@@ -3141,6 +3174,30 @@ Refresh this harness-dependent proof before accepting a cursor upgrade:
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+## Explicit PR-follow outcome display
+
+Verified on 2026-11-21 with Pi 1.5.2 and Claude Code 2.1.330 on Linux.
+[Explicit PR follows](../configuration.md#explicit-pr-follows-configpr-follow) owns the opt-in setup and supported presentation boundary.
+The guard opens real terminal sessions and substitutes only forge reads.
+It submits no prompt and changes no real PR.
+Each taskless merge, closure, and failing check on a new commit produces one URL-bearing transcript line.
+The guard also checks that no primary model turn or supervision wake starts.
+Pi's native skill discovery verifies that no follow trigger enters the unconditional skill index.
+`tests/fm-session-start.test.sh` checks that the flag adds only one guidance line and removing it restores the original digest bytes.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-pr-follow-live-e2e.test.sh
+```
+
+```text
+ok - pi 1.5.2: three taskless forge changes produced three visible lines, no primary turn or wake
+skip: pi-signed is not installed for the live PR-follow proof
+ok - claude 2.1.330 (Claude Code): three taskless forge changes produced three visible lines, no primary turn or wake
+```
+
+Pi-signed was not separately exercised in this run.
+Other primaries are outside this feature's supported presentation boundary, rather than silently using model-mediated notification.
+
 ## Pi supervision branch
 
 The supervision-branch extension (`.pi/extensions/fm-branch-supervision.ts`, [docs/pi-supervision-branch.md](../pi-supervision-branch.md)) builds its second session through the Pi SDK surface: `createAgentSession` (including its `model`, `modelRuntime`, and `thinkingLevel` options), `DefaultResourceLoader` with `extensionFactories`, `SessionManager`, `createBashToolDefinition` with a `spawnHook`, `sendCustomMessage` for routine notes, `appendEntry` and `registerEntryRenderer` for captain outcomes, the `before_provider_request` hook, the command context's model registry for picker candidates, a fresh `ModelRuntime` for isolated-branch resolution, and Pi's own `getSupportedThinkingLevels`/`clampThinkingLevel` plus its `getThinkingLevel` and `thinking_level_select` extension surface for effort.
@@ -3685,6 +3742,25 @@ Verified on 2026-10-19 with `codex-cli 0.163.0` on macOS arm64 in an isolated na
 The native TUI fired project SessionStart and asynchronous Stop hooks, and `codex queue --thread` delivered input to the embedded `--no-daemon` session.
 [Supervision verification](supervision.md#codex-native-model-free-park-2026-10-19) records the commands, ten-minute provider-call comparison, real check delivery, input interrupt, park-death recovery and native-exit cleanup.
 This verifies the primary-session park, not a worker busy-state classifier or a Codex dialog-mirror writer.
+
+The [minimum-version policy](../configuration.md#codex-native-stop-park-configcodex-stop-park) admits releases beyond those exercised live.
+On 2026-11-05, the following focused checks passed on Linux with installed `codex-cli 0.166.0`:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-codex-stop-park.test.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+Selected exact output:
+
+```text
+ok - the park admits numeric releases >=0.163.0 and fails closed on other version output
+codex-cli 0.166.0: Stop parser checked 12 isolated cases with clean wrapper JSON and bounded continuation
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=46017
+```
+
+The portable park suite exercises registration and capability through a compiled harness ancestor, including below-minimum, intermediate, patch, future-major, malformed, prerelease, and failed-probe cases.
+The real installed CLI guard checks hook flags and native Stop response parsing in isolated app-server fixtures; it does not prove a resumed TUI's watcher cycle.
+The CLI emitted a nonfatal stale arg0 cleanup warning (`Cross-device link`) during the guard.
 
 ## hc
 

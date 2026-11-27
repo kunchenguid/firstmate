@@ -2905,6 +2905,65 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
   [ -n "$hit" ]
 }
 
+# 0 when config/turnend-abort-absorb is present, crew <id>'s current-state read is a
+# run-step failed or unknown verdict naming run `run: <id>`, that run is terminal in
+# the no-mistakes run store with an explicit abort record (status cancelled with error
+# exactly "cancelled: aborted by user", or status failed with error exactly
+# "step <name>: aborted by user" optionally followed by ": <reason>"), and the task's
+# busy-state verdict (fm_busy_classify_meta) is exactly busy <source> and the record's
+# ts is newer than that run's last update. Every other shape - flag
+# absent, a run that failed for another reason, a busy verdict at or before the
+# abort, or any unreadable input - returns 1, so the wake surfaces as before.
+crew_aborted_run_superseded_by_busy() {  # <id>
+  local id=$1 state config line run_id wt db row run_status run_error run_end busy ts
+  [ -n "$id" ] || return 1
+  state=${STATE:-${FM_STATE_OVERRIDE:-${FM_HOME:-}/state}}
+  config=${CONFIG:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}}
+  [ -e "$config/turnend-abort-absorb" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in
+    "state: failed · source: run-step"*|"state: unknown · source: run-step"*) ;;
+    *) return 1 ;;
+  esac
+  run_id=$(printf '%s\n' "$line" | sed -n 's/.* · run: \([A-Za-z0-9_-]\{1,\}\).*/\1/p')
+  [ -n "$run_id" ] || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  declare -F fm_nm_state_db >/dev/null 2>&1 || {
+    # shellcheck source=bin/fm-nm-run-lib.sh
+    . "$_FM_CLASSIFY_LIB_DIR/fm-nm-run-lib.sh" || return 1
+  }
+  db=$(fm_nm_state_db "$wt") && [ -f "$db" ] || return 1
+  row=$(python3 -I -c '
+import sqlite3, sys
+from contextlib import closing
+from pathlib import Path
+with closing(sqlite3.connect(Path(sys.argv[1]).as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+    r = db.execute("SELECT status, COALESCE(error, \"\"), updated_at FROM runs WHERE id = ?", (sys.argv[2],)).fetchall()
+if len(r) == 1 and isinstance(r[0][2], int):
+    print("%s\t%s\t%d" % r[0])
+' "$db" "$run_id" 2>/dev/null) || return 1
+  IFS=$'\t' read -r run_status run_error run_end <<< "$row"
+  case "$run_end" in ''|*[!0-9]*) return 1 ;; esac
+  case "$run_status" in
+    cancelled) [ "$run_error" = "cancelled: aborted by user" ] || return 1 ;;
+    failed) [[ $run_error =~ ^step\ [A-Za-z0-9_-]+:\ aborted\ by\ user(:\ .+)?$ ]] || return 1 ;;
+    *) return 1 ;;
+  esac
+  declare -F fm_busy_record_read >/dev/null 2>&1 || {
+    # shellcheck source=bin/fm-busy-lib.sh
+    . "$_FM_CLASSIFY_LIB_DIR/fm-busy-lib.sh" || return 1
+  }
+  declare -F fm_backend_of_meta >/dev/null 2>&1 || {
+    # shellcheck source=bin/fm-backend.sh
+    . "$_FM_CLASSIFY_LIB_DIR/fm-backend.sh" || return 1
+  }
+  busy=$(fm_busy_classify_meta "$state/$id.meta" "$id" "$state") || return 1
+  case "$busy" in busy\ *) ;; *) return 1 ;; esac
+  ts=$(sed -n 's/.* ts=\([0-9]\{1,\}\)$/\1/p' "$(fm_busy_record_path "$state" "$id")" 2>/dev/null | head -1)
+  [ -n "$ts" ] && [ "$ts" -gt "$run_end" ]
+}
+
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably
 # working; 1 (actionable/surface) if any is not, or no task can be resolved. Pass the
 # same space-separated file list the caller classified with the span read above.
@@ -2971,7 +3030,7 @@ signal_crew_provably_working() {  # <file> ...
     esac
     case " $seen " in *" $task "*) continue ;; esac
     seen="$seen $task"
-    crew_is_provably_working "$task" || return 1
+    crew_is_provably_working "$task" || crew_aborted_run_superseded_by_busy "$task" || return 1
   done
   [ -n "$seen" ] || return 1
   return 0
