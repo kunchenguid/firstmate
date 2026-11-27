@@ -891,3 +891,21 @@ ok - Claude Code 2.1.284 (Claude Code) with the flag on: the mod auto-loads from
 ok - Claude Code 2.1.284 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
 ok - Claude Code 2.1.284 (Claude Code) with Calm off shows the supervision notes: the session-start anchor for an unprocessed captain outcome, a sailboat for a new routine outcome, an anchor for a new captain outcome, and the latch-trip note, each behind the fm: label, skipping processed and silent outcomes, moving no store marker, never reaching the model, and on resume showing each anchor once
 ```
+
+## 2026-11-18 Claude Code 2.1.326 strict validation
+
+Claude Code 2.1.323 and later type-check the mod's TypeScript without `allowImportingTsExtensions` and read no `tsconfig.json` from the plugin folder, so `claude plugin validate --strict` refused the unchanged mod; 2.1.322 still passed it.
+
+- Every value import that names a sibling module by its `.ts` path raised TS5097. Node's direct type-stripped loading in `tests/fm-calm-claude-mod.test.sh` needs that exact path, so each such import carries one `// @ts-ignore TS5097` line; type-only imports are exempt and carry none.
+- The engine's own declarations grew required fields, so only the test fixtures changed: `Spinner` props carry `suffix`, `UserMessage` props carry `isExpanded`, the mocked `fs.stat` answers `isLink`, and the mocked `ui.blit` reads `cells` only from the packed-cell variant.
+
+```text
+$ claude --version
+2.1.326 (Claude Code)
+
+$ bash tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.326 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm, and logging supervision notes
+ok - Claude Code 2.1.326 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, and supervision notes
+```
+
+The current mod passes the same test on 2.1.322 and 2.1.327 as well.

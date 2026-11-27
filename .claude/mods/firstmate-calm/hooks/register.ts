@@ -44,6 +44,7 @@ import type { EngineInterface, Register, RenderElement, RenderInput } from "clau
 import {
   CALM_WORKING_SHIP_TICK_MS,
   createCalmWorkingShipSprite,
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 } from "../lib/fm-calm-working-ship-sprite.ts";
 import {
   CALM_SHIP_RASTER_KEY,
@@ -52,6 +53,7 @@ import {
   calmShipRasterColumns,
   packCalmShipRasterCells,
   type CalmShipRasterPalette,
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 } from "../lib/fm-calm-ship-raster.ts";
 import {
   calmPreferencePath,
@@ -63,6 +65,7 @@ import {
   userTextIsOperational,
   userTextOperationalRecord,
   workingNoteKey,
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 } from "../lib/fm-calm-presentation.ts";
 import {
   firstmateStateDirectory,
@@ -76,6 +79,7 @@ import {
   replayOutcomeNotes,
   sessionShownThrough,
   type HostHealth,
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 } from "../lib/fm-branch-notes.ts";
 
 /** The slash command the mod serves, the same name as Pi's `/calm`. */

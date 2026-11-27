@@ -7,6 +7,7 @@
 // (bin/fm-branch-outcome.sh owns every file format read here) and from the supervision
 // host's latch (bin/fm-supervision-host.sh). It only renders: nothing here marks an
 // outcome read or processed. Everything is pure so tests run it under Node.
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 import { calmCodeRootFromPluginRoot } from "./fm-calm-presentation.ts";
 
 export const BRANCH_NOTE_BOAT = "⛵";
