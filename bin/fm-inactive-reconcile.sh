@@ -427,11 +427,13 @@ terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
   [ "$declared" = "$state" ]
 }
 
-# The task's delivered PR. Recorded meta pr= is authoritative; without one,
-# the fallback scrape accepts only a terminal line in a mode's ready-signal
-# shape (`done: PR <url>` or `done: PR <url> checks green`, optionally carrying
-# an emission-time tag this scrape steps over without reading), so a PR a
-# worker merely mentioned in prose is never claimed as the delivery.
+# The task's delivered PR. A terminal line in a mode's ready-signal shape
+# (`done: PR <url>` or `done: PR <url> checks green`, optionally carrying an
+# emission-time tag this scrape steps over without reading) names it, even over
+# a recorded meta pr=, because the relayed line's text already names that URL
+# and a task that delivered several PRs keeps an older one recorded. Otherwise
+# the recorded pr= stands, so a PR a worker merely mentioned in prose is never
+# claimed as the delivery.
 # With the home's config/pr-register-scan opt-in present, the terminal line
 # instead counts when its note is a ready report accepted by
 # fm_dod_ready_note_url, naming a GitHub-shaped or fm_pr_url_parse forge URL,
@@ -444,10 +446,11 @@ pr_for_task() { # <meta> <terminal-line> <status-file>
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(meta_field "$meta" pr)
   if [ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-register-scan" ]; then
-    if [ -z "$value" ] && [ -n "$terminal" ]; then
-      value=$(printf '%s\n' "$terminal" \
+    if [ -n "$terminal" ]; then
+      ready=$(printf '%s\n' "$terminal" \
         | sed -nE 's|^done( \[at=[^]]*\])?: PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\2|p' \
         | head -1 || true)
+      [ -z "$ready" ] || value=$ready
     fi
     clean_field "$value"
     return 0
