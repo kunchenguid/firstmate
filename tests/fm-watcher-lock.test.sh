@@ -2472,7 +2472,7 @@ test_killed_acquirer_owner_litter_is_reaped() {
       nested) lock="$state/arbitrary/deeper/.future-mutex" ;;
     esac
     lock_parent=${lock%/*}
-    mkdir -p -m 700 "$lock_parent"
+    mkdir -p "$lock_parent" && chmod 700 "$lock_parent"
     write_killing_mktemp "$fakebin"
     if [ "$shape" = live-holder ]; then
       # The holder stays alive blocked on a FIFO nobody writes, bounded by
