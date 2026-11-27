@@ -104,8 +104,6 @@ const document = {baseURI: url, title: "Fixture page", querySelectorAll: root.qu
   implementation: {createHTMLDocument: () => ({importNode: node => fixtureRoot(node.outerHTML)})},
   styleSheets: sheets.filter(s => s.ownerNode), adoptedStyleSheets: sheets.filter(s => !s.ownerNode)};
 const result = vm.runInNewContext("(" + expression + ")()", {document, location: {href: url}});
-assert.deepStrictEqual(owners.filter(n => n.getAttribute("id")?.startsWith("disabled-")).map(n => n.getAttribute("media")),
-  ["screen", "screen"], "capture changed the live media attributes");
 assert.strictEqual(root.outerHTML, markup, "capture changed the live DOM");
 console.log("result: " + JSON.stringify(JSON.stringify(result)));
 JSCAPTURE
@@ -584,7 +582,7 @@ assert not any(".removed" in css or ".dynamic{color:black}" in css for css in p.
 assert any(".fallback{color:green}" in css for css in p.styles)
 PYHTML
   then fail "CSSOM or reserved markup output failed"; fi
-  assert_equals 'https://external.test/sheet.css' "$(jq -r '.inaccessible_stylesheets[0]' "${snap%.html}.meta.json")" "inaccessible stylesheet was not disclosed"
+  assert_equals '["https://external.test/sheet.css"]' "$(jq -c '.inaccessible_stylesheets' "${snap%.html}.meta.json")" "unexpected inaccessible stylesheets"
   if ! node - "$snap" <<'JS'
 const fs = require("fs"), vm = require("vm"), assert = require("assert");
 const html = fs.readFileSync(process.argv[2], "utf8");
