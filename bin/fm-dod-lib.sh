@@ -16,6 +16,9 @@
 # new task/approval record. Once the latched head is contained in the project's
 # local default branch (that round landed), the next accepted done head replaces
 # it, so a further round of the same task reports readiness for approval again.
+# The local-only done line names its head (`ready in branch <branch> at <sha>`);
+# a named head that is not the worker copy's HEAD is refused, and
+# bin/fm-merge-local.sh latches a named head that no reader latched before.
 # The optional third argument is the task's full ship-branch name (a project's
 # registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
 # and is the immutable task branch rendered in every delivery contract.
@@ -670,7 +673,7 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
+When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch at <head>\` to the status file and stop, where \`<head>\` is the full commit id \`git rev-parse HEAD\` prints.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
@@ -859,6 +862,16 @@ fm_dod_status_names_pr() {  # <status-file> <url>
 # The last recorded <key>= value in <meta>, or empty.
 fm_dod_meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+# The full commit id a local-only ready note names (`ready in branch <branch>
+# at <sha>`), or failure when the note names none.
+fm_dod_local_ready_note_head() {  # <note>
+  local head
+  case "$1" in 'ready in branch '?*' at '?*) ;; *) return 1 ;; esac
+  head=${1##* at }
+  case "$head" in ''|*[!0-9a-f]*) return 1 ;; esac
+  case ${#head} in 40|64) printf '%s\n' "$head" ;; *) return 1 ;; esac
 }
 
 # Read the single owned local landing identity. Never accept rev expressions,
@@ -1131,7 +1144,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> [meta-locked]]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured=''
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit captured='' named
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if [ "$mode" = local-only ] && [ -n "$meta" ]; then
     captured=$(cat "$meta") || return 1
@@ -1176,6 +1189,11 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
       return 0
     fi
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
+    return 1
+  fi
+  if [ "$mode" = local-only ] && named=$(fm_dod_local_ready_note_head "$(status_line_note "$line")") \
+    && [ "$named" != "$sha" ]; then
+    printf '%s\n' "named head $named is not this copy's HEAD $sha"
     return 1
   fi
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then

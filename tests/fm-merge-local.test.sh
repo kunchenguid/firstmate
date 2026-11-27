@@ -66,6 +66,32 @@ test_branch_advance_does_not_change_approval() {
   pass 'branch advance refuses, and restoring the reported X lands exactly X'
 }
 
+# A done line that names its head is latched at landing when no reader
+# latched it before; a line naming no head, or a head the worker moved past,
+# refuses without moving main.
+test_named_done_line_latches_at_landing() {
+  local line
+  for line in named unnamed moved; do
+    make_case "named-$line"
+    case "$line" in
+      named|moved) printf 'done [at=1790000000]: ready in branch fm/local-task at %s\n' "$X" \
+        > "$HOME_DIR/state/local-task.status" ;;
+      unnamed) printf 'done [at=1790000000]: ready in branch fm/local-task\n' \
+        > "$HOME_DIR/state/local-task.status" ;;
+    esac
+    if [ "$line" = named ]; then
+      land >/dev/null || fail 'a done line naming its head did not land'
+      [ "$(git -C "$PROJ" rev-parse HEAD)" = "$X" ] || fail 'landing did not use the named head'
+      [ "$(fm_dod_local_done_head "$META")" = "$X" ] || fail 'landing did not latch the named head'
+      continue
+    fi
+    [ "$line" = unnamed ] || git -C "$WT" commit -q --allow-empty -m Y
+    assert_refused
+    assert_no_regex '^local_done_head=' "$META" "$line: a refused landing latched a head"
+  done
+  pass 'a done line naming its head latches at landing, and an unnamed or moved head refuses'
+}
+
 # Round 1 landed X, so the latched head is in main; the next done for the same
 # task records the new head and lands it, while an unlanded head stays latched.
 test_landed_round_repins_next_done() {
@@ -335,4 +361,4 @@ fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_d
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
-  test_landed_round_repins_next_done
+  test_landed_round_repins_next_done test_named_done_line_latches_at_landing

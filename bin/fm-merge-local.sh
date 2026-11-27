@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # project's default branch to local_done_head= in state/<task-id>.meta,
-# recorded when the done report was accepted by bin/fm-dod-lib.sh. Missing or
-# malformed heads refuse. Legacy tasks with no head must report readiness again
-# before approval. The recorded ship branch must still point at that exact commit.
+# recorded when the done report was accepted by bin/fm-dod-lib.sh. When no
+# reader latched it yet, the task's current done line is accepted here if it
+# names its head (`ready in branch <branch> at <sha>`), which latches that head.
+# Missing or malformed heads otherwise refuse. Legacy tasks with no head must
+# report readiness again before approval. The recorded ship branch must still
+# point at that exact commit.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -66,6 +69,20 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+# No reader latched the head yet: accept the task's current done line here when
+# it names its head, so the latched identity is the one the report carried.
+if ! grep -q '^local_done_head=' "$META" \
+  && [ "$(fm_dod_meta_value "$META" mode)" = local-only ]; then
+  MERGE_DONE_LINE=$(status_current_line "$STATE/$ID.status" ship)
+  if fm_dod_local_ready_note_head "$(status_line_note "$MERGE_DONE_LINE")" >/dev/null; then
+    MERGE_DONE_REASON=$(FM_HOME="$FM_HOME" fm_dod_accept_ship_done ship local-only \
+      "$(fm_dod_meta_value "$META" worktree)" "$(fm_dod_meta_value "$META" project)" \
+      "$MERGE_DONE_LINE" "$STATE" "$ID" "$META") || {
+      echo "error: task $ID's done report could not be accepted: $MERGE_DONE_REASON" >&2
+      exit 1
+    }
+  fi
+fi
 MERGE_EXPECTED_HEAD=$(fm_dod_local_done_head "$META") || {
   echo "error: missing or malformed local done head for task $ID; report readiness before approval" >&2
   exit 1
