@@ -892,14 +892,19 @@ pass "mixed local and remote routes validate without migration"
 
 # Launch on the remote home's own configured backend. Parent metadata records
 # host placement separately from that backend and arms the reply source.
-# Droid remote secondmates fail closed until live SSH recovery is verified.
+# Droid remote secondmates are refused locally, before any remote call, until
+# live SSH recovery is verified.
 printf 'pi\n' > "$PARENT/config/crew-harness"
+ssh_calls_before_droid=$(cat "$SSH_COUNT" 2>/dev/null || echo 0)
 if remote_droid_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness droid 2>&1); then
   fail "remote spawn accepted unverified Droid remote secondmate"
 fi
 assert_contains "$remote_droid_out" 'unverified remote secondmate harness: droid' \
   "remote Droid secondmate refusal did not name the unverified boundary"
+assert_equals "$ssh_calls_before_droid" "$(cat "$SSH_COUNT" 2>/dev/null || echo 0)" \
+  "remote Droid secondmate refusal reached the remote host before refusing"
 assert_absent "$PARENT/state/ios.meta" "refused remote Droid secondmate published launch metadata"
+pass "remote Droid secondmate spawn is refused locally before any remote side effect"
 
 launches_before_inherit=0
 [ ! -f "$HERDR_LOG" ] || launches_before_inherit=$(grep -c '^tab create' "$HERDR_LOG" || true)

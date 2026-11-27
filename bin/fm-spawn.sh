@@ -1367,8 +1367,7 @@ spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_rex_session_id remote_rex_server remote_rex_ok
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config effective_model ledger_model
-
+  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -1414,7 +1413,15 @@ spawn_remote_secondmate() {
     harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate "$id")
   fi
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | omp | droid) ;;
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | omp) ;;
+  droid)
+    # Remote Droid secondmates stay refused until SSH recovery is live-verified;
+    # refusing here keeps the readiness probe, remote sync, and inheritance untouched.
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: unverified remote secondmate harness: droid" >&2
+    return 1
+    ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
@@ -1645,11 +1652,6 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
-  effective_model=$(printf '%s\n' "$out" | sed -n 's/^effective_model=//p' | tail -1)
-  if [ "$remote_harness" = droid ]; then
-    model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
-    model=${model:-default}
-  fi
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
@@ -1662,7 +1664,6 @@ spawn_remote_secondmate() {
     echo "yolo=off"
     echo "tasktmp="
     echo "model=${model#-}"
-    [ "$remote_harness" != droid ] || echo "effective_model=${effective_model:-unknown-at-spawn}"
     echo "effort=${effort#-}"
     echo "home=$home"
     echo "projects=$(secondmate_registry_field "$DATA/secondmates.md" "$id" projects)"
@@ -1702,9 +1703,7 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
-  ledger_model=${model#-}
-  [ "$harness" != droid ] || ledger_model=${effective_model:-unknown-at-spawn}
-  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "$ledger_model" || true
+  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }

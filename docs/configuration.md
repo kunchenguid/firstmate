@@ -1512,7 +1512,6 @@ Canonical Droid tasks additionally carry `effective_model`, an accounting and re
 A requested pin or configured default is not proof of execution.
 `fm-droid-model.sh` observes the runtime session settings sidecar through SessionStart, PreToolUse, and Stop hooks and reconciles only `effective_model` under the task lock, bound to `spawn_gen` so retired sessions cannot alter a replacement's record.
 An observation arriving while spawn holds that lock is reconciled after launch; no accounting hook waits for spawn's lock.
-Remote launch and relaunch replies mirror both fields from the launching host; switching away from Droid removes `effective_model` from both host and parent records.
 The fleet ledger receives the observed identifier available at dispatch, including an honest `unknown-at-spawn` if reconciliation has not happened yet.
 Neither runtime settings generation nor relaunch or recovery uses `effective_model` for selection.
 
