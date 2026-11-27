@@ -338,6 +338,10 @@ autoarm_commit() {  # <outcome> [marker-file] [interrupted-session-identity]
     fm_recovery_marker_snapshot "$STATE/.watcher-down" || return 2
     case "$FM_RECOVERY_MARKER_TOKEN" in
       pending:downtime:*|announced:downtime:*) recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+      pending:handling:*|announced:handling:*)
+        [ "$HOST_MODE" -eq 0 ] || return 2
+        recovery=${FM_RECOVERY_MARKER_TOKEN##*:} ;;
+      '') recovery= ;;
       *) return 2 ;;
     esac
     fm_autoarm_write_owned "$STATE" "$MY_GEN" "$outcome" "$marker" "$session_pid" "$recovery" || return
