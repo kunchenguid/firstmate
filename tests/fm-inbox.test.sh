@@ -496,6 +496,39 @@ kill_holder
 trap fm_test_cleanup EXIT
 pass "readiness says unknown (or not-receivable) instead of inferring liveness from a lock"
 
+# The posture record's mode is the mode wherever a record stands: the flag's
+# own word answers only on a flag-without-record home. Driven through the real
+# record writer (bin/fm-afk-contract.sh enter), the real flag writer
+# (bin/fm-afk-start.sh fm_afk_flag_write), and the real `fm-inbox.sh ready`
+# projection for every record x flag combination.
+home=$(make_home ready-posture)
+write_posture_record() {  # <none|away|quiet>
+  rm -f "$home/state/.afk-contract"
+  [ "$1" = none ] || FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_AFK_MODE="$1" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null
+}
+write_posture_flag() {  # <none|away|quiet>
+  rm -f "$home/state/.afk"
+  [ "$1" = none ] || bash -c '. "$1"; fm_afk_flag_write "$2" "$3"' \
+    _ "$ROOT/bin/fm-afk-start.sh" "$home/state" "$1" >/dev/null
+}
+ready_posture_state() {
+  run_inbox "$home" ready | python3 -c 'import json,sys; print(json.load(sys.stdin)["posture"]["state"])'
+}
+for rec in none away quiet; do
+  for flag in none away quiet; do
+    write_posture_record "$rec"
+    write_posture_flag "$flag"
+    want=$rec
+    if [ "$rec" = none ]; then
+      if [ "$flag" = none ]; then want=present; else want=$flag; fi
+    fi
+    assert_equals "$want" "$(ready_posture_state)" \
+      "record=$rec flag=$flag: posture follows the record, then the flag"
+  done
+done
+pass "readiness posture is the record's mode when a record stands, the flag's word without one"
+
 # --- invalid input ----------------------------------------------------------
 
 home=$(make_home invalid)
