@@ -1081,9 +1081,9 @@ CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude -n <name> herdr: unknown
 claude -n <name>                                            tmux:  empty (typed text: pending)
 ```
 
-The classifier now accepts a bare agent-glyph row sandwiched between a width-proven titled top rule and its solid closing rule (`_fm_composer_titled_rule_row` and `_fm_composer_bare_rule_sandwich` in `bin/fm-composer-lib.sh`, issues #5601 and #5558).
+The classifier accepts a bare agent-glyph row beneath a width-proven titled top rule when the intervening rows to its solid closing rule form a contiguous, non-blank, edge-free wrap region bounded by `FM_COMPOSER_PI_MAX_LINES` (`_fm_composer_titled_rule_row` and `_fm_composer_bare_rule_sandwich` in `bin/fm-composer-lib.sh`, issues #5601 and #5558).
 After the fix the named Herdr pane read `empty`, and the daemon's real injection path wrote the operational record, typed the doorbell, sent Enter, and confirmed the submit on that pane.
-`test_matrix_claude_named_session_titled_rule` in `tests/fm-composer-lib.test.sh` pins idle, ghost-suggestion, typed, and extraction cases on every capability profile, the unnamed ghost case, and the Pi blank-row non-regression.
+`test_matrix_claude_named_session_titled_rule` in `tests/fm-composer-lib.test.sh` pins idle, ghost-suggestion, typed, extraction, and wrapped typed-line cases on every capability profile, the unnamed ghost case, and the Pi blank-row non-regression; blank and overlong regions remain unknown.
 The composer-matrix guard's `claude-named` arm requires the cursorless read of a real named Claude pane to be exactly `empty`:
 
 ```sh
