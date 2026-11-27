@@ -218,6 +218,8 @@
 # because there is no established translation from a gh/glab-style flag into
 # a Forgejo API field yet.
 #
+# Before merging, arming or re-enqueuing, bin/fm-goal.sh can-merge checks
+# the linked goal item's merge-after dependencies in the owning home.
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
@@ -2776,6 +2778,7 @@ away_status=0
 require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
+"$SCRIPT_DIR/fm-goal.sh" can-merge "$ID" || exit 1
 # The requeue sweep dispatches before the recording gates: its stdout is the
 # watcher's wake line and must stay empty while the arm is healthy, and
 # record_pr_metadata re-records through fm-pr-check, whose own stdout belongs

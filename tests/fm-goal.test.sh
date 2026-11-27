@@ -713,7 +713,90 @@ test_done_identity() {
   pass 'drive completions require and record the full PR URL they landed through'
 }
 
-fm_test_run test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \
+test_merge_after() {
+  fixture
+  local url=https://github.com/example/fixture/pull/7 out
+  printf '%s\n' \
+    'item [id=a] [owner=main]: prerequisite' \
+    'item [id=b] [owner=terp] [task=child] [merge-after=a]: build in parallel' \
+    'item [id=c] [owner=main] [after=a]: genuinely serial' > "$ITEMS"
+  start >/dev/null
+  local_mate
+  out=$(goal startable)
+  assert_contains "$out" $'I1\tb\tterp\tchild' 'merge-after does not gate starts'
+  assert_not_contains "$out" $'I1\tc\t' 'legacy after still gates starts'
+  expect_rc 1 goal mark I1 b 'done' -- "$url"
+  assert_grep 'merge-after pending: a' "$TMP_ROOT/out" 'completion refusal identifies its dependency'
+  expect_rc 1 mate_goal mark I1 b 'done' -- "$url"
+  expect_rc 1 mate_goal can-merge child
+  goal mark I1 a dropped -- skipped >/dev/null
+  expect_rc 1 goal can-merge child
+  assert_contains "$(goal startable)" $'I1\tc\t' 'drop still satisfies legacy after'
+  goal mark I1 a 'done' -- "$url" >/dev/null
+  expect_rc 0 goal can-merge child
+  expect_rc 0 mate_goal mark I1 b 'done' -- "$url"
+  assert_equals '[]' "$(goal export I1 | jq -c '.goals[0].items[1].merge_after_pending')" 'pending dependencies clear'
+  printf '%s\n' 'item [id=a] [owner=main] [merge-after=b]: one' 'item [id=b] [owner=main] [after=a]: two' > "$ITEMS"
+  expect_rc 2 goal edit I1 --items-file "$ITEMS"
+  printf '%s\n' 'item [id=a] [owner=main] [merge-after=unknown]: one' > "$ITEMS"
+  expect_rc 2 goal edit I1 --items-file "$ITEMS"
+  pass 'merge-after permits parallel starts and gates completion, including on local mate routes'
+}
+
+test_wait_conditions() {
+  fixture
+  local id now out before url=https://github.com/example/fixture/pull/8
+  local external='external:provider [ticket: 42] at 50%'
+  for id in blocker item cross pr captain timer external old; do
+    printf 'item [id=%s] [owner=main]: %s\n' "$id" "$id"
+  done > "$ITEMS"
+  start >/dev/null
+  start I2 >/dev/null
+  now=$(date +%s)
+  goal mark I1 item waiting --on item:blocker -- item >/dev/null
+  goal mark I1 cross waiting --on item:I2/blocker -- cross >/dev/null
+  goal mark I1 pr waiting --on "pr:$url" -- PR >/dev/null
+  goal mark I1 captain waiting --on captain:review -- captain >/dev/null
+  goal mark I1 timer waiting --on until:1 -- timer >/dev/null
+  goal mark I1 external waiting --on "$external" -- external >/dev/null
+  mark_line old waiting "$((now - 1800))" >> "$H/state/goals/I1.marks"
+  expect_rc 2 goal mark I1 item running --on item:blocker -- invalid
+  expect_rc 2 goal mark I1 item waiting --on item:../bad -- invalid
+  expect_rc 2 goal mark I1 timer waiting --on until:01 -- invalid
+  mkdir -p "$H/bin"
+  # shellcheck disable=SC2016 # The fixture shell expands these variables when called.
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "%s\n" probed >> "$WAIT_FIXTURE/probes"' \
+    'if [ -f "$WAIT_FIXTURE/merged" ]; then printf "state=MERGED\nmerged=true\n"; else printf "state=OPEN\nmerged=false\n"; fi' > "$H/bin/gh"
+  chmod +x "$H/bin/gh"
+  printf 'resolved [key=review] [at=%s]: old answer\n' "$((now - 30))" > "$H/state/main.status"
+  out=$(WAIT_FIXTURE="$H" PATH="$H/bin:$PATH" goal export I1)
+  assert_equals 'blocker,timer' "$(jq -r '[.goals[0].items[] | select(.startable) | .id] | join(",")' <<< "$out")" 'elapsed timer clears, old answer and open dependencies do not'
+  assert_equals "$external" "$(jq -r '.goals[0].items[] | select(.id == "external") | .wait_on' <<< "$out")" 'external text round-trips literally'
+  assert_equals 'old' "$(jq -r '.goals[0].items[] | select(.wait_stale) | .id' <<< "$out")" 'old untyped mark is stale; new external wait is not'
+  goal mark I1 blocker dropped -- skipped >/dev/null
+  goal mark I2 blocker 'done' -- "$url" >/dev/null
+  printf 'resolved [key=review] [at=%s]: new answer\n' "$(date +%s)" >> "$H/state/main.status"
+  : > "$H/merged"
+  before=$(cksum "$H/state/goals/I1.marks")
+  goal pause I1 >/dev/null
+  assert_equals '' "$(WAIT_FIXTURE="$H" PATH="$H/bin:$PATH" goal startable | grep '^I1' || true)" 'OFF goal produces no starts'
+  out=$(WAIT_FIXTURE="$H" PATH="$H/bin:$PATH" goal show I1)
+  assert_not_contains "$out" 'wait cleared:' 'OFF goal does not clear its waits'
+  assert_equals 1 "$(wc -l < "$H/probes" | tr -d ' ')" 'OFF goal does not query the forge'
+  goal resume I1 >/dev/null
+  out=$(WAIT_FIXTURE="$H" PATH="$H/bin:$PATH" goal export I1)
+  assert_equals 'item,cross,pr,captain,timer' "$(jq -r '[.goals[0].items[] | select(.startable and .wait_cleared) | .id] | join(",")' <<< "$out")" 'observed item, forge, captain and timer evidence make waits startable'
+  out=$(WAIT_FIXTURE="$H" PATH="$H/bin:$PATH" goal show I1)
+  assert_contains "$out" 'wait: stale wait; marked waiting' 'show flags an old untyped wait'
+  assert_contains "$out" 'wait cleared: captain:review' 'show identifies a cleared condition'
+  assert_equals "$before" "$(cksum "$H/state/goals/I1.marks")" 'projection preserves the append-only mark history'
+  goal mark I1 external open -- 'provider confirmed' >/dev/null
+  assert_contains "$(WAIT_FIXTURE="$H" PATH="$H/bin:$PATH" goal startable)" $'I1\texternal\t' 'external wait clears manually'
+  pass 'structured waits resolve from evidence, external waits remain manual, and OFF suppresses resolution'
+}
+
+fm_test_run test_merge_after test_wait_conditions test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \
   test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
   test_probe_pr_merged test_limits test_orphaned_running test_target_close_and_brief test_export test_driven

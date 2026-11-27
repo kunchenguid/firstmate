@@ -30,9 +30,11 @@
 #     item [id=node-refresh] [owner=terp] [class=drive] [task=miko-node-refresh]: refresh control-1 node bundle
 #     item [id=grafana-secret] [owner=main] [class=captain]: rotate the grafana secret
 #
-# Item grammar: `item [id=<id>] [owner=<owner>] [after=<ids>] [class=<drive|captain>] [task=<task-id>] [project=<p>] [target=<stage>] [until=<epoch>] [stop-on=<words>]: <title>`.
+# Item grammar: `item [id=<id>] [owner=<owner>] [after=<ids>] [merge-after=<ids>] [class=<drive|captain>] [task=<task-id>] [project=<p>] [target=<stage>] [until=<epoch>] [stop-on=<words>]: <title>`.
 # id and owner are required; after lists item ids (comma separated) that must
-# reach done or dropped first; class defaults to drive (a captain item is a
+# reach done or dropped before work starts. Prefer merge-after for independent
+# work: its predecessors must be done (not dropped) before completion or PR
+# merge, but do not gate starts. class defaults to drive (a captain item is a
 # decision or action only the captain can take, and is never startable); task
 # names the landing item when the item is "merge task X's PR". Every id,
 # owner, task, project, and target must be path-safe: no empty value, leading
@@ -66,7 +68,13 @@
 #     the parent channel (bin/fm-parent-channel-lib.sh).
 # Mark grammar: `goal [goal=<id>] [item=<item>] [state=<s>] [stage=<stage>] [task=<task>] [at=<epoch>]: <note>`
 # with states open|running|waiting|blocked|done|dropped. `open` resets an item
-# to unstarted. A progress mark carries a state, a stage, or both; the stage folds on
+# to unstarted. A waiting mark may carry [on=<encoded condition>], where the
+# CLI condition is pr:<url>, item:<id> (or item:<goal>/<id>), captain:<key>,
+# until:<epoch>, or external:<text>. A merged PR, done/dropped item, stamped
+# keyed captain resolution, or elapsed timer projects the wait as open while
+# driven. External waits stay manual and are stale after 60 min; unspecified
+# waits are stale after 30 min. The mark remains in the append-only history.
+# A progress mark carries a state, a stage, or both; the stage folds on
 # its own newest-wins clock, so a stage-only mark never changes the item's
 # state or since. A done mark on a drive item must name the PR it landed
 # through: a full PR URL word in the note (the first one folds as the item's
@@ -131,8 +139,9 @@
 #   fm-goal.sh start <id> --title <text> --done-when <text> --named-by <text> \
 #                      --plan <path-or-url> --items-file <path>
 #   fm-goal.sh edit <id> --items-file <path> [--title <text>] [--done-when <text>]
-#   fm-goal.sh mark <id> <item> <state> [--stage <stage>] [--task <task-id>] -- <note>
+#   fm-goal.sh mark <id> <item> <state> [--stage <stage>] [--task <task-id>] [--on <condition>] -- <note>
 #   fm-goal.sh mark <id> <item> stage=<stage> [--task <task-id>] -- <note>
+#   fm-goal.sh can-merge <task-id>
 #   fm-goal.sh evidence <id> <item> -- <evidence>
 #   fm-goal.sh probe [<id> [<item>]] [--dry-run]
 #   fm-goal.sh pause|resume <id>
@@ -209,8 +218,9 @@
 # id, owner, class, title, state (the folded mark state), task, pr (the PR a
 # done mark landed through, null when none is folded), project,
 # target, stage, stage_at, since, until (each null when absent), after,
-# waiting_on and stop_on (lists), and the booleans startable, target_reached
-# and landing_hint, plus orphaned_running (a running mark without a live task).
+# waiting_on, merge_after, merge_after_pending and stop_on (lists), wait_on
+# (condition or null), and the booleans startable, target_reached, landing_hint,
+# wait_stale, wait_cleared and orphaned_running (a running mark without a live task).
 # drive_revision counts drive marks; --driven exports only active ON goals.
 # It is read-only, takes no lock, and needs jq.
 # In a secondmate home, startable and export read the local parent's goals and
@@ -399,6 +409,35 @@ _fm_goal_clean_field() {  # <text> -> single line, bounded
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-$FM_GOAL_FIELD_MAX
 }
 
+# Wait tags must survive the status grammar's first-colon split and its
+# whitespace-delimited header. Escape '%' first and decode it last.
+_fm_goal_wait_encode() {
+  local v=$1
+  v=${v//%/%25}; v=${v//:/%3A}; v=${v// /%20}
+  v=${v//\[/%5B}; v=${v//\]/%5D}
+  printf '%s' "$v"
+}
+
+_fm_goal_wait_decode() {
+  local v=$1
+  v=${v//%3A/:}; v=${v//%20/ }
+  v=${v//%5B/[}; v=${v//%5D/]}; v=${v//%25/%}
+  printf '%s' "$v"
+}
+
+_fm_goal_wait_valid() {
+  local on=$1 ref=${1#*:}
+  case "$ref" in *[[:cntrl:]]*|'') return 1 ;; esac
+  case "$on" in
+    pr:*) fm_pr_url_parse "$ref" >/dev/null 2>&1 ;;
+    item:*/*) fm_goal_id_valid "${ref%%/*}" && fm_goal_id_valid "${ref#*/}" ;;
+    item:*|captain:*) fm_goal_id_valid "$ref" ;;
+    until:*) [[ "$ref" =~ ^(0|[1-9][0-9]{0,11})$ ]] ;;
+    external:*) [[ "$ref" == *[![:space:]]* ]] ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- the item line grammar ---------------------------------------------------
 
 # fm_goal_item_parse <line>: 0 iff <line> is a valid item line; sets
@@ -409,9 +448,9 @@ _fm_goal_clean_field() {  # <text> -> single line, bounded
 # FM_GOAL_ITEM_TITLE.
 fm_goal_item_parse() {  # <line>
   local line=$1 head rest token key value title
-  local seen_id=0 seen_owner=0 seen_after=0 seen_class=0 seen_task=0
+  local seen_id=0 seen_owner=0 seen_after=0 seen_merge_after=0 seen_class=0 seen_task=0
   local seen_project=0 seen_target=0 seen_until=0 seen_stopon=0
-  FM_GOAL_ITEM_ID=''; FM_GOAL_ITEM_OWNER=''; FM_GOAL_ITEM_AFTER=''
+  FM_GOAL_ITEM_ID=''; FM_GOAL_ITEM_OWNER=''; FM_GOAL_ITEM_AFTER=''; FM_GOAL_ITEM_MERGE_AFTER=''
   FM_GOAL_ITEM_CLASS=''; FM_GOAL_ITEM_TASK=''; FM_GOAL_ITEM_TITLE=''
   FM_GOAL_ITEM_PROJECT=''; FM_GOAL_ITEM_TARGET=''; FM_GOAL_ITEM_UNTIL=''
   FM_GOAL_ITEM_STOPON=''
@@ -457,6 +496,11 @@ fm_goal_item_parse() {  # <line>
         [ "$seen_after" -eq 0 ] || return 1; seen_after=1
         _fm_goal_after_list_valid "$value" || return 1
         FM_GOAL_ITEM_AFTER=$value
+        ;;
+      merge-after)
+        [ "$seen_merge_after" -eq 0 ] || return 1; seen_merge_after=1
+        _fm_goal_after_list_valid "$value" || return 1
+        FM_GOAL_ITEM_MERGE_AFTER=$value
         ;;
       class)
         [ "$seen_class" -eq 0 ] || return 1; seen_class=1
@@ -518,6 +562,7 @@ _fm_goal_item_line() {  # <idx>
   local i=$1 out
   out="item [id=${FM_GOAL_ITEMS_IDS[$i]}] [owner=${FM_GOAL_ITEMS_OWNERS[$i]}]"
   [ -z "${FM_GOAL_ITEMS_AFTERS[$i]}" ] || out="$out [after=${FM_GOAL_ITEMS_AFTERS[$i]}]"
+  [ -z "${FM_GOAL_ITEMS_MERGE_AFTERS[$i]}" ] || out="$out [merge-after=${FM_GOAL_ITEMS_MERGE_AFTERS[$i]}]"
   [ "${FM_GOAL_ITEMS_CLASSES[$i]}" = drive ] || out="$out [class=${FM_GOAL_ITEMS_CLASSES[$i]}]"
   [ -z "${FM_GOAL_ITEMS_TASKS[$i]}" ] || out="$out [task=${FM_GOAL_ITEMS_TASKS[$i]}]"
   [ -z "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] || out="$out [project=${FM_GOAL_ITEMS_PROJECTS[$i]}]"
@@ -534,7 +579,7 @@ FM_GOAL_REC_STARTED='' FM_GOAL_REC_STARTED_EPOCH='' FM_GOAL_REC_NAMED_BY=''
 FM_GOAL_REC_PLAN='' FM_GOAL_REC_DONE_WHEN='' FM_GOAL_REC_CLOSED=''
 FM_GOAL_REC_CLOSED_EPOCH='' FM_GOAL_REC_CLOSED_REASON='' FM_GOAL_REC_CLOSED_WORDS=''
 FM_GOAL_ITEM_COUNT=0
-FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
+FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=() FM_GOAL_ITEMS_MERGE_AFTERS=()
 FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
 FM_GOAL_ITEMS_PRS=()
 FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
@@ -545,7 +590,7 @@ FM_GOAL_PROJECTION=()
 # Empty every loaded item array (the record loader and the items-file loader).
 _fm_goal_items_reset() {
   FM_GOAL_ITEM_COUNT=0
-  FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=()
+  FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=() FM_GOAL_ITEMS_MERGE_AFTERS=()
   FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
   FM_GOAL_ITEMS_PRS=()
   FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
@@ -557,6 +602,7 @@ _fm_goal_items_append() {
   FM_GOAL_ITEMS_IDS[${#FM_GOAL_ITEMS_IDS[@]}]=$FM_GOAL_ITEM_ID
   FM_GOAL_ITEMS_OWNERS[${#FM_GOAL_ITEMS_OWNERS[@]}]=$FM_GOAL_ITEM_OWNER
   FM_GOAL_ITEMS_AFTERS[${#FM_GOAL_ITEMS_AFTERS[@]}]=$FM_GOAL_ITEM_AFTER
+  FM_GOAL_ITEMS_MERGE_AFTERS[${#FM_GOAL_ITEMS_MERGE_AFTERS[@]}]=$FM_GOAL_ITEM_MERGE_AFTER
   FM_GOAL_ITEMS_CLASSES[${#FM_GOAL_ITEMS_CLASSES[@]}]=$FM_GOAL_ITEM_CLASS
   FM_GOAL_ITEMS_TASKS[${#FM_GOAL_ITEMS_TASKS[@]}]=$FM_GOAL_ITEM_TASK
   FM_GOAL_ITEMS_PRS[${#FM_GOAL_ITEMS_PRS[@]}]=''
@@ -812,9 +858,8 @@ _fm_goal_index_of() {  # <item-id> -> index printed, or rc 1 when absent
   return 1
 }
 
-# Item ids unique, after refs known, and the after graph acyclic. The
-# cycle test is a relaxation: an item is orderable once every after ref is
-# orderable; items never orderable sit on a cycle.
+# Item ids are unique and the combined dependency graph is known and acyclic.
+# An item is orderable once every dependency is orderable.
 _fm_goal_items_graph_ok() {
   local i j id ref part refs rounds
   local -a ordered=()
@@ -834,16 +879,16 @@ _fm_goal_items_graph_ok() {
       fi
       j=$((j + 1))
     done
-    refs=${FM_GOAL_ITEMS_AFTERS[$i]}
-    if [ -n "$refs" ]; then
-      local LC_ALL=C IFS=,
+    local kind LC_ALL=C IFS=,
+    for kind in after merge-after; do
+      if [ "$kind" = after ]; then refs=${FM_GOAL_ITEMS_AFTERS[$i]}; else refs=${FM_GOAL_ITEMS_MERGE_AFTERS[$i]}; fi
       for part in $refs; do
         _fm_goal_index_of "$part" >/dev/null || {
-          _FM_GOAL_READ_ERROR="unknown after item: $part"
+          _FM_GOAL_READ_ERROR="unknown $kind item: $part"
           return 1
         }
       done
-    fi
+    done
     i=$((i + 1))
   done
   rounds=0
@@ -852,6 +897,8 @@ _fm_goal_items_graph_ok() {
     while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
       [ "${ordered[$i]}" -eq 0 ] || { i=$((i + 1)); continue; }
       refs=${FM_GOAL_ITEMS_AFTERS[$i]}
+      refs=${refs:+$refs,}${FM_GOAL_ITEMS_MERGE_AFTERS[$i]}
+      refs=${refs%,}
       local ready=1
       if [ -n "$refs" ]; then
         local LC_ALL=C IFS=,
@@ -880,6 +927,7 @@ _fm_goal_items_graph_ok() {
 
 FM_GOAL_M_STATES=() FM_GOAL_M_ATS=() FM_GOAL_M_NOTES=() FM_GOAL_M_TASKS=() FM_GOAL_M_PRS=()
 FM_GOAL_EVIDENCE=() FM_GOAL_EVIDENCE_ATS=()
+FM_GOAL_M_ON=() FM_GOAL_WAIT_CLEARED=() FM_GOAL_WAIT_STALE=()
 FM_GOAL_FOLD_IGNORED=0
 FM_GOAL_PROGRESS_ATS=()
 # Every valid mark on a planned item, in read order, for the since-epoch views
@@ -896,6 +944,7 @@ _fm_goal_fold_reset() {
   local i=0
   FM_GOAL_M_STATES=(); FM_GOAL_M_ATS=(); FM_GOAL_M_NOTES=(); FM_GOAL_M_TASKS=(); FM_GOAL_M_PRS=()
   FM_GOAL_EVIDENCE=(); FM_GOAL_EVIDENCE_ATS=()
+  FM_GOAL_M_ON=(); FM_GOAL_WAIT_CLEARED=(); FM_GOAL_WAIT_STALE=()
   FM_GOAL_S_STAGES=(); FM_GOAL_S_ATS=()
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     FM_GOAL_S_STAGES[${#FM_GOAL_S_STAGES[@]}]=''
@@ -925,7 +974,7 @@ _fm_goal_fold_reset() {
 # retain the latest evidence without touching either progress clock.
 _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now> <owner> <stage>
   local item=$2 state=$3 at=$4 task=$5 note=$6 now=$7 owner=$8 stage=${9-}
-  local idx u known=0 pr=''
+  local idx u known=0 pr='' on=${10-}
   [ -z "$state" ] || fm_goal_state_valid "$state" || return 1
   if [ -z "$state$stage" ]; then
     fm_goal_id_valid "$task" || return 1
@@ -953,6 +1002,7 @@ _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now
       FM_GOAL_M_ATS[idx]=$at
       FM_GOAL_M_NOTES[idx]=$note
       FM_GOAL_M_TASKS[idx]=$task
+      FM_GOAL_M_ON[idx]=$on
       # The PR a done mark landed through folds from the note's first full
       # PR URL word (audit item 12); a later mark without one keeps the pr
       # an earlier done mark recorded for the item.
@@ -990,7 +1040,7 @@ _fm_goal_fold_apply_mark() {  # <goal-id> <item> <state> <at> <task> <note> <now
 # Parse one `goal [...]` line and hand it to _fm_goal_fold_apply_mark.
 _fm_goal_fold_goal_line() {  # <line> <goal-id> <now> <owner>
   local line=$1 goal=$2 now=$3 owner=$4
-  local head verb token key value item='' state='' task='' at='' stage='' note seen_goal=0
+  local head verb token key value item='' state='' task='' at='' stage='' on='' note seen_goal=0
   verb=${line%% *}
   [ "$verb" = goal ] || return 2
   case "$line" in *:*) head=${line%%:*}; note=${line#*:} ;; *) return 1 ;; esac
@@ -1018,6 +1068,7 @@ _fm_goal_fold_goal_line() {  # <line> <goal-id> <now> <owner>
       task) [ -z "$task" ] || return 1; task=$value ;;
       stage) [ -z "$stage" ] || return 1; stage=$value ;;
       at) [ -z "$at" ] || return 1; at=$value ;;
+      on) [ -z "$on" ] && [ -n "$value" ] || return 1; on=$value ;;
       *) return 1 ;;
     esac
   done
@@ -1026,7 +1077,12 @@ _fm_goal_fold_goal_line() {  # <line> <goal-id> <now> <owner>
   [ -z "$task" ] || fm_goal_id_valid "$task" || return 1
   case "$at" in *[!0-9]*|0[0-9]*) return 1 ;; esac
   [ "${#at}" -le 12 ] || return 1
-  _fm_goal_fold_apply_mark "$goal" "$item" "$state" "$at" "$task" "${note# }" "$now" "$owner" "$stage"
+  if [ -n "$on" ]; then
+    [ "$state" = waiting ] || return 1
+    on=$(_fm_goal_wait_decode "$on")
+    _fm_goal_wait_valid "$on" || return 1
+  fi
+  _fm_goal_fold_apply_mark "$goal" "$item" "$state" "$at" "$task" "${note# }" "$now" "$owner" "$stage" "$on"
 }
 
 # The name of the variable holding <key>'s position in FM_GOAL_MERGED_TASKS, set in
@@ -1194,6 +1250,103 @@ _fm_goal_item_doneish() {  # <idx>
     done|dropped) return 0 ;;
   esac
   return 1
+}
+
+# Empty output means the completion gate is clear. A drop satisfies hard
+# `after`, but cannot prove the landing expected by `merge-after`.
+_fm_goal_merge_pending() {  # <idx>
+  local refs=${FM_GOAL_ITEMS_MERGE_AFTERS[$1]} ref idx out='' IFS=,
+  for ref in $refs; do
+    if idx=$(_fm_goal_index_of "$ref") && [ "${FM_GOAL_M_STATES[$idx]}" = 'done' ]; then continue; fi
+    out=${out:+$out,}$ref
+  done
+  printf '%s' "$out"
+}
+
+# Read another goal without clobbering the current projection. Closed goals
+# keep their final marks; unknown goals or items never clear a wait.
+_fm_goal_wait_other_item() (  # <goal> <item> <state> <data> <now>
+  local idx closed
+  if _fm_goal_open_record "$1" "$3" >/dev/null 2>&1; then
+    fm_goal_fold "$1" "$3" "$4" "$5"
+  else
+    closed=$(_fm_goal_newest_closed "$1" "$3" 2>/dev/null) || return 1
+    _fm_goal_regular_file "${closed%.goal}.marks" || return 1
+    fm_goal_validate "$closed" "$1" || return 1
+    fm_goal_fold "$1" "$3" "$4" "$5" "${closed%.goal}.marks"
+  fi
+  idx=$(_fm_goal_index_of "$2") && _fm_goal_item_doneish "$idx"
+)
+
+_fm_goal_wait_captain_answered() {  # <key> <since> <state> <data> <task> <owner>
+  local source path line verb at
+  for source in "$5" "$6" "$1"; do
+    [ -n "$source" ] || continue
+    path=$(_fm_goal_owner_stream "$3" "$4" "$source") || continue
+    while IFS= read -r line; do
+      status_line_verb "$line" verb
+      [ "$verb" = resolved ] && [ "$(_fm_decision_key "$line" '')" = "$1" ] || continue
+      at=$(status_line_at_epoch "$line") || continue
+      [ "$at" -ge "$2" ] && [ "$at" -le "$_FM_GOAL_FOLD_NOW" ] && return 0
+    done < <(LC_ALL=C grep -F "[key=$1]" "$path" 2>/dev/null)
+  done
+  return 1
+}
+
+# Resolve waits only in active read views, never while holding the goal lock.
+# PR reads use the shared forge probe with a bounded timeout and at most one
+# read per distinct URL in this projection. Errors leave the wait in place.
+_fm_goal_project_waits() {  # <state> <data> [owner filter]
+  [ "$FM_GOAL_REC_DRIVE" = driven ] || return 0
+  local i on ref idx ready stale now=$_FM_GOAL_FOLD_NOW owner=${3-}
+  local count=0
+  local -a checked=() merged=()
+  for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
+    [ -z "$owner" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$owner" ] || continue
+    [ "${FM_GOAL_M_STATES[$i]}" = waiting ] || continue
+    on=${FM_GOAL_M_ON[$i]-}; ref=${on#*:}; ready=0; stale=0
+    case "$on" in
+      '') [ "$((now - FM_GOAL_M_ATS[i]))" -lt 1800 ] || stale=1 ;;
+      external:*) [ "$((now - FM_GOAL_M_ATS[i]))" -lt 3600 ] || stale=1 ;;
+      until:*) [ "$now" -lt "$ref" ] || ready=1 ;;
+      item:*/*)
+        if [ "${ref%%/*}" != "$FM_GOAL_REC_ID" ]; then
+          _fm_goal_wait_other_item "${ref%%/*}" "${ref#*/}" "$1" "$2" "$now" && ready=1
+        elif idx=$(_fm_goal_index_of "${ref#*/}") && _fm_goal_item_doneish "$idx"; then ready=1
+        fi
+        ;;
+      item:*) if idx=$(_fm_goal_index_of "$ref") && _fm_goal_item_doneish "$idx"; then ready=1; fi ;;
+      captain:*)
+        _fm_goal_wait_captain_answered "$ref" "${FM_GOAL_M_ATS[$i]}" "$1" "$2" \
+          "${FM_GOAL_ITEMS_TASKS[$i]}" "${FM_GOAL_ITEMS_OWNERS[$i]}" && ready=1
+        ;;
+      pr:*)
+        for ((idx=0; idx<count; idx++)); do
+          [ "${checked[$idx]}" != "$ref" ] || break
+        done
+        if [ "$idx" -eq "$count" ]; then
+          count=$((count + 1))
+          checked[idx]=$ref
+          merged[idx]=0
+          fm_run_timed 3 "$FM_GOAL_DIR/fm-goal-probe-pr-merged.sh" "$ref" </dev/null >/dev/null 2>&1 && merged[idx]=1
+        fi
+        ready=${merged[$idx]}
+        ;;
+    esac
+    if [ "$ready" -eq 1 ]; then
+      FM_GOAL_M_STATES[i]=open
+      FM_GOAL_WAIT_CLEARED[i]=1
+    fi
+    [ "$stale" -eq 0 ] || FM_GOAL_WAIT_STALE[i]=1
+  done
+  return 0
+}
+
+_fm_goal_wait_label() {  # <idx>
+  local on=${FM_GOAL_M_ON[$1]-} label='marked waiting'
+  [ -z "$on" ] || label="on $on"
+  [ -z "${FM_GOAL_WAIT_STALE[$1]-}" ] || label="stale wait; $label"
+  printf '%s' "$label"
 }
 
 # waiting_on for item <idx> in FM_GOAL_WAITING: the after ids not done or
@@ -1529,6 +1682,7 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
   now=$(date +%s)
   _fm_goal_open_record "$id" "$state" || return 1
   fm_goal_fold "$id" "$state" "$data" "$now"
+  _fm_goal_project_waits "$state" "$data"
   printf 'GOAL %s: %s\n' "$FM_GOAL_REC_ID" "$FM_GOAL_REC_TITLE"
   printf '  state: %s, started %s (%s ago), named by %s\n' \
     "$FM_GOAL_REC_STATE" "$FM_GOAL_REC_STARTED" \
@@ -1556,6 +1710,14 @@ fm_goal_render_show() {  # <id> [state-dir] [data-dir]
     line="$line]: ${FM_GOAL_ITEMS_TITLES[$i]}"
     printf '%s\n' "$line"
     _fm_goal_show_stage_lines "$i" "$now"
+    if [ -n "${FM_GOAL_ITEMS_MERGE_AFTERS[$i]}" ]; then
+      line=$(_fm_goal_merge_pending "$i")
+      printf '    merge-after: %s (pending: %s)\n' "${FM_GOAL_ITEMS_MERGE_AFTERS[$i]}" "${line:--}"
+    fi
+    case "${FM_GOAL_M_STATES[$i]}:${FM_GOAL_WAIT_CLEARED[$i]-}" in
+      waiting:*) printf '    wait: %s\n' "$(_fm_goal_wait_label "$i")" ;;
+      open:1) printf '    wait cleared: %s\n' "${FM_GOAL_M_ON[$i]}" ;;
+    esac
     [ -z "${FM_GOAL_EVIDENCE[$i]}" ] || printf '    evidence: %s\n' "${FM_GOAL_EVIDENCE[$i]}"
     if [ -n "${FM_GOAL_M_ATS[$i]}" ]; then
       printf '    state: %s since %s (%s ago) - %s\n' \
@@ -1609,6 +1771,7 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
     printf '%s\n' "$FM_LINE_CAP_LINE"
     return 0
   fi
+  _fm_goal_project_waits "$state" "$data"
   line="GOAL $id (active since $FM_GOAL_REC_STARTED"
   case "$away" in
     named) line="$line; driven while away: yes, named)" ;;
@@ -1651,7 +1814,7 @@ _fm_goal_brief_block() {  # <id> <state> <data> <away>
         [ -z "$FM_GOAL_WAITING" ] || waiting="$waiting  waiting: ${FM_GOAL_ITEMS_IDS[$i]} after $FM_GOAL_WAITING$FM_GOAL_BRIEF_SEP"
         ;;
       waiting)
-        waiting="$waiting  waiting: ${FM_GOAL_ITEMS_IDS[$i]} [${FM_GOAL_ITEMS_OWNERS[$i]}] (marked waiting)$FM_GOAL_BRIEF_SEP"
+        waiting="$waiting  waiting: ${FM_GOAL_ITEMS_IDS[$i]} [${FM_GOAL_ITEMS_OWNERS[$i]}] ($(_fm_goal_wait_label "$i"))$FM_GOAL_BRIEF_SEP"
         ;;
       blocked)
         blocked="$blocked  blocked: ${FM_GOAL_ITEMS_IDS[$i]} [${FM_GOAL_ITEMS_OWNERS[$i]}]$FM_GOAL_BRIEF_SEP"
@@ -1709,6 +1872,7 @@ _fm_goal_brief_block_mate() {  # <id> <state> <data> <mate> <away>
     printf '%s\n' "$FM_LINE_CAP_LINE"
     return 0
   fi
+  _fm_goal_project_waits "$state" "$data" "$mate"
   fm_cap_line_var "PARENT GOAL $id (your items; the parent firstmate owns the record): $FM_GOAL_REC_TITLE"
   printf '%s\n' "$FM_LINE_CAP_LINE"
   fm_cap_line_var "  done when: $FM_GOAL_REC_DONE_WHEN"; printf '%s\n' "$FM_LINE_CAP_LINE"
@@ -1731,7 +1895,7 @@ _fm_goal_brief_block_mate() {  # <id> <state> <data> <mate> <away>
         running="$running$line]$FM_GOAL_BRIEF_SEP"
         ;;
       waiting)
-        waiting="$waiting  waiting: ${FM_GOAL_ITEMS_IDS[$i]} (marked waiting)$FM_GOAL_BRIEF_SEP"
+        waiting="$waiting  waiting: ${FM_GOAL_ITEMS_IDS[$i]} ($(_fm_goal_wait_label "$i"))$FM_GOAL_BRIEF_SEP"
         ;;
       open)
         _fm_goal_item_waiting "$i"
@@ -2155,11 +2319,12 @@ cmd_edit() {
 
 # Build the unstamped mark line head `goal [goal=..] [item=..] [state=..]` and
 # cap the full line so the stamped form stays within the status line cap.
-_fm_goal_mark_line() {  # <id> <item> <state> <task> <note> [stage] -> printed
+_fm_goal_mark_line() {  # <id> <item> <state> <task> <note> [stage] [on] -> printed
   local head="goal [goal=$1] [item=$2]" cap
   [ -z "$3" ] || head="$head [state=$3]"
   [ -z "${6-}" ] || head="$head [stage=$6]"
   [ -z "$4" ] || head="$head [task=$4]"
+  [ -z "${7-}" ] || head="$head [on=$(_fm_goal_wait_encode "$7")]"
   cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
   [ $((${#head} + 3)) -lt "$cap" ] || { fm_goal_log 'mark tags exceed the status line cap'; return 2; }
   printf '%s: %s' "$head" "$5" | cut -c1-$cap
@@ -2173,11 +2338,13 @@ _fm_goal_mark_line() {  # <id> <item> <state> <task> <note> [stage] -> printed
 # without the PR the landing lag of a done item cannot be measured.
 _fm_goal_bind_mark_task() {  # <goal> <item> <state> [state-dir] [data-dir]
   [ "$3" = 'done' ] || return 0
-  local idx word
+  local idx word pending
   local -a pr_words=()
   if [ "${FM_PARENT_CHANNEL_ROUTE-}" != remote ]; then
     fm_goal_fold "$1" "${4:-$FM_GOAL_STATE}" "${5:-$FM_GOAL_DATA}" "$(date +%s)"
     idx=$(_fm_goal_index_of "$2") || return 1
+    pending=$(_fm_goal_merge_pending "$idx")
+    [ -z "$pending" ] || { fm_goal_log "completion refused for $1/$2: merge-after pending: $pending"; return 1; }
     [ -n "$task" ] || task=${FM_GOAL_ITEMS_TASKS[$idx]}
     [ "${FM_GOAL_ITEMS_CLASSES[$idx]}" = drive ] || return 0
     # A PR an earlier done mark folded for this item already records the
@@ -2219,7 +2386,7 @@ cmd_evidence() {
 
 cmd_mark() {
   [ -z "${FM_TASK_ID-}" ] || [ "${FM_GOAL_RECORDING_EVIDENCE-}" = 1 ] || _fm_goal_die 1 'workers may only record evidence'
-  local id item state='' task='' stage='' note='' dash_seen=0 flag what
+  local id item state='' task='' stage='' note='' on='' dash_seen=0 flag what
   local rc=0 line stamped path
   [ "$#" -ge 3 ] || _fm_goal_usage_error 'mark needs <goal> <item> <state|stage=<stage>> -- <note>'
   id=$1
@@ -2238,6 +2405,12 @@ cmd_mark() {
       --task)
         [ "$#" -ge 2 ] && [ -n "${2-}" ] || _fm_goal_usage_error '--task needs a value'
         task=$2
+        shift 2
+        ;;
+      --on)
+        [ "$state" = waiting ] && [ -z "$on" ] || _fm_goal_usage_error '--on is only given once, on a waiting mark'
+        _fm_goal_wait_valid "${2-}" || _fm_goal_usage_error '--on needs pr:<url>, item:<id>, captain:<key>, until:<epoch>, or external:<text>'
+        on=$2
         shift 2
         ;;
       --stage)
@@ -2297,7 +2470,7 @@ cmd_mark() {
     else
       _fm_goal_bind_mark_task "$id" "$item" "$state" "${FM_SECONDMATE_PARENT_HOME:-$FM_GOAL_HOME}/state" "${FM_SECONDMATE_PARENT_HOME:-$FM_GOAL_HOME}/data" || exit 1
     fi
-    line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || exit 2
+    line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage" "$on") || exit 2
     fm_parent_channel_report "$FM_GOAL_HOME" "$FM_GOAL_STATE" "$line" || {
       fm_goal_log "could not publish the mark on the parent channel"
       exit 1
@@ -2327,7 +2500,7 @@ cmd_mark() {
   else
     _fm_goal_bind_mark_task "$id" "$item" "$state" || { fm_goal_lock_release; return 1; }
   fi
-  line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage") || { fm_goal_lock_release; return 2; }
+  line=$(_fm_goal_mark_line "$id" "$item" "$state" "$task" "$note" "$stage" "$on") || { fm_goal_lock_release; return 2; }
   stamped=$(status_stamp_line "$line")
   if [ -e "$path" ] || [ -L "$path" ]; then
     _fm_goal_regular_file "$path" || { fm_goal_lock_release; return 1; }
@@ -2565,6 +2738,33 @@ _fm_goal_read_view() {
   [ ! -L "$FM_SECONDMATE_PARENT_HOME" ] && [ ! -L "$FM_GOAL_VIEW_STATE" ] && [ ! -L "$FM_GOAL_VIEW_DATA" ]
 }
 
+# Read-only preflight used before Firstmate requests a forge merge or arm.
+# Only the goal-owning home and its local mates can see a task's goal binding.
+# Preserve legacy merge behavior when a mate has no readable parent binding.
+cmd_can_merge() {
+  if [ "$#" -ne 1 ] || ! fm_goal_id_valid "$1"; then
+    _fm_goal_usage_error 'can-merge needs a task id'
+  fi
+  local path id i pending
+  _fm_goal_read_view || return 0
+  while IFS= read -r path; do
+    id=${path##*/}; id=${id%.goal}
+    _fm_goal_open_record "$id" "$FM_GOAL_VIEW_STATE" || return 1
+    case "${FM_GOAL_ITEMS_MERGE_AFTERS[*]}" in *[![:space:]]*) ;; *) continue ;; esac
+    fm_goal_fold "$id" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA"
+    for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
+      [ "${FM_GOAL_ITEMS_TASKS[$i]}" = "$1" ] || continue
+      [ -z "$FM_GOAL_VIEW_OWNER" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$FM_GOAL_VIEW_OWNER" ] || continue
+      pending=$(_fm_goal_merge_pending "$i")
+      [ -z "$pending" ] || {
+        fm_goal_log "merge refused for $id/${FM_GOAL_ITEMS_IDS[$i]}: merge-after pending: $pending"
+        return 1
+      }
+    done
+  done < <(fm_goal_active_records "$FM_GOAL_VIEW_STATE")
+  return 0
+}
+
 cmd_startable() {
   local path id i with_location=0 location home
   if [ "$#" -eq 1 ] && [ "$1" = --with-task-location ]; then
@@ -2579,6 +2779,7 @@ cmd_startable() {
     _fm_goal_open_record "$id" "$FM_GOAL_VIEW_STATE" >/dev/null 2>&1 || continue
     [ "$FM_GOAL_REC_DRIVE" = driven ] || continue
     fm_goal_fold "$id" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$(date +%s)"
+    _fm_goal_project_waits "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
     for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
       [ -z "$FM_GOAL_VIEW_OWNER" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$FM_GOAL_VIEW_OWNER" ] || continue
       if _fm_goal_item_startable "$i"; then
@@ -2637,6 +2838,7 @@ _fm_goal_export_one() {  # <id> [--driven]
   [ "${2-}" != --driven ] || [ "$FM_GOAL_REC_DRIVE" = driven ] || return 1
   marks=${FM_GOAL_REC_DRIVE_MARKS//[^$'\n']/}
   fm_goal_fold "$1" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$now"
+  _fm_goal_project_waits "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
   for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
     [ -z "$FM_GOAL_VIEW_OWNER" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$FM_GOAL_VIEW_OWNER" ] || continue
     _fm_goal_item_waiting "$i"
@@ -2653,6 +2855,9 @@ _fm_goal_export_one() {  # <id> [--driven]
       --arg state "${FM_GOAL_M_STATES[$i]}" --arg since "${FM_GOAL_M_ATS[$i]}" \
       --arg pr "${FM_GOAL_ITEMS_PRS[$i]}" \
       --arg after "${FM_GOAL_ITEMS_AFTERS[$i]}" --arg waiting "$FM_GOAL_WAITING" \
+      --arg merge_after "${FM_GOAL_ITEMS_MERGE_AFTERS[$i]}" --arg pending "$(_fm_goal_merge_pending "$i")" \
+      --arg wait_on "${FM_GOAL_M_ON[$i]-}" --arg stale "${FM_GOAL_WAIT_STALE[$i]-}" \
+      --arg cleared "${FM_GOAL_WAIT_CLEARED[$i]-}" \
       --arg until "${FM_GOAL_ITEMS_UNTILS[$i]}" --arg stopon "$stopon" \
       --arg title "${FM_GOAL_ITEMS_TITLES[$i]}" \
       --argjson orphan "$orphan" --argjson startable "$startable" --argjson reached "$reached" --argjson landing "$landing" '
@@ -2666,6 +2871,9 @@ _fm_goal_export_one() {  # <id> [--driven]
        stage: (if $stage == "" then null else $stage end),
        stage_at: ($stage_at | epoch), since: ($since | epoch),
        after: ($after | csv), waiting_on: ($waiting | csv),
+       merge_after: ($merge_after | csv), merge_after_pending: ($pending | csv),
+       wait_on: (if $wait_on == "" then null else $wait_on end),
+       wait_stale: ($stale == "1"), wait_cleared: ($cleared == "1"),
        until: ($until | epoch), stop_on: ($stopon | csv),
        startable: $startable, orphaned_running: $orphan, target_reached: $reached, landing_hint: $landing}')"$'\n'
   done
@@ -3188,6 +3396,7 @@ main() {
   case "$cmd" in
     start|edit|mark|evidence|probe|show|brief|active|startable|export|exists|window|driven|close|pause|resume) ;;
     launch-links) cmd_launch_links "$@"; return ;;
+    can-merge) cmd_can_merge "$@"; return ;;
     apply-drive-answer) cmd_apply_drive_answer "$@"; return ;;
     help|-h|--help) fm_goal_usage; return 0 ;;
     *) _fm_goal_usage_error "unknown subcommand: $cmd" ;;

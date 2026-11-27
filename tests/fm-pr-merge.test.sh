@@ -794,6 +794,31 @@ test_verified_merge_records_pr_and_head() {
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
 }
 
+test_goal_merge_after_refuses_before_forge() {
+  local dir rc=0 url=https://github.com/example/repo/pull/9
+  dir=$(make_case goal-merge-after)
+  mkdir -p "$dir/wt"
+  add_gh_mocks "$dir" deadbeefcafefeed0000000000000000deadbeef
+  printf '%s\n' 'item [id=first] [owner=main]: first' \
+    'item [id=second] [owner=main] [task=task-x1] [merge-after=first]: parallel' > "$dir/items"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    bash "$ROOT/bin/fm-goal.sh" start fixture --title fixture --done-when shipped \
+      --named-by fixture --plan plan.md --items-file "$dir/items" >/dev/null
+  run_pr_merge "$dir" task-x1 "$url" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'merge-after blocks the direct merge'
+  assert_grep 'merge-after pending: first' "$dir/stderr" 'the direct merge refusal names its dependency'
+  rc=0
+  run_pr_merge "$dir" task-x1 "$url" --queue-at-green > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  expect_code 1 "$rc" 'merge-after blocks the registration-time arm'
+  assert_grep 'merge-after pending: first' "$dir/stderr" 'the arm refusal names its dependency'
+  [ ! -s "$dir/gh-axi.log" ] || fail 'merge-after called the forge before its dependency was done'
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    bash "$ROOT/bin/fm-goal.sh" mark fixture first 'done' -- "$url" >/dev/null
+  run_pr_merge "$dir" task-x1 "$url" > "$dir/stdout" 2> "$dir/stderr" || fail 'the gate did not clear after the predecessor was done'
+  assert_logged_gh_merge "$dir" 9 example/repo --squash
+  pass 'a merge-after dependency gates both the forge merge and the registration-time arm'
+}
+
 # The forge call is the point of no return: once gh-axi has merged, nothing this
 # script does afterwards can un-merge it. Proving pr= is already in the task's
 # meta at that moment is what makes a later failure unable to lose the merge.
@@ -3939,6 +3964,7 @@ test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
+test_goal_merge_after_refuses_before_forge
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses

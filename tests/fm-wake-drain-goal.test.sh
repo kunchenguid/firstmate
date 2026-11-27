@@ -117,6 +117,21 @@ test_mark_moves_an_item_in_the_next_drain() {
   pass "a mark moves an item and the next drain names the next startable item"
 }
 
+test_stale_wait_in_drain() {
+  local dir out now
+  dir=$(lab_home stale-wait)
+  start_goal "$dir" I1
+  now=$(date +%s)
+  printf 'goal [goal=I1] [item=build] [state=waiting] [at=%s]: old untyped wait\n' \
+    "$((now - 1800))" > "$dir/state/goals/I1.marks"
+  out=$(lab_env "$dir" "$DRAIN") || fail 'drain failed with an old wait'
+  assert_contains "$out" 'waiting: build [main] (stale wait; marked waiting)' 'drain flags an old untyped wait'
+  lab_env "$dir" bash "$GOAL" pause I1 >/dev/null
+  out=$(lab_env "$dir" "$DRAIN") || fail 'drain failed with drive off'
+  assert_not_contains "$out" 'stale wait' 'drain suppresses drive prompts for OFF goals'
+  pass 'the drain GOAL section resurfaces old waits only for driven goals'
+}
+
 test_unreadable_goal_never_fails_the_drain() {
   local dir out rc=0
   dir=$(lab_home corrupt)
@@ -243,6 +258,7 @@ test_active_goal_prints_state_and_duty_on_an_empty_queue
 test_goal_section_follows_queued_wake_rows
 test_away_record_drives_named_and_unnamed_goals
 test_mark_moves_an_item_in_the_next_drain
+test_stale_wait_in_drain
 test_unreadable_goal_never_fails_the_drain
 test_pace_reports_idle_on_goals_only
 test_pace_samples_the_mate_scope_without_writing_the_parent
