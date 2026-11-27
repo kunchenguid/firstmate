@@ -45,7 +45,8 @@ A page host may add its own sources and layout between steps 3 and 4, but may no
 - Everything the captain must or can do has a question or steps in the decisions section, in plain words.
 - A question appears once, and an answered or resolved one does not appear.
 - Entries under `must` come first; `can` and `later` may be collapsed but not left out silently.
-- Each page shows only its own project's goal cards, with captain steps for other projects grouped under "Overige projecten" inside section 1.
+- Each page shows only its own project's goal cards and captain entries, with its captain steps first in section 1.
+- Captain steps for work that belongs to no cockpit appear once, under "Overige projecten" inside section 1 of the page whose scope also names `main`.
 - Two refreshes in a row make zero differences when the world did not change.
 
 ## Miko page working rules

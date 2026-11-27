@@ -357,10 +357,12 @@ def render_captain_steps(page, truth):
         block = '<ul>' + ''.join(rows) + '</ul>'
         if foreign and not other:
             block = f'<section id="{OTHER_PROJECTS}"><h3>Overige projecten</h3>{block}</section>'
-        at = other.close if foreign and other else decisions.close
-        fragment = '<!-- fm-captain-steps -->' + block + '<!-- /fm-captain-steps -->'
-        # Two groups inserted at the same offset must leave the native group first.
-        patches.insert(0, (at, fragment))
+        # The cockpit's own steps open section 1, before its questions; other projects close it.
+        first = next((n for n in parsed.nodes if n.parent is decisions), None)
+        heading = first is not None and re.fullmatch(r'h[1-6]', first.tag) and first.close is not None
+        top = page.index('>', first.close) + 1 if heading else decisions.end
+        at = other.close if foreign and other else decisions.close if foreign else top
+        patches.append((at, '<!-- fm-captain-steps -->' + block + '<!-- /fm-captain-steps -->'))
     return apply_patches(page, patches)
 
 
@@ -530,10 +532,17 @@ def verify_goal_views(page, goals):
         if node.id and node.id.startswith('fm-goal-pace-') and node.id not in expected_pace:
             problems.append(f'unexpected pace marker: {node.id}')
 
+    def settled(signature):
+        # Pace is a clock sample: its marker must be there, its numbers are newer in every truth.
+        tag, attrs, parts = signature
+        if 'fm-goal-pace' in (attrs.get('class') or '').split():
+            return tag, {'class': 'fm-goal-pace'} | ({'id': attrs['id']} if 'id' in attrs else {}), []
+        return tag, attrs, [part if isinstance(part, str) else settled(part) for part in parts]
+
     def check_markup(expected, parent=None):
         model = GoalPage(expected).nodes[0]
         found = parsed.by_id[model.id]
-        if (len(found) != 1 or not found[0].visible or found[0].signature() != model.signature()
+        if (len(found) != 1 or not found[0].visible or settled(found[0].signature()) != settled(model.signature())
                 or (parent and not found[0].ancestor(lambda n: n is parent))):
             problems.append(f'missing or stale goal rendering: {model.id}')
 

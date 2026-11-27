@@ -366,6 +366,13 @@ for marker in (markers[0], card_marker):
 assert page.count('class="fm-goal-pace"') == 2, 'extra marker, including possible OFF card leak'
 PY
 done
+# A later sync only moves the pace sample; the published page stays verified until the world changes.
+write_pace 0 25 || fail 'could not write newer pace fixture'
+run_refresh COCKPIT_GOAL_HOME="$GOAL_HOME" COCKPIT_OUT="$TMP_ROOT/newer-pace.html" >/dev/null || fail 'newer pace refresh failed'
+if cmp -s "$pace_preview.truth.json" "$TMP_ROOT/newer-pace.html.truth.json"; then fail 'newer pace sample did not reach the truth'; fi
+bash "$TOOLS/cockpit-sync.sh" --verify-page "$pace_preview" --out "$TMP_ROOT/newer-pace.html.truth.json" > "$TMP_ROOT/newer-pace.out" \
+  || fail "a newer pace sample alone made the published page stale: $(cat "$TMP_ROOT/newer-pace.out")"
+pass 'cockpit goal pace: a newer pace sample alone does not fail the published page'
 cp "$pace_preview" "$TMP_ROOT/previous-pace.html"
 write_pace 3600 11 || fail 'could not write stale pace fixture'
 refresh_pace || fail 'stale pace refresh failed'
@@ -834,7 +841,10 @@ printf '%s\n' 'item [id=check] [owner=captain] [class=captain] [project=demo]: n
   > "$TMP_ROOT/items-overige"
 in_sync_home bash "$ROOT/bin/fm-goal.sh" start demo --title Demo --done-when 'demo complete' \
   --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-overige" >/dev/null || fail 'could not start other project'
-sync --scope miko --out "$TMP_ROOT/overige.json" > /dev/null || fail 'other project sync failed'
+sync --scope miko --out "$TMP_ROOT/own-only.json" > /dev/null || fail 'own-only sync failed'
+jq -e '[.section1[][] | select(.key == "demo/check" or .key == "demo-colour")] == []' "$TMP_ROOT/own-only.json" >/dev/null \
+  || fail 'a cockpit that does not host other projects listed them'
+sync --scope miko --scope main --out "$TMP_ROOT/overige.json" > /dev/null || fail 'other project sync failed'
 scoped="$TMP_ROOT/overige.html"
 printf '%s\n' '<section id="captain-door"></section><section id="overige-projecten"><h2>Overige projecten</h2></section><h2 id="doelen">Doelen</h2>' > "$scoped"
 python3 -I "$TOOLS/goal_drive.py" --truth "$TMP_ROOT/overige.json" --page "$scoped" || fail 'other project render failed'
@@ -862,6 +872,83 @@ fi
 grep -Fq 'missing or stale captain steps: demo/check' "$TMP_ROOT/scope.out" || fail 'wrong lower-only finding'
 if grep -Fq 'id="doel-demo"' "$scoped"; then fail 'unscoped project got a second goal card'; fi
 pass 'cockpit routes other projects to Overige projecten with exact record steps'
+
+# ---- every captain entry belongs to exactly one cockpit ----
+MAIN_HOME="$TMP_ROOT/scope-main"; MIKO_HOME="$TMP_ROOT/scope-terp"; GERIS_HOME="$TMP_ROOT/scope-geris"
+for home in "$MAIN_HOME" "$MIKO_HOME" "$GERIS_HOME"; do
+  mkdir -p "$home/state" "$home/data"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+done
+printf 'terp\n' > "$MIKO_HOME/.fm-secondmate-home"
+printf 'geris\n' > "$GERIS_HOME/.fm-secondmate-home"
+printf '%s\n' "- terp - Miko mate (home: $MIKO_HOME; scope: test; projects: ; added 2026-11-27)" \
+  "- geris - Geris mate (home: $GERIS_HOME; scope: test; projects: fabric_monorepo, claims; added 2026-11-27)" \
+  > "$MAIN_HOME/data/secondmates.md"
+in_home() { # in_home <home> <command...>
+  local home=$1; shift
+  env -u FM_TASK_ID -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE -u FM_CONFIG_OVERRIDE FM_HOME="$home" "$@"
+}
+hold() { # hold <home> <task> [hold flags...]
+  local home=$1 task=$2; shift 2
+  in_home "$home" bash "$ROOT/bin/fm-captain-hold.sh" hold "$task" --title "Call $task" --category captain-only-fact \
+    --reason "Decide $task." "$@" >/dev/null 2>&1 || fail "could not hold $task"
+}
+start_goal() { # start_goal <id> <item line...>
+  local id=$1; shift
+  printf '%s\n' "$@" > "$TMP_ROOT/items-scope"
+  in_home "$MAIN_HOME" bash "$ROOT/bin/fm-goal.sh" start "$id" --title "Doel $id" --done-when 'complete' \
+    --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-scope" >/dev/null 2>&1 || fail "could not start $id"
+}
+start_goal miko-page 'item [id=build] [owner=terp]: Build the page' 'item [id=sign] [owner=captain] [class=captain]: Sign the page'
+start_goal geris-budget 'item [id=roll] [owner=geris]: Roll the budget' 'item [id=word] [owner=captain] [class=captain]: Give the PROD word'
+start_goal fleet-care 'item [id=measure] [owner=main]: Measure the limit' \
+  'item [id=tighten] [owner=captain] [class=captain]: Approve the tighter limit'
+hold "$MAIN_HOME" pool-cleanup --repo firstmate
+hold "$MAIN_HOME" vendor-rerun --repo fabric_monorepo
+hold "$MAIN_HOME" miko-audit --repo .firstmate
+hold "$MAIN_HOME" pinned-call --repo firstmate
+in_home "$MAIN_HOME" bash "$ROOT/bin/fm-tasks-axi.sh" show pinned-call --json | jq -r '.body' > "$TMP_ROOT/pinned.body"
+printf 'cockpit=geris\n' >> "$TMP_ROOT/pinned.body"
+in_home "$MAIN_HOME" bash "$ROOT/bin/fm-tasks-axi.sh" update pinned-call --body-file "$TMP_ROOT/pinned.body" >/dev/null \
+  || fail 'could not pin a hold to a cockpit'
+hold "$MIKO_HOME" read-token
+hold "$GERIS_HOME" budget-roll
+scope_sync() { # scope_sync <out> <sync args...>
+  local out=$1; shift
+  in_home "$MAIN_HOME" env PATH="$SYNC_BIN:$PATH" COCKPIT_CREW_STATE_BIN="$SYNC_BIN/crew-state" \
+    bash "$TOOLS/cockpit-sync.sh" --goal-home "$MAIN_HOME" --out "$out" "$@"
+}
+scope_sync "$GERIS_HOME/state/cockpit-truth.geris.json" --scope geris --scope fabric_monorepo > "$TMP_ROOT/scope.out" 2>&1 \
+  || fail "Geris sync failed: $(cat "$TMP_ROOT/scope.out")"
+scope_sync "$MIKO_HOME/state/cockpit-truth.miko.json" --scope miko --scope terp --scope main > "$TMP_ROOT/scope.out" 2>&1 \
+  || fail "Miko sync failed: $(cat "$TMP_ROOT/scope.out")"
+python3 -I - "$GERIS_HOME/state/cockpit-truth.geris.json" "$MIKO_HOME/state/cockpit-truth.miko.json" <<'PY' || fail 'captain entries leaked between cockpits'
+import json, sys
+def entries(path):
+    section = json.load(open(path))['section1']
+    return {e['key']: e.get('group') for bucket in section.values() for e in bucket}
+geris, miko = entries(sys.argv[1]), entries(sys.argv[2])
+assert geris == {'geris-budget/word': None, 'vendor-rerun': None, 'pinned-call': None, 'budget-roll': None}, geris
+assert miko == {'miko-page/sign': None, 'miko-audit': None, 'read-token': None,
+                'pool-cleanup': 'other_projects', 'fleet-care/tighten': 'other_projects'}, miko
+PY
+pass 'cockpit scope: each captain entry is on exactly one cockpit; work of no cockpit is only on the one that names main'
+scoped="$TMP_ROOT/scope-geris.html"
+printf '%s\n' '<section id="captain-door"><h2>Wacht op jou</h2><form data-lavish-question="budget-roll"></form></section><h2 id="doelen">Doelen</h2>' > "$scoped"
+python3 -I "$TOOLS/goal_drive.py" --truth "$GERIS_HOME/state/cockpit-truth.geris.json" --page "$scoped" || fail 'Geris render failed'
+scope_sync "$GERIS_HOME/state/cockpit-truth.geris.json" --verify-page "$scoped" > "$TMP_ROOT/scope.out" || fail "$(cat "$TMP_ROOT/scope.out")"
+python3 -I - "$scoped" <<'PY' || fail 'captain steps do not open section 1'
+import re, sys
+door = re.search(r'<section id="captain-door">(.*?)</section>', open(sys.argv[1]).read(), re.S)[1]
+assert door.index('</h2>') < door.index('data-cockpit-step') < door.index('<form'), door
+assert 'overige-projecten' not in door and 'read-token' not in door and 'pool-cleanup' not in door, door
+PY
+pass 'cockpit scope: a scoped page opens section 1 with only its own steps, before its questions'
+in_home "$MAIN_HOME" env PATH="$SYNC_BIN:$PATH" bash "$TOOLS/cockpit-sync.sh" --goal-home "$MAIN_HOME" --captain-waiting \
+  > "$TMP_ROOT/waiting.out" || fail 'cross-home audit failed'
+if grep -q '^MISSING' "$TMP_ROOT/waiting.out"; then fail "audit missed a secondmate cockpit: $(cat "$TMP_ROOT/waiting.out")"; fi
+[ "$(grep -c '^on-cockpit' "$TMP_ROOT/waiting.out")" = 7 ] || fail "audit did not count every main item: $(cat "$TMP_ROOT/waiting.out")"
+pass 'cockpit audit: items on a registered secondmate cockpit count as covered'
 
 # A personal action uses one existing held-task key; it gates only the steps
 # that depend on its result, at the edge (start or merge) that needs it.

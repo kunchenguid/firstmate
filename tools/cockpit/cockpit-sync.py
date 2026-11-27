@@ -22,8 +22,16 @@ Scope (environment fallbacks are shown where available; environment lists are co
                                           secondmate (or one registered for the project). Verify all items
                                           of matched goals. --goal-id explicitly selects goals instead;
                                           --exclude-goal always applies. Linked decisions stay in scope.
+                                          Each captain entry belongs to one cockpit, named by the first of:
+                                          a cockpit=NAME line in the hold body; its linked goal; the secondmate
+                                          home that holds it; the hold's repo; its origin task's home and project;
+                                          the hold or goal id prefix (goal items: the item project, else the goal's
+                                          owners and projects, else the goal id prefix). A scoped sync lists only
+                                          its own entries. Entries of no registered cockpit are listed, grouped as
+                                          other_projects, only by the sync whose scope also names main.
   --out FILE           COCKPIT_TRUTH      the truth JSON; live default is HOME/state/cockpit-truth.json
                        (scoped refreshes use cockpit-truth.<scope>.json). Audit reads these files
+                       from --state, HOME/state and each registered local secondmate's state
                        unless --out is supplied. Output: STATUS<TAB>KIND<TAB>KEY (STATUS is
                        MISSING or on-cockpit). --goal-items-stdin audits only a goals[] array
                        supplied by the caller and appends a wake episode id for reached items.
@@ -54,16 +62,17 @@ truth JSON (schema fm-cockpit-truth.v1; no timestamps, so an unchanged world wri
     entry      {key, aliases[], title, about, question, options[{value,label,detail}], recommendation,
                 blocks[], sources[]}
     steps       {record key: [authored steps, in order]}
-    group       optional other_projects, rendered inside section 1
+    group       optional other_projects (work of no cockpit), rendered inside section 1
   out_of_scope number of holds and decisions left out by --scope or goal selection
 
 Page contract checked by --verify-page:
   - every captain entry appears in section 1 as data-lavish-question="<key or alias>" or
-    data-cockpit-captain="<key or alias> ..."; other projects' ordered steps appear in the
-    nested #overige-projecten block
+    data-cockpit-captain="<key or alias> ..."; the page's own ordered steps open the section and
+    other projects' ordered steps appear in the nested #overige-projecten block
   - every such value in the section belongs to an entry that is still open, and no entry appears twice
   - the goal cards, drive KPI, per-goal KPI lines and all ring counts match the scoped truth.
     The lines show drive readiness separately from done/total, startable, running, waiting and waits on you.
+    A pace marker is checked for presence only: its numbers are a clock sample that every sync renews.
     The line and card show sampled pace when available, with a warning for actionable idle over 10m.
     Each card has a closed "Alle stappen (N)" disclosure with its compact per-goal ring and every
     item, using goal_item_title if set or the text before the first " - " in title.
@@ -287,6 +296,53 @@ def project_names(names):
     return {name.rstrip('/').rsplit('/', 1)[-1].casefold() for name in names if name}
 
 
+def scope_members(scope, mates):
+    """(projects, owners) a scope selects: its projects, its secondmates and those registered for them."""
+    projects = project_names(scope)
+    selectors = {name.casefold() for name in scope}
+    for sm, _, names in mates:
+        if sm.casefold() in selectors:
+            projects |= project_names(names)
+    owners = {sm.casefold() for sm, _, names in mates if project_names(names) & projects}
+    return projects, (owners | selectors | projects) - {'main', 'captain'}
+
+
+class Scope:
+    """Which cockpit a captain item belongs to; the --scope help owns the rule."""
+
+    def __init__(self, scope, mates):
+        self.scoped = bool(scope)
+        projects, owners = scope_members(scope, mates)
+        self.members = (projects | owners) - {'main', 'captain'}
+        self.hosts_other = 'main' in {name.casefold() for name in scope}
+        self.cockpits = {n for sm, _, names in mates for n in {sm.casefold()} | project_names(names)}
+
+    def kind(self, *sources):
+        """native, foreign (another cockpit's) or other (no cockpit's): the first source naming a cockpit decides."""
+        if not self.scoped:
+            return 'native'
+        for names in sources:
+            names = project_names(names)
+            if names & self.members:
+                return 'native'
+            if names & self.cockpits:
+                return 'foreign'
+        return 'other'
+
+    def shows(self, kind):
+        return kind == 'native' or (kind == 'other' and self.hosts_other)
+
+
+def id_prefix(name):
+    return name.split('-', 1)[0]
+
+
+def goal_item_sources(goal, item):
+    if item.get('project'):
+        return [[item['project']]]
+    return [[item['owner']], [n for i in goal['items'] for n in (i.get('project'), i['owner'])], [id_prefix(goal['id'])]]
+
+
 def export_goals(goal_home, ids, also_ids, exclude, scope, mates, state=None, *, with_drive_ready=False):
     env = home_env(goal_home)
     if state is not None:
@@ -300,13 +356,7 @@ def export_goals(goal_home, ids, also_ids, exclude, scope, mates, state=None, *,
         assert snapshot['schema'] == 'fm-goal-export.v1'
     except (ValueError, KeyError, AssertionError) as exc:
         raise SyncError('goal export: unsupported answer') from exc
-    projects = project_names(scope)
-    selectors = {name.casefold() for name in scope}
-    for sm, _, names in mates:
-        if sm.casefold() in selectors:
-            projects |= project_names(names)
-    owners = {sm.casefold() for sm, _, names in mates if project_names(names) & projects}
-    owners |= (selectors | projects) - {'main', 'captain'}
+    projects, owners = scope_members(scope, mates)
 
     def in_scope(item):
         if item.get('project'):
@@ -332,22 +382,21 @@ def waiting_goal_items(goals):
                 yield f'{goal["id"]}/{item["id"]}', goal, item, wait[8:] if explicit else None
 
 
-def other_project(item):
-    return bool(item.get('project') and not project_names([item['project']]) & {'miko', 'geris'})
-
-
 CAPTAIN_BUCKETS = ('must', 'can', 'later')
 
 
-def coverage_paths(state):
-    return [state / 'cockpit-truth.json', *sorted(state.glob('cockpit-truth.*.json'))]
+def coverage_paths(home, state):
+    """Truth files of the audited home, its goal view and its registered local secondmates."""
+    states = [state, home / 'state', *(mate / 'state' for _, mate, _ in secondmates(home))]
+    return list(dict.fromkeys(path for s in states
+                              for path in [s / 'cockpit-truth.json', *sorted(s.glob('cockpit-truth.*.json'))]))
 
 
 def audit_captain_waiting(args):
     home = Path(args.goal_home).resolve()
     state = args.state or home / 'state'
     sources = set()
-    for path in [Path(args.out)] if args.out else coverage_paths(state):
+    for path in [Path(args.out)] if args.out else coverage_paths(home, state):
         if path.is_symlink() or not path.is_file():
             continue
         truth = json.loads(path.read_text(encoding='utf-8'))
@@ -598,6 +647,7 @@ def captain_hold_rows(home):
 
 
 def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_waits):
+    """scope is a Scope."""
     links = {}  # task or item id -> goal items it belongs to
     for goal in goals:
         for item in goal['items']:
@@ -609,11 +659,12 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
     def waiting_on_item(goal, item):
         return [i for i in goal['items'] if item['id'] in i['after'] and i.get('status', i['state']) not in CLOSED]
 
-    def in_scope(name, repo, home_name, project_dir=''):
-        if name in foreign:
-            return False
-        names = {repo, home_name, Path(project_dir).name} - {''}
-        return not scope or name in links or bool(names & scope) or (name in sm_projects and name in scope)
+    def home_names(name):
+        return [] if name == 'main' else [name, *sm_projects.get(name, [])]
+
+    def origin_names(task):
+        return next(([read_meta(h / 'state' / f'{task}.meta').get('project'), *home_names(n)] for n, h in homes
+                     if task and (h / 'state' / f'{task}.meta').is_file()), [])
 
     buckets, order, skipped, mismatches = {}, [], 0, []
 
@@ -654,24 +705,32 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
                 blockers.setdefault(other, []).append(row['id'])
 
     for name, home in homes:
-        wanted = []
-        for row in rows_by_home[name]:
-            if row.get('hold_kind') != 'captain':
-                continue
-            projects = project_names([row.get('repo'), *sm_projects.get(name, [])])
-            linked = any(ref == row['id'] or i['task'] == row['id'] or i['id'] == row['id']
-                         for _, _, i, ref in waits)
-            scoped = in_scope(row['id'], row.get('repo', ''), name)
-            if scoped or linked or not projects & {'miko', 'geris'}:
-                wanted.append((row, not scoped or bool(projects and not projects & {'miko', 'geris'})))
-            else:
-                skipped += 1
-        # the list truncates titles and bodies, so each held record is shown in full
+        rows = [row for row in rows_by_home[name] if row.get('hold_kind') == 'captain']
+        # the list truncates titles and bodies and omits the repo, so each held record is shown in full
         with ThreadPoolExecutor(max_workers=8) as pool:
-            records = list(pool.map(lambda pair: show_task(home, pair[0]['id']), wanted))
-        for (row, other), record in zip(wanted, records):
+            records = list(pool.map(lambda row: show_task(home, row['id']), rows))
+        for row, record in zip(rows, records):
             task = row['id']
             body = record.get('body', '')
+            explicit = re.search(r'^cockpit=(\S+)$', body, re.M)
+            origin = re.search(r'^Captain hold origin: (\S+)', body, re.M)
+            origin = origin.group(1) if origin else ''
+            linked = [i for _, _, i, ref in waits if task in (ref, i['task'], i['id'])]
+            if explicit:
+                kind = scope.kind([explicit.group(1)])
+            elif task in links:
+                kind = 'native'
+            elif linked:
+                kind = 'other' if all(i.get('other_project') for i in linked) else 'native'
+            elif task in foreign:
+                kind = 'foreign'
+            else:
+                kind = scope.kind(home_names(name), [record.get('repo')], origin_names(origin),
+                                  [id_prefix(task)], [id_prefix(origin)])
+            if not scope.shows(kind):
+                skipped += 1
+                continue
+            other = kind == 'other'
             context = question_context(body)
             action = context.get('action') is True
             title = record.get('title', task) if action else context.get('question') or record.get('title', task)
@@ -692,9 +751,7 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
                 aliases += [f'{goal["id"]}/{item["id"]}', f'{goal["id"]}.{item["id"]}'] if item['class'] == 'captain' else []
                 new['blocks'].append(plain(f'{goal["title"]}: {item["title"]}', 200))
             new['blocks'] += [f'backlog: {other}' for other in blockers.get(task, [])]
-            origin = re.search(r'^Captain hold origin: (\S+)', body, re.M)
-            working = any((h / 'state' / f'{t}.meta').is_file() for _, h in homes
-                          for t in (task, origin and origin.group(1)) if t)
+            working = any((h / 'state' / f'{t}.meta').is_file() for _, h in homes for t in (task, origin) if t)
             until = row.get('hold_until', '-')
             deferred = (until not in ('', '-') and until[:10] > today) or row.get('blocked_by') not in ('', '-', 'none', None)
             add('later' if deferred else 'must' if blocked or new['blocks'] or working else 'can', new, *aliases)
@@ -710,7 +767,8 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
             continue
         new = entry(key, item['title'], f'Doel: {goal["title"]}', source=f'goal item {key}')
         new['steps'] = {key: [item['title']]}
-        new['other_project'] = item.get('other_project') or other_project(item)
+        new['other_project'] = bool(item.get('other_project')
+                                    or (item.get('project') and scope.kind([item['project']]) != 'native'))
         new['blocks'] = [plain(f'{goal["title"]}: {i["title"]}', 200) for i in waiting_on_item(goal, item)]
         by_id = {i['id']: i for i in goal['items']}
         ready = all(by_id[a].get('status', by_id[a]['state']) in CLOSED for a in item['after'] if a in by_id)
@@ -740,7 +798,9 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
                 continue
             meta = read_meta(home / 'state' / f'{task}.meta')
             sm = task if meta.get('kind') == 'secondmate' else name
-            if target in held or not in_scope(task, '', sm, meta.get('project', '')):
+            kind = ('native' if task in links else 'foreign' if task in foreign else
+                    scope.kind(home_names(sm), [meta.get('project')], [id_prefix(task)]))
+            if target in held or kind != 'native':  # an unrouted key is its own cockpit's finding
                 skipped += 1
             elif target in known:
                 mismatches.append({'key': label, 'kind': 'stale-decision-key',
@@ -849,14 +909,13 @@ def build_truth(args):
     deciding_tasks = {(home, task) for home, (_, rows) in decisions.items() for task, _, _ in rows}
     samples, fresh = read_goal_pace(goal_home)
     verified, mismatches = build_goals(goals, unique, deciding_tasks, samples, fresh)
-    # Other projects need a captain entry, not a second goal card or a forge scan.
+    # Work that belongs to no cockpit needs a captain entry on its host, not a second goal card or a forge scan.
+    scope = Scope(args.scope, mates)
     outside = [g for g in dropped if not (args.exclude_goal and re.search(args.exclude_goal, g['id']))]
-    native_owners = {'miko', 'geris'} | {sm.casefold() for sm, _, projects in mates
-                                        if project_names(projects) & {'miko', 'geris'}}
     extra_waits = [(key, goal, dict(item, status=item['state'], other_project=True), wait)
                    for key, goal, item, wait in waiting_goal_items(outside)
-                   if other_project(item) or (not item.get('project') and item['owner'].casefold() not in native_owners)]
-    section, more, skipped = captain_list(verified, dropped, unique, set(args.scope),
+                   if scope.scoped and scope.hosts_other and scope.kind(*goal_item_sources(goal, item)) == 'other']
+    section, more, skipped = captain_list(verified, dropped, unique, scope,
                                          {sm: projects for sm, _, projects in mates}, decisions, extra_waits)
     return {'schema': SCHEMA, 'goals': verified, 'mismatches': mismatches + more, 'section1': section,
             'out_of_scope': skipped}

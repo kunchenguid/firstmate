@@ -1105,7 +1105,7 @@ print_goal_section() {
   local out missing sync="$SCRIPT_DIR/../tools/cockpit/cockpit-sync.sh"
   [ -x "$SCRIPT_DIR/fm-goal.sh" ] || return 0
   if [ -x "$sync" ]; then
-    if out=$(FM_CREW_STATE_NO_FORGE=1 fm_run_timed 15 "$sync" --goal-home "$FM_HOME" --state "$STATE" --captain-waiting); then
+    if out=$(FM_CREW_STATE_NO_FORGE=1 fm_run_timed 60 "$sync" --goal-home "$FM_HOME" --state "$STATE" --captain-waiting); then
       missing=$(awk '$1 == "MISSING" {printf " %s", $3}' <<< "$out")
       [ -z "$missing" ] || printf 'captain items NOT on cockpit:%s\n' "$missing"
     else
