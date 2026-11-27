@@ -24,13 +24,15 @@
 #           captures under mobile viewport and user-agent emulation.
 #           Snapshot names are reserved atomically; collisions add a sortable
 #           ~NNNNNN suffix rather than replacing an earlier capture.
-#           Readable CSSOM rules supplement captured markup at their owning
-#           stylesheet positions; adopted sheets follow document sheets.
-#           Sheets reported as disabled by the capture browser stay inactive.
-#           Without editing the live page or changing authored media attributes,
-#           capture clears disabled inline styles and marks disabled stylesheet
-#           links with `disabled` in the snapshot. Selectors such as `:empty`
-#           and `[disabled]` can therefore match differently in the snapshot.
+#           Readable CSSOM rules stay at their owners' positions in the
+#           snapshot. If a sheet has an owner but no matching snapshot node,
+#           its rules are not appended as adopted rules. Adopted sheets follow
+#           document sheets.
+#           Capture omits disabled adopted sheets, clears disabled inline
+#           styles, and marks disabled stylesheet links with `disabled` on
+#           their snapshot copies. It leaves the live page and authored media
+#           attributes unchanged. Selectors such as `:empty` and `[disabled]`
+#           can therefore match differently in the snapshot.
 #           Non-disabled linked sheets with unreadable rules fall back to the
 #           sanitized link; see inaccessible_stylesheets in SNAPSHOT RECORD.
 #           Output lines: snapshot, url, viewport, enhancers, session-url,
