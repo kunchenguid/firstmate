@@ -390,11 +390,11 @@ fm_busy_record_read() {  # <state-dir> <id>
   }
   # `read -a` rather than `set --`: it never glob-expands a field and never
   # touches the caller's positional parameters or shell options.
-  local -a fields
-  IFS=' ' read -r -a fields <<< "$line"
-  ver=${fields[0]:-}
+  local -a busy_fields
+  IFS=' ' read -r -a busy_fields <<< "$line"
+  ver=${busy_fields[0]:-}
   [ "$ver" = "$FM_BUSY_LIB_VERSION" ] || { printf 'malformed'; return 1; }
-  for f in "${fields[@]:1}"; do
+  for f in "${busy_fields[@]:1}"; do
     case "$f" in
       gen=*) r_gen=${f#gen=} ;;
       seq=*) r_seq=${f#seq=} ;;

@@ -520,21 +520,21 @@ unit_mode_fresh_defaults_away() {
 }
 
 unit_mode_refresh_preserves_quiet() {
-  local st sleep_pid lock out
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-mode-preserve.XXXXXX")
-  mkdir -p "$st/state"
-  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  local qhome sleep_pid lock out
+  qhome=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-mode-preserve.XXXXXX")
+  mkdir -p "$qhome/state"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$qhome/state/.afk"
   sleep 600 &
   sleep_pid=$!
-  lock="$st/state/.supervise-daemon.lock"
+  lock="$qhome/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   # The exact real-entry shape: a bare direct re-write with no explicit mode,
   # simulating the terminal-side fm-afk-start.sh redundant write that would
   # silently clobber quiet back to away if it were not preserve-on-refresh.
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$START" >/dev/null 2>&1
-  out=$(read_mode "$st/state")
+  FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" "$START" >/dev/null 2>&1
+  out=$(read_mode "$qhome/state")
   if [ "$out" = quiet ]; then
     pass "mode: a bare refresh (FM_AFK_MODE unset) of an already-running quiet daemon preserves quiet, never resets to away"
   else
@@ -542,55 +542,55 @@ unit_mode_refresh_preserves_quiet() {
   fi
   kill "$sleep_pid" 2>/dev/null || true
   wait "$sleep_pid" 2>/dev/null || true
-  rm -rf "$st"
+  rm -rf "$qhome"
 }
 
 # A live quiet daemon must follow the record when /afk turns it into away;
 # a refresh before that entry must not silently turn quiet into away.
 unit_mode_quiet_daemon_to_away() {
-  local command st sleep_pid lock mode rc
+  local command qhome sleep_pid lock mode rc
   for command in start start-native; do
-    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-to-away.XXXXXX")
-    mkdir -p "$st/state"
-    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" enter >/dev/null 2>&1 \
+    qhome=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-to-away.XXXXXX")
+    mkdir -p "$qhome/state"
+    FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" FM_AFK_MODE=quiet "$LAUNCH" enter >/dev/null 2>&1 \
       || fail "$command: could not enter quiet mode"
-    printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+    printf 'quiet\n%s\n' "$(date '+%s')" > "$qhome/state/.afk"
     sleep 600 &
     # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
     sleep_pid=$!
-    lock="$st/state/.supervise-daemon.lock"
+    lock="$qhome/state/.supervise-daemon.lock"
     mkdir -p "$lock"
     printf '%s' "$sleep_pid" > "$lock/pid"
     ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
 
-    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" FM_SUPERVISOR_TARGET=unused \
       FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" "$command" >/dev/null 2>&1
     rc=$?
-    mode=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" mode)
-    if [ "$rc" -eq 0 ] && [ "$mode" = quiet ] && [ "$(head -n 1 "$st/state/.afk")" = quiet ]; then
+    mode=$(FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" "$CONTRACT" mode)
+    if [ "$rc" -eq 0 ] && [ "$mode" = quiet ] && [ "$(head -n 1 "$qhome/state/.afk")" = quiet ]; then
       pass "$command: an unset-mode quiet refresh preserves the quiet record and flag"
     else
       fail "$command: quiet refresh changed the record or flag (rc=$rc, record=$mode)"
     fi
 
-    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter >/dev/null 2>&1
+    FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" "$LAUNCH" enter >/dev/null 2>&1
     rc=$?
-    mode=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" mode)
+    mode=$(FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" "$CONTRACT" mode)
     if [ "$rc" -ne 0 ] || [ "$mode" != away ]; then
       fail "$command: /afk did not convert the live quiet record to away (rc=$rc, record=$mode)"
     fi
-    FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" FM_SUPERVISOR_TARGET=unused \
       FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" "$command" >/dev/null 2>&1
     rc=$?
-    if [ "$rc" -eq 0 ] && [ "$(head -n 1 "$st/state/.afk")" = away ] \
-      && [ "$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" mode)" = away ]; then
+    if [ "$rc" -eq 0 ] && [ "$(head -n 1 "$qhome/state/.afk")" = away ] \
+      && [ "$(FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" "$CONTRACT" mode)" = away ]; then
       pass "$command: /afk over a running quiet daemon refreshes the flag to away"
     else
       fail "$command: /afk record and daemon flag disagree after refresh (rc=$rc)"
     fi
     kill "$sleep_pid" 2>/dev/null || true
     wait "$sleep_pid" 2>/dev/null || true
-    rm -rf "$st"
+    rm -rf "$qhome"
   done
 }
 
