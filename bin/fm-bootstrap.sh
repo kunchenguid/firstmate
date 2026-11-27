@@ -1797,6 +1797,14 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     "$SCRIPT_DIR/fm-pr-health.sh" arm >/dev/null \
       || echo "MISSING: the PR health monitor could not be armed; owned PRs are not watched"
   fi
+  # Register after local default materialization and any same-run convergence.
+  if local_phase && [ -f "$CONFIG/$FM_STARTUP_MEMORY_BUDGET_FILE" ] \
+    && [ -x "$SCRIPT_DIR/fm-startup-growth-check.sh" ]; then
+    if ! mkdir -p -- "$STATE" || ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-startup-growth-check.sh" arm >/dev/null; then
+      echo "MISSING: the daily startup growth check could not be armed"
+    fi
+  fi
   # The reaper check closes finished crewmates and scouts once config/reaper opts in.
   if local_phase && [ -f "$CONFIG/reaper" ] && command -v jq >/dev/null 2>&1 && [ -x "$SCRIPT_DIR/fm-reap.sh" ]; then
     "$SCRIPT_DIR/fm-reap.sh" arm >/dev/null 2>&1 \

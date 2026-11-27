@@ -6,7 +6,7 @@ Reference of the `stow` skill, loaded on demand from its `SKILL.md` table; the a
 
 Report the outcome in plain captain-facing language with all of these facts:
 
-- effective startup-memory budget and total estimated tokens before and after;
+- effective startup-memory budget and total estimated tokens before and after, including the fourth-input accounting or exception from the startup-memory pass;
 - one or more actions for each of `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, using only `unchanged`, `added`, `rewritten`, `pruned`, `routed`, `archived`, or `proposed-offload`; adding or replacing a migration marker is `rewritten`, never a new action verb such as `migrated`;
 - each durable finding filed outside memory and its authoritative owner, including every capture to a declared memory tier;
 - every finding or entry a declared tier should hold but this session could not reach, left carrying its pending-capture marker and named so a session that can reach it captures it;

@@ -109,8 +109,12 @@ test_primary_bootstrap_materializes_visible_default() {
   home=${rec#*|}
   fakebin=$(make_fake_toolchain "$TMP_ROOT/materialize")
 
+  FM_BOOTSTRAP_DETECT_ONLY=1 run_bootstrap "$root" "$home" "$fakebin" >/dev/null
+  assert_absent "$home/state/startup-growth.check.sh" "detect-only bootstrap armed the check"
   out=$(run_bootstrap "$root" "$home" "$fakebin")
   [ -z "$out" ] || fail "default materialization should stay quiet, got: $out"
+  assert_present "$home/state/startup-growth.check.sh" "bootstrap did not arm the default-budget home"
+  assert_present "$home/state/startup-growth.check-trust" "bootstrap did not register the growth check"
   [ "$(<"$home/config/startup-memory-budget")" = 7500 ] \
     || fail "bootstrap did not materialize the visible 7500 default"
   [ "$(FM_HOME="$home" "$BUDGET" read)" = 7500 ] \
@@ -140,7 +144,12 @@ test_primary_bootstrap_materializes_visible_default() {
   run_bootstrap "$root" "$second" "$fakebin" >/dev/null
   [ ! -e "$second/config/startup-memory-budget" ] \
     || fail "secondmate bootstrap created an independent budget instead of awaiting inheritance"
-  pass "primary bootstrap materializes only the visible default and preserves valid captain choices"
+  assert_absent "$second/state/startup-growth.check.sh" "bootstrap armed a secondmate with no budget"
+  printf '321\n' > "$second/config/startup-memory-budget"
+  run_bootstrap "$root" "$second" "$fakebin" >/dev/null
+  assert_present "$second/state/startup-growth.check.sh" "bootstrap did not arm the secondmate after inheritance"
+  assert_present "$second/state/startup-growth.check-trust" "bootstrap did not register the secondmate growth check"
+  pass "bootstrap arms authenticated growth checks only in homes with a budget"
 }
 
 test_primary_bootstrap_materializes_captain_imports() {
@@ -412,10 +421,41 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
   pass "budget propagation converges through config push with exact rereads, absence, and safe rejection"
 }
 
+test_budget_accounting_includes_only_the_supplied_claude_index() {
+  local home index before out
+  home="$TMP_ROOT/claude-accounting"
+  index="$home/active account/projects/-test-project/memory/MEMORY.md"
+  mkdir -p "$home/config" "$home/data" "${index%/*}"
+  printf '5\n' > "$home/config/startup-memory-budget"
+  printf 'abc\n' > "$home/data/learnings.md"
+  out=$(FM_HOME="$home" "$BUDGET" report --claude-index "$index") || fail "report rejected an absent index"
+  assert_contains "$out" 'file=claude-auto-memory/MEMORY.md bytes=0 estimated_tokens=0 status=absent' \
+    "absent index was not accounted for"
+  printf 'synthetic test index\n' > "$index"
+  before=$(cksum < "$index")
+  out=$(FM_HOME="$home" "$BUDGET" report --claude-index "$index") || fail "report rejected an ordinary index"
+  assert_contains "$out" 'file=claude-auto-memory/MEMORY.md bytes=21 estimated_tokens=7 status=present' \
+    "active index was not measured by the shared estimator"
+  assert_contains "$out" 'total_estimated_tokens=9' "active index did not enter the per-home total"
+  assert_contains "$out" 'budget_status=over-budget' "index-induced excess did not change the verdict"
+  assert_equals "$before" "$(cksum < "$index")" "accounting modified the index"
+  out=$(FM_HOME="$home" "$BUDGET" report) || fail "ordinary report failed"
+  assert_contains "$out" 'budget_status=within-budget' "ordinary report counted a Claude project without an explicit selection"
+  assert_not_contains "$out" 'claude-auto-memory' "ordinary report exposed an unselected index"
+  rm -f -- "$index"
+  ln -s "$home/data/learnings.md" "$index"
+  if out=$(FM_HOME="$home" "$BUDGET" report --claude-index "$index" 2>&1); then
+    fail "report accepted a symlinked Claude index"
+  fi
+  assert_contains "$out" 'memory file is not an ordinary regular file' "report did not identify the unsafe index"
+  pass "stow accounting counts the exact read-only Claude index against the same budget"
+}
+
 test_primary_bootstrap_materializes_visible_default
 test_primary_bootstrap_materializes_captain_imports
 test_safe_parser_rejects_ambiguous_and_unsafe_values
 test_budget_accounting_reports_all_three_files_and_safe_failure
+test_budget_accounting_includes_only_the_supplied_claude_index
 test_primary_budget_converges_with_exact_reread_and_safe_failures
 
 echo '# all fm-startup-memory-budget tests passed'

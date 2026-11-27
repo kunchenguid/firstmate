@@ -1298,7 +1298,8 @@ Malformed or multi-line values, a symlinked, hardlinked, or special budget file,
 
 ### Accounting and curation
 
-Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three files.
+Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three Firstmate files.
+The active session's `/stow` pass includes its applicable Claude auto-memory index as a fourth input under the same allowance and estimator.
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
 
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
@@ -1308,10 +1309,10 @@ The helper's header owns exact parsing, publication, and report output mechanics
 
 ### Daily startup growth check
 
-A home can arm a lightweight daily growth monitor with `bin/fm-startup-growth-check.sh arm`.
+Mutable local bootstrap arms a lightweight daily growth monitor in each home with `config/startup-memory-budget`, including secondmates that have inherited the setting.
 It writes `state/startup-growth.check.sh` and binds it through the existing authenticated watcher-check mechanism, so no extra daemon or scheduler is installed.
 Registering it is a reason to watch on the same terms as the [watched-tool check](#watched-tool-updates-configwatched-toolsjson), so an armed home keeps needing a watcher after its last task is torn down.
-Use `bin/fm-startup-growth-check.sh disarm` to remove the check and its local report record.
+Use `bin/fm-startup-growth-check.sh disarm` to remove the check and its local report record until the next eligible bootstrap.
 
 The check evaluates at most once per day and stays silent when nothing meaningful changed.
 A due evaluation uses file metadata and byte sizes before any content inspection: it asks `bin/fm-startup-memory-budget.sh report` for the budget verdict over `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, watches the `data/projects.md` and `data/secondmates.md` that session start also prints in full for growth without entering that budget total, and separately watches the tracked startup/instruction owner files described by the script header.
@@ -1323,10 +1324,11 @@ The check does not run session-start, bootstrap, network checks, model calls, re
 Growth is measured against a per-file baseline retained in the check's own state record, so accumulation that stays under one day's threshold is still caught once it adds up; reporting a file rebases its baseline to the reported size, so accepted growth then stays silent.
 A surface observed for the first time is baselined silently, including the first content of an optional file that did not exist yet when the check was armed, and an established baseline survives that file disappearing and coming back.
 The fixed growth thresholds are inspectable in the script header: 2048 bytes for tracked startup/instruction files and 250 estimated tokens for the printed startup-memory files.
-Budget overrun, unsafe or unreadable inputs, missing required tracked owner files, or material growth are reported once and deduplicated until the finding changes or clears; the report line is delivered before the check advances its own record, so a state-publication failure can repeat a finding but never swallow one.
-That one line goes out through the shared per-line digest cut, so an over-long finding set carries the repo's `[truncated]` marker instead of ending mid-finding, while deduplication keeps comparing the full uncapped set.
+Unsafe or unreadable inputs, missing required tracked owner files, or material growth are reported once and deduplicated until the finding changes or clears.
+Separately, an actionable budget overrun produces at most one weekly `run the stow pass` wake when `config/record-sweep` is `on`; `shadow` or an absent switch records when the wake would be due without delivering it.
+The wake asks the agent to make the curation judgments in the internal `/stow` skill; the monitor never edits memory.
+The report line goes out through the shared per-line digest cut, so an over-long finding set carries the repo's `[truncated]` marker instead of ending mid-finding, while deduplication keeps comparing the full uncapped set.
 Older bulk learning files remain reference-only; this monitor neither loads nor merges them.
-A reported review need is only a recommendation, not cleanup authority.
 
 ## Stow pass horizon (config/stow-pass-horizon)
 

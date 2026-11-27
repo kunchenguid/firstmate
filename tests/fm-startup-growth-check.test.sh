@@ -224,18 +224,50 @@ test_budget_overrun_reports_and_separates_prompt_cost() {
   root=${rec%%|*}
   home=${rec#*|}
   printf '10\n' > "$home/config/startup-memory-budget"
+  printf 'on\n' > "$home/config/record-sweep"
   add_bytes "$home/data/captain.md" 90
   add_bytes "$root/bin/fm-bootstrap.sh" 3000
   result=$(run_check "$root" "$home" 1000)
   [ "$(status_part "$result")" = 0 ] || fail "overrun check failed: $(output_part "$result")"
   out=$(output_part "$result")
-  assert_contains "$out" 'startup memory budget overrun total_estimated_tokens=' "budget overrun was not reported"
+  assert_contains "$out" 'run the stow pass: startup memory budget overrun total_estimated_tokens=' "budget overrun was not reported"
   assert_not_contains "$out" 'tracked startup surface growth' "initial tracked growth should not be inferred without a baseline"
   assert_not_contains "$out" 'bin/fm-bootstrap.sh' "initial tracked bytes were incorrectly counted as prompt-memory overrun evidence"
-  result=$(run_check "$root" "$home" 87401)
+  add_bytes "$home/data/captain.md" 900
+  result=$(run_check "$root" "$home" 87400)
   [ "$(status_part "$result")" = 0 ] || fail "repeated overrun check failed: $(output_part "$result")"
   out=$(output_part "$result")
-  [ -z "$out" ] || fail "standing budget overrun was reported again instead of deduplicated: $out"
+  assert_contains "$out" 'memory growth data/captain.md' "independent growth finding was suppressed"
+  assert_not_contains "$out" 'run the stow pass' "a changed total bypassed the weekly cooldown"
+  result=$(run_check "$root" "$home" 605800)
+  [ "$(status_part "$result")" = 0 ] || fail "next weekly check failed: $(output_part "$result")"
+  assert_contains "$(output_part "$result")" 'run the stow pass' "an unresolved overrun did not wake again after seven days"
+  result=$(run_check "$root" "$home" 692200)
+  [ "$(status_part "$result")" = 0 ] || fail "post-reminder check failed: $(output_part "$result")"
+  [ -z "$(output_part "$result")" ] || fail "standing overrun woke again within a week"
+}
+
+test_shadow_records_without_consuming_the_live_reminder() {
+  local rec root home result mode now
+  rec=$(make_world shadow)
+  root=${rec%%|*}
+  home=${rec#*|}
+  printf '5\n' > "$home/config/startup-memory-budget"
+  now=1000
+  for mode in absent shadow unexpected; do
+    if [ "$mode" != absent ]; then
+      printf '%s\n' "$mode" > "$home/config/record-sweep"
+    fi
+    result=$(run_check "$root" "$home" "$now")
+    [ "$(status_part "$result")" = 0 ] || fail "shadow check failed: $(output_part "$result")"
+    [ -z "$(output_part "$result")" ] || fail "mode $mode woke the watcher"
+    assert_grep $'stow_reminder\t-\t'"$now" "$home/state/.startup-growth-check" "mode $mode did not record the candidate"
+    now=$((now + 604800))
+  done
+  printf 'on\n' > "$home/config/record-sweep"
+  result=$(run_check "$root" "$home" "$((now - 604800 + 86400))")
+  [ "$(status_part "$result")" = 0 ] || fail "promotion failed: $(output_part "$result")"
+  assert_contains "$(output_part "$result")" 'run the stow pass' "shadow blocked the first live wake"
 }
 
 test_secondmate_is_not_woken_about_the_primary_owned_shared_overrun() {
@@ -244,6 +276,7 @@ test_secondmate_is_not_woken_about_the_primary_owned_shared_overrun() {
   root=${rec%%|*}
   home=${rec#*|}
   printf '10\n' > "$home/config/startup-memory-budget"
+  printf 'on\n' > "$home/config/record-sweep"
   add_bytes "$home/data/captain-shared.md" 900
   : > "$home/.fm-secondmate-home"
   result=$(run_check "$root" "$home" 1000)
@@ -406,11 +439,11 @@ test_findings_are_delivered_even_when_the_record_cannot_be_published() {
   rec=$(make_world unpublishable)
   root=${rec%%|*}
   home=${rec#*|}
-  printf '5\n' > "$home/config/startup-memory-budget"
+  rm -f "$root/AGENTS.md"
   ln -s /no/such/place "$home/state/.startup-growth-check"
   out=$(FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STARTUP_GROWTH_NOW=1000 "$CHECK" check 2>/dev/null) || status=$?
   [ "$status" != 0 ] || fail "an unpublishable report record should surface as a failure"
-  assert_contains "$out" 'startup memory budget overrun' "the finding was dropped because the record could not be published"
+  assert_contains "$out" 'missing tracked AGENTS.md' "the finding was dropped because the record could not be published"
   leftover=$(cd "$home/state" && ls -1 .startup-growth-check.?????? 2>/dev/null || true)
   [ -z "$leftover" ] || fail "a failed evaluation leaked its temporary record: $leftover"
 }
@@ -435,7 +468,7 @@ make_isolated_bin() {  # <name> <register-exit-code>
 }
 
 test_rearming_an_unchanged_binding_does_not_replace_the_shim() {
-  local rec root home bin before after out
+  local rec root home bin before after trust out
   rec=$(make_world rearm-noop)
   root=${rec%%|*}
   home=${rec#*|}
@@ -443,10 +476,13 @@ test_rearming_an_unchanged_binding_does_not_replace_the_shim() {
   FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$bin/fm-startup-growth-check.sh" arm >/dev/null \
     || fail "first arm failed"
   before=$(fm_pr_file_inode "$home/state/startup-growth.check.sh")
+  trust=$(fm_pr_file_inode "$home/state/startup-growth.check-trust")
   out=$(FM_ROOT_OVERRIDE="$root" FM_HOME="$home" "$bin/fm-startup-growth-check.sh" arm 2>&1) \
     || fail "re-arm of an unchanged binding failed: $out"
   after=$(fm_pr_file_inode "$home/state/startup-growth.check.sh")
   assert_equals "$before" "$after" "re-arming replaced a shim whose bytes were already correct"
+  assert_equals "$trust" "$(fm_pr_file_inode "$home/state/startup-growth.check-trust")" \
+    "re-arming replaced an already valid trust binding"
   out=$(env -u FM_HOME FM_ROOT_OVERRIDE="$root" FM_STARTUP_GROWTH_NOW=1000 \
     "$home/state/startup-growth.check.sh" 2>&1) || fail "the re-armed shim no longer runs: $out"
   assert_present "$home/state/.startup-growth-check" "the re-armed shim did not run the daily check"
@@ -612,6 +648,7 @@ test_first_content_of_an_optional_file_is_baselined_silently
 test_established_baseline_survives_disappearance_and_restoration
 test_secondmate_is_not_notified_about_primary_owned_shared_growth
 test_budget_overrun_reports_and_separates_prompt_cost
+test_shadow_records_without_consuming_the_live_reminder
 test_secondmate_is_not_woken_about_the_primary_owned_shared_overrun
 test_metadata_read_failure_keeps_the_retained_baseline
 test_due_unsafe_inputs_are_reported_but_absent_optional_memory_is_not

@@ -1328,8 +1328,8 @@ test_pr_health_monitor_arms_only_with_its_flag() {
       [ -f "$case_dir/home/state/pr-health.check.sh" ] && [ -f "$case_dir/home/state/pr-health.check-trust" ] \
         || fail "bootstrap did not register the PR health monitor: $(ls -A "$case_dir/home/state")"
     else
-      [ -z "$(ls -A "$case_dir/home/state")" ] \
-        || fail "bootstrap without the PR health flag left state: $(ls -A "$case_dir/home/state")"
+      assert_absent "$case_dir/home/state/pr-health.check.sh" "bootstrap armed PR health without its flag"
+      assert_absent "$case_dir/home/state/pr-health.check-trust" "bootstrap registered PR health without its flag"
     fi
   done
   pass "bootstrap arms the PR health monitor only when config/pr-health-monitor exists"

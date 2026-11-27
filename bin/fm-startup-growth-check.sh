@@ -37,7 +37,10 @@
 # accepted growth then stays silent.  The thresholds are fixed:
 #   2048 bytes for tracked startup/instruction files
 #   250 estimated tokens, ceil(bytes / 3), for printed startup memory files
-# Budget overrun is always meaningful.
+# An actionable budget overrun gets a separate seven-day cooldown per home,
+# regardless of changing totals or unrelated growth findings. The default
+# (absent config/record-sweep) and `shadow` record when a wake would be due;
+# only `on` emits "run the stow pass". Shadow never consumes the live cooldown.
 #
 # A due evaluation also removes the empty temporary records a killed
 # evaluation can leave in state/: only files matching its own mint pattern
@@ -73,7 +76,7 @@ BUDGET_BIN="$SCRIPT_DIR/fm-startup-memory-budget.sh"
 . "$SCRIPT_DIR/fm-check-lib.sh"
 
 usage() {
-  sed -n '2,48{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,/^set -u/{ /^set -u/d; s/^# \{0,1\}//; p; }' "$0"
 }
 
 fail() {
@@ -89,6 +92,7 @@ now_epoch() {
 }
 
 INTERVAL=86400
+STOW_INTERVAL=$((7 * INTERVAL))
 BYTE_THRESHOLD=2048
 TOKEN_THRESHOLD=250
 MAX_LINE=1000
@@ -266,11 +270,38 @@ evaluate_budget() {
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' memory_budget "$budget" "$total" "$status" "$exception" >> "$NEW_RECORD" || exit 1
   [ "$status" = over-budget ] && [ -z "$exception" ] || return 0
-  append_finding "startup memory budget overrun total_estimated_tokens=$total budget=$budget owner=bin/fm-startup-memory-budget.sh"
+  STOW_OVERRUN="startup memory budget overrun total_estimated_tokens=$total budget=$budget"
+}
+
+stow_due() {  # <now> <last>
+  local now=$1 last=$2
+  case "$last" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$((10#$now - 10#$last))" -ge "$STOW_INTERVAL" ]
+}
+
+record_stow_reminder() {  # <now>
+  local now=$1 live shadow mode=shadow switch="$CONFIG_DIR/record-sweep"
+  IFS=$'\t' read -r live shadow < <(awk -F '\t' '
+    $1 == "stow_reminder" { print $2 "\t" $3; exit }
+  ' "$OLD_RECORD") || true
+  if [ -n "$STOW_OVERRUN" ]; then
+    if [ -f "$switch" ] && [ ! -L "$switch" ]; then
+      mode=$(<"$switch")
+    fi
+    if [ "$mode" = on ]; then
+      if stow_due "$now" "$live"; then
+        live=$now
+        STOW_WAKE="run the stow pass: $STOW_OVERRUN"
+      fi
+    elif stow_due "$now" "$shadow"; then
+      shadow=$now
+    fi
+  fi
+  printf '%s\t%s\t%s\n' stow_reminder "${live:--}" "${shadow:--}" >> "$NEW_RECORD" || exit 1
 }
 
 run_check() {
-  local now reported_previous
+  local now reported_previous wake=
   if ! now=$(check_due); then
     return 0
   fi
@@ -297,13 +328,22 @@ run_check() {
   stat_surface memory data/captain-shared.md "$DATA_DIR/captain-shared.md" yes
   stat_surface memory data/learnings.md "$DATA_DIR/learnings.md" yes
 
+  STOW_OVERRUN=
+  STOW_WAKE=
   evaluate_budget
+  record_stow_reminder "$now"
 
   if [ -n "$FINDINGS" ]; then
     if [ "$FINDINGS" != "$reported_previous" ]; then
-      fm_cap_line "startup-growth: $FINDINGS" "$MAX_LINE"
+      wake=$FINDINGS
     fi
     printf '%s\t%s\n' reported "$FINDINGS" >> "$NEW_RECORD" || exit 1
+  fi
+  if [ -n "$STOW_WAKE" ]; then
+    wake="$STOW_WAKE${wake:+; $wake}"
+  fi
+  if [ -n "$wake" ]; then
+    fm_cap_line "startup-growth: $wake" "$MAX_LINE"
   fi
   write_record_atomically "$NEW_RECORD" "$RECORD" || fail "could not publish report record"
   NEW_RECORD=
@@ -376,6 +416,11 @@ arm() {
     '#!/usr/bin/env bash' \
     "export FM_HOME=$(printf '%q' "$home")" \
     "exec $(printf '%q' "$SCRIPT_DIR/fm-startup-growth-check.sh") check")
+  if fm_custom_check_registered "$STATE" "$CHECK_ID" \
+    && [ "$(cat "$CHECK_SHIM" 2>/dev/null)" = "$want" ]; then
+    printf 'armed: state/%s.check.sh\n' "$CHECK_ID"
+    return 0
+  fi
   ARM_BACKUP=
   if [ -f "$CHECK_SHIM" ] && [ ! -L "$CHECK_SHIM" ]; then
     ARM_BACKUP=$(shim_backup "$state_device") || fail "could not save the existing check shim"

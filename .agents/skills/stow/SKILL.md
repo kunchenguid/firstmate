@@ -2,7 +2,7 @@
 name: stow
 description: >-
   Sweep the session for uncaptured durable knowledge and unfiled or wrong open work records, and curate startup memory.
-  Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), before a session reset or context compaction, or periodically to keep operational memory current.
+  Use when the captain invokes /stow (e.g. "/stow", "stow what you've learned"), on a startup-growth "run the stow pass" wake, before a session reset or context compaction, or periodically to keep operational memory current.
 user-invocable: true
 metadata:
   internal: true
@@ -26,7 +26,7 @@ Every `/stow` performs the whole sequence: the required startup-memory pass, the
 | Read | When |
 | --- | --- |
 | `references/memory-tiers.md` ("Memory tiers and entry markers", "Optional pass horizon") | reading, writing, or judging any memory marker, tier, or clock |
-| `references/startup-memory-pass.md` ("Required startup-memory pass", "The cold tier", "One-time migration of unmarked entries") | running the required pass on every `/stow`, archiving an entry, or meeting an unmarked legacy entry |
+| `references/startup-memory-pass.md` ("Required startup-memory pass", "The cold tier", "One-time migration of unmarked entries") | running the required pass, including the active Claude auto-memory index, archiving an entry, or meeting an unmarked legacy entry |
 | `references/offload.md` ("Over-budget offload to JIT-loaded owners", "Destinations", "Flow") | the pass is still over budget after decay and consolidation, or a pinned offload is proposed or approved |
 | `references/knowledge-sweep.md` ("Knowledge sweep and routing", "Open-record persistence") | sweeping the session for findings and open work records |
 | `references/receipt-and-cascade.md` ("Completion receipt", "Automatic cascade to secondmates") | writing the receipt, or cascading from a primary home to its secondmates |

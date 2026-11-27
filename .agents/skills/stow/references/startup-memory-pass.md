@@ -6,15 +6,21 @@ Reference of the `stow` skill, loaded on demand from its `SKILL.md` table; the a
 
 Every `/stow` invocation performs this complete pass, even when the session contains no new finding:
 
-1. Run `bin/fm-startup-memory-budget.sh report` before considering a write.
-   Record its effective budget and each file's estimated-token total.
-   The budget is per home: this home's three files against this home's own allowance, never a fleet total.
+1. Identify the active Claude account's auto-memory index for this session's project: `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<slug>/memory/MEMORY.md`, where `<slug>` is Claude's project key for the session's project root.
+   Use the active harness's project path, not an arbitrary checkout, a guessed account, or an index from another home.
+   Run `bin/fm-startup-memory-budget.sh report --claude-index "$index"` before considering a write when that index is in scope, including when its exact path is known but the file is absent.
+   If the active harness has no Claude auto-memory, run `report` without the flag and note that the fourth input does not apply.
+   If an applicable index cannot be located or read, name the accounting exception and do not claim reset-safe.
+   Record the effective budget and each input's estimated-token total.
+   All inputs count against the same per-home allowance, never a fleet total.
    The helper's stable estimate is the documented conservative local approximation, not provider-exact accounting.
    If it rejects the setting or a memory file, do not infer a default or silently continue.
    Report that concrete exception and do not call the session reset-safe.
 2. Read every current memory file completely: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`.
-   Treat an absent local file as absent, not as an invitation to manufacture content.
-   Note any `Memory layering` declaration in them (schema: `docs/configuration.md`) and which declared tiers this session can reach; every later step consults it.
+   Read the applicable Claude `MEMORY.md` completely as the fourth input, but do not recursively load the topics it links to or edit anything in the harness store.
+   Treat an absent input as absent, not as an invitation to manufacture content.
+   Check the index for duplicates, stale pointers, and current unique facts; route current facts through the normal ownership rules, and report any needed index cleanup to the harness-store owner without claiming that routing reduced the index's measured size.
+   Note any `Memory layering` declaration in the Firstmate files (schema: `docs/configuration.md`) and which declared tiers this session can reach; every later step consults it.
    When neither `data/captain.md` nor `data/captain-shared.md` holds one, treat the local files as the only owners.
    In a primary home, all three are curation inputs under their existing ownership rules.
    In a secondmate home, `data/captain-shared.md` is a read-only primary-owned input: count it, never edit it, and curate only the editable local files.
@@ -48,7 +54,7 @@ Every `/stow` invocation performs this complete pass, even when the session cont
    Convergence precondition: before evicting anything, total the eligible pool and check that archiving all of it would reach the budget; when even that cannot, skip the eviction rung entirely, archive nothing for budget reasons, and carry the concrete inability to the final step, naming the exempt pinned and pending-capture floor that crowds out the budget.
    Automatic processes never move a `pinned` entry: decay clocks, legacy grace cycles, oldest-first budget eviction, immediate budget archiving, and autonomous offload do not apply to it.
    The sole exception is relocation to a JIT owner after explicit, per-item captain approval under the offload flow below, and that entry remains in memory until its destination is live.
-8. Run `bin/fm-startup-memory-budget.sh report` again after the complete pass.
+8. Run the same budget report from step 1 again after the complete pass, including the same applicable index.
    Finish at or below the effective budget, or open a concrete captain decision before ending the pass.
    A secondmate must explicitly report `primary-owned-shared-file-alone-exceeds-budget` when the inherited shared file alone exceeds its allowance, because local curation cannot resolve it.
    Route that constraint to the primary owner and open one concrete captain decision at the primary owning level that names the shortfall, with exactly these options: raise the affected home's effective budget, or explicitly approve the primary owner trimming or offloading each named shared-file entry.
