@@ -657,7 +657,7 @@ inbox_steer_note_ring_failure() {  # <task> <record-path> <ring-result>
   fi
   [ "$(cat "$marker" 2>/dev/null || true)" != "$base $result" ] || return 0
   case "$result" in
-    1) detail='the composer holds unsent text and the pane is not generating, so the doorbell was not typed' ;;
+    1) detail='the composer holds text that is not this doorbell, so the doorbell was not typed over it' ;;
     2) detail='the backend did not confirm the doorbell' ;;
     *) return 0 ;;
   esac
@@ -675,9 +675,11 @@ inbox_steer_note_ring_failure() {  # <task> <record-path> <ring-result>
 # bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
 # Endpoint and busy checks precede delivery so recovery never types into a dead
 # or missing worker; the ring helper protects pending composer text.
-# A pane inside an active generation is WORKING, not stuck: its doorbell queues
-# behind the turn the worker is already running, so the message rings now and
-# the busy-deferral budget is not spent on an agent that is simply generating.
+# A pane inside an active generation is WORKING, not stuck: its doorbell is
+# attempted now rather than deferred by the busy guard, and the busy-deferral
+# budget is not spent on an agent that is simply generating. Being busy is not a
+# licence to type, though - the ring still refuses a composer holding text that
+# is not its own doorbell line, and records that skip.
 # Only a turn that has outlived BUSY_TURN_MAX_SECS - busy proof with nothing to
 # show for it - spends that budget and can surface as stuck-busy.
 # Normal retries keep the watcher blocking rather than waking firstmate.
@@ -716,11 +718,12 @@ inbox_steer_check() {  # <window> <task>
   verdict=$(inbox_steer_verdict "$w" "$tail40")
   if inbox_steer_busy "$verdict"; then
     # An agent that is GENERATING is working, not stuck. A proven turn in flight
-    # that has not outlived BUSY_TURN_MAX_SECS has something to show for its
-    # busy verdict, so the doorbell queues behind that turn on this cycle: the
-    # message rings - retry mark included - and the busy-deferral budget is
-    # reserved for a pane whose busy proof has run past its bound with nothing
-    # completed, which is the stuck-busy case that budget exists for.
+    # that has not outlived BUSY_TURN_MAX_SECS has something to show for its busy
+    # verdict, so the doorbell is attempted on this cycle - retry mark included -
+    # and the busy-deferral budget is reserved for a pane whose busy proof has run
+    # past its bound with nothing completed, which is the stuck-busy case that
+    # budget exists for. Attempting is not typing: the ring itself still refuses a
+    # composer holding text that is not ours, busy or not.
     if [ "$(fm_busy_working_class "$verdict")" = working ] \
       && ! busy_turn_over_age "$task"; then
       if [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
@@ -747,7 +750,7 @@ inbox_steer_check() {  # <window> <task>
     ring)
       ring_rc=0
       FM_COMPOSER_HARNESS=$(window_harness "$w") \
-        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$verdict" || ring_rc=$?
+        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
@@ -773,7 +776,7 @@ inbox_steer_check() {  # <window> <task>
     retry)
       ring_rc=0
       FM_COMPOSER_HARNESS=$(window_harness "$w") \
-        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$verdict" || ring_rc=$?
+        fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
       inbox_steer_note_ring_failure "$task" "$rec" "$ring_rc" || true
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"

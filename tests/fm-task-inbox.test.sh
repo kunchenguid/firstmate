@@ -20,7 +20,9 @@
 #      acknowledgement resets the ladder for the next message.
 #   5. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
 #      aged message on an idle pane WITHOUT waking firstmate, waits on a busy
-#      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
+#      pane, never types over composer text that is not its own doorbell line
+#      even on a generating pane (and records that skip in the task status),
+#      stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, and emits exactly
 #      one stale wake once the ring budget is spent.
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
@@ -410,45 +412,51 @@ test_ring_submits_its_own_stuck_doorbell() {
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
-# A composer that holds text BECAUSE THE PANE IS GENERATING is busy-working, not
-# an idle draft: the doorbell queues behind the active turn instead of being
-# skipped. The idle-draft refusal above is unchanged, and that is the guard that
-# must never be weakened - only the classification of the text changes.
-test_ring_queues_behind_active_generation() {
-  local dir state rec doorbell log composer rc verdict
-  dir="$TMP_ROOT/ring-generating"
+# The invariant restored after the maintainer's P1 finding: the ring types over
+# composer text that is NOT its own doorbell line in no state at all. One
+# condition, read from the composer content alone, decides it - turn state is not
+# consulted, because text sitting in a composer belongs to whoever typed it (the
+# captain, or the worker queueing its own follow-up), never to the running turn,
+# and an Enter over it submits their draft with our constant line appended.
+test_ring_never_types_over_foreign_composer_text() {
+  local dir state rec doorbell log composer rc text
+  dir="$TMP_ROOT/ring-foreign"
   state="$dir/state"
   mkdir -p "$state"
   make_composer_stub "$dir"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
   log="$dir/send.log"; composer="$dir/composer"
-  ring() {  # <busy-verdict>
+  ring() {
     PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
       FM_FAKE_DROP_ENTERS="$dir/drops" \
-      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 "$1"
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
   }
 
-  # Generating: the pending text is the turn's own, so Enter queues the constant
-  # doorbell behind it and the message is not left un-rung.
-  : > "$log"; printf '%s' 'a long answer still streaming' > "$composer"
-  rc=0; ring 'busy claude-hook' || rc=$?
-  [ "$rc" = 0 ] || fail "a composer holding the active generation's text should queue the doorbell, got rc $rc"
-  grep -qF 'SUBMIT: a long answer still streaming' "$log" \
-    || fail "the doorbell was not queued behind the active generation:"$'\n'"$(cat "$log")"
-  grep -qF "$doorbell" "$log" \
-    || fail "the queued submit did not carry the doorbell line:"$'\n'"$(cat "$log")"
-  [ ! -s "$composer" ] || fail "the queued doorbell was left unsubmitted in the composer"
-
-  # The same text with no turn in flight is an idle draft: refusing is right.
-  for verdict in 'idle claude-hook' 'unknown missing' ''; do
-    : > "$log"; printf '%s' 'a human half-typed line' > "$composer"
-    rc=0; ring "$verdict" || rc=$?
-    [ "$rc" = 1 ] || fail "idle pending text must still skip the ring (verdict '$verdict'), got rc $rc"
-    [ ! -s "$log" ] || fail "idle pending text was submitted with verdict '$verdict':"$'\n'"$(cat "$log")"
-    [ "$(cat "$composer")" = 'a human half-typed line' ] || fail "idle pending text was changed with verdict '$verdict'"
+  # Foreign text: nothing typed, nothing submitted, the text left as it was.
+  for text in 'a half-typed draft' 'a long answer still streaming' \
+    "some other line and $doorbell"; do
+    : > "$log"; printf '%s' "$text" > "$composer"
+    rc=0; ring || rc=$?
+    [ "$rc" = 1 ] || fail "foreign composer text must skip the ring, got rc $rc for: $text"
+    [ ! -s "$log" ] || fail "foreign composer text was submitted:"$'\n'"$(cat "$log")"
+    [ "$(cat "$composer")" = "$text" ] || fail "foreign composer text was typed over: $(cat "$composer")"
   done
-  pass "inbox: a composer holding text inside an active generation queues the doorbell, while an idle draft still refuses"
+
+  # Our own line is ours to submit, so a stuck doorbell still rings.
+  : > "$log"; printf '%s' "$doorbell" > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "our own stuck doorbell should still be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "our own stuck doorbell was not submitted exactly once:"$'\n'"$(cat "$log")"
+
+  # An empty composer takes the doorbell normally.
+  : > "$log"; : > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "an empty composer should ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "an empty composer did not receive the doorbell:"$'\n'"$(cat "$log")"
+  pass "inbox: the ring never types over composer text that is not its own doorbell, and still rings an empty composer or its own stuck line"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -953,9 +961,11 @@ busy_case() {
 }
 
 # One episode, one delivery: a pane that is GENERATING is working, not stuck.
-# Its doorbell queues behind the turn on this very cycle and the busy-deferral
-# budget is never touched, so a worker writing a long answer neither loses its
-# message nor escalates as stuck-busy.
+# Its doorbell is attempted on this very cycle and the busy-deferral budget is
+# never touched, so a worker writing a long answer neither loses its message nor
+# escalates as stuck-busy. Attempting is not typing: a composer holding text that
+# is not our own doorbell line is still refused (see
+# test_watcher_never_types_over_foreign_text_while_generating).
 test_watcher_generating_pane_rings() {
   local dir wakes
   dir=$(busy_case generating)   # busy capture, but a FRESH spawn record: inside the turn bound
@@ -1003,6 +1013,57 @@ test_watcher_ring_failure_is_visible_in_status() {
   [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 2 ] \
     || fail "the retry ladder did not advance after the failures"
   pass "watcher: a doorbell that cannot be typed is recorded in the task status, once per failure"
+}
+
+# The maintainer's P1 finding, end to end: a pane in the middle of a generation
+# whose composer holds text that is not our doorbell line is never typed into.
+# A busy pane does not make that text the turn's own - it belongs to whoever
+# typed it, the captain or the worker queueing a follow-up - so the ring skips
+# it, the skip is recorded in the task status with its reason, and the
+# instruction stays durable. The same generating pane with an empty composer
+# still rings, which is the other half of the invariant.
+test_watcher_never_types_over_foreign_text_while_generating() {
+  local dir statusf rec gen
+  dir=$(busy_case generating-foreign)
+  # A semantic busy record for a claude worker: proof of a turn in flight, with
+  # a spawn record still inside the turn bound.
+  gen=bb1
+  printf '%s\n' "$gen" > "$dir/state/t1.busy-gen"
+  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  printf 'v1 gen=%s seq=1 state=busy source=claude-hook event=UserPromptSubmit ts=%s\n' \
+    "$gen" "$(date +%s)" > "$dir/state/t1.busy-state"
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+
+  # The captain's (or the worker's own queued) draft sitting in the composer.
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  busy_steer_check "$dir" "$dir/draft.capture"
+  [ ! -s "$dir/send.log" ] \
+    || fail "a generating pane's foreign composer text was typed over:"$'\n'"$(cat "$dir/send.log")"
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "the skip over foreign composer text was not recorded in the task status:"$'\n'"$(cat "$statusf")"
+  grep -qF 'not this doorbell' "$statusf" \
+    || fail "the recorded skip did not say why the doorbell was not typed:"$'\n'"$(cat "$statusf")"
+  rec="$dir/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "a skipped doorbell stopped being durable"
+  [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 1 ] \
+    || fail "the skip did not advance the retry ladder"
+  [ ! -s "$dir/state/.wake-queue" ] \
+    || fail "a generating pane with foreign composer text was escalated:"$'\n'"$(cat "$dir/state/.wake-queue")"
+
+  # The same generating pane, composer empty: the doorbell rings.
+  printf '╭──────────────────╮\n│                  │\n╰──────────────────╯\n' > "$dir/empty.capture"
+  : > "$dir/send.log"
+  busy_steer_check "$dir" "$dir/empty.capture"
+  grep -qF 'Firstmate instruction waiting' "$dir/send.log" \
+    || fail "an empty composer on a generating pane did not ring the doorbell:"$'\n'"$(cat "$dir/send.log")"
+  pass "watcher: foreign composer text is never typed over on a generating pane and the skip is recorded, while an empty composer still rings"
 }
 
 test_watcher_waits_on_busy_pane() {
@@ -1490,10 +1551,11 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
-test_ring_queues_behind_active_generation
+test_ring_never_types_over_foreign_composer_text
 test_watcher_rerings_idle_pane_quietly
 test_watcher_generating_pane_rings
 test_watcher_ring_failure_is_visible_in_status
+test_watcher_never_types_over_foreign_text_while_generating
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces
