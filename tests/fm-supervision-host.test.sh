@@ -984,8 +984,9 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
 
 # Manual mode, set by no CI lane: on a machine with stock Bash 3.2, run
 #   FM_TEST_STOCK_BASH=1 /bin/bash tests/fm-supervision-host.test.sh
-# to run just the await_close cases. The rest of this file is not a Bash 3.2
-# suite.
+# to run just the await_close cases. The host starts through env, so the first
+# bash on PATH must be 3.2 too: the first pass line names the version that
+# ran. The rest of this file is not a Bash 3.2 suite.
 if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
   fm_test_run \
     test_parked_host_starts_no_process_once_its_arm_reported \
