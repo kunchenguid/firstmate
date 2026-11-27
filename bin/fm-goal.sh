@@ -229,7 +229,7 @@
 # goal records for secondmates, and refuses remote or unreadable routes.
 #
 # `ready` checks every drive item in scope, even when drive is OFF. It checks
-# the owner's written brief for unresolved tokens, or uses the same main-home
+# the owner's written brief for unresolved tokens, or uses the same owner-local
 # source lint as the drafter (fm-goal-brief-lib.sh); it never writes a draft.
 # A path-safe brief-source names an alternate task directory in that same
 # home, not a launch task binding.
@@ -1483,25 +1483,24 @@ _fm_goal_item_target_reached() {  # <idx>
   [ "$cur" -ge "$want" ]
 }
 
-# Item task home, or empty for the calling home. Owners not named in the
-# registry retain local lookup; an unobservable route fails closed.
-_fm_goal_item_task_home() {  # <idx> <data-dir>
-  local owner=${FM_GOAL_ITEMS_OWNERS[$1]} data=$2 registry="$2/secondmates.md" home
-  [ "$owner" != main ] && [ "$(fm_parent_channel_home_id "$FM_GOAL_HOME")" != "$owner" ] || return 0
-  [ ! -L "$data" ] && [ ! -L "$registry" ] || return 1
-  [ -e "$registry" ] || return 0
-  [ -f "$registry" ] && [ -r "$registry" ] || return 1
-  if ! secondmate_registry_line_for_id "$registry" "$owner"; then
-    # An invalid or duplicate row is not permission to use a local namesake.
-    awk -v prefix="- $owner" '$0 == prefix || index($0, prefix " ") == 1 { exit 1 }' "$registry"
-    return $?
-  fi
+# An unobservable owner route is not permission to read a local namesake.
+_fm_goal_registered_owner_home() {  # <owner> <registry-data-dir>
+  local owner=$1 data=$2 registry="$2/secondmates.md" home
+  [ ! -L "$data" ] && [ ! -L "$registry" ] && [ -f "$registry" ] && [ -r "$registry" ] || return 1
+  secondmate_registry_line_for_id "$registry" "$owner" || return 1
   [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || return 1
   home=${SECONDMATE_REGISTRY_HOME%/}
   case "$home/" in */../*|*/./*) return 1 ;; esac
   case "$home" in /*) ;; *) return 1 ;; esac
   [ ! -L "$home" ] && [ "$(fm_parent_channel_home_id "$home")" = "$owner" ] || return 1
   printf '%s\n' "$home"
+}
+
+# Item task home, or empty for the calling home.
+_fm_goal_item_task_home() {  # <idx> <data-dir>
+  local owner=${FM_GOAL_ITEMS_OWNERS[$1]}
+  [ "$owner" != main ] && [ "$(fm_parent_channel_home_id "$FM_GOAL_HOME")" != "$owner" ] || return 0
+  _fm_goal_registered_owner_home "$owner" "$2"
 }
 
 # Print one fix, or nothing when the brief is ready. Never render brief contents.
@@ -1528,7 +1527,13 @@ _fm_goal_brief_fix() {  # <idx> <registry-data>
     printf 'replace the symlink with a regular task directory and brief at %s\n' "$path"
     return
   fi
-  if [ ! -e "$path" ] && [ "$owner" = main ] && [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] &&
+  if [ -n "$home" ]; then
+    # Local callers retain their overrides; never inherit the caller's clone,
+    # backlog or addenda when projecting the registered mate's readiness.
+    local FM_GOAL_HOME="$home" FM_GOAL_DATA="$data" FM_GOAL_STATE="$home/state"
+    local FM_GOAL_CONFIG="$home/config" FM_PROJECTS_OVERRIDE="$home/projects"
+  fi
+  if [ ! -e "$path" ] && [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}" ] &&
      [ -z "${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]}" ]; then
     if ! fix=$(_fm_goal_draft_render "$i"); then printf '%s\n' "$fix"; fi
     return
@@ -3023,12 +3028,28 @@ _fm_goal_read_view() {
   local rc=0
   FM_GOAL_VIEW_STATE=$FM_GOAL_STATE FM_GOAL_VIEW_DATA=$FM_GOAL_DATA FM_GOAL_VIEW_OWNER=''
   fm_parent_channel_destination "$FM_GOAL_HOME" "$FM_GOAL_STATE" >/dev/null 2>&1 || rc=$?
-  [ "$rc" -ne 1 ] || return 0
+  if [ "$rc" -eq 1 ]; then
+    [ ! -e "$FM_GOAL_HOME/.fm-secondmate-parent" ] && [ ! -L "$FM_GOAL_HOME/.fm-secondmate-parent" ]
+    return $?
+  fi
   [ "$rc" -eq 0 ] && [ "$FM_PARENT_CHANNEL_ROUTE" = local ] || return 1
   FM_GOAL_VIEW_STATE="$FM_SECONDMATE_PARENT_HOME/state"
   FM_GOAL_VIEW_DATA="$FM_SECONDMATE_PARENT_HOME/data"
   FM_GOAL_VIEW_OWNER=$FM_PARENT_CHANNEL_ID
-  [ ! -L "$FM_SECONDMATE_PARENT_HOME" ] && [ ! -L "$FM_GOAL_VIEW_STATE" ] && [ ! -L "$FM_GOAL_VIEW_DATA" ]
+  [ ! -L "$FM_SECONDMATE_PARENT_HOME" ] &&
+    [ -d "$FM_GOAL_VIEW_STATE" ] && [ ! -L "$FM_GOAL_VIEW_STATE" ] && [ -r "$FM_GOAL_VIEW_STATE" ] && [ -x "$FM_GOAL_VIEW_STATE" ] &&
+    [ -d "$FM_GOAL_VIEW_DATA" ] && [ ! -L "$FM_GOAL_VIEW_DATA" ] && [ -r "$FM_GOAL_VIEW_DATA" ] && [ -x "$FM_GOAL_VIEW_DATA" ]
+}
+
+# Dispatch/readiness require a current owner registration in addition to the
+# mate's parent read route; a replaced home can still have its old identity file.
+_fm_goal_owner_read_view() {
+  local home
+  _fm_goal_read_view || return 1
+  [ -n "$FM_GOAL_VIEW_OWNER" ] || return 0
+  [ "$FM_GOAL_VIEW_OWNER" != main ] || return 1
+  home=$(_fm_goal_registered_owner_home "$FM_GOAL_VIEW_OWNER" "$FM_GOAL_VIEW_DATA") || return 1
+  [ "$home" -ef "$FM_GOAL_HOME" ]
 }
 
 cmd_ready() {
@@ -3036,7 +3057,7 @@ cmd_ready() {
   if [ "$#" -ne 1 ] || ! fm_goal_id_valid "$1"; then
     _fm_goal_usage_error 'ready needs a safe goal id'
   fi
-  _fm_goal_read_view || _fm_goal_die 1 'goal readiness not checked: parent home is not reachable'
+  _fm_goal_owner_read_view || _fm_goal_die 1 'goal readiness not checked: owner or parent home is not reachable'
   _fm_goal_open_record "$1" "$FM_GOAL_VIEW_STATE" || exit 1
   fm_goal_fold "$1" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA"
   _fm_goal_drive_readiness "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
@@ -3112,7 +3133,7 @@ cmd_launch_links() {
   local path id i task verdict now owner
   [ "$#" -le 1 ] || _fm_goal_usage_error 'launch-links takes at most one task id'
   [ "$#" -eq 0 ] || fm_goal_id_valid "$1" || _fm_goal_usage_error 'unsafe task id'
-  _fm_goal_read_view || return 1
+  _fm_goal_owner_read_view || return 1
   [ ! -L "$(fm_goal_dir "$FM_GOAL_VIEW_STATE")" ] || return 1
   owner=${FM_GOAL_VIEW_OWNER:-main}
   now=$(date +%s) || return 1

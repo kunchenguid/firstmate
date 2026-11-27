@@ -116,6 +116,9 @@ test_drive_readiness() {
   out=$(goal ready I2) || [ "$?" -eq 1 ] || fail 'readiness failed unexpectedly'
   assert_contains "$out" '1 of 2 items drive-ready' 'OFF goal still reports readiness and uses the folded task link'
   assert_not_contains "$out" 'build:' 'linked ready item has no gap'
+  : > "$registry"
+  expect_rc 1 goal ready I2
+  assert_contains "$(<"$TMP_ROOT/out")" 'mate: not checked: owner terp is unreachable' 'an absent owner registration never defaults to main'
   pass 'drive readiness checks briefs and owner routes, warns on writes, enforces strict preflight, and includes OFF goals'
 }
 
@@ -643,7 +646,8 @@ crew_state_stub() {  # <task>=<state> ... - stub fm-crew-state.sh verdicts for t
 }
 
 test_orphaned_running() {
-  fixture
+  fixture; local_mate
+  printf '%s\n' "- terp - Lab mate (home: $M; scope: test; projects: ; added 2026-11-27)" > "$H/data/secondmates.md"
   printf '%s\n' \
     'item [id=notask] [owner=terp]: running with no task' \
     'item [id=dead] [owner=terp] [task=deadchild]: running with a dead task' \
@@ -662,9 +666,9 @@ test_orphaned_running() {
     mark_line closed 'done' "$((now - 300))"
   } > "$H/state/goals/I1.marks"
   # a task the verdict is read through needs its meta record to exist
-  printf 'kind=ship\n' > "$H/state/deadchild.meta"
-  printf 'kind=ship\n' > "$H/state/livechild.meta"
-  printf 'kind=ship\n' > "$H/state/donechild.meta"
+  printf 'kind=ship\n' > "$M/state/deadchild.meta"
+  printf 'kind=ship\n' > "$M/state/livechild.meta"
+  printf 'kind=ship\n' > "$M/state/donechild.meta"
   out=$(project)
   assert_contains "$out" 'item notask owner=terp class=drive state=running' 'running with no task keeps its folded state'
   assert_contains "$out" 'task=- startable=yes (orphaned running, no live task) waiting_on=-' 'no task marks the item orphaned-running startable'

@@ -216,6 +216,7 @@ MATE="$TMP_ROOT/mate"
 mkdir -p "$MATE/state" "$MATE/config"
 printf 'miko\n' > "$MATE/.fm-secondmate-home"
 printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$HOME_DIR" > "$MATE/.fm-secondmate-parent"
+printf '%s\n' "- miko - Lab mate (home: $MATE; scope: test; projects: firstmate; added 2026-11-27)" > "$HOME_DIR/data/secondmates.md"
 printf 'enforce\n' > "$MATE/config/auto-dispatch"
 printf '%s\n' 't1,queued,ship,firstmate,Parent item' 'mate-job,queued,ship,firstmate,Mate item' > "$READY_LIST"
 MATE_ENV=(FM_HOME="$MATE" FM_CONFIG_OVERRIDE="$MATE/config" FM_STATE_OVERRIDE="$MATE/state")

@@ -14,7 +14,7 @@ export FM_GOAL_PUSH_CAPACITY="$T/capacity" FM_AUTODISPATCH_READY="$T/ready"
 export FM_AUTODISPATCH_DISPATCH="$T/dispatch" FM_ADMISSION_DISPATCH="$T/dispatch"
 export FM_ADMISSION_SPAWN="$T/spawn"
 unset FM_AUTODISPATCH_PROJECT_MODE
-export FM_CREW_STATE_BIN="$T/crew" QUEUE_CMD="$Q" LAB="$T"
+export FM_CREW_STATE_BIN="$T/crew" QUEUE_CMD="$Q" GOAL_CMD="$G" PUSH_CMD="$P" LAB="$T"
 
 # Every redirected target below is in a fresh private fixture directory.
 cat > "$T/capacity" <<'SH'
@@ -25,12 +25,17 @@ SH
 cat > "$T/ready" <<'SH'
 #!/usr/bin/env bash
 [ "$1" = ready ] || exit 2
-cat "$LAB/ready.csv"
+if [ -f "$FM_DATA_OVERRIDE/ready.csv" ]; then cat "$FM_DATA_OVERRIDE/ready.csv"; fi
 SH
 cat > "$T/dispatch" <<'SH'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$LAB/dispatch.log"
+if [ -f "$LAB/block-$2" ]; then
+  : > "$LAB/entered-$2"
+  for ((i=0; i<200; i++)); do [ ! -f "$LAB/allow-$2" ] || break; sleep .05; done
+  [ -f "$LAB/allow-$2" ] || exit 1
+fi
 if [ -f "$LAB/hold-$2" ]; then
   "$QUEUE_CMD" add "$2" --reason 'lab admission hold' -- "$2" "$3"
   exit 75
@@ -40,6 +45,17 @@ SH
 cat > "$T/spawn" <<'SH'
 #!/usr/bin/env bash
 set -eu
+if [ -f "$LAB/rebind-$1.items" ]; then
+  FM_HOME="$LAB/home" FM_DATA_OVERRIDE="$LAB/home/data" FM_STATE_OVERRIDE="$LAB/home/state" \
+    FM_CONFIG_OVERRIDE="$LAB/home/config" "$GOAL_CMD" edit rebind --items-file "$LAB/rebind-$1.items" >/dev/null
+  : > "$LAB/rebound-$1"
+elif [ -f "$LAB/move-$1.registry" ]; then
+  cp "$LAB/move-$1.registry" "$LAB/home/data/secondmates.md"
+  : > "$LAB/rebound-$1"
+fi
+mode=direct-PR yolo=off prefix=fm/
+if [ "$1" = replay ]; then mode=local-only yolo=on prefix=fix-; fi
+"$PUSH_CMD" eligible "$FM_GOAL_PUSH_BINDING" "$1" --launch "$2" "$mode" "$yolo" "$prefix" || exit 76
 printf '%s\n' "$*" >> "$LAB/spawn.log"
 printf 'kind=ship\n' > "$FM_STATE_OVERRIDE/$1.meta"
 SH
@@ -59,7 +75,7 @@ start() {
 brief() {
   mkdir -p "$H/data/$1"
   printf 'Delivery contract: mode=direct-PR\nShip branch: fm/%s\n' "$1" > "$H/data/$1/brief.md"
-  printf '%s,queued,ship,demo,Test brief\n' "$1" >> "$T/ready.csv"
+  printf '%s,queued,ship,demo,Test brief\n' "$1" >> "$H/data/ready.csv"
 }
 
 for id in one two three four captain blocked off held mate unrelated; do brief "$id"; done
@@ -157,11 +173,16 @@ printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$H" > "$
 printf 'mate1\n' > "$M/.fm-secondmate-home"
 printf 'enforce\n' > "$M/config/goal-push"
 printf 'Delivery contract: mode=direct-PR\nShip branch: fm/mate-task\n' > "$M/data/mate-task/brief.md"
-printf 'mate-task,queued,ship,demo,Local mate test\n' >> "$T/ready.csv"
-printf '%s\n' 'item [id=mate] [owner=mate1] [task=mate-task]: mate owns this' > "$T/mategoal.items"
+printf 'mate-task,queued,ship,demo,Local mate test\n' >> "$M/data/ready.csv"
+printf '%s\n' '- demo [direct-PR] - mate project' > "$M/data/projects.md"
+printf '%s\n' "- mate1 - Lab mate (home: $M; scope: test; projects: demo; added 2026-11-27)" > "$H/data/secondmates.md"
+printf '%s\n' 'item [id=mate] [owner=mate1] [task=mate-task] [project=demo]: mate owns this' > "$T/mategoal.items"
 start mategoal
-FM_HOME="$M" FM_STATE_OVERRIDE="$M/state" FM_CONFIG_OVERRIDE="$M/config" FM_DATA_OVERRIDE="$M/data" \
-  FM_PROJECTS_OVERRIDE="$M/projects" "$P" tick
+mate_run() {
+  FM_HOME="$M" FM_STATE_OVERRIDE="$M/state" FM_CONFIG_OVERRIDE="$M/config" FM_DATA_OVERRIDE="$M/data" \
+    FM_PROJECTS_OVERRIDE="$M/projects" "$P" "$@"
+}
+mate_run tick
 assert_grep "new mate-task $M/projects/demo --wait" "$T/dispatch.log" 'mate dispatch uses its own project clone'
 assert_grep '[goal=mategoal] [item=mate] [state=running]' "$H/state/mate1.status" 'mate marks the item via the parent channel'
 assert_absent "$M/state/goals/mategoal.marks" 'mate never creates a second goal record'
@@ -188,7 +209,11 @@ item() {
   item blank-evidence main ' [project=draftrepo]' "$scope Evidence: "
   item no-project main '' "$scope Evidence: $proof"
   item draft-captain main ' [project=draftrepo] [class=captain]' "$scope Evidence: $proof"
-  item draft-mate mate1 ' [project=draftrepo]' "$scope Evidence: $proof"
+  item draft-mate mate1 ' [project=draftrepo]' 'Exercise mate rendering'
+  printf 'spec draft-mate %s\n' "$(jq -cn --arg scope "$scope" --arg evidence "$proof" \
+    '{section:"Plan §3",scope:$scope,evidence:$evidence,kind:"ship"}')"
+  item thin-mate mate1 ' [project=draftrepo]' 'Thin spec'
+  printf '%s\n' 'spec thin-mate {"section":"Plan §3","scope":"Make better","evidence":"Check"}'
   item draft-bare main ' [project=bare]' "$scope Evidence: $proof"
   item wrong-project main ' [project=draftrepo]' "$scope Evidence: $proof"
   item captain-hold main ' [project=draftrepo]' "$scope Evidence: $proof"
@@ -206,7 +231,7 @@ printf '%s\n' 'draft-good,queued,ship,draftrepo,Good' 'draft-bare,queued,ship,ba
   'wrong-project,queued,ship,demo,Wrong project' 'captain-hold,blocked,ship,draftrepo,Not ready' \
   'addendum,queued,ship,route,Unfilled addendum' 'placeholder,queued,ship,draftrepo,Unfilled source' \
   'replay,queued,ship,draftrepo,Held then replayed' 'over-cap,queued,ship,draftrepo,Deferred' \
-  'cap-independent,queued,ship,draftrepo,Separate goal' >> "$T/ready.csv"
+  'cap-independent,queued,ship,draftrepo,Separate goal' >> "$H/data/ready.csv"
 assert_equals '1 of 1 items drive-ready' "$("$G" ready separate)" 'approved source is ready before its brief exists'
 assert_absent "$H/data/cap-independent/brief.md" 'ready never materializes a brief'
 ready_out=$("$G" ready draft) && fail 'invalid draft sources must not all be ready'
@@ -246,9 +271,27 @@ assert_grep 'cannot draft draft/addendum: fill {FILL:MIKO_ROUTE}' "$H/state/goal
 assert_grep 'cannot draft draft/captain-hold: make the unique ship row' "$H/state/goal-push.log" 'drafter respects the captain hold'
 assert_grep 'enforce defer draft draft/over-cap: per-goal cap reached' "$H/state/goal-push.log" 'cap defers overflow'
 assert_grep 'Drafted by goal pusher' "$H/data/cap-independent/brief.md" 'another goal has its own draft allowance'
-FM_HOME="$M" FM_STATE_OVERRIDE="$M/state" FM_CONFIG_OVERRIDE="$M/config" FM_DATA_OVERRIDE="$M/data" \
-  FM_PROJECTS_OVERRIDE="$M/projects" "$P" run
-assert_absent "$M/data/draft-mate/brief.md" 'mate never drafts an item inherited from the parent view'
+git init -q "$M/projects/draftrepo"
+printf '%s\n' '- draftrepo [local-only +yolo branch=mate-] - mate project' >> "$M/data/projects.md"
+# A ready parent row cannot substitute for the missing owner row.
+printf '%s\n' 'draft-mate,queued,ship,draftrepo,Parent namesake' >> "$H/data/ready.csv"
+mate_run run
+assert_absent "$M/data/draft-mate/brief.md" 'an owner cannot bind a parent ready row'
+printf '%s\n' 'draft-mate,queued,ship,draftrepo,Ready only in mate home' \
+  'thin-mate,queued,ship,draftrepo,Ready row but thin source' >> "$M/data/ready.csv"
+ready_out=$("$G" ready draft) && fail 'other deliberately invalid draft fixtures must still be held'
+assert_not_contains "$ready_out" 'draft-mate:' 'parent readiness validates the mate draft against the owner-local row'
+assert_absent "$M/data/draft-mate/brief.md" 'parent readiness never materializes the owner brief'
+mate_run run
+assert_grep 'Ship branch: mate-draft-mate' "$M/data/draft-mate/brief.md" 'mate drafts under its own project posture'
+assert_grep 'Approved plan section: Plan §3' "$M/data/draft-mate/brief.md" 'owner draft carries the approved section'
+assert_grep "Scope: $scope" "$M/data/draft-mate/brief.md" 'owner draft carries the approved scope, not just the item title'
+assert_grep "Evidence: $proof" "$M/data/draft-mate/brief.md" 'owner draft carries the approved evidence'
+assert_grep "new draft-mate $M/projects/draftrepo --wait --mode local-only --yolo on --branch-prefix mate-" \
+  "$T/dispatch.log" 'only the owner home launches its local draft'
+assert_absent "$H/data/draft-mate/brief.md" 'mate never materializes its task in the parent data'
+assert_absent "$M/data/thin-mate/brief.md" 'even with a ready owner row, thin structured instructions are refused'
+assert_absent "$M/state/thin-mate.meta" 'the thin owner spec did not launch'
 "$P" run
 assert_grep 'Drafted by goal pusher' "$H/data/over-cap/brief.md" 'next pass can draft a deferred item'
 pass 'goal fallback drafts viable items and routes them through the broker without widening scope or ownership'
@@ -264,11 +307,11 @@ assert_grep 'Approved plan section: Rendering validation' "$replay" 'inline spec
 assert_grep "Scope: $scope" "$replay" 'inline spec supplies scope despite a short title'
 cp "$replay" "$T/approved-brief"
 # The saved queue checks the new backlog and the bytes originally admitted.
-cp "$T/ready.csv" "$T/approved-rows"
-awk -F, '$1 != "replay"' "$T/approved-rows" > "$T/ready.csv"
+cp "$H/data/ready.csv" "$T/approved-rows"
+awk -F, '$1 != "replay"' "$T/approved-rows" > "$H/data/ready.csv"
 "$Q" retry --goal-task replay
 assert_absent "$H/state/replay.meta" 'ready row held after queuing cannot replay'
-cp "$T/approved-rows" "$T/ready.csv"
+cp "$T/approved-rows" "$H/data/ready.csv"
 printf '%s\n' 'Replacement written by hand, without any draft markers.' > "$replay"
 "$Q" retry --goal-task replay
 assert_absent "$H/state/replay.meta" 'removing provenance cannot unpin a held draft'
@@ -307,4 +350,61 @@ mv "$H/state/cockpit-truth.json" "$T/review-truth.json"
 "$P" tick
 assert_equals 2 "$(grep -c 'captain item NOT on cockpit: review/review' "$H/state/.wake-queue")" 'coverage disappearing starts one new episode'
 pass 'watcher reports each missing cockpit episode once, even in shadow mode'
+
+# Both homes can use the same key without sharing a brief, ready row or task
+# record. Hold the first local pass inside its broker to prove real overlap.
+printf 'enforce\n' > "$H/config/goal-push"
+"$G" pause draft >/dev/null
+"$G" pause separate >/dev/null
+brief mate-task
+printf '%s\n' 'item [id=local] [owner=main]: independent work' > "$T/local-task.items"
+start local-task
+"$G" mark local-task local open --task mate-task -- 'link main task' >/dev/null
+: > "$T/block-mate-task"
+"$P" run &
+first=$!
+for ((j=0; j<200; j++)); do [ ! -f "$T/entered-mate-task" ] || break; sleep .05; done
+assert_present "$T/entered-mate-task" 'first pass reached the launch broker'
+"$P" run
+: > "$T/allow-mate-task"
+wait "$first"
+assert_equals 1 "$(grep -Fc "new mate-task $H/projects/demo --wait" "$T/dispatch.log")" 'overlapping passes make one main start'
+assert_equals 1 "$(grep -Fc "new mate-task $M/projects/demo --wait" "$T/dispatch.log")" 'the same task key had one independent mate start'
+assert_present "$H/state/mate-task.meta" 'main has its own task record'
+assert_present "$M/state/mate-task.meta" 'mate has its own task record'
+pass 'concurrent owner-local passes start the same local key once, without cross-home collisions'
+
+mkdir -p "$M/data/rebound"
+printf 'Delivery contract: mode=direct-PR\nShip branch: fm/rebound\n' > "$M/data/rebound/brief.md"
+printf 'rebound,queued,ship,demo,Mate work\n' >> "$M/data/ready.csv"
+printf '%s\n' 'item [id=work] [owner=mate1] [task=rebound] [project=demo]: initially mate owned' > "$T/rebind.items"
+start rebind
+: > "$T/hold-rebound"
+mate_run run
+assert_present "$M/state/admission-queue/rebound.start" 'the owner queues its routed hold locally'
+assert_absent "$H/state/admission-queue/rebound.start" 'the parent has no replay for a local mate hold'
+printf '%s\n' 'item [id=work] [owner=main] [task=rebound] [project=demo]: now main owned' > "$T/rebind-rebound.items"
+mate_run run
+mate_run run
+assert_present "$T/rebound-rebound" 'the item owner changed after queue preflight'
+assert_absent "$M/state/rebound.meta" 'rebind after queue preflight stops the old owner at final admission'
+assert_not_contains "$(<"$T/spawn.log")" 'rebound' 'owner rebind during replay makes zero launches'
+
+mkdir -p "$M/data/moving" "$T/new-mate"
+printf 'mate1\n' > "$T/new-mate/.fm-secondmate-home"
+printf 'Delivery contract: mode=direct-PR\nShip branch: fm/moving\n' > "$M/data/moving/brief.md"
+printf 'moving,queued,ship,demo,Moving owner home\n' >> "$M/data/ready.csv"
+printf '%s\n' 'item [id=work] [owner=mate1] [task=moving] [project=demo]: moving owner home' > "$T/move.items"
+start move
+: > "$T/hold-moving"
+mate_run run
+assert_present "$M/state/admission-queue/moving.start" 'the old home has a valid queued start before rebind'
+printf '%s\n' "- mate1 - Lab mate (home: $T/new-mate; scope: test; projects: demo; added 2026-11-27)" > "$T/move-moving.registry"
+mate_run run
+assert_present "$T/rebound-moving" 'the registered home moved after queue preflight'
+assert_absent "$M/state/moving.meta" 'the old home identity cannot replay a start after a registry move'
+result=$(mate_run run 2>&1) && fail 'the old home must lose access to owner dispatch on rebind'
+assert_contains "$result" 'not checked' 'the stale home is reported as not checked, never main'
+pass 'owner changes and OFF gates both stop owner-local replay before launch'
+
 echo '# all fm-goal-push tests passed'

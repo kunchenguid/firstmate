@@ -19,14 +19,23 @@ fm_goal_brief_token() {
 # are local to the caller's shell (command substitutions use a subshell).
 _fm_goal_draft_source() {
   local i=$1 task=${FM_GOAL_ITEMS_TASKS[$1]} project=${FM_GOAL_ITEMS_PROJECTS[$1]} registry raw token
-  local spec=${FM_GOAL_ITEMS_SPECS[$1]-} fields
+  local spec=${FM_GOAL_ITEMS_SPECS[$1]-} fields home owner rc=0 source_version=goal-draft-v2
   local evidence_clause='^(.+)[[:space:];][Ee][Vv][Ii][Dd][Ee][Nn][Cc][Ee]:[[:space:]]*([^[:space:]].*)$'
   local PM="$FM_GOAL_DIR/fm-project-mode.sh"
   if ! fm_task_id_creation_valid "$task" || [ -z "$project" ] || [ -n "${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]}" ]; then
     printf 'set task= and project= for automatic drafting, or write the requested brief\n'; return 1
   fi
-  if [ "${FM_GOAL_ITEMS_OWNERS[$i]}" != main ] || [ -z "$FM_GOAL_REC_ID" ] || [ -z "$FM_GOAL_REC_PLAN" ]; then
-    printf 'write a brief or record the approved instructions with goal start/edit in the owning home\n'; return 1
+  owner=$(fm_parent_channel_home_id "$FM_GOAL_HOME") || rc=$?
+  if [ "$rc" -eq 1 ] && [ ! -e "$FM_GOAL_HOME/.fm-secondmate-parent" ] && [ ! -L "$FM_GOAL_HOME/.fm-secondmate-parent" ]; then
+    owner=main
+  fi
+  if [ "${FM_GOAL_ITEMS_OWNERS[$i]}" != "$owner" ] || [ -z "$FM_GOAL_REC_ID" ] || [ -z "$FM_GOAL_REC_PLAN" ]; then
+    printf 'not checked: the approved item is not in its owning home\n'; return 1
+  fi
+  if [ "$owner" != main ]; then
+    [ -n "$spec" ] || { printf 'record approved scope and evidence in the parent goal item spec, or write the brief locally\n'; return 1; }
+    home=$(cd "$FM_GOAL_HOME" && pwd -P) || return 1
+    source_version="goal-draft-v2 owner-home=$home"
   fi
   FM_GOAL_DRAFT_LINE=$(_fm_goal_item_line "$i")
   FM_GOAL_DRAFT_SECTION='' FM_GOAL_DRAFT_SCOPE='' FM_GOAL_DRAFT_EVIDENCE=''
@@ -52,9 +61,9 @@ _fm_goal_draft_source() {
     printf 'record concrete scope and expected proof in the approved item spec or its Evidence: clause\n'; return 1
   fi
   FM_GOAL_DRAFT_CLONE="${FM_PROJECTS_OVERRIDE:-$FM_GOAL_HOME/projects}/$project"
-  if ! { [ -d "$FM_GOAL_DRAFT_CLONE" ] &&
+  if ! { [ -d "$FM_GOAL_DRAFT_CLONE" ] && [ ! -L "$FM_GOAL_DRAFT_CLONE" ] && [ ! -L "${FM_GOAL_DRAFT_CLONE%/*}" ] &&
          [ "$(git -C "$FM_GOAL_DRAFT_CLONE" rev-parse --is-inside-work-tree --show-prefix 2>/dev/null)" = true ] &&
-         [ ! -L "$FM_GOAL_DATA/projects.md" ] &&
+         [ ! -L "$FM_GOAL_DATA" ] && [ ! -L "$FM_GOAL_DATA/projects.md" ] &&
          registry=$(FM_DATA_OVERRIDE="$FM_GOAL_DATA" "$PM" --list-json 2>/dev/null) &&
          jq -e --arg project "$project" '.present and ([.duplicates[] | select(. == $project)] | length == 0) and
            ([.projects[] | select(.name == $project and .recognised)] | length == 1)' <<< "$registry" >/dev/null &&
@@ -70,7 +79,7 @@ _fm_goal_draft_source() {
     "$FM_GOAL_DIR/fm-auto-dispatch.sh" draft-row "$task" "$project"; then
     printf 'make the unique ship row for %s ready, unheld, and bound to project %s\n' "$task" "$project"; return 1
   fi
-  FM_GOAL_DRAFT_SOURCE=$(printf '%s\n' goal-draft-v2 "$FM_GOAL_REC_ID" "$FM_GOAL_REC_STARTED_EPOCH" \
+  FM_GOAL_DRAFT_SOURCE=$(printf '%s\n' "$source_version" "$FM_GOAL_REC_ID" "$FM_GOAL_REC_STARTED_EPOCH" \
     "$FM_GOAL_DRAFT_LINE" "$spec" "$FM_GOAL_REC_PLAN" "$FM_GOAL_REC_DONE_WHEN" "$FM_GOAL_DRAFT_MODE" \
     "$FM_GOAL_DRAFT_YOLO" "$FM_GOAL_DRAFT_PREFIX" "$FM_GOAL_DRAFT_FORGE" "$FM_GOAL_DRAFT_PR" | fm_pr_sha256 -)
   if ! [[ "$FM_GOAL_DRAFT_SOURCE" =~ ^[a-f0-9]{64}$ ]]; then

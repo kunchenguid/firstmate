@@ -6,8 +6,8 @@
 # or cockpit truth change. tick also wakes on reached, uncovered captain
 # steps in both modes and stores its scheduling cursor in watcher state.
 # eligible is the read-only final guard for goal-originated dispatch and replay.
-# The main home drafts up to three missing briefs per driven goal per pass in
-# enforce; shadow only logs proposals. fm-goal-brief-lib.sh owns draft lint.
+# The owner home drafts up to three missing local briefs per driven goal per
+# pass in enforce; shadow only logs proposals. fm-goal-brief-lib.sh owns draft lint.
 # FM_GOAL_PUSH_CAPACITY replaces fm-capacity.sh for lab tests only.
 set -u
 export LC_ALL=C
@@ -49,7 +49,7 @@ startable() {
 load_eligible() {
   local binding=$1 task=$2 goal=${1%%/*} item=${1#*/} links
   [ "$goal/$item" = "$binding" ] && fm_goal_id_valid "$goal" && fm_goal_id_valid "$item" || return 1
-  [ "$(mode)" = enforce ] && _fm_goal_read_view && load_goal "$goal" || return 1
+  [ "$(mode)" = enforce ] && _fm_goal_owner_read_view && load_goal "$goal" || return 1
   ELIGIBLE_INDEX=$(_fm_goal_index_of "$item") || return 1
   [ -n "$task" ] && [ "${FM_GOAL_ITEMS_TASKS[$ELIGIBLE_INDEX]}" = "$task" ] && startable "$ELIGIBLE_INDEX" || return 1
   links=$("$SCRIPT_DIR/fm-goal.sh" launch-links "$task") || return 1
@@ -247,12 +247,7 @@ run_pass() {
       brief="$FM_GOAL_DATA/$task/brief.md"
       if [ -z "$task" ] || { [ ! -e "$STATE/$task.meta" ] &&
          { [ ! -f "$brief" ] || [ ! -s "$brief" ] || [ -L "$brief" ]; }; }; then
-        # Mate homes can launch written briefs from their parent view but
-        # never draft from that view. Cap deferrals wait for the next pass.
-        if [ -n "$FM_GOAL_VIEW_OWNER" ]; then
-          briefs="$briefs $binding"
-          continue
-        fi
+        # Cap deferrals wait for the next pass.
         if [ "$drafts" -ge 3 ]; then
           log "defer draft $binding: per-goal cap reached"
           continue
@@ -352,7 +347,7 @@ case "${1:-}" in
   *) exit 2 ;;
 esac
 [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ ! -L "$LOG" ] || exit 1
-_fm_goal_read_view || exit 0
+_fm_goal_owner_read_view || { printf 'goal push not checked: owner or parent home is not reachable\n' >&2; exit 1; }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 fm_lock_try_acquire "$LOCK" || exit 0
