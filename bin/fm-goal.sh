@@ -17,7 +17,7 @@
 # written by exactly one script: this one.
 #
 # THE RECORD (state/goals/<id>.goal; written only by this script):
-#   version: 1 (or 2 with the fields below, or 3 with drive marks)
+#   version: 1 (or 2 with the fields below, 3 with drive marks, or 4 with specs)
 #   id: I1
 #   title: <one line>
 #   state: active
@@ -29,6 +29,7 @@
 #   items:
 #     item [id=node-refresh] [owner=terp] [class=drive] [task=miko-node-refresh]: refresh control-1 node bundle
 #     item [id=grafana-secret] [owner=main] [class=captain]: rotate the grafana secret
+#     spec node-refresh {"section":"Plan §2","scope":"Refresh control-1 only","evidence":"Node health report"}
 #
 # Item grammar: `item [id=<id>] [owner=<owner>] [after=<ids>] [merge-after=<ids>] [class=<drive|captain>] [task=<task-id>] [project=<p>] [target=<stage>] [until=<epoch>] [stop-on=<words>] [brief-source=<task-id>] [captain-reason=<reason>]: <title>`.
 # id and owner are required; after lists item ids (comma separated) that must
@@ -158,6 +159,16 @@
 #   fm-goal.sh window <id> --since <epoch>
 #   fm-goal.sh driven --since <epoch>
 #
+# Items files for start/edit accept optional `spec <item-id> <one-line JSON>`
+# rows anywhere among the item rows. Copy approved plan text into the object:
+# section, scope and evidence are nonblank strings; kind is an optional nonblank
+# string (for example "check"). Specs are inline data, never file or URL lookups.
+# Each spec must name a declared item and appear at most once. On edit, an
+# explicit spec replaces that item's spec; omitting it keeps the existing spec
+# for retained IDs. The archive keeps specs. Records with specs use version 4
+# (with or without drive marks); legacy version 1-3 records need no migration.
+# Specs do not change readiness, dispatch or completion rules.
+#
 # Workers (FM_TASK_ID) may only record evidence on an item whose folded task
 # matches their launch identity. Evidence is a task-tagged, note-only mark;
 # it changes neither state nor stage nor their clocks. It remains in the
@@ -233,6 +244,7 @@
 # waiting_on, merge_after, merge_after_pending and stop_on (lists), wait_on
 # (condition or null), and the booleans startable, target_reached, landing_hint,
 # wait_stale, wait_cleared and orphaned_running (a running mark without a live task).
+# Items with an inline spec also carry it as the `spec` object.
 # drive_revision counts drive marks; --driven exports only active ON goals.
 # --with-drive-ready adds drive_ready {ready, total} counts to each goal.
 # It is read-only, takes no lock, and needs jq.
@@ -607,7 +619,7 @@ FM_GOAL_REC_CLOSED_EPOCH='' FM_GOAL_REC_CLOSED_REASON='' FM_GOAL_REC_CLOSED_WORD
 FM_GOAL_ITEM_COUNT=0
 FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=() FM_GOAL_ITEMS_MERGE_AFTERS=()
 FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
-FM_GOAL_ITEMS_PRS=()
+FM_GOAL_ITEMS_PRS=() FM_GOAL_ITEMS_SPECS=()
 FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
 FM_GOAL_ITEMS_STOPONS=() FM_GOAL_ITEMS_BRIEF_SOURCES=() FM_GOAL_ITEMS_CAPTAIN_REASONS=()
 _FM_GOAL_READ_ERROR=''
@@ -618,7 +630,7 @@ _fm_goal_items_reset() {
   FM_GOAL_ITEM_COUNT=0
   FM_GOAL_ITEMS_IDS=() FM_GOAL_ITEMS_OWNERS=() FM_GOAL_ITEMS_AFTERS=() FM_GOAL_ITEMS_MERGE_AFTERS=()
   FM_GOAL_ITEMS_CLASSES=() FM_GOAL_ITEMS_TASKS=() FM_GOAL_ITEMS_TITLES=()
-  FM_GOAL_ITEMS_PRS=()
+  FM_GOAL_ITEMS_PRS=() FM_GOAL_ITEMS_SPECS=()
   FM_GOAL_ITEMS_PROJECTS=() FM_GOAL_ITEMS_TARGETS=() FM_GOAL_ITEMS_UNTILS=()
   FM_GOAL_ITEMS_STOPONS=() FM_GOAL_ITEMS_BRIEF_SOURCES=() FM_GOAL_ITEMS_CAPTAIN_REASONS=()
 }
@@ -647,8 +659,33 @@ _fm_goal_read_error() {  # <reason> - records why and fails the load
   return 1
 }
 
+# Resolve specs after all item IDs have been parsed, for both input formats.
+_fm_goal_load_specs() {  # [spec lines...]
+  [ "$#" -gt 0 ] || return 0
+  command -v jq >/dev/null 2>&1 || { _fm_goal_read_error 'item specs need jq'; return 1; }
+  local line id idx json
+  for line in "$@"; do
+    line=${line#spec }
+    id=${line%% *}
+    if ! fm_goal_id_valid "$id" || [ "$id" = "$line" ]; then
+      _fm_goal_read_error 'malformed spec line (want: spec <item-id> <one-line JSON>)'; return 1
+    fi
+    idx=$(_fm_goal_index_of "$id") || { _fm_goal_read_error "spec for unknown item: $id"; return 1; }
+    [ -z "${FM_GOAL_ITEMS_SPECS[$idx]-}" ] || { _fm_goal_read_error "duplicate spec for item: $id"; return 1; }
+    json=$(printf '%s\n' "${line#* }" | jq -Rce '
+      def text: type == "string" and test("[^[:space:]]");
+      fromjson | select(type == "object" and
+        (.section | text) and (.scope | text) and (.evidence | text) and
+        (if has("kind") then (.kind | text) else true end))' 2>/dev/null) || {
+      _fm_goal_read_error "invalid spec JSON for item $id (want an object with section, scope and evidence text)"
+      return 1
+    }
+    FM_GOAL_ITEMS_SPECS[idx]=$json
+  done
+}
+
 _fm_goal_load_record() {  # <path>
-  local path=$1 line field value
+  local path=$1 line field value spec_lines=()
   local seen_items=0 seen_closed=0 seen_projection=0 have_closed_epoch=0 have_closed_reason=0 have_closed_words=0
   local version='' id='' state='' started='' started_epoch='' title=''
   local named_by='' plan='' done_when='' closed='' closed_epoch='' closed_reason='' closed_words=''
@@ -738,6 +775,9 @@ _fm_goal_load_record() {  # <path>
           }
           _fm_goal_items_append
           ;;
+        '  spec '*)
+          spec_lines+=("${line#  }")
+          ;;
         '  '*)
           _fm_goal_read_error "indented non-item line in the items section: $line"; return 1
           ;;
@@ -768,13 +808,19 @@ _fm_goal_load_record() {  # <path>
   done < "$path"
   [ "$have_version" -eq 1 ] || { _FM_GOAL_READ_ERROR='no version'; return 1; }
   case "$version" in
-    1|2|3) ;;
+    1|2)
+      [ -z "$drive_marks" ] || { _fm_goal_read_error 'drive marks require version 3 or later'; return 1; }
+      ;;
+    3)
+      [ -n "$drive_marks" ] || { _fm_goal_read_error 'version 3 requires a drive mark'; return 1; }
+      ;;
+    4) ;;
     *) _FM_GOAL_READ_ERROR="unsupported version: $version"; return 1 ;;
   esac
-  if [ "$version" = 3 ]; then
-    [ -n "$drive_marks" ] || { _fm_goal_read_error 'version 3 requires a drive mark'; return 1; }
+  if [ "$version" = 4 ]; then
+    [ "${#spec_lines[@]}" -gt 0 ] || { _fm_goal_read_error 'version 4 requires an item spec'; return 1; }
   else
-    [ -z "$drive_marks" ] || { _fm_goal_read_error 'drive marks require version 3'; return 1; }
+    [ "${#spec_lines[@]}" -eq 0 ] || { _fm_goal_read_error 'item specs require version 4'; return 1; }
   fi
   [ "$have_id" -eq 1 ] || { _FM_GOAL_READ_ERROR='no id'; return 1; }
   fm_goal_id_valid "$id" || { _FM_GOAL_READ_ERROR="unsafe id: $id"; return 1; }
@@ -793,6 +839,7 @@ _fm_goal_load_record() {  # <path>
   [ "$have_done_when" -eq 1 ] && [ -n "$done_when" ] || { _FM_GOAL_READ_ERROR='no done_when'; return 1; }
   [ "$FM_GOAL_ITEM_COUNT" -ge 1 ] || { _FM_GOAL_READ_ERROR='no items'; return 1; }
   _fm_goal_items_graph_ok || return 1
+  _fm_goal_load_specs "${spec_lines[@]}" || return 1
   if [ "$state" = closed ]; then
     [ "$seen_closed" -eq 1 ] || { _FM_GOAL_READ_ERROR='closed record without closed:'; return 1; }
     case "$closed_epoch" in ''|*[!0-9]*|0[0-9]*) _FM_GOAL_READ_ERROR='closed record without a valid closed_epoch'; return 1 ;; esac
@@ -852,17 +899,20 @@ fm_goal_validate() {  # <path> [expected-id]
   return 1
 }
 
-# fm_goal_items <path>: print the stored item lines, normalized, one per line,
-# in record order (the two-space record prefix stripped).
+# fm_goal_items <path>: print the normalized items file from a stored record.
 fm_goal_items() {  # <path>
-  local path=$1 i=0
-  _fm_goal_load_record "$path" || return 1
-  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
-    _fm_goal_item_line "$i"
-    printf '\n'
-    i=$((i + 1))
+  _fm_goal_load_record "$1" || return 1
+  _fm_goal_items_text ''
+}
+
+_fm_goal_items_text() {  # <indent>
+  local i
+  for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
+    printf '%s%s\n' "$1" "$(_fm_goal_item_line "$i")"
+    if [ -n "${FM_GOAL_ITEMS_SPECS[$i]-}" ]; then
+      printf '%sspec %s %s\n' "$1" "${FM_GOAL_ITEMS_IDS[$i]}" "${FM_GOAL_ITEMS_SPECS[$i]}"
+    fi
   done
-  return 0
 }
 
 # fm_goal_marks <id> [state-dir]: print the local marks file as stored (the
@@ -2170,9 +2220,6 @@ _fm_goal_usage_error() {  # <message>
   exit 2
 }
 
-# Load an items file into the FM_GOAL_ITEMS_* arrays. rc 2 with a message on
-# any malformed line, duplicate id, unknown after id, or cycle. Blank lines
-# and #-comments are ignored.
 # Refuse an items list whose `target=` is not a rung of its project's ladder.
 # A project with no ladder file has nothing to check against, so its target
 # stays a free word; a malformed ladder file fails the list closed.
@@ -2197,8 +2244,9 @@ _fm_goal_check_targets() {  # <path-for-messages>
   return 0
 }
 
+# Load an items file; malformed items, specs, dependencies or targets are rc 2.
 _fm_goal_load_items_file() {  # <path>
-  local path=$1 line
+  local path=$1 line spec_lines=()
   _fm_goal_items_reset
   if ! { [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ]; }; then
     fm_goal_log "items file is missing, unreadable, or a symlink: $path"
@@ -2207,6 +2255,7 @@ _fm_goal_load_items_file() {  # <path>
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       ''|'#'*) continue ;;
+      'spec '*) spec_lines+=("$line"); continue ;;
     esac
     if ! fm_goal_item_parse "$line"; then
       fm_goal_log "malformed item line in $path: $line"
@@ -2218,10 +2267,10 @@ _fm_goal_load_items_file() {  # <path>
     fm_goal_log "no items in $path"
     return 2
   }
-  _fm_goal_items_graph_ok || {
+  if ! _fm_goal_items_graph_ok || ! _fm_goal_load_specs "${spec_lines[@]}"; then
     fm_goal_log "invalid items in $path: $_FM_GOAL_READ_ERROR"
     return 2
-  }
+  fi
   _fm_goal_check_targets "$path" || return 2
   return 0
 }
@@ -2229,6 +2278,7 @@ _fm_goal_load_items_file() {  # <path>
 # Write the oldest record version supporting the fields in use.
 _fm_goal_record_version() {
   local i=0
+  if [ "${#FM_GOAL_ITEMS_SPECS[@]}" -gt 0 ]; then printf 4; return 0; fi
   if [ -n "$FM_GOAL_REC_DRIVE_MARKS" ]; then printf 3; return 0; fi
   while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
     if [ -n "${FM_GOAL_ITEMS_PROJECTS[$i]}${FM_GOAL_ITEMS_TARGETS[$i]}${FM_GOAL_ITEMS_UNTILS[$i]}${FM_GOAL_ITEMS_STOPONS[$i]}${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]}${FM_GOAL_ITEMS_CAPTAIN_REASONS[$i]}" ]; then
@@ -2242,7 +2292,6 @@ _fm_goal_record_version() {
 
 # Render a full record from the loaded arrays + the meta globals.
 _fm_goal_render_record() {
-  local i=0
   printf 'version: %s\n' "$(_fm_goal_record_version)"
   printf 'id: %s\n' "$FM_GOAL_REC_ID"
   printf 'title: %s\n' "$FM_GOAL_REC_TITLE"
@@ -2254,11 +2303,7 @@ _fm_goal_render_record() {
   printf 'done_when: %s\n' "$FM_GOAL_REC_DONE_WHEN"
   printf '%s' "$FM_GOAL_REC_DRIVE_MARKS"
   printf 'items:\n'
-  while [ "$i" -lt "$FM_GOAL_ITEM_COUNT" ]; do
-    printf '  %s\n' "$(_fm_goal_item_line "$i")"
-    i=$((i + 1))
-  done
-  return 0
+  _fm_goal_items_text '  '
 }
 
 _fm_goal_write_atomic() {  # <path> (content on stdin)
@@ -2361,8 +2406,9 @@ cmd_start() {
 
 cmd_edit() {
   local id='' items_file='' title='' done_when='' require_briefs=0
-  local flag value path staged
+  local flag value path staged i idx
   local r_id r_title r_started r_started_epoch r_named_by r_plan r_done_when old_count
+  local old_ids=() old_specs=()
   [ "$#" -ge 1 ] || _fm_goal_usage_error 'edit needs a goal id'
   id=$1
   shift
@@ -2398,7 +2444,13 @@ cmd_edit() {
   r_plan=$FM_GOAL_REC_PLAN
   r_done_when=$FM_GOAL_REC_DONE_WHEN
   old_count=$FM_GOAL_ITEM_COUNT
+  old_ids=("${FM_GOAL_ITEMS_IDS[@]}")
+  for i in "${!FM_GOAL_ITEMS_SPECS[@]}"; do old_specs[i]=${FM_GOAL_ITEMS_SPECS[$i]}; done
   _fm_goal_load_items_file "$items_file" || { fm_goal_lock_release; exit 2; }
+  for i in "${!old_specs[@]}"; do
+    idx=$(_fm_goal_index_of "${old_ids[$i]}") || continue
+    [ -n "${FM_GOAL_ITEMS_SPECS[$idx]-}" ] || FM_GOAL_ITEMS_SPECS[idx]=${old_specs[$i]}
+  done
   _fm_goal_check_before_write "$id" "$require_briefs" edit || { fm_goal_lock_release; exit 1; }
   FM_GOAL_REC_ID=$r_id
   FM_GOAL_REC_TITLE=$(_fm_goal_clean_field "${title:-$r_title}")
@@ -2986,7 +3038,7 @@ _fm_goal_export_one() {  # <id> <selector> <with-drive-ready 0|1>
     if _fm_goal_item_landing "$i" "$FM_GOAL_VIEW_STATE"; then landing=true; else landing=false; fi
     if _fm_goal_item_orphaned_running "$i"; then orphan=true; else orphan=false; fi
     stopon=${FM_GOAL_ITEMS_STOPONS[$i]}
-    items="$items$(jq -cn \
+    items="$items$(jq -c \
       --arg id "${FM_GOAL_ITEMS_IDS[$i]}" --arg owner "${FM_GOAL_ITEMS_OWNERS[$i]}" \
       --arg class "${FM_GOAL_ITEMS_CLASSES[$i]}" --arg task "${FM_GOAL_ITEMS_TASKS[$i]}" \
       --arg project "${FM_GOAL_ITEMS_PROJECTS[$i]}" --arg target "${FM_GOAL_ITEMS_TARGETS[$i]}" \
@@ -3014,7 +3066,8 @@ _fm_goal_export_one() {  # <id> <selector> <with-drive-ready 0|1>
        wait_on: (if $wait_on == "" then null else $wait_on end),
        wait_stale: ($stale == "1"), wait_cleared: ($cleared == "1"),
        until: ($until | epoch), stop_on: ($stopon | csv),
-       startable: $startable, orphaned_running: $orphan, target_reached: $reached, landing_hint: $landing}')"$'\n'
+       startable: $startable, orphaned_running: $orphan, target_reached: $reached, landing_hint: $landing}
+       + (if . == null then {} else {spec: .} end)' <<< "${FM_GOAL_ITEMS_SPECS[$i]:-null}")"$'\n'
   done
   [ -z "$FM_GOAL_VIEW_OWNER" ] || [ -n "$items" ] || return 1
   printf '%s' "$items" | jq -cs \

@@ -237,6 +237,67 @@ test_edit() {
   pass 'edit atomically updates the plan without discarding marked drift'
 }
 
+test_specs() {
+  fixture; start OLD >/dev/null
+  goal export OLD | jq -e '.goals[0].items | all(has("spec") | not)' >/dev/null || fail 'legacy items have no spec field'
+
+  local spec='{"section":"Demo §4","scope":"Check \"Demo\" only\nNo production changes","evidence":"One result per tab","kind":"check"}'
+  local updated marks out archive archived_items
+  updated=$(jq -c '.scope = "Check all four tabs"' <<< "$spec")
+  { printf 'spec b %s\n' "$spec"; printf '%s\n' "$(<"$ITEMS")"; } > "$H/with-spec"
+  ITEMS=$H/with-spec
+  start >/dev/null
+  assert_grep 'version: 4' "$H/state/goals/I1.goal" 'inline specs select the new record version'
+  goal export I1 | jq -e --argjson spec "$spec" '
+    .goals[0].items | (map(select(has("spec"))) | length == 1) and
+    any(.id == "b" and .spec == $spec)' >/dev/null || fail 'export round-trips the inline object by ID'
+  goal mark I1 b blocked -- 'waiting for demo' >/dev/null
+  marks=$(cksum "$H/state/goals/I1.marks")
+  goal pause I1 >/dev/null
+  printf '%s\n' 'item [id=b] [owner=main]: verify Demo' 'item [id=a] [owner=terp]: first step' > "$ITEMS"
+  goal edit I1 --items-file "$ITEMS" >/dev/null
+  goal export I1 | jq -e --argjson spec "$spec" '
+    .goals[0] | .driven == false and (.items[0] | .id == "b" and .spec == $spec)' >/dev/null \
+    || fail 'omitting a spec in an item-only edit retains it by ID after reorder'
+
+  printf 'spec b %s\n' "$updated" >> "$ITEMS"
+  goal edit I1 --items-file "$ITEMS" >/dev/null
+  assert_equals "$marks" "$(cksum "$H/state/goals/I1.marks")" 'scope edit keeps the mark log byte-for-byte'
+  goal export I1 | jq -e --argjson spec "$updated" '
+    .goals[0].items[0] | .id == "b" and .state == "blocked" and .spec == $spec' >/dev/null \
+    || fail 'edited scope and folded state both export'
+
+  out=$(goal close I1 --captain --words 'Demo verification retired')
+  archive=$(printf '%s\n' "$out" | awk '/^record archived at / { print $NF }')
+  archived_items=$(FM_HOME="$H" bash -c '. "$1/bin/fm-goal.sh"; fm_goal_items "$2"' _ "$ROOT" "$archive")
+  assert_contains "$archived_items" "spec b $updated" 'archived record reloads the edited inline spec'
+  assert_grep 'waiting for demo' "${archive%.goal}.marks" 'archive retains the progress mark'
+  pass 'goal specs round-trip through start, edit, export and archive without changing marks'
+}
+
+test_invalid_specs() {
+  fixture; start >/dev/null
+  local items valid before
+  items=$(<"$ITEMS")
+  valid='{"section":"§4","scope":"Demo only","evidence":"Results"}'
+  before=$(cksum "$H/state/goals/I1.goal")
+  printf '%s\nspec b %s\nspec b %s\n' "$items" "$valid" "$valid" > "$ITEMS"
+  expect_rc 2 start I2
+  assert_contains "$(<"$TMP_ROOT/out")" 'duplicate spec for item: b' 'duplicate spec is refused'
+  assert_absent "$H/state/goals/I2.goal" 'invalid start publishes nothing'
+  printf '%s\nspec absent %s\n' "$items" "$valid" > "$ITEMS"
+  expect_rc 2 goal edit I1 --items-file "$ITEMS"
+  assert_contains "$(<"$TMP_ROOT/out")" 'spec for unknown item: absent' 'unknown spec ID is refused'
+  local bad
+  for bad in "$valid $valid" '{"section":"§4","scope":123,"evidence":"Results"}' 'https://example.invalid/plan' 'brief=plan.md'; do
+    printf '%s\nspec b %s\n' "$items" "$bad" > "$ITEMS"
+    expect_rc 2 goal edit I1 --items-file "$ITEMS"
+    assert_contains "$(<"$TMP_ROOT/out")" 'invalid spec JSON for item b' 'spec must be a single object with text, not a locator'
+  done
+  assert_equals "$before" "$(cksum "$H/state/goals/I1.goal")" 'invalid edits leave the existing record intact'
+  pass 'duplicate, unknown and malformed goal specs fail closed'
+}
+
 test_brief() {
   fixture
   local i out first
@@ -854,6 +915,6 @@ test_wait_conditions() {
 }
 
 fm_test_run test_drive_readiness test_merge_after test_wait_conditions test_worker_evidence test_done_identity test_start test_validation test_marks test_local_mate test_remote_mate \
-  test_projection test_main_landing test_symlinks test_edit test_brief test_large_brief test_close test_authority test_window test_quiet_status \
+  test_projection test_main_landing test_symlinks test_edit test_specs test_invalid_specs test_brief test_large_brief test_close test_authority test_window test_quiet_status \
   test_v2_schema test_stage_marks test_ladder_targets test_probe test_probe_bounds test_probe_authority \
   test_probe_pr_merged test_limits test_orphaned_running test_target_close_and_brief test_export test_driven
