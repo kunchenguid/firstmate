@@ -44,6 +44,14 @@
 #          check; repair still happens, but inside fm-spawn's launch gate only
 #          when a relaunch is actually authorized.
 #
+# Remote probe bound: every remote probe call goes through
+# bin/fm-remote-call-lib.sh's fm_remote_call, which owns the hard bound and the
+# timeout verdict, so a peer that accepts the SSH connection and then never
+# answers cannot stall a whole supervision cycle on a single mate. A timed-out
+# call is the same "remote unavailable" verdict as ssh exit 255: the route is
+# preserved, nothing is killed or relaunched, and the reason names the endpoint
+# and the time actually spent.
+#
 # Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
 # task across the bootstrap sweep and the watcher tick, so a concurrent
 # relaunch can never be observed mid-flight as a dead endpoint and killed.
@@ -62,6 +70,8 @@ FM_SM_LIVE_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 . "$FM_SM_LIVE_LIB_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh
 . "$FM_SM_LIVE_LIB_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-remote-call-lib.sh
+. "$FM_SM_LIVE_LIB_DIR/fm-remote-call-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$FM_SM_LIVE_LIB_DIR/fm-timeout-lib.sh"
 
@@ -169,10 +179,15 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
         return 0
       fi
     fi
-    if out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+    if fm_remote_call "$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id"; then
       remote_rc=0
     else
       remote_rc=$?
+    fi
+    out=$FM_REMOTE_CALL_OUT
+    if fm_timed_out "$remote_rc"; then
+      FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host (state probe timed out after ${FM_REMOTE_CALL_ELAPSED}s)"
+      return 0
     fi
     if [ "$remote_rc" -eq 255 ]; then
       FM_SM_LIVE_REASON="remote host unavailable or endpoint state unknown; route preserved on $remote_host"
@@ -187,10 +202,15 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
     case "$agent_state" in
       alive)
         if [ "$mode" = full ]; then
-          if route_out=$("$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id" < /dev/null 2>/dev/null); then
+          if fm_remote_call "$FM_SM_LIVE_LIB_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh route "$id"; then
             remote_rc=0
           else
             remote_rc=$?
+          fi
+          route_out=$FM_REMOTE_CALL_OUT
+          if fm_timed_out "$remote_rc"; then
+            FM_SM_LIVE_REASON="remote host unavailable or endpoint route unknown; route preserved on $remote_host (route probe timed out after ${FM_REMOTE_CALL_ELAPSED}s)"
+            return 0
           fi
           if [ "$remote_rc" -eq 255 ]; then
             FM_SM_LIVE_REASON="remote host unavailable or endpoint route unknown; route preserved on $remote_host"

@@ -136,6 +136,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # bin/fm-wake-lib.sh's single directed expansion below; a second directive
 # here would re-expand the same transitive graph.
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-remote-call-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-remote-call-lib.sh"
 
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
@@ -1563,7 +1565,7 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
 # unchanged, only for the records that selection returns.
 fm_pending_reply_tick() {  # <state-dir>
   local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
+  local observation observation_task found i remote_obs_rc
   local -a observation_tasks=() observation_values=() records=() selected=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
@@ -1668,9 +1670,22 @@ fm_pending_reply_tick() {  # <state-dir>
         done
         if [ "$found" = 0 ]; then
           if [ -n "$remote_host" ]; then
-            observation=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
-              fm-remote-secondmate-control.sh observe "$task_id" < /dev/null 2>/dev/null || printf 'unknown')
-            case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+            # The observation call is bounded by bin/fm-remote-call-lib.sh: a
+            # peer that accepts the connection and then never answers must not
+            # stall the tick that guards this reply. A timeout is unknown
+            # observation, exactly like an unparseable reply, never proof the
+            # mate is idle or gone.
+            remote_obs_rc=0
+            fm_remote_call "$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+              fm-remote-secondmate-control.sh observe "$task_id" || remote_obs_rc=$?
+            if fm_timed_out "$remote_obs_rc"; then
+              printf 'fm-pending-reply: remote observation on %s timed out after %ss; reading it as unknown\n' \
+                "$remote_host" "$FM_REMOTE_CALL_ELAPSED" >&2
+              observation=unknown
+            else
+              observation=$FM_REMOTE_CALL_OUT
+              case "$observation" in busy|idle|fallback-idle|unknown) ;; *) observation=unknown ;; esac
+            fi
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi

@@ -470,6 +470,8 @@ The watcher's liveness tick applies the identical rule during ordinary supervisi
 - The remote endpoint is probed read-only once per cadence.
 - Only a positive `dead` or `missing` reply relaunches through that command.
 - An unreachable transport or inconclusive state is left untouched rather than replaced locally.
+- Every remote call ordinary supervision makes - the liveness probe, the current-state read, and the pending-reply observation - is hard-bounded, so a host that accepts the connection and then never answers delays one tick by that bound instead of stalling supervision, and a timed-out call reads as unavailable rather than as death.
+  [`fm-remote-call-lib.sh`](../bin/fm-remote-call-lib.sh) owns that one bound, its override, and the endpoint-and-elapsed diagnostic each case records.
 
 ### Inventory reconcile for markerless routes
 
