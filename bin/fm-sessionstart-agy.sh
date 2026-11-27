@@ -14,6 +14,9 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 SOURCE=
 while [ $# -gt 0 ]; do
@@ -43,6 +46,14 @@ if [ -z "$DIGEST" ] || ! command -v jq >/dev/null 2>&1; then
   printf '{}\n'
   exit 0
 fi
+
+# state/.turnend-blocks is home-scoped, not session-keyed, so an exhausted
+# repair budget would otherwise carry into this fresh session and silence the
+# Stop hook's bounded nag. Only a first session start (startup/new) clears it;
+# every other source keeps the in-progress budget.
+case "$SOURCE" in
+  ''|startup|new) rm -f "$STATE/.turnend-blocks" 2>/dev/null || true ;;
+esac
 
 jq -cn --arg msg "$DIGEST" '{injectSteps:[{systemMessage:{systemMessage:$msg}}]}'
 exit 0

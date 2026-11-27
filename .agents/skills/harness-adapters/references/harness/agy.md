@@ -1,6 +1,6 @@
 # Antigravity CLI
 
-Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend.
+Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend; primary tracked background `run_command` supervision was verified on `agy 1.5.15` (2026-11-24).
 Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
@@ -55,6 +55,6 @@ agy 1.4.9 reads every top-level key as a named hook spec (firstmate ships one, `
 A PreToolUse handler that prints nothing allows the call, while a printed object without a `decision` denies it, so the seatbelts print only on deny.
 SessionStart executes `bin/fm-sessionstart-agy.sh` to inject the session-start digest into model context.
 PreToolUse invokes `bin/fm-arm-pretool-check.sh --agy`, `bin/fm-cd-pretool-check.sh --agy`, and `bin/fm-subagent-pretool-check.sh --agy`.
-Stop executes `bin/fm-turnend-guard-agy.sh`, which parks on a home-scoped watcher cycle through `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host) under the registered 28800s hook timeout and delivers actionable wake output; only an optional `FM_AGY_PARK_TIMEOUT` bound re-arms via `{"decision":"continue","reason":"..."}` with `[supervision-park]`, and `FM_AGY_TURNEND_LOOP_CEILING` (default 180) bounds hook-driven turns.
-A bounded 3-block repair nag is enforced via `bin/fm-turnend-guard.sh --agy` before failing open with `{}`.
+Primary supervision runs `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host) as a tracked background `run_command` call (`WaitMsBeforeAsync: 5000`, `IsDaemon: false`) with reactive wakeup.
+Stop executes `bin/fm-turnend-guard-agy.sh` under a 30s timeout as a fast non-blocking backstop that delegates to `bin/fm-turnend-guard.sh --agy` for a bounded 3-block repair nag before failing open with `{}`.
 See `../../../../../docs/supervision-protocols/agy.md` for the complete supervision protocol.

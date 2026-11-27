@@ -73,14 +73,14 @@ The host's header owns the output contract they read.
 | omp | the watch extension, `.omp/extensions/fm-primary-omp-watch.ts`, which restarts its own successor after each close | the extension's `watcher` follow-up |
 | Grok | the model's tracked background call, rendered as `bin/fm-supervision-host.sh park` at session start | the background task's completion notification |
 | Codex | the foreground checkpoint, `bin/fm-watch-checkpoint.sh`, or the native Stop park on a home that [opts in](configuration.md#codex-native-stop-park-configcodex-stop-park) | checkpoint output, or the native thread queue; see [the Codex protocol](supervision-protocols/codex.md) |
-| Antigravity (`agy`) | the Stop-hook park, `bin/fm-turnend-guard-agy.sh` | the park's `watcher` follow-up |
+| Antigravity (`agy`) | the model's tracked background call, rendered as `bin/fm-supervision-host.sh park` at session start | the background task's completion notification |
 
 Hook, plugin, extension, and checkpoint owners pass their harness as the primary pin.
-Grok's model-owned call relies on primary detection.
+Grok's and Antigravity's model-owned calls rely on primary detection.
 The host pins dispatched work to the primary's crew harness rather than the engine's.
 
-Grok's arm command is fixed when the session-start block renders.
-So adding or removing the file on a Grok home takes effect at the next session start.
+Grok's and Antigravity's arm commands are fixed when the session-start block renders.
+So adding or removing the file on a Grok or Antigravity home takes effect at the next session start.
 The other owners read the file at every arm.
 
 ### The report surface

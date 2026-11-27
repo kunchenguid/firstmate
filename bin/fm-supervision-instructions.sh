@@ -7,9 +7,9 @@
 # config/supervision-host elsewhere, never with config/supervision-host-off), the block
 # adds one state line and the host's main-side protocol
 # (docs/supervision-protocols/supervision-host.md, whose lines tagged
-# "{<harness>,...} " render only for the listed harnesses), and Grok's arm
-# command becomes the host; on a home that does not run it the output is
-# unchanged.
+# "{<harness>,...} " render only for the listed harnesses), and Grok's and
+# Antigravity's arm commands become the host; on a home that does not run it the
+# output is unchanged.
 set -eu
 
 # Template replacements must stay literal on Bash 5.2+ and stock macOS Bash.
@@ -121,14 +121,14 @@ if [ "$HARNESS" = codex ]; then
   fi
 fi
 HOST_SNIPPET=
-grok_arm='bin/fm-watch-arm.sh'
+persistent_arm='bin/fm-watch-arm.sh'
 case "$HARNESS" in
   claude|cursor|opencode|omp|grok|codex|agy)
     # shellcheck source=bin/fm-supervision-engine-lib.sh
     . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
     if fm_supervision_host_enabled "$CONFIG" "$HARNESS"; then
       HOST_SNIPPET="$DOC_DIR/supervision-host.md"
-      grok_arm='bin/fm-supervision-host.sh park'
+      persistent_arm='bin/fm-supervision-host.sh park'
     fi
     ;;
 esac
@@ -191,7 +191,8 @@ render_snippet() {  # [snippet]
     line=${line//__FM_OMP_TURNEND_EXT__/$omp_turnend_ext}
     line=${line//__FM_X_MODE_ENV_SH__/$x_mode_env_sh}
     line=${line//__FM_X_MODE_ENV__/$x_mode_env}
-    line=${line//__FM_GROK_ARM__/$grok_arm}
+    line=${line//__FM_GROK_ARM__/$persistent_arm}
+    line=${line//__FM_AGY_ARM__/$persistent_arm}
     printf '%s\n' "$line"
   done < "$snippet"
 }
@@ -244,17 +245,13 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision by letting the OpenCode TUI plugin arm after idle; use bin/fm-watch-arm.sh only as a manual recovery probe if the plugin reports failure.'
       ;;
     grok)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$grok_arm" ' as its own Grok tracked background task, never shell &.'
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$persistent_arm" ' as its own Grok tracked background task, never shell &.'
       ;;
     cursor)
       printf '%s%s\n' "$prefix" 'watcher supervision is owned by the stop-hook park; inspect the hook registration and watcher startup path before ending the turn.'
       ;;
     agy)
-      if [ -n "$HOST_SNIPPET" ]; then
-        printf '%s%s\n' "$prefix" 'supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh running the supervision host); inspect the hook registration and supervision host startup path before ending the turn.'
-      else
-        printf '%s%s\n' "$prefix" 'watcher supervision is owned by the Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh); inspect the hook registration and watcher startup path before ending the turn.'
-      fi
+      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with ' "$persistent_arm" ' as its own Antigravity tracked background run_command (WaitMsBeforeAsync: 5000), never shell &.'
       ;;
     *)
       printf '%s%s\n' "$prefix" 'repair missing watcher supervision according to the session-start block for this harness; do not use shell &.'
@@ -284,13 +281,13 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the OpenCode TUI plugin already owns watcher continuity; do not arm manually.'
       ;;
     grok)
-      printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$grok_arm" ' Grok tracked background task as directed below.'
+      printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$persistent_arm" ' Grok tracked background task as directed below.'
       ;;
     cursor)
       printf '%s\n' '- Ordinary wake: the stop-hook park (bin/fm-turnend-guard-cursor.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     agy)
-      printf '%s\n' '- Ordinary wake: the Stop-hook park (bin/fm-turnend-guard-agy.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
+      printf '%s%s%s\n' '- Ordinary wake: re-arm exactly one ' "$persistent_arm" ' Antigravity tracked background run_command as directed below.'
       ;;
     *)
       printf '%s\n' '- Ordinary wake: follow the continuation in the harness protocol below; do not use shell &.'

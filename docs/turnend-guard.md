@@ -24,7 +24,7 @@ Do not infer this guard's scope, loop safety, or compatibility tradeoffs for tho
 | How each harness blocks or follows up | [Harness integrations](#harness-integrations) |
 | Claude's Stop auto-arm cooperation, block budget, and fail-open | [Claude cooperative mode](#claude-cooperative-mode) |
 | Cursor's parked hook | [Cursor park](#cursor-park) |
-| Antigravity's parked hook | [Antigravity park](#antigravity-park) |
+| Antigravity's turn-end guard | [Antigravity turn-end guard](#antigravity-turn-end-guard) |
 | Known gaps | [Compatibility limits](#compatibility-limits) |
 | Tests and live evidence | [Regression coverage](#regression-coverage) |
 
@@ -263,7 +263,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 | omp | `session_stop` in `.omp/extensions/fm-primary-turnend-guard.ts` | Blocking hook that compels one continuation |
 | Cursor | `stop` hook in `.cursor/hooks.json` | Cannot block, so it parks and returns at most one follow-up |
 | Grok | `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` | Native blocking, or one legacy `grok --resume` fallback |
-| Antigravity | `Stop` hook in `.agents/hooks.json` | Synchronous Stop-hook park running `bin/fm-watch-arm.sh` (or the supervision host) with bounded repair nag via `bin/fm-turnend-guard.sh --agy` |
+| Antigravity | `Stop` hook in `.agents/hooks.json` | Non-blocking turn-end backstop via `bin/fm-turnend-guard.sh --agy` |
 
 The registrations in detail:
 
@@ -307,9 +307,9 @@ The registrations in detail:
   The discriminator is the payload's own `transcript_path`, not the environment and not the shared foreign-host predicate above.
   pi-code stamps it with Pi's session file under `/.pi/`, a path component a Claude transcript never carries.
   The stand-down fails toward running, matching the guards above, so no payload, no `jq`, or no `transcript_path` still arms, and every other Claude-shaped hook pi-code delivers keeps running.
-- Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 28800s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
-  In linked crewmate worktrees or foreign checkouts, the wrapper stands down immediately with `{}`.
-  In primary or persistent secondmate homes, the hook parks synchronously on `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park` on a home that runs the host), keeping supervision continuity alive until an incoming wake event arrives or a bounded repair nag is returned via `bin/fm-turnend-guard.sh --agy`.
+- Antigravity registers a `Stop` hook in `.agents/hooks.json` with a 30s timeout, anchoring commands safely to the project root and delegating the turn boundary to `bin/fm-turnend-guard-agy.sh`.
+  In linked crewmate worktrees, foreign lock-owner sessions, or non-normal termination reasons, the wrapper stands down immediately with `{}`.
+  In primary or persistent secondmate homes, it delegates synchronously without parking to `bin/fm-turnend-guard.sh --agy` for a bounded 3-block repair nag when supervision is missing.
 
 ### Claude and Codex blocking
 
@@ -553,21 +553,19 @@ Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does
 The step is now registered only for the [dialog mirror](supervision-host.md#the-dialog-mirror); it does not invalidate the park baton.
 Baton invalidation and the `preCompact` surface remain deferred.
 
-### Antigravity park
+### Antigravity turn-end guard
 
-Antigravity CLI evaluates project-local `.agents/hooks.json` (Stop event) at the end of every agent turn.
-Like Cursor, Antigravity does not expose an asynchronous background rewake channel on Stop.
-`bin/fm-turnend-guard-agy.sh` parks the Stop hook on a tracked child, following the [Cursor park](#cursor-park): `bin/fm-watch-arm.sh`, or `bin/fm-supervision-host.sh park` with `FM_SUPERVISION_HOST_PRIMARY=agy` on a home that runs the supervision host.
-It polls the child every `FM_AGY_PARK_POLL` seconds (default 2) and waits on it under the 28800s hook timeout, so an idle watcher cycle forces no model turn and consumes no `executionNum`; the optional `FM_AGY_PARK_TIMEOUT` bounds the total wait across every attempt:
+Antigravity CLI evaluates project-local `.agents/hooks.json` (`Stop` event) at the end of every agent turn synchronously and blocks the agent loop until the hook returns.
+Because synchronous Stop-hook parking keeps the interactive session in a working state and queues captain messages, Antigravity primary supervision runs `bin/fm-watch-arm.sh` (or `bin/fm-supervision-host.sh park`) as a tracked background `run_command` task with reactive wakeup rather than parking inside `Stop`.
 
-- An actionable close (a watcher reason line, or a `supervision-host:` line in host mode) resets `state/.turnend-blocks` and returns `{"decision":"continue","reason":"<wake>"}` on stdout, immediately starting a follow-up supervision turn.
-- When an `FM_AGY_PARK_TIMEOUT` bound is set and passes with the child still running, the hook stops the child and returns `{"decision":"continue","reason":"[supervision-park] ..."}` so the next turn boundary parks again.
-- A non-actionable close beside a verified healthy watcher, a host that stood down, or a fleet that no longer needs supervision resets `state/.turnend-blocks`, emits `{}`, and lets the turn end cleanly.
-- A park that cannot establish a cycle after two bounded attempts delegates to `bin/fm-turnend-guard.sh --agy` for a bounded 3-block repair nag before failing open.
+`bin/fm-turnend-guard-agy.sh` runs as a fast, non-blocking turn-end backstop:
 
-Before parking, the hook stands down with `{}` in crewmate or scout linked worktrees, passes through non-normal termination reasons, and verifies session-lock ownership so a foreign session never steals supervision.
-When `executionNum` reaches the loop ceiling (`FM_AGY_TURNEND_LOOP_CEILING`, default 180) while supervision is still needed, it returns one ceiling notice instead of parking; past the ceiling it emits `{}`.
-Each invocation publishes a unique claim in `state/.agy-park-owner` and yields cleanly with `{}` if a newer Stop hook supersedes this park while waiting.
+- It stands down with `{}` when the payload is empty, malformed, or `jq` is absent.
+- It stands down with `{}` in crewmate or scout linked worktrees (`fm_primary_scope_matches`).
+- It passes through non-normal termination reasons (`terminationReason` other than `NO_TOOL_CALL`) with `{}` so hook-triggered continuations never loop.
+- It checks session-lock ownership via `bin/fm-session-lock-lib.sh` so a read-only session owned by another live session passes through with `{}`.
+- Otherwise it delegates directly to `bin/fm-turnend-guard.sh --agy`, returning `{}` when supervision is healthy or not needed and a bounded 3-block repair nag (`{"decision":"continue","reason":"..."}`) when supervision is missing.
+  That block count is home-scoped, so `bin/fm-sessionstart-agy.sh` clears `state/.turnend-blocks` on a fresh `SessionStart` (`startup` or `new`): a new session never inherits a predecessor's exhausted budget, and the 3-block bound restarts per session.
 
 ### Adapter failures in the pull guard
 

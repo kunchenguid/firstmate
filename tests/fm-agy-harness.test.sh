@@ -119,10 +119,22 @@ SH
 }
 
 test_agy_claims_no_inherited_launcher_marker() {
-  local fakebin out
+  local fakebin fakebin_no_agy out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  # Stub ps so running this suite inside a live agy session does not walk up
+  # to the outer agy process.
+  fakebin_no_agy=$(fm_fakebin "$TMP_ROOT/anc-agent-marker")
+  cat > "$fakebin_no_agy/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin_no_agy/ps"
+  out=$(AGENT=1 PATH="$fakebin_no_agy:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -600,8 +612,13 @@ EOF
 # which runners do not keep in the system bin dirs. Carry the directory the
 # invoking environment resolves node from, the fm-kimi-harness shape.
 NODE_BIN=$(command -v node) || fail "test needs node"
-NODE_BIN_DIR=$(dirname "$NODE_BIN")
-BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+NODE_ONLY_BIN="$TMP_ROOT/node-only-bin"
+mkdir -p "$NODE_ONLY_BIN"
+ln -sf "$NODE_BIN" "$NODE_ONLY_BIN/node"
+if JQ_BIN=$(command -v jq 2>/dev/null); then
+  ln -sf "$JQ_BIN" "$NODE_ONLY_BIN/jq"
+fi
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_ONLY_BIN:/usr/bin:/bin:/usr/sbin:/sbin}
 
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
@@ -889,6 +906,7 @@ test_agy_secondmate_launch_pre_trusts_home_and_records_meta() {
   expect_code 0 "$rc" "agy secondmate spawn should succeed ($out)"
   store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
   assert_agy_trusted "$store" "$sm_home" "agy secondmate home was not pre-trusted"
+  assert_contains "$(cat "$CASE_DIR/launch.log")" "FM_SUPERVISION_MODEL=persistent" "agy secondmate launch must pin FM_SUPERVISION_MODEL=persistent"
   meta="$HOME_DIR/state/$id.meta"
   [ -f "$meta" ] || fail "agy secondmate spawn wrote no state/$id.meta"
   grep -Fq 'kind=secondmate' "$meta" || fail "agy secondmate meta missing kind=secondmate"

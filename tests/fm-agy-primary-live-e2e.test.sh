@@ -95,46 +95,26 @@ assert_contains "$OUT" "watcher-direct" \
   "live agy reply lacked the [watcher-direct] reason bin/fm-arm-pretool-check.sh --agy returns, so the PreToolUse deny is unproven"
 pass "agy primary live: PreToolUse --agy deny blocks a direct watcher command"
 
-# --- Stop-hook park -----------------------------------------------------------
-# An in-flight task makes supervision needed, so the turn end must park on a
-# real watcher. Once the watcher beats, a task status line wakes it, and the
-# wake must reach a follow-up turn; a short park bound keeps the run bounded.
+# --- Non-blocking Stop-hook turn-end guard ------------------------------------
+# An in-flight task with no live watcher triggers one non-blocking repair nag
+# (TURN WOULD END BLIND) via the Stop hook and never creates state/.agy-park-owner;
+# with a live watcher (or empty fleet), the Stop hook allows clean exit.
 rm -f "$HOME_DIR/state/.lock" "$HOME_DIR/state/.agy-park-owner" \
-  "$HOME_DIR/state/.last-watcher-beat" "$HOME_DIR/state/live-watcher-started" \
-  "$HOME_DIR/state/live-task.status" "$HOME_DIR/state/.wake-queue"
+  "$HOME_DIR/state/.turnend-blocks" "$HOME_DIR/state/.last-watcher-beat" \
+  "$HOME_DIR/state/live-task.meta"
 : > "$HOME_DIR/state/live-task.meta"
-(
-  i=0
-  while [ "$i" -lt 240 ]; do
-    if [ -s "$HOME_DIR/state/.agy-park-owner" ] && [ -e "$HOME_DIR/state/.last-watcher-beat" ]; then
-      : > "$HOME_DIR/state/live-watcher-started"
-      sleep 1
-      printf 'done: live-park-wake\n' >> "$HOME_DIR/state/live-task.status"
-      j=0
-      while [ "$j" -lt 80 ] && [ -d "$HOME_DIR/state/.watch.lock" ]; do
-        sleep 0.25
-        j=$((j + 1))
-      done
-      sleep 2
-      rm -f "$HOME_DIR/state/live-task.meta" "$HOME_DIR/state/.wake-queue" "$HOME_DIR/state/live-task.status"
-      exit 0
-    fi
-    sleep 0.25
-    i=$((i + 1))
-  done
-) &
-WAKE_PID=$!
-OUT=$(run_agy "$HOME_DIR" "If you have not yet seen a firstmate watcher wake message in this conversation, reply with the single word READY and end your turn without running any command. Once you receive a firstmate watcher wake message, reply with the single word DONE and end your turn without running any command." \
-  FM_POLL=1 FM_SIGNAL_GRACE=0 FM_AGY_PARK_TIMEOUT=30 FM_AGY_TURNEND_LOOP_CEILING=2)
-wait "$WAKE_PID" 2>/dev/null || true
-[ -s "$HOME_DIR/state/.agy-park-owner" ] \
-  || fail "Stop hook never claimed a park in state/.agy-park-owner in live agy run: $OUT"
-[ -e "$HOME_DIR/state/live-watcher-started" ] \
-  || fail "Stop hook never started a real watcher with state/.last-watcher-beat in live agy run: $OUT"
-assert_contains "$OUT" "DONE" "Stop hook watcher wake did not reach a follow-up turn in live agy run"
-rm -f "$HOME_DIR/state/live-task.meta" "$HOME_DIR/state/.wake-queue" "$HOME_DIR/state/live-task.status"
-stop_watchers
-pass "agy primary live: Stop hook parks on a real watcher and delivers its wake to a follow-up turn"
+OUT=$(run_agy "$HOME_DIR" "If you see a TURN WOULD END BLIND message, reply with the single word GUARD_FIRED. Otherwise reply with the single word READY and end your turn without running any command.")
+[ ! -e "$HOME_DIR/state/.agy-park-owner" ] \
+  || fail "non-blocking Stop hook must not create state/.agy-park-owner in live agy run"
+assert_contains "$OUT" "GUARD_FIRED" "Stop hook turn-end guard did not fire on missing watcher in live agy run: $OUT"
+
+rm -f "$HOME_DIR/state/live-task.meta" "$HOME_DIR/state/.turnend-blocks"
+OUT=$(run_agy "$HOME_DIR" "Reply with the single word CLEAN_EXIT and end your turn without running any command.")
+assert_contains "$OUT" "CLEAN_EXIT" "Stop hook did not allow clean exit on empty fleet in live agy run: $OUT"
+assert_not_contains "$OUT" "TURN WOULD END BLIND" "Stop hook wrongly nagged on an empty fleet in live agy run: $OUT"
+[ ! -e "$HOME_DIR/state/.turnend-blocks" ] \
+  || fail "Stop hook charged the repair-block budget on an empty fleet in live agy run"
+pass "agy primary live: Stop hook enforces non-blocking turn-end guard without parking"
 
 # --- --secondmate agy trust pre-seeding and launch -----------------------------
 git -C "$HOME_DIR" worktree add -q -b "fm/$SM_ID" "$SM_HOME" >/dev/null 2>&1 \

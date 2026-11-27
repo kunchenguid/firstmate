@@ -278,9 +278,10 @@ fm_watcher_healthy() {
 #               spawns the replacement itself, so a genuinely unheld singleton lock
 #               is healthy during that hand-off only with extension ownership and a
 #               fresh beacon. Any held but unhealthy lock remains down.
-#   persistent  every other harness (codex foreground checkpoint, opencode/grok
-#               background arm, tmux, unknown): the watcher runs as a tracked live
-#               process, so a live identity-matched pid is the real liveness signal.
+#   persistent  every other harness (codex foreground checkpoint, opencode/grok/
+#               agy background arm, tmux, unknown): the watcher runs as a
+#               tracked live process, so a live identity-matched pid is the real
+#               liveness signal.
 # FM_SUPERVISION_MODEL overrides detection (tests, and callers that already know
 # the harness). Otherwise bin/fm-harness.sh is the single detection owner, so this
 # stays consistent with the harness-specific repair line the guards already emit.
@@ -291,7 +292,7 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude|cursor|agy) printf 'autoarm\n' ;;
+    claude|cursor) printf 'autoarm\n' ;;
     codex)
       if [ -x "$FM_WAKE_LIB_DIR/fm-codex-stop-park.sh" ] && "$FM_WAKE_LIB_DIR/fm-codex-stop-park.sh" --capable; then
         printf 'autoarm\n'

@@ -77,7 +77,7 @@ Oh My Pi (`omp`), a Pi fork, is verified as a primary with the same extension-ow
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints unless a home opts in to its model-free native Stop park, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
-Antigravity CLI (`agy`) is verified as a primary too, using a tracked project-local `.agents/hooks.json` whose Stop hook parks on the watcher between turns like Cursor's.
+Antigravity CLI (`agy`) is verified as a primary too, arming supervision as its own tracked background `run_command` task with reactive wakeup, with a tracked project-local `.agents/hooks.json` whose Stop hook runs a fast 30s non-blocking turn-end backstop rather than parking on the watcher.
 
 ### Install and launch
 
