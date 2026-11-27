@@ -1601,9 +1601,9 @@ test_suggested_tasks_are_a_summary_and_never_queued_work() {
   out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed with no suggestions"
   printf '%s' "$out" | jq -e '.suggested == {count:0, oldest_age_days:null, line:""}' >/dev/null \
     || fail "an empty list was not an empty summary: $(printf '%s' "$out" | jq -c .suggested)"
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SUGGESTIONS_NOW=$(($(date +%s) - 5 * 86400)) \
-    "$ROOT/bin/fm-suggestions.sh" add --origin scout-a --item 1 --title "A distinct waiting lead" >/dev/null \
-    || fail "the intake failed"
+  jq -cn --argjson filed "$(($(date +%s) - 5 * 86400))" \
+    '{id:"sg-00000001", origin:"scout-a", item:1, title:"A distinct waiting lead",
+      filed_at:$filed, outcome:"suggested"}' > "$home/data/suggestions.jsonl"
   out=$(run "$home" "$fakebin" --json) || fail "the snapshot failed with a suggestion"
   printf '%s' "$out" | jq -e '
     .suggested == {count:1, oldest_age_days:5, line:"1 suggested task, oldest 5d"}

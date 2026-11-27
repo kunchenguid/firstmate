@@ -9,7 +9,6 @@ metadata:
 # Ship landing
 
 For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done [at=<epoch>]: PR <url> checks green` after CI is green, while `direct-PR` reports `done [at=<epoch>]: PR <url>` after opening the PR, each only for a non-draft PR; a lane that deliberately holds a draft declares a wait instead, and `bin/fm-pr-check.sh` refuses to arm merge monitoring on a draft.
-When a worker's report at `data/<id>/report.md` lists numbered follow-ups (unfixed findings, deferred or out-of-scope work), record each one through `scout-completion`'s follow-up intake before teardown, so it has an outcome of suggested, picked, bundled, repeat of, expired, or escalated; a follow-up with no recorded outcome is a dropped finding, and teardown refuses it.
 Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal or the resolved checks-green `fm-crew-state.sh` line - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
 `bin/fm-dod-lib.sh` owns the named-head gate on that ready signal: a ship `done:` whose named head exists only in the worker's disposable copy is not ready (`bin/fm-crew-state.sh` reports blocked, `bin/fm-pr-check.sh` refuses to register, and a secondmate does not publish that done upstream).
 That blocked reading is the gate working, not a stuck worker, so steer the worker on the commit the refusal names rather than waiting.
@@ -23,6 +22,7 @@ For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary sin
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
 Tear down a ship task only after landing is confirmed.
+At close, handle any numbered follow-ups in the done report through `scout-completion`'s Follow-up intake.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Find out what the work is, then get it cleaned up, committed, merged under the configured merge authority, and finished through a worker on that task's delivery path, and retry the teardown.
 Escalate to the captain only when that is not possible, such as work you cannot identify, a finish that needs a captain decision, or a merge firstmate has no authority for.

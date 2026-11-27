@@ -3171,7 +3171,7 @@ Set `enabled` to false or delete `config/bridge.json` to stop refreshing; the pu
 
 ### Tasks, Remove and Restore
 
-The Tasks section lists this home's open tasks and waiting suggestions, filtered by why they wait and grouped by project or by where they came from.
+The Tasks section lists this home's open tasks and any remaining legacy suggestions, filtered by why they wait and grouped by project or by where they came from.
 Opening a task shows what it is, where it came from, why it is waiting, what it needs first and what needs it, all read from the task list and its records with no model call.
 Where a task came from is read from structure only: a `Captain <date>:` first line, the line a picked suggestion writes, an `Origin:` line, or a secondmate row; anything else says "Not recorded", and the section counts those.
 Remove takes a task off every list without deleting it: the row moves unchanged to `data/forgotten.md` and stays restorable for 90 days, then moves to `data/forgotten-archive.md`, which is never deleted.

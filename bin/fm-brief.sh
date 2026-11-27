@@ -843,7 +843,7 @@ $WAIT_BLOCK$INBOX_SECTION
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
-End the report with a \`## Follow-ups\` section of numbered follow-ups for anything noticed but not investigated or fixed, each on one line with its one-line outcome, file:line, size (S, M or L), kind (defect, hardening, doc-nit, question or research), and the risk if ignored, starting that risk with \`security\` or \`data-loss\` when it is one; omitting one silently drops it, and filing them is not your job.
+$(fm_report_followups_contract)
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 Only when the reviewed inventory is empty, run \`FM_HOME=$(shell_quote "$FM_HOME") bash $(shell_quote "$FM_ROOT/bin/fm-captain-hold.sh") complete $(shell_quote "$ID") --none\`.

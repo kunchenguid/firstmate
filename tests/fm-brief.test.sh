@@ -214,7 +214,7 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "Request checklist" "$brief" "$id: brief still carries the retired Request checklist"
     assert_no_grep "{ASKS}" "$brief" "$id: brief still carries the retired {ASKS} placeholder"
     assert_no_grep "asks <done>" "$brief" "$id: brief still demands the retired asks count"
-    assert_no_grep "numbered follow-ups" "$brief" "$id: brief still demands the retired follow-up list"
+    assert_done_report_followups "$brief"
     assert_grep "report.md" "$brief" "$id: brief missing the done-report contract"
     assert_no_grep "lane=" "$brief" "$id: brief recorded a retired lane token"
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
@@ -1284,6 +1284,13 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
 }
 
+assert_done_report_followups() {  # <brief>
+  assert_grep "List only follow-ups that absolutely must be done as numbered items under \`## Follow-ups\` in the done report only" "$1" \
+    "brief did not limit follow-ups to critical report items"
+  assert_grep 'Never record or file them separately; firstmate decides at close' "$1" \
+    "brief did not leave follow-up decisions to firstmate at close"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1295,12 +1302,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
     "scout brief did not load the captain-call policy before done"
   assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
     "scout brief did not cross-reference visual-review completion"
-  assert_grep 'file:line, size (S, M or L), kind (defect, hardening, doc-nit, question or research)' "$scout" \
-    "scout brief did not ask for the follow-up fields"
-  assert_grep "\`## Follow-ups\` section" "$scout" \
-    "scout brief did not name the section teardown checks"
-  assert_no_grep "into the backlog" "$scout" \
-    "scout brief still promised to file follow-ups as backlog rows"
+  assert_done_report_followups "$scout"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
     "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
   charter="$home/data/sample-mate/brief.md"

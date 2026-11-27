@@ -17,12 +17,7 @@ The promoted worker must inventory scratch state, return to a clean copy of the 
 
 ## Follow-up intake
 
-This section owns what happens to any report's numbered follow-ups, on a ship or a scout: a follow-up is a lead, not a decision, so it never becomes a backlog row without the captain's pick.
-`bin/fm-suggestions.sh` owns the store, de-duplication, expiry and the teardown check; never file a follow-up with `tasks-axi add`.
-
-1. Group the list by root cause or area, across this report and recent ones.
-2. Record each numbered item with `bin/fm-suggestions.sh add --origin <id> --item <n>` and its one-line outcome, file:line, size, kind and risk; a duplicate comes back as `repeat`.
-3. Fold nits into one polish suggestion per repo area with `bundle`, so the digest states them as one candidate.
-4. State each real finding by its outcome, with `--recommend pick`, `bundle` or `drop`.
-5. Pass `--hold` for a question only the captain can answer, so it takes the captain-hold path instead of waiting in the list.
-6. Treat a security or data-loss finding as urgent even when the worker did not label it: start its `--risk` with `security` or `data-loss`, which holds it for the captain, then tell the captain in the same turn.
+Workers list only follow-ups that absolutely must be done, as numbered items in the done report only.
+When closing a ship or scout, firstmate reads that list once, before teardown, and decides for each item whether to start a new task now under the usual authority or discard it.
+Never record the list or its dispositions separately, or defer an item to a suggestions backlog.
+Surface urgent security or data-loss findings promptly and use `captain-hold-lifecycle` for decisions that actually require the captain.

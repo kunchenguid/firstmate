@@ -202,8 +202,11 @@ test_old_removals_are_archived_not_deleted() {
 test_suggestions_drop_and_restore() {
   local home id out
   home=$(make_home sugg)
-  out=$(in_home "$home" "$SUGG" add --origin scout-x --item 1 --title "Tidy the follow-up list" --kind hardening)
-  id=$(printf '%s\n' "$out" | awk '{print $2}')
+  id=sg-00000001
+  jq -cn --arg id "$id" --argjson now "$(date +%s)" \
+    '{id:$id, title:"Tidy the follow-up list", origin:"scout-x", item:1, kind:"hardening",
+      file_line:"", size:"", risk:"", repo:"", filed_at:$now, outcome:"suggested"}' \
+    > "$home/data/suggestions.jsonl"
   [ "$(in_home "$home" "$SUGG" list --json | jq -r '.[0].id')" = "$id" ] || fail "list --json does not show the waiting suggestion"
   out=$(in_home "$home" "$FORGET" remove --batch sg-batch "$id")
   assert_contains "$out" "removed $id" "a suggestion was not dropped: $out"

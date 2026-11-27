@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
-# fm-suggestions.sh - the suggested-tasks list: worker follow-ups kept off the board.
+# fm-suggestions.sh - inspect and clean up the legacy suggested-tasks list.
 #
-# A worker follow-up is a lead, not a decision, so it is never a backlog row until
-# the captain picks it. This script is the only writer of two local files in the
-# home's data directory (FM_DATA_OVERRIDE, else $FM_HOME/data):
-#   suggestions.jsonl             every recorded follow-up not yet expired
+# This script is the only writer of the legacy stores in the home's data
+# directory (FM_DATA_OVERRIDE, else $FM_HOME/data):
+#   suggestions.jsonl             existing suggestions not yet archived
 #   suggestions-not-picked.jsonl  the "not picked" archive; records are never deleted,
 #                                 and leave it only when `restore` moves one back
 # Nothing dispatches from either file, and neither is a tasks-axi state.
-# .agents/skills/scout-completion/SKILL.md owns the judgment applied before intake;
-# this script owns the mechanics below.
+# .agents/skills/scout-completion/SKILL.md owns the current close-time rule.
 #
 # Usage:
-#   fm-suggestions.sh add --origin <task-id> --title <one-line outcome>
-#       [--item <report-number>] [--file-line <path:line>] [--size S|M|L]
-#       [--kind defect|hardening|doc-nit|question|research] [--risk <text>]
-#       [--repo <name>] [--recommend pick|bundle|drop] [--hold --category <captain-hold-category>]
 #   fm-suggestions.sh summary [--json]
 #   fm-suggestions.sh list --json
 #   fm-suggestions.sh digest [--json]
@@ -25,7 +19,6 @@
 #   fm-suggestions.sh restore <suggestion-id>...
 #   fm-suggestions.sh expire
 #   fm-suggestions.sh archive [--json]
-#   fm-suggestions.sh check <task-id> [--report <path>]
 #
 # Recorded outcomes (the `outcome` field):
 #   suggested  waiting in the list
@@ -36,20 +29,7 @@
 #   escalated  sent to the captain; `target` is the captain-held row
 #   dropped    the captain removed it from the list (bin/fm-forget.sh)
 #
-# add        Prints `<outcome> <id> [<target>]`. A repeated --origin/--item pair,
-#            or the same origin and title, returns the first result unchanged.
-#            A repeat is an earlier record with the same normalized title, or the
-#            same --file-line and --kind, or an open backlog row with the same
-#            normalized title or naming that --file-line. A repeat of a suggestion
-#            raises that suggestion's `seen` count, which the digest shows.
-#            Escalation: a --risk starting with `security` or `data-loss`, or
-#            --hold, creates a captain-held row through bin/fm-captain-hold.sh and
-#            records `escalated`. It skips de-duplication because a waiting or
-#            filed lookalike does not put the finding in front of the captain; only
-#            an earlier escalation of the same finding counts as a repeat, and a
-#            waiting lookalike becomes a repeat of the new escalation.
-#            A backlog that cannot be read refuses the intake rather than skipping
-#            the de-duplication.
+# add        Refused: new worker follow-ups are not logged.
 # summary    Read-only and lock-free, so bin/fm-bearings-snapshot.sh can call it.
 #            Past-due records already count as gone even before `expire` moves them.
 #            --json prints {count, oldest_age_days, line}; plain prints the line,
@@ -70,13 +50,9 @@
 # expire     Moves past-due records to the archive. Idempotent, also after a crash
 #            between the archive append and the list rewrite.
 # archive    Lists the "not picked" archive.
-# check      The teardown gate. Counts the numbered items under the report's
-#            follow-ups heading (default report: <data>/<task-id>/report.md) and
-#            exits 1 naming each number with no record for that --origin/--item.
-#            A missing report or a section with no numbered items passes.
 #
 # Environment: FM_SUGGESTIONS_NOW (epoch override), FM_SUGGESTIONS_EXPIRE_DAYS.
-# Exit: 0 ok, 1 refused or failed check, 2 usage.
+# Exit: 0 ok, 1 refused or failed, 2 usage.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,13 +75,8 @@ case "$EXPIRE_DAYS" in ''|*[!0-9]*) die "FM_SUGGESTIONS_EXPIRE_DAYS must be a wh
 
 # shellcheck disable=SC2016
 JQ_DEFS='
-  def norm: ascii_downcase | [scan("[a-z0-9]+")] | join(" ");
   def age_days($now): (($now - .filed_at) / 86400 | floor);
   def past_due($now; $days): .outcome == "suggested" and ($now - .filed_at) >= ($days * 86400);
-  def names_ref($ref):
-    ($ref != "") and (. as $text | ($text | split($ref)) as $parts
-      | ($parts | length) > 1
-        and any($parts[1:][]; test("^[0-9]") | not));
 '
 
 release_lock() {
@@ -181,14 +152,6 @@ row_id_for() {  # <suggestion-id> <title>
   printf '%s%s\n' "${slug:+$slug-}" "${1#sg-}"
 }
 
-hash_of() {
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | cut -c1-8
-  else
-    printf '%s' "$1" | sha256sum | cut -c1-8
-  fi
-}
-
 # Move past-due records to the archive. The append comes first and skips ids the
 # archive already holds, so a crash before the rewrite converges on the next run.
 do_expire() {
@@ -207,123 +170,6 @@ do_expire() {
   jq 'length' <<<"$due"
 }
 
-cmd_add() {
-  local origin='' title='' item='' file_line='' size='' kind='' risk='' repo='' recommend='' hold=0 category=''
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --hold) hold=1; shift; continue ;;
-      --origin|--title|--item|--file-line|--size|--kind|--risk|--repo|--recommend|--category)
-        [ $# -ge 2 ] || die "$1 needs a value" 2 ;;
-      *) die "add: unknown argument $1" 2 ;;
-    esac
-    case "$1" in
-      --origin) origin=$2 ;;
-      --title) title=$2 ;;
-      --item) item=$2 ;;
-      --file-line) file_line=$2 ;;
-      --size) size=$2 ;;
-      --kind) kind=$2 ;;
-      --risk) risk=$2 ;;
-      --repo) repo=$2 ;;
-      --recommend) recommend=$2 ;;
-      --category) category=$2 ;;
-    esac
-    shift 2
-  done
-  title=$(printf '%s' "$title" | tr '\n\t' '  ' | sed 's/^ *//; s/ *$//')
-  [ -n "$origin" ] || die "add: --origin is required" 2
-  [ -n "$title" ] || die "add: --title is required" 2
-  case "$item" in *[!0-9]*) die "add: --item must be a number" 2 ;; esac
-  [ -z "$item" ] || item=$((10#$item))
-  case "$size" in ''|S|M|L) ;; *) die "add: --size must be S, M or L" 2 ;; esac
-  case "$kind" in ''|defect|hardening|doc-nit|question|research) ;; *) die "add: --kind must be defect, hardening, doc-nit, question or research" 2 ;; esac
-  case "$recommend" in ''|pick|bundle|drop) ;; *) die "add: --recommend must be pick, bundle or drop" 2 ;; esac
-  case "$(printf '%s' "$risk" | tr '[:upper:]' '[:lower:]')" in
-    security|security[!a-z-]*) hold=1; category=${category:-security-sensitive} ;;
-    data-loss|data-loss[!a-z-]*|data\ loss|data\ loss[!a-z-]*) hold=1; category=${category:-destructive} ;;
-  esac
-
-  acquire_lock
-  do_expire >/dev/null
-  local list archive prior id record match rows row_match held_reason held_id
-  list=$(read_store "$LIST") || exit 1
-  archive=$(read_store "$ARCHIVE") || exit 1
-
-  id="sg-$(hash_of "$origin|$item|$title")"
-  prior=$(jq -r -n --slurpfile l <(printf '%s' "$list") --slurpfile a <(printf '%s' "$archive") --arg id "$id" --arg o "$origin" --arg n "$item" '
-    $l[0] as $l | $a[0] as $a | first(($l + $a)[] | select(.id == $id or ($n != "" and .origin == $o and .item == ($n | tonumber))))
-    | [.outcome, .id, (.target // "")] | join(" ")')
-  if [ -n "$prior" ]; then
-    printf '%s\n' "$prior" | sed 's/ *$//'
-    return 0
-  fi
-
-  record=$(jq -c -n --arg id "$id" --arg origin "$origin" --arg item "$item" --arg title "$title" \
-    --arg fl "$file_line" --arg size "$size" --arg kind "$kind" --arg risk "$risk" --arg repo "$repo" \
-    --arg recommend "$recommend" --argjson now "$NOW" '
-    {id:$id, origin:$origin, item:(if $item == "" then null else ($item | tonumber) end), title:$title,
-     file_line:$fl, size:$size, kind:$kind, risk:$risk, repo:$repo, recommend:$recommend,
-     filed_at:$now, resolved_at:null, outcome:"suggested", target:null, seen:1}')
-
-  # An earlier record of the same finding; repeats point at their target instead.
-  match=$(jq -c -n --slurpfile l <(printf '%s' "$list") --slurpfile a <(printf '%s' "$archive") \
-    --slurpfile r <(printf '%s' "$record") "$JQ_DEFS"'
-    $l[0] as $l | $a[0] as $a | $r[0] as $r | ($r.title | norm) as $t
-    | [ ($l + $a)[] | select(.outcome != "repeat")
-        | select((.title | norm) == $t
-                 or ($r.file_line != "" and .file_line == $r.file_line and .kind == $r.kind)) ]
-    | sort_by(.filed_at) | first // empty')
-
-  if [ "$hold" = 1 ]; then
-    if [ -n "$match" ] && [ "$(jq -r .outcome <<<"$match")" = escalated ]; then
-      record_repeat "$list" "$record" "$(jq -r .id <<<"$match")" "$(jq -r .id <<<"$match")"
-      return 0
-    fi
-    held_id=$(row_id_for "$id" "$title")
-    held_reason="Follow-up from $origin: $title${file_line:+ ($file_line)}${risk:+ - risk if ignored: $risk}"
-    "$SCRIPT_DIR/fm-captain-hold.sh" hold "$held_id" --reason "$held_reason" --title "$title" \
-      ${category:+--category "$category"} ${repo:+--repo "$repo"} >/dev/null \
-      || die "the captain hold for $held_id failed; nothing recorded, so retry this intake"
-    list=$(jq -c --slurpfile m <(printf '%s' "${match:-null}") --arg id "$id" --argjson now "$NOW" '
-      $m[0] as $m | if $m == null then . else
-        map(if .id == $m.id and .outcome == "suggested"
-            then .outcome = "repeat" | .target = $id | .resolved_at = $now else . end) end' <<<"$list")
-    write_store "$LIST" "$(jq -c --slurpfile r <(printf '%s' "$record") --arg t "$held_id" --argjson now "$NOW" \
-      '$r[0] as $r | . + [$r | .outcome = "escalated" | .target = $t | .resolved_at = $now]' <<<"$list")"
-    printf 'escalated %s %s\n' "$id" "$held_id"
-    return 0
-  fi
-
-  if [ -n "$match" ]; then
-    record_repeat "$list" "$record" "$(jq -r .id <<<"$match")" "$(jq -r .id <<<"$match")"
-    return 0
-  fi
-
-  rows=$(open_rows) || die "cannot read the backlog to de-duplicate; nothing recorded, so retry this intake"
-  row_match=$(jq -r -n --slurpfile rows <(printf '%s' "$rows") --slurpfile r <(printf '%s' "$record") "$JQ_DEFS"'
-    $rows[0] as $rows | $r[0] as $r | ($r.title | norm) as $t
-    | first($rows[] | select((.title | norm) == $t
-        or ((.title + "\n" + .body) | names_ref($r.file_line)))) | .id')
-  if [ -n "$row_match" ]; then
-    record_repeat "$list" "$record" "$row_match" ""
-    return 0
-  fi
-
-  write_store "$LIST" "$(jq -c --slurpfile r <(printf '%s' "$record") '$r[0] as $r | . + [$r]' <<<"$list")"
-  printf 'suggested %s\n' "$id"
-}
-
-# Records the repeat and raises the seen count of the suggestion it repeats. An
-# archived target is left as archived: repeats do not revive what went unpicked.
-record_repeat() {  # <list-json> <record> <target-id> <suggestion-id-or-empty>
-  local list=$1 record=$2 target=$3 bump=$4 updated
-  updated=$(jq -c --slurpfile r <(printf '%s' "$record") --arg t "$target" --arg b "$bump" --argjson now "$NOW" '
-    $r[0] as $r | map(if .id == $b then .seen = ((.seen // 1) + 1) else . end)
-    + [$r | .outcome = "repeat" | .target = $t | .resolved_at = $now]' <<<"$list")
-  write_store "$LIST" "$updated"
-  printf 'repeat %s %s\n' "$(jq -r .id <<<"$record")" "$target"
-}
-
 cmd_summary() {
   local json=0 list
   case "${1-}" in --json) json=1 ;; '') ;; *) die "summary: unknown argument $1" 2 ;; esac
@@ -335,7 +181,7 @@ cmd_summary() {
     | (if $n == 0 then "" else
          "\($n) suggested task\(if $n == 1 then "" else "s" end), oldest \($oldest)d" end) as $line
     | if $json == 1 then {count:$n, oldest_age_days:$oldest, line:$line} else $line end' <<<"$list" \
-    | if [ "$json" = 1 ]; then cat; else jq -r .; fi
+    | if [ "$json" = 1 ]; then cat; else jq -r 'select(. != "")'; fi
 }
 
 cmd_digest() {
@@ -533,58 +379,11 @@ cmd_archive() {
   fi
 }
 
-# The numbered items directly under the report's follow-ups heading.
-report_items() {  # <report>
-  awk '
-    /^#+[[:space:]]/ {
-      heading = tolower($0)
-      inside = (heading ~ /follow-?ups?/)
-      next
-    }
-    inside && /^[0-9]+[.)][[:space:]]/ {
-      n = $0
-      sub(/[.)].*/, "", n)
-      print n + 0
-    }
-  ' "$1"
-}
-
-cmd_check() {
-  local id='' report='' items list archive records missing='' n
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --report) [ $# -ge 2 ] || die "--report needs a value" 2; report=$2; shift 2 ;;
-      -*) die "check: unknown argument $1" 2 ;;
-      *) [ -z "$id" ] || die "check: one task id only" 2; id=$1; shift ;;
-    esac
-  done
-  [ -n "$id" ] || die "check: name the task id" 2
-  [ -n "$report" ] || report="$DATA/$id/report.md"
-  [ -f "$report" ] || { printf 'ok %s: no report\n' "$id"; return 0; }
-  items=$(report_items "$report")
-  [ -n "$items" ] || { printf 'ok %s: no numbered follow-ups\n' "$id"; return 0; }
-  require_jq
-  list=$(read_store "$LIST") || exit 1
-  archive=$(read_store "$ARCHIVE") || exit 1
-  records=$(jq -c -n --slurpfile l <(printf '%s' "$list") --slurpfile a <(printf '%s' "$archive") --arg o "$id" \
-    '$l[0] as $l | $a[0] as $a | [($l + $a)[] | select(.origin == $o) | .item]')
-  for n in $items; do
-    jq -e --argjson n "$n" 'index($n) != null' <<<"$records" >/dev/null || missing="$missing $n"
-  done
-  if [ -n "$missing" ]; then
-    printf 'missing %s: follow-ups without a recorded outcome:%s\n' "$id" "$missing"
-    return 1
-  fi
-  printf 'ok %s: every follow-up has a recorded outcome\n' "$id"
-}
-
 command=${1-}
 [ $# -eq 0 ] || shift
-# check needs jq only once a report has items, so teardown of a task with no
-# follow-ups keeps working on a host or PATH without it.
-case "$command" in add|summary|list|digest|pick|bundle|drop|restore|expire|archive) require_jq ;; esac
+case "$command" in summary|list|digest|pick|bundle|drop|restore|expire|archive) require_jq ;; esac
 case "$command" in
-  add) cmd_add "$@" ;;
+  add) die "follow-ups belong only in the done report; firstmate starts a new task now or discards them at close. No suggestions are recorded." ;;
   summary) cmd_summary "$@" ;;
   list) cmd_list "$@" ;;
   digest) cmd_digest "$@" ;;
@@ -594,7 +393,6 @@ case "$command" in
   restore) cmd_restore "$@" ;;
   expire) cmd_expire "$@" ;;
   archive) cmd_archive "$@" ;;
-  check) cmd_check "$@" ;;
   -h|--help|help) usage ;;
   '') usage >&2; exit 2 ;;
   *) die "unknown command $command" 2 ;;

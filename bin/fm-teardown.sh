@@ -3920,17 +3920,6 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-# A report's numbered follow-ups each need a recorded outcome before the task
-# records go; bin/fm-suggestions.sh `check` owns what counts. --force is the same
-# explicit discard authority the report gate above honors.
-if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
-  if ! SUGGESTIONS_CHECK=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-suggestions.sh" check "$ID" 2>&1); then
-    echo "REFUSED: $SUGGESTIONS_CHECK" >&2
-    echo "Record each follow-up through bin/fm-suggestions.sh add before teardown." >&2
-    exit 1
-  fi
-fi
-
 # A public commitment is not kept until its final reply lands in the ORIGINAL
 # thread, and this cleanup removes the task records that make the promise
 # reconcilable. Refuse while this home still owes a public reply for exactly this

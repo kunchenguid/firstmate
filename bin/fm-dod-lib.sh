@@ -444,6 +444,14 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+# The follow-up instruction shared by ship and scout reports.
+fm_report_followups_contract() {
+  cat <<'EOF'
+List only follow-ups that absolutely must be done as numbered items under `## Follow-ups` in the done report only, with the outcome, file:line, and risk if ignored.
+Never record or file them separately; firstmate decides at close whether to start each as a new task now or discard it.
+EOF
+}
+
 # The done-report contract, shared by every ship mode's block. The done report is
 # the one extra durable writable file outside the worktree the ship contract
 # authorizes, like the status file and the no-mistakes findings file.
@@ -451,6 +459,7 @@ fm_done_report_contract() {  # <data-dir> <task-id>
   local data=$1 id=$2
   cat <<EOF
 Write a done report at \`$data/$id/report.md\` (create the file when you first need it) with what you delivered and its proof - a test or command and the output line that proves it, a file:line, or a link; besides the status file and any escalation file this Definition of done names, it is the one file outside the worktree you may write.
+$(fm_report_followups_contract)
 EOF
 }
 
