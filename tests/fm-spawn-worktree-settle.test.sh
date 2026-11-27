@@ -31,6 +31,7 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-worktree-settle)
 # query returns FM_FAKE_PANE_STALE for the first FM_FAKE_PANE_STALE_READS
 # calls, then FM_FAKE_PANE_PATH forever after - reproducing a pane that
 # transiently reports a stale cwd before settling into the real worktree.
+# Its capture-pane prints FM_FAKE_PANE_SCREEN as the pane's text.
 make_settle_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -54,6 +55,7 @@ case "$*" in
     ;;
 esac
 case "${1:-}" in
+  capture-pane) printf '%s\n' "${FM_FAKE_PANE_SCREEN:-}"; exit 0 ;;
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) [ ! -s "$window_file" ] || cat "$window_file"; exit 0 ;;
   new-window)
@@ -229,7 +231,33 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   assert_contains "$out" "repository's primary checkout" \
     "the refusal did not say why that path was rejected"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  assert_contains "$out" "within 60s" "the default wait was not 60 seconds"
+  [ "$(cat "$COUNTFILE")" -eq 60 ] || fail "default wait polled the pane $(cat "$COUNTFILE") times, expected 60"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
+}
+
+# A pool at its slot cap, or a slot that takes minutes to create, leaves the
+# only explanation in the pane. FM_SPAWN_TREEHOUSE_TIMEOUT sets the wait, and
+# the refusal carries treehouse's own output after the typed command, because
+# the refusal closes the window that holds it.
+test_treehouse_wait_is_configurable_and_reports_pane_output() {
+  local rec id out status screen
+  id=settle-pool-cap-z6
+  rec=$(make_primary_case settle-pool-cap "$id" 100000)
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  screen=$'earlier output\nuser@host mate % treehouse get\ntreehouse: all 24 worktrees are in use (max_trees=24)\nuser@host mate %'
+
+  out=$(FM_SPAWN_TREEHOUSE_TIMEOUT=4 FM_FAKE_PANE_SCREEN="$screen" run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a pane that never left the primary checkout"$'\n'"$out"
+  assert_contains "$out" "within 4s" "the refusal did not report the configured wait"
+  [ "$(cat "$COUNTFILE")" -eq 4 ] || fail "configured wait polled the pane $(cat "$COUNTFILE") times, expected 4"
+  assert_contains "$out" "pane output after 'treehouse get': treehouse: all 24 worktrees are in use (max_trees=24) | user@host mate %" \
+    "the refusal did not carry treehouse's own pane output"$'\n'"$out"
+  assert_not_contains "$out" "earlier output" "the refusal carried pane output from before treehouse get"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "the treehouse wait is configurable and the refusal carries treehouse's pane output"
 }
 
 test_unborn_head_project_is_refused_at_once() {
@@ -257,6 +285,7 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_treehouse_wait_is_configurable_and_reports_pane_output
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"
