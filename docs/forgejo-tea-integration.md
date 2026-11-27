@@ -196,6 +196,7 @@ $ curl .../repos/fixture/fixture-repo/commits/<sha>/status
 {"state":"","sha":"","total_count":0,"statuses":null,...}
 ```
 
+Newer instances report the same empty head as `"state":"pending"` with `total_count: 0`; the zero count is what is read.
 This is read as `none`, the same way GitLab's null `head_pipeline` is read as `none` in `docs/gitlab-merge-watch.md`, and refuses the merge rather than treating an absent check as nothing to verify:
 
 ```
