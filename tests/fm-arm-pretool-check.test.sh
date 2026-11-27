@@ -246,6 +246,8 @@ test_direct_policy_contract() {
   assert_policy direct-exact-kill allow 'kill -TERM 4242'
   assert_policy direct-pattern-pkill-name $'deny\tpattern-kill' 'pkill chrome'
   assert_policy direct-pattern-pkill-user $'deny\tpattern-kill' 'pkill -u agent'
+  assert_policy direct-pattern-pkill-attached-uid $'deny\tpattern-kill' 'pkill -U501'
+  assert_policy direct-pattern-pkill-attached-gid $'deny\tpattern-kill' 'pkill -TERM -G20'
   assert_policy direct-pattern-pkill-f-parent $'deny\tpattern-kill' 'pkill -f -P $$'
   assert_policy direct-pattern-pkill-after-dashdash $'deny\tpattern-kill' 'pkill -- -P'
   assert_policy direct-targeted-pkill-parent allow 'pkill -P $$'

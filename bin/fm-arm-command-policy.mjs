@@ -15,6 +15,7 @@
 // runs only when this module is invoked directly, never on import.
 
 import path from "node:path";
+import { constants as osConstants } from "node:os";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -66,10 +67,15 @@ function normalizeLineContinuations(source) {
 // A pkill selects by pattern unless every argument is a signal or one of the
 // exact-target options (parent pid, pidfile, process group, session); -f, a
 // pattern operand, or anything unrecognized counts as a pattern kill.
+function isSignalOption(value) {
+  const name = /^-([A-Z0-9]+)$/.exec(value)?.[1];
+  return Boolean(name) && (/^\d+$/.test(name) || Object.hasOwn(osConstants.signals, `SIG${name.replace(/^SIG/, "")}`));
+}
+
 function pkillMatchesPattern(args) {
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index].value;
-    if (/^-(\d+|[A-Z][A-Z0-9]+)$/.test(value) || /^--signal=./.test(value) || /^-[PFgs]./.test(value)) continue;
+    if (isSignalOption(value) || /^--signal=./.test(value) || /^-[PFgs]./.test(value)) continue;
     if (/^(-[PFgs]|--signal)$/.test(value) && index + 1 < args.length) {
       index += 1;
       continue;
