@@ -3446,13 +3446,13 @@ Making any of them a precondition is what leaves a provably dead runner owning i
 - Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
 - If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.
 - If restoration or rearming also fails, teardown returns a distinct status and reports the retained registration backup path for manual recovery instead of hiding the retired waits.
-- The sweep retires local registrations and machine-wide claims whose recorded state-root identity matches that home's resolved state root through the same identity-checked, generation-bound retirement path, and leaves foreign-home claims untouched.
+- The sweep retires local registrations and machine-wide claims whose recorded state-root identity matches that home's own `state/` directory, never an inherited `FM_STATE_OVERRIDE`, through the same identity-checked, generation-bound retirement path, and leaves foreign-home claims untouched.
 - Teardown refuses with the home, lease, routing evidence, registrations, claims, and runners retained when identity is uncertain, ownership is unreadable or unreleased, or relevant state exists without a sweep-capable child script.
 
 **Recover from unsupported manual deletion**
 
 Raw manual deletion of a Firstmate home is unsupported because it can orphan a blocking child.
-To recover, restore that home's tracked `bin/fm-procevent.sh`, run `FM_HOME=<home> <home>/bin/fm-procevent.sh sweep-home`, then rerun the supported teardown.
+To recover, restore that home's tracked `bin/fm-procevent.sh`, run `FM_HOME=<home> FM_STATE_OVERRIDE=<home>/state <home>/bin/fm-procevent.sh sweep-home`, then rerun the supported teardown.
 
 The owning-home lease below bounds how long such an orphan can run, but it is a backstop, not a substitute for the supported path.
 
