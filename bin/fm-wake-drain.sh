@@ -632,9 +632,9 @@ print_branch_outcomes_section() {
   local routine_lines='' routine_count=0 routine_shown=0
   local -a captain_tasks=() captain_lines=() captain_line_bytes=()
   [ "$ACTOR" = main ] || return 0
+  [ -s "$STATE/branch-outcomes.jsonl" ] || return 0
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   fm_supervision_host_outcomes_drained "$config" || return 0
-  [ -s "$STATE/branch-outcomes.jsonl" ] || return 0
   ! fm_afk_contract_away_present "$STATE" || return 0
   if ! command -v jq >/dev/null 2>&1; then
     printf 'BRANCH OUTCOMES SKIPPED: jq is not installed, so the outcome store cannot be presented; nothing was marked read, and these outcomes are presented once jq is back.\n' >&2

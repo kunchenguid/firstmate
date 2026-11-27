@@ -181,9 +181,6 @@ sources=$FM_SUP_SOURCES
 checks=$FM_SUP_CHECKS
 needed=$FM_SUP_NEEDED
 beacon_desc=$FM_SUP_BEACON_DESC
-fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
-watcher_healthy=$FM_WATCHER_VERDICT_OK
-watcher_down_reason=$FM_WATCHER_VERDICT_REASON
 if [ "$needed" = false ]; then
   # Leave the unhealthy state (nothing riding on the watcher): clear so a later
   # work or X-mode need + stale combination is a fresh episode even if the
@@ -191,6 +188,9 @@ if [ "$needed" = false ]; then
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
   exit 0
 fi
+fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
+watcher_healthy=$FM_WATCHER_VERDICT_OK
+watcher_down_reason=$FM_WATCHER_VERDICT_REASON
 
 # Count only the rows this actor could actually present or retire, so the
 # warning never sends an actor to a drain that provably has nothing for it.
