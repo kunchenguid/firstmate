@@ -356,6 +356,10 @@ JS
   printf '%s\n' '{}' > "$dir/node.config.json"
   for option in --config-file --experimental-config-file \
     --config-file=node.config.json --experimental-config-file=node.config.json; do
+    if ! (cd "$dir" && node "$option" -e '') >/dev/null 2>&1; then
+      printf 'ok - session-lock: live node %s # SKIP unsupported by runtime\n' "$option"
+      continue
+    fi
     (
       cd "$dir" || exit 1
       FM_TEST_AUGGIE_LIB="$ROOT/bin/fm-auggie-lib.sh" FM_TEST_AUGGIE_MODE=script \
@@ -402,7 +406,9 @@ JS
     for option in -e --eval -p --print --run --eval=code --print=code --run=start -ecode -pcode; do
       if fm_auggie_script_arg "node $option $2"; then exit 4; fi
     done
-    for option in --inspect --inspect-brk --force-fips --no-warnings --experimental-default-config-file; do
+    for option in --inspect --inspect-brk --force-fips --no-warnings --experimental-default-config-file \
+      --config-file --experimental-config-file \
+      --config-file=node.config.json --experimental-config-file=node.config.json; do
       [ "$(fm_auggie_script_arg "node $option $2")" = "$2" ] || exit 5
     done
   ' probe "$ROOT/bin/fm-auggie-lib.sh" "$script" \
