@@ -13,7 +13,7 @@
 # none. The first observation starts the clock; a drive switch resets it even
 # if no OFF sample was taken. Waiting groups carry counts and oldest ages in
 # seconds. Null host fields mean unknown, not zero. Capacity is for this home.
-# drive_ready carries the goal export readiness counts {ready, total}.
+# drive_ready is passed through unchanged from fm-goal.sh export --with-drive-ready.
 # merge_after_ready counts work ready to START, not permission to merge a PR.
 # It consumes optional goal-export items[].merge_after (ids); typed waits use
 # the kind prefix of items[].wait_on. captain_missing counts open captain
@@ -51,6 +51,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+at=${FM_GOAL_PACE_NOW_EPOCH:-$(date +%s)}
+case "$at" in ''|*[!0-9]*|0[0-9]*) echo 'fm-goal-pace: invalid clock' >&2; exit 1 ;; esac
+
 goals=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-goal.sh" export --driven --with-drive-ready | jq -ec '
   select(.schema == "fm-goal-export.v1") | .goals')
 # No initial files (or host probes) for a home that has never had ON work.
@@ -64,8 +67,6 @@ if [ "$goals" != '[]' ]; then
     --goal-home "$FM_HOME" --state "$STATE" --captain-waiting --goal-items-stdin \
     | awk '$1 == "MISSING" && $2 == "goal" {print $3}')
 fi
-at=${FM_GOAL_PACE_NOW_EPOCH:-$(date +%s)}
-case "$at" in ''|*[!0-9]*|0[0-9]*) echo 'fm-goal-pace: invalid clock' >&2; exit 1 ;; esac
 
 capacity=null workers=null
 if [ "$goals" != '[]' ]; then

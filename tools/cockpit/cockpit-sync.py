@@ -38,6 +38,9 @@ Mismatches between goal marks and reality are findings, not failures: sync still
 
 truth JSON (schema fm-cockpit-truth.v1; no timestamps, so an unchanged world writes nothing):
   goals[]      {id, title, done_when, driven, items[]}
+    drive_ready {ready, total, unknown} or {total} when not checked (fm-goal.sh owns readiness semantics).
+               ON uses the owning home's age-, goal-, and item-revision-checked pace sample.
+               OFF or missing readiness uses the read-only goal export projection; stale samples do not.
     pace       optional {running, idle, idle_minutes, waiting} from the owning home's state/goal-pace.json
                (ON only, same start and drive revision, snapshot no more than 10 minutes old)
     items[]    {id, title, owner, class, task, mark, status, task_state, last_line, flags[],
@@ -60,7 +63,7 @@ Page contract checked by --verify-page:
     nested #overige-projecten block
   - every such value in the section belongs to an entry that is still open, and no entry appears twice
   - the goal cards, drive KPI, per-goal KPI lines and all ring counts match the scoped truth.
-    The lines show done/total, running, waiting and waits on you; total includes every item.
+    The lines show drive readiness separately from done/total, startable, running, waiting and waits on you.
     The line and card show sampled pace when available, with a warning for actionable idle over 10m.
     Each card has a closed "Alle stappen (N)" disclosure with its compact per-goal ring and every
     item, using goal_item_title if set or the text before the first " - " in title.
@@ -284,11 +287,14 @@ def project_names(names):
     return {name.rstrip('/').rsplit('/', 1)[-1].casefold() for name in names if name}
 
 
-def export_goals(goal_home, ids, also_ids, exclude, scope, mates, state=None):
+def export_goals(goal_home, ids, also_ids, exclude, scope, mates, state=None, *, with_drive_ready=False):
     env = home_env(goal_home)
     if state is not None:
         env['FM_STATE_OVERRIDE'] = str(state)
-    out = run(['bash', str(ROOT / 'bin' / 'fm-goal.sh'), 'export'], 'goal export', env=env)
+    cmd = ['bash', str(ROOT / 'bin' / 'fm-goal.sh'), 'export']
+    if with_drive_ready:
+        cmd.append('--with-drive-ready')
+    out = run(cmd, 'goal export', env=env)
     try:
         snapshot = json.loads(out)
         assert snapshot['schema'] == 'fm-goal-export.v1'
@@ -445,7 +451,7 @@ def verify_item(item, task_state, pr, must_wait):
     return status, flags
 
 
-def build_goals(goals, homes, deciding_tasks, samples):
+def build_goals(goals, homes, deciding_tasks, samples, fresh):
     found, wanted = {}, []
     for goal in goals:
         for item in goal['items']:
@@ -486,9 +492,11 @@ def build_goals(goals, homes, deciding_tasks, samples):
                     and item['status'] == 'waiting' and item['mark'] == 'open'
                     and item['class'] == 'drive' and item['after'] and set(item['after']) <= closed):
                 item['status'] = 'startable'
+        row = (samples or {}).get(goal['id'], {})
         result = {'id': goal['id'], 'title': goal['title'], 'done_when': goal['done_when'],
-                  'driven': goal.get('driven'), 'items': items}
-        pace = goal_pace(goal, samples.get(goal['id'], {}))
+                  'driven': goal.get('driven'), 'items': items,
+                  'drive_ready': goal_readiness(goal, row, fresh, samples is not None)}
+        pace = goal_pace(goal, row) if fresh else None
         if pace is not None:
             result['pace'] = pace
         out.append(result)
@@ -747,20 +755,61 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_wai
 
 
 def read_goal_pace(home):
+    path = home / 'state' / 'goal-pace.json'
     try:
-        snapshot = json.loads((home / 'state' / 'goal-pace.json').read_text(encoding='utf-8'))
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None, False
+        snapshot = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {}, False
     except (OSError, ValueError, RecursionError):
-        return {}
+        return None, False
     if not isinstance(snapshot, dict) or snapshot.get('schema') != 'fm-goal-pace.v1':
-        return {}
+        return None, False
     epoch, goals = snapshot.get('generated_epoch'), snapshot.get('goals')
-    if type(epoch) is not int or not 0 <= int(time.time()) - epoch <= 600 or not isinstance(goals, list):
-        return {}
-    return {row['id']: row for row in goals if isinstance(row, dict) and isinstance(row.get('id'), str)}
+    if type(epoch) is not int or not isinstance(goals, list):
+        return None, False
+    rows = {}
+    for row in goals:
+        if not isinstance(row, dict) or not isinstance(row.get('id'), str) or row['id'] in rows:
+            return None, False
+        rows[row['id']] = row
+    return rows, 0 <= int(time.time()) - epoch <= 600
+
+
+def same_drive(goal, row):
+    return all(type(row.get(key)) is int and row[key] == goal[key] for key in ('started_epoch', 'drive_revision'))
+
+
+def goal_readiness(goal, row, fresh, readable):
+    total = sum(i['class'] == 'drive' for i in goal['items'])
+    unchecked = {'total': total}
+    projected = goal.get('drive_ready')
+    if not total or not isinstance(projected, dict):
+        return unchecked
+    revision = projected.get('item_revision')
+    counts = ('ready', 'total', 'unknown')
+    if (not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{64}', revision)
+            or any(type(projected.get(key)) is not int or projected[key] < 0 for key in counts)
+            or projected['total'] != total or projected['ready'] + projected['unknown'] > total):
+        return unchecked
+    ready = projected
+    if goal['driven']:
+        if not readable:
+            return unchecked
+        if 'drive_ready' in row:
+            ready = row['drive_ready']
+            # Also compare the live verdict: an owner route or its data can
+            # disappear without the item definitions changing.
+            if (not fresh or not same_drive(goal, row) or not isinstance(ready, dict)
+                    or any(type(ready.get(key)) is not int for key in counts)
+                    or any(ready.get(key) != projected[key] for key in (*counts, 'item_revision'))):
+                return unchecked
+    return {key: ready[key] for key in counts}
 
 
 def goal_pace(goal, row):
-    if not goal['driven'] or any(row.get(key) != goal[key] for key in ('started_epoch', 'drive_revision')):
+    if not goal['driven'] or not same_drive(goal, row):
         return None
     try:
         running = list(row['running_by_home'].values())
@@ -790,10 +839,11 @@ def build_truth(args):
         if home not in [h for _, h in unique]:
             unique.append((name, home))
     goals, dropped = export_goals(goal_home, set(args.goal_id), set(args.also_goal_id),
-                                  args.exclude_goal, args.scope, mates)
+                                  args.exclude_goal, args.scope, mates, with_drive_ready=True)
     decisions = {home: open_decisions(home) for _, home in unique}
     deciding_tasks = {(home, task) for home, (_, rows) in decisions.items() for task, _, _ in rows}
-    verified, mismatches = build_goals(goals, unique, deciding_tasks, read_goal_pace(goal_home))
+    samples, fresh = read_goal_pace(goal_home)
+    verified, mismatches = build_goals(goals, unique, deciding_tasks, samples, fresh)
     # Other projects need a captain entry, not a second goal card or a forge scan.
     outside = [g for g in dropped if not (args.exclude_goal and re.search(args.exclude_goal, g['id']))]
     native_owners = {'miko', 'geris'} | {sm.casefold() for sm, _, projects in mates

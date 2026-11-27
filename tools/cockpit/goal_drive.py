@@ -31,21 +31,23 @@ ATTRIBUTE = re.compile(r' data-fm-goal-drive="(?:on|off)"(?=>)|'
 STYLE = '''<style>
 [data-fm-goal-drive="off"], .fm-goal-kpi-off { filter: grayscale(1); }
 #fm-goal-kpis { list-style:none; margin:4px 0 8px; padding:0; }
-#fm-goal-kpis > li { display:flex; align-items:baseline; gap:4px 8px; margin:0 0 4px;
+#fm-goal-kpis > li { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 8px; margin:0 0 4px;
     border:1px solid #465369; border-radius:6px; padding:3px 6px; background:#141821;
     color:#f2f4f8; font-size:.875rem; }
-.fm-goal-kpi-title { flex:1 1 0; min-inline-size:0; color:inherit;
+.fm-goal-kpi-title { flex:1 1 8rem; min-inline-size:0; color:inherit;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .fm-goal-kpi-metrics { flex:none; max-inline-size:75%; display:flex; flex-wrap:wrap;
     gap:2px 4px; font-size:.75rem; }
 .fm-goal-kpi-metrics > span { white-space:nowrap; color:var(--fm-goal-color); }
-.fm-goal-pace { color:#d4dbe7; font-size:.75rem; }
+.fm-goal-readiness, .fm-goal-pace { color:#d4dbe7; font-size:.75rem; }
+.fm-goal-readiness { flex:none; max-inline-size:100%; }
 .fm-goal-pace > span { white-space:nowrap; }
 .fm-goal-pace-warning { color:#ffc35c; font-weight:bold; }
 p.fm-goal-pace { display:table; background:#141821; border-radius:4px; margin:4px 0; padding:2px 4px; }
 @media (max-width:640px) {
-    #fm-goal-kpis > li:has(.fm-goal-pace) { flex-wrap:wrap; }
-    #fm-goal-kpis .fm-goal-pace { flex:0 0 100%; }
+    #fm-goal-kpis .fm-goal-kpi-title { flex:0 1 100%; }
+    #fm-goal-kpis .fm-goal-kpi-metrics { max-inline-size:100%; }
+    #fm-goal-kpis .fm-goal-readiness, #fm-goal-kpis .fm-goal-pace { flex:0 1 100%; }
 }
 .fm-goal-drive { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; margin:2px 0 4px; }
 .fm-goal-drive button { font:inherit; color:inherit; background:#202633; border:1px solid #546074;
@@ -152,6 +154,19 @@ def pace_marker(goal, *, card=False):
             f'<span>{pace["waiting"]} wacht</span></{tag}>')
 
 
+def readiness_marker(goal):
+    readiness = goal.get('drive_ready', {})
+    if readiness.get('total') == 0:
+        label = 'Geen crewtaken'
+    elif 'ready' not in readiness:
+        label = 'Instructies: niet gecontroleerd'
+    else:
+        label = f'Instructies klaar: {readiness["ready"]}/{readiness["total"]}'
+        if readiness['unknown']:
+            label += f' · {readiness["unknown"]} niet gecontroleerd'
+    return f'<span class="fm-goal-readiness">{label}</span>'
+
+
 def goal_kpis(goals):
     if not goals:
         return ''
@@ -160,13 +175,14 @@ def goal_kpis(goals):
         items = goal['items']
         counts = Counter(i['status'] for i in items)
         metrics = []
-        for state in ('done', 'running', 'waiting', 'open-captain'):
+        for state in ('done', 'startable', 'running', 'waiting', 'open-captain'):
             count = f'{counts[state]}/{len(items)}' if state == 'done' else counts[state]
             metrics.append(f'<span data-fm-goal-status="{state}">{count} {STATUSES[state][0]}</span>')
         gid, title = html.escape(goal['id']), html.escape(goal['title'])
         off = '' if goal['driven'] else ' class="fm-goal-kpi-off"'
         rows.append(f'<li{off}><a class="fm-goal-kpi-title" href="#doel-{gid}" title="{title}">{title}</a>'
-                    f'<span class="fm-goal-kpi-metrics">{"".join(metrics)}</span>{pace_marker(goal)}</li>')
+                    f'<span class="fm-goal-kpi-metrics">{"".join(metrics)}</span>'
+                    f'{readiness_marker(goal)}{pace_marker(goal)}</li>')
     return f'<ul id="fm-goal-kpis" role="list" aria-label="Status per doel">{"".join(rows)}</ul>'
 
 

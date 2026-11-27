@@ -119,7 +119,17 @@ test_drive_readiness() {
   : > "$registry"
   expect_rc 1 goal ready I2
   assert_contains "$(<"$TMP_ROOT/out")" 'mate: not checked: owner terp is unreachable' 'an absent owner registration never defaults to main'
-  pass 'drive readiness checks briefs and owner routes, warns on writes, enforces strict preflight, and includes OFF goals'
+  local before_revision
+  before_revision=$(goal export I2 --with-drive-ready | jq -er '
+    .goals[0].drive_ready | select(.ready == 1 and .total == 2 and .unknown == 1) | .item_revision') || fail 'missing or wrong readiness projection'
+  printf '%s\n' 'item [id=build] [owner=main] [task=builder]: build' \
+    'item [id=mate] [owner=unknown] [task=child]: secondmate work' > "$ITEMS"
+  expect_rc 0 goal edit I2 --items-file "$ITEMS"
+  goal export I2 --with-drive-ready | jq -e --arg before "$before_revision" '
+    .goals[0].drive_ready | .ready == 1 and .total == 2 and .unknown == 1 and
+    (.item_revision | test("^[a-f0-9]{64}$") and . != $before)' >/dev/null \
+    || fail 'owner rebind did not invalidate readiness, or an unknown owner used the local namesake'
+  pass 'drive readiness checks owner routes without local namesakes, binds revisions, and includes OFF goals'
 }
 
 test_validation() {

@@ -233,7 +233,10 @@ printf '%s\n' 'draft-good,queued,ship,draftrepo,Good' 'draft-bare,queued,ship,ba
   'replay,queued,ship,draftrepo,Held then replayed' 'over-cap,queued,ship,draftrepo,Deferred' \
   'cap-independent,queued,ship,draftrepo,Separate goal' >> "$H/data/ready.csv"
 assert_equals '1 of 1 items drive-ready' "$("$G" ready separate)" 'approved source is ready before its brief exists'
-assert_absent "$H/data/cap-independent/brief.md" 'ready never materializes a brief'
+"$G" export separate --with-drive-ready | jq -e '
+  .goals[0].drive_ready | .ready == 1 and .total == 1 and .unknown == 0' >/dev/null \
+  || fail 'readiness export did not count a validated approved source'
+assert_absent "$H/data/cap-independent/brief.md" 'ready and export never materialize a brief'
 ready_out=$("$G" ready draft) && fail 'invalid draft sources must not all be ready'
 assert_contains "$ready_out" 'addendum: fill {FILL:MIKO_ROUTE}' 'ready checks rendered addenda'
 assert_contains "$ready_out" 'placeholder: fill {FILL:MIKO_ROUTE}' 'ready checks source tokens'

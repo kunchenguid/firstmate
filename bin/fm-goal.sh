@@ -255,7 +255,10 @@
 # wait_stale, wait_cleared and orphaned_running (a running mark without a live task).
 # Items with an inline spec also carry it as the `spec` object.
 # drive_revision counts drive marks; --driven exports only active ON goals.
-# --with-drive-ready adds drive_ready {ready, total} counts to each goal.
+# --with-drive-ready adds drive_ready {ready, total, unknown, item_revision}.
+# total counts only drive items; unknown is the subset that could not be checked.
+# item_revision binds the counts to this home/view and the current item definitions
+# including specs, owners and folded task links. It is not a drive-switch revision.
 # It is read-only, takes no lock, and needs jq.
 # In a secondmate home, ready, startable and export read the local parent's goals and
 # list only items owned by this mate. Dependencies still use the full goal.
@@ -1503,19 +1506,20 @@ _fm_goal_item_task_home() {  # <idx> <data-dir>
   _fm_goal_registered_owner_home "$owner" "$2"
 }
 
-# Print one fix, or nothing when the brief is ready. Never render brief contents.
+# Print one fix, or nothing when the brief is ready. Return 2 if the check
+# could not be performed. Never render brief contents.
 _fm_goal_brief_fix() {  # <idx> <registry-data>
   local i=$1 home data task path owner token fix row_check=''
   owner=${FM_GOAL_ITEMS_OWNERS[$i]}
   if ! home=$(_fm_goal_item_task_home "$i" "$2"); then
     printf 'not checked: owner %s is unreachable; verify the brief in that home\n' "$owner"
-    return
+    return 2
   fi
   data=$FM_GOAL_DATA
   [ -z "$home" ] || data=$home/data
   if [ -L "$data" ] || [ ! -d "$data" ] || [ ! -x "$data" ]; then
     printf 'not checked: restore access to the owner data directory %s\n' "$data"
-    return
+    return 2
   fi
   task=${FM_GOAL_ITEMS_BRIEF_SOURCES[$i]:-${FM_GOAL_ITEMS_TASKS[$i]}}
   if [ -z "$task" ]; then
@@ -1526,6 +1530,10 @@ _fm_goal_brief_fix() {  # <idx> <registry-data>
   if [ -L "$data/$task" ] || [ -L "$path" ]; then
     printf 'replace the symlink with a regular task directory and brief at %s\n' "$path"
     return
+  fi
+  if { [ -d "$data/$task" ] && [ ! -x "$data/$task" ]; } || { [ -f "$path" ] && [ ! -r "$path" ]; }; then
+    printf 'not checked: restore read access to %s\n' "$path"
+    return 2
   fi
   if [ -n "$home" ]; then
     # Local callers retain their overrides; never inherit the caller's clone,
@@ -1538,7 +1546,7 @@ _fm_goal_brief_fix() {  # <idx> <registry-data>
     if ! fix=$(_fm_goal_draft_render "$i"); then printf '%s\n' "$fix"; fi
     return
   fi
-  if [ ! -f "$path" ] || [ ! -r "$path" ] || [ ! -s "$path" ]; then
+  if [ ! -f "$path" ] || [ ! -s "$path" ]; then
     printf 'write a readable, nonempty brief at %s\n' "$path"
     return
   fi
@@ -1552,15 +1560,18 @@ _fm_goal_brief_fix() {  # <idx> <registry-data>
 
 _fm_goal_drive_readiness() {  # <registry-data> [owner filter]
   local i j id fix refs
-  FM_GOAL_READY=0 FM_GOAL_READY_TOTAL=0 FM_GOAL_READY_GAPS=()
+  FM_GOAL_READY=0 FM_GOAL_READY_TOTAL=0 FM_GOAL_READY_UNKNOWN=0 FM_GOAL_READY_GAPS=()
   for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do
     [ -z "${2-}" ] || [ "${FM_GOAL_ITEMS_OWNERS[$i]}" = "$2" ] || continue
     id=${FM_GOAL_ITEMS_IDS[$i]}
     fix=''
     if [ "${FM_GOAL_ITEMS_CLASSES[$i]}" = drive ]; then
       FM_GOAL_READY_TOTAL=$((FM_GOAL_READY_TOTAL + 1))
-      fix=$(_fm_goal_brief_fix "$i" "$1")
-      [ -n "$fix" ] || FM_GOAL_READY=$((FM_GOAL_READY + 1))
+      if ! fix=$(_fm_goal_brief_fix "$i" "$1"); then
+        FM_GOAL_READY_UNKNOWN=$((FM_GOAL_READY_UNKNOWN + 1))
+      elif [ -z "$fix" ]; then
+        FM_GOAL_READY=$((FM_GOAL_READY + 1))
+      fi
     elif [ -z "${FM_GOAL_ITEMS_CAPTAIN_REASONS[$i]}" ]; then
       for ((j=0; j<FM_GOAL_ITEM_COUNT; j++)); do
         [ "${FM_GOAL_ITEMS_CLASSES[$j]}" = drive ] || continue
@@ -3161,7 +3172,7 @@ cmd_launch_links() {
 # progress counts, and one object per item carrying its projection (see the
 # `export` paragraph in the header for the contract).
 _fm_goal_export_one() {  # <id> <selector> <with-drive-ready 0|1>
-  local now i startable reached landing orphan stopon marks items='' drive_ready=null
+  local now i startable reached landing orphan stopon marks items='' drive_ready=null revision
   now=$(date +%s)
   _fm_goal_open_record "$1" "$FM_GOAL_VIEW_STATE" || return 1
   [ "${2-}" != --driven ] || [ "$FM_GOAL_REC_DRIVE" = driven ] || return 1
@@ -3169,7 +3180,15 @@ _fm_goal_export_one() {  # <id> <selector> <with-drive-ready 0|1>
   fm_goal_fold "$1" "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$now"
   if [ "$3" -eq 1 ]; then
     _fm_goal_drive_readiness "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
-    drive_ready="{\"ready\":$FM_GOAL_READY,\"total\":$FM_GOAL_READY_TOTAL}"
+    # Hash the same in-memory definitions that were checked, not a second read
+    # of a record that could have been replaced between the two operations.
+    revision=$({
+      printf '%s\0' "$FM_GOAL_HOME" "$FM_GOAL_VIEW_OWNER" "$FM_GOAL_REC_PLAN" "$FM_GOAL_REC_DONE_WHEN"
+      _fm_goal_items_text ''
+    } | fm_pr_sha256 -) || revision=''
+    if [[ "$revision" =~ ^[a-f0-9]{64}$ ]]; then
+      drive_ready="{\"ready\":$FM_GOAL_READY,\"total\":$FM_GOAL_READY_TOTAL,\"unknown\":$FM_GOAL_READY_UNKNOWN,\"item_revision\":\"$revision\"}"
+    fi
   fi
   _fm_goal_project_waits "$FM_GOAL_VIEW_STATE" "$FM_GOAL_VIEW_DATA" "$FM_GOAL_VIEW_OWNER"
   for ((i=0; i<FM_GOAL_ITEM_COUNT; i++)); do

@@ -266,10 +266,10 @@ kpis = ElementTree.fromstring(page[kpi_start:page.index('</ul>', kpi_start) + le
 assert len(kpis) == 2
 alpha, beta = kpis
 assert alpha[0].text == 'Doel alpha' and alpha[0].get('href') == '#doel-alpha'
-assert [metric.text for metric in alpha[1]] == ['1/9 Klaar', '1 Bezig', '3 Wacht', '1 Aan jou']
+assert [metric.text for metric in alpha[1]] == ['1/9 Klaar', '2 Kan starten', '1 Bezig', '3 Wacht', '1 Aan jou']
 assert not alpha.get('class')
 assert beta[0].text == 'Doel beta' and beta.get('class') == 'fm-goal-kpi-off'
-assert [metric.text for metric in beta[1]] == ['0/1 Klaar', '0 Bezig', '1 Wacht', '0 Aan jou']
+assert [metric.text for metric in beta[1]] == ['0/1 Klaar', '0 Kan starten', '0 Bezig', '1 Wacht', '0 Aan jou']
 assert 'wordt gedreven' in page and '>uit</span>' in page
 assert 'Alpha steps' in page and 'Beta steps' in page
 
@@ -369,7 +369,9 @@ done
 cp "$pace_preview" "$TMP_ROOT/previous-pace.html"
 write_pace 3600 11 || fail 'could not write stale pace fixture'
 refresh_pace || fail 'stale pace refresh failed'
-cmp -s "$preview" "$pace_preview" || fail 'stale pace differs from absent pace'
+cmp -s "$preview.truth.json" "$pace_preview.truth.json" || fail 'stale legacy pace changes truth versus absent pace'
+bash "$TOOLS/cockpit-sync.sh" --verify-page "$pace_preview" --out "$pace_preview.truth.json" >/dev/null \
+  || fail 'freshly built page with stale pace did not verify'
 if bash "$TOOLS/cockpit-sync.sh" --verify-page "$TMP_ROOT/previous-pace.html" \
   --out "$pace_preview.truth.json" > "$TMP_ROOT/stale-pace.out"; then
   fail 'a stale card pace marker passed verification'
@@ -377,11 +379,105 @@ fi
 grep -Fq 'unexpected pace marker: fm-goal-pace-alpha' "$TMP_ROOT/stale-pace.out" || fail 'stale card pace not reported'
 python3 -I "$TOOLS/goal_drive.py" --truth "$pace_preview.truth.json" --page "$TMP_ROOT/previous-pace.html" \
   || fail 'could not rebuild a page with stale pace'
-cmp -s "$preview" "$TMP_ROOT/previous-pace.html" || fail 'rebuild retained stale pace'
+bash "$TOOLS/cockpit-sync.sh" --verify-page "$TMP_ROOT/previous-pace.html" --out "$pace_preview.truth.json" >/dev/null \
+  || fail 'rebuild retained stale pace'
 printf '%s\n' '{not JSON' > "$pace_file"
 refresh_pace || fail 'bad pace refresh failed'
-cmp -s "$preview" "$pace_preview" || fail 'bad pace differs from absent pace'
+jq -e '[.goals[] | select(has("pace"))] == [] and
+  (.goals[] | select(.id == "alpha") | .drive_ready == {total:8})' "$pace_preview.truth.json" >/dev/null \
+  || fail 'broken pace must not show tempo or checked ON readiness'
 pass 'cockpit goal pace: fresh sample on KPI and ON card, warning after 10m; OFF, absent, stale and bad samples stay quiet'
+
+# Use the real sampler and sync on a mixed-home goal, with no dispatch or forge fixtures.
+ready_home="$TMP_ROOT/ready-home"
+ready_mate="$TMP_ROOT/ready-mate"
+ready_env() { env -i PATH="$PATH" HOME="$TMP_ROOT/home" FM_HOME="$ready_home" "$@"; }
+ready_goal() { ready_env bash "$ROOT/bin/fm-goal.sh" "$@"; }
+ready_truth="$TMP_ROOT/readiness.json"
+ready_page="$TMP_ROOT/readiness.html"
+ready_sync() {
+  ready_env bash "$TOOLS/cockpit-sync.sh" --goal-home "$ready_home" --out "$ready_truth" >/dev/null &&
+    python3 -I "$TOOLS/goal_drive.py" --truth "$ready_truth" --page "$ready_page"
+}
+mkdir -p "$ready_home/state" "$ready_mate/state" "$ready_home/data" "$ready_mate/data"
+printf 'mate\n' > "$ready_mate/.fm-secondmate-home"
+printf '%s\n' "- mate - Lab mate (home: $ready_mate; scope: test; projects: ; added 2026-11-27)" > "$ready_home/data/secondmates.md"
+for task in one two three same; do
+  mkdir -p "$ready_home/data/$task"
+  printf 'Local instructions\n' > "$ready_home/data/$task/brief.md"
+done
+mkdir -p "$ready_mate/data/four"
+printf 'Mate instructions\n' > "$ready_mate/data/four/brief.md"
+printf '%s\n' \
+  'item [id=one] [owner=main] [task=one]: One' \
+  'item [id=two] [owner=main] [task=two]: Two' \
+  'item [id=three] [owner=main] [brief-source=three]: Three' \
+  'item [id=four] [owner=mate] [task=four]: Four' \
+  'item [id=five] [owner=mate] [task=same]: Five' \
+  'item [id=sign] [owner=captain] [class=captain]: Approve' > "$TMP_ROOT/ready-mixed"
+printf 'item [id=ghost] [owner=unknown] [task=same]: Unknown owner\n' > "$TMP_ROOT/ready-unknown"
+printf 'item [id=sign] [owner=captain] [class=captain]: Review\n' > "$TMP_ROOT/ready-captain"
+for fixture in mixed unknown captain; do
+  ready_goal start "$fixture" --title "Doel $fixture" --done-when 'demo complete' --named-by 'do this' \
+    --plan plan.md --items-file "$TMP_ROOT/ready-$fixture" >/dev/null || fail "could not start readiness goal $fixture"
+done
+printf '<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><h2 id="doelen">Doelen</h2>\n' > "$ready_page"
+ready_unchanged() {
+  find "$ready_home" "$ready_mate" -print | sort
+  find "$ready_home" "$ready_mate" -type f -exec cksum {} + | sort
+}
+ready_assert() {
+  jq -e --arg id "$1" --argjson expected "$2" '.goals[] | select(.id == $id) | .drive_ready == $expected' \
+    "$ready_truth" >/dev/null || fail "wrong readiness truth for $1: expected $2"
+}
+ready_4of5='{"ready":4,"total":5,"unknown":0}'
+before_ready=$(ready_unchanged)
+ready_sync || fail 'missing-sample projection failed'
+ready_assert mixed "$ready_4of5"
+[ "$before_ready" = "$(ready_unchanged)" ] || fail 'missing-sample refresh changed owner state or data'
+ready_env bash "$ROOT/bin/fm-goal-pace.sh" >/dev/null || fail 'real readiness sample failed'
+ready_sample="$ready_home/state/goal-pace.json"
+jq -e '.goals[] | select(.id == "mixed") | .drive_ready | .ready == 4 and .total == 5 and .unknown == 0' \
+  "$ready_sample" >/dev/null || fail 'pace did not sample mixed-home 4/5'
+before_ready=$(ready_unchanged)
+ready_sync || fail 'fresh-sample refresh failed'
+ready_assert mixed "$ready_4of5"
+ready_assert unknown '{"ready":0,"total":1,"unknown":1}'
+ready_assert captain '{"total":0}'
+[ "$before_ready" = "$(ready_unchanged)" ] || fail 'ready refresh changed owner state or data'
+python3 - "$ready_page" <<'PY' || fail 'wrong readiness KPI labels'
+from pathlib import Path
+from xml.etree import ElementTree
+import re
+import sys
+page = Path(sys.argv[1]).read_text()
+rows = ElementTree.fromstring(re.search(r'<ul id="fm-goal-kpis".*?</ul>', page, re.S)[0])
+labels = {row[0].get('href'): row.find('span[@class="fm-goal-readiness"]').text for row in rows}
+assert labels == {'#doel-mixed': 'Instructies klaar: 4/5',
+                  '#doel-unknown': 'Instructies klaar: 0/1 · 1 niet gecontroleerd',
+                  '#doel-captain': 'Geen crewtaken'}, labels
+PY
+# An owner data directory can disappear while the item definition stays the same.
+mv "$ready_mate/data" "$ready_mate/data.unavailable"
+ready_sync || fail 'unavailable owner-data refresh failed'
+ready_assert mixed '{"total":5}'
+mv "$ready_mate/data.unavailable" "$ready_mate/data"
+# Counts do not change, so only the item revision can reject this sample.
+printf 'spec four {"section":"Plan §2","scope":"Review a narrower scope","evidence":"Sample result"}\n' >> "$TMP_ROOT/ready-mixed"
+ready_goal edit mixed --items-file "$TMP_ROOT/ready-mixed" >/dev/null || fail 'readiness edit failed'
+ready_sync || fail 'post-edit refresh failed'
+ready_assert mixed '{"total":5}'
+grep -Fq '>Instructies: niet gecontroleerd</span>' "$ready_page" || fail 'stale edit still looks checked'
+ready_env "FM_GOAL_PACE_NOW_EPOCH=$(($(date +%s) - 601))" bash "$ROOT/bin/fm-goal-pace.sh" >/dev/null \
+  || fail 'old readiness sample failed'
+ready_sync || fail 'old-sample refresh failed'
+ready_assert mixed '{"total":5}'
+ready_goal pause mixed >/dev/null || fail 'could not switch readiness goal OFF'
+before_ready=$(ready_unchanged)
+ready_sync || fail 'OFF readiness projection failed'
+ready_assert mixed "$ready_4of5"
+[ "$before_ready" = "$(ready_unchanged)" ] || fail 'OFF refresh changed owner state or data'
+pass 'cockpit readiness: mixed-home 4/5, OFF and missing projection, stale edit and age, unknown owner and no crew items; refresh read-only'
 
 goal apply-drive-answer "$TMP_ROOT/toggles.result" >/dev/null || fail 'apply rejected cockpit answer capture'
 goal export | jq -e '([.goals[] | select(.driven) | .id] == ["beta"])' >/dev/null || fail 'both keyed answers were not applied'
