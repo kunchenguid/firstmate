@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Usage: fm-goal-push.sh run [--dry-run] | tick | eligible <goal>/<item> <task> [--launch]
-# config/goal-push: shadow (default, only writes state/goal-push.log) or enforce.
-# The watcher calls tick: run every 120s or on a goal/mark, landing, or status
-# (including answer) change. tick stores its scheduling cursor in watcher state.
+# config/goal-push: shadow (default, logs dispatch/mark proposals) or enforce.
+# The watcher calls tick: run every 120s or on a goal/mark, landing, status,
+# or cockpit truth change. tick also wakes on reached, uncovered captain
+# steps in both modes and stores its scheduling cursor in watcher state.
 # eligible is the read-only final guard for goal-originated dispatch and replay.
 # The main home drafts up to three missing briefs per driven goal per pass in
 # enforce; shadow only logs proposals. Drafts need task=, project=, a normalized
@@ -218,6 +219,37 @@ draft_brief() {
   "$SCRIPT_DIR/fm-task-milestones.sh" stamp "$STATE/$task.status" brief -- 'drafted by goal pusher' || true
 }
 
+# Track reached, uncovered episodes only. A covered/cleared observation
+# removes the episode, allowing a future episode to ring without an hourly nag.
+captain_notices() {
+  local file="$STATE/.goal-push-captain" goals audit count prior='' next='' tmp status kind binding episode row
+  [ ! -L "$file" ] && { [ ! -e "$file" ] || [ -f "$file" ]; } || return 1
+  goals=$(FM_CREW_STATE_NO_FORGE=1 "$SCRIPT_DIR/fm-goal.sh" export --driven | jq -ec '.goals') || return 1
+  audit=$(printf '%s\n' "$goals" | "$SCRIPT_DIR/../tools/cockpit/cockpit-sync.sh" \
+    --goal-home "$FM_HOME" --state "$FM_GOAL_VIEW_STATE" --captain-waiting --goal-items-stdin) || return 1
+  count=$(awk '$1 == "MISSING" {n++} END {print n+0}' <<< "$audit")
+  [ "$goals" = '[]' ] || log "captain_missing=$count"
+  if [ "$command" != tick ]; then
+    [ "$run_mode" = enforce ] && [ "$(mode)" = enforce ] || return 0
+  fi
+  [ ! -f "$file" ] || prior=$(<"$file")
+  while IFS=$'\t' read -r status kind binding episode; do
+    [ "$status" = MISSING ] && [ "$kind" = goal ] && [ -n "$episode" ] || continue
+    row="$binding $episode"
+    if grep -Fxq -- "$row" <<< "$prior" || {
+      still_driven "${binding%%/*}" && fm_wake_append check "goal-push:captain:$binding" \
+        "check: captain item NOT on cockpit: $binding"; }; then
+      next="${next:+$next$'\n'}$row"
+    fi
+  done <<< "$audit"
+  [ "$prior" != "$next" ] || return 0
+  tmp=$(mktemp "$STATE/.goal-push-captain.XXXXXX") || return 1
+  if ! printf '%s\n' "$next" > "$tmp" || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 run_pass() {
   local run_mode=$1 now path goal i changed task binding brief result budget=-1 remaining queued links drafts
   local briefs='' ready='' held='' off='' listed=0
@@ -301,6 +333,7 @@ run_pass() {
     if still_driven "${binding%%/*}"; then current="$current $binding"; fi
   done
   [ -z "$current" ] || notice "briefs-$(printf '%s\n' "$current" | cksum | tr ' ' '-')" "goal briefs needed:$current"
+  captain_notices || log 'captain cockpit audit failed'
 }
 
 # One cheap metadata batch per watcher poll; content and status notes are not
@@ -314,7 +347,8 @@ event_key() {
   done
   [ "${#paths[@]}" -gt 0 ] || return 1
   for f in "$dir"/*.marks "$STATE"/*.pr-poll-merge-notified "$STATE"/*.status \
-           "$FM_GOAL_VIEW_STATE/${FM_GOAL_VIEW_OWNER:-main}.status" "$FM_GOAL_CONFIG/goal-push"; do
+           "$FM_GOAL_VIEW_STATE/${FM_GOAL_VIEW_OWNER:-main}.status" "$FM_GOAL_CONFIG/goal-push" \
+           "$FM_GOAL_VIEW_STATE/cockpit-truth.json" "$FM_GOAL_VIEW_STATE"/cockpit-truth.*.json; do
     [ -f "$f" ] && [ ! -L "$f" ] && paths+=("$f")
   done
   if [ "$(uname -s)" = Darwin ]; then
@@ -350,6 +384,7 @@ if [ "$1" = tick ]; then
   if [ "$key" = "$old_key" ] && [ "$((epoch - last))" -lt 120 ]; then exit 0; fi
   printf '%s %s\n' "$epoch" "$key" > "$tick_file"
 fi
+command=$1
 run_mode=$(mode)
 [ "${2:-}" != --dry-run ] || run_mode=shadow
 run_pass "$run_mode"

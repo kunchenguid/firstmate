@@ -45,6 +45,9 @@ A merged PR is not the end of an item with a target: the GOAL section lists it a
 At each drive turn run `bin/fm-goal.sh probe <id>` so the stage marks follow the world; a probe marks only what its ladder proves, and a rung no probe can prove (a captain-only click) stays for the captain.
 `close <id> --done` refuses while an item is short of its target, so a goal is never closed on a merge alone.
 
+Anything the captain must answer, approve, sign in for, test or check needs a keyed `needs-decision` or to-do and a cockpit entry from firstmate or its secondmate.
+Treat `captain items NOT on cockpit` as work for `cockpit-refresh`, and include any remaining captain checks under "To check" in the done report.
+
 ## Marks and the secondmate duty
 
 After every landing, and after any change to one of its items, the item's owner runs `bin/fm-goal.sh mark <id> <item> <state> [--task <task-id>] -- <note>`; in a secondmate home that same command routes the mark to the parent channel itself, so a second mate never writes the parent's record.

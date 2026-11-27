@@ -5,6 +5,7 @@ Rules and step order: .agents/skills/cockpit-refresh/SKILL.md. This help owns th
 
 Modes (read-only on the firstmate homes and on the forge):
   sync (default)      cockpit-sync.py --goal-home HOME --out truth.json [--page LIVE.html]
+  audit waiting       cockpit-sync.py --captain-waiting --goal-home HOME [--out truth.json]
   verify a built page cockpit-sync.py --verify-page BUILT.html --out truth.json
   mark a page failed  cockpit-sync.py --banner-only "reason" --page LIVE.html
 
@@ -21,7 +22,12 @@ Scope (environment fallbacks are shown where available; environment lists are co
                                           secondmate (or one registered for the project). Verify all items
                                           of matched goals. --goal-id explicitly selects goals instead;
                                           --exclude-goal always applies. Linked decisions stay in scope.
-  --out FILE           COCKPIT_TRUTH      the truth JSON
+  --out FILE           COCKPIT_TRUTH      the truth JSON; live default is HOME/state/cockpit-truth.json
+                       (scoped refreshes use cockpit-truth.<scope>.json). Audit reads these files
+                       unless --out is supplied. Output: STATUS<TAB>KIND<TAB>KEY (STATUS is
+                       MISSING or on-cockpit). --goal-items-stdin audits only a goals[] array
+                       supplied by the caller and appends a wake episode id for reached items.
+  --state DIR          audit: override the local state directory (e.g. for the goal driver)
 Page options:
   --page FILE          sync: remove the failure banner on success, add it on failure
   --section ID         id of the page's decisions section (repeatable; default captain-door, beslissingen)
@@ -44,11 +50,14 @@ truth JSON (schema fm-cockpit-truth.v1; no timestamps, so an unchanged world wri
   section1     {must[], can[], later[]}
     entry      {key, aliases[], title, about, question, options[{value,label,detail}], recommendation,
                 blocks[], sources[]}
+    steps       {record key: [authored steps, in order]}
+    group       optional other_projects, rendered inside section 1
   out_of_scope number of holds and decisions left out by --scope or goal selection
 
 Page contract checked by --verify-page:
-  - every must and can entry appears in the section as data-lavish-question="<key or alias>" or
-    data-cockpit-captain="<key or alias> ..."
+  - every captain entry appears in section 1 as data-lavish-question="<key or alias>" or
+    data-cockpit-captain="<key or alias> ..."; other projects' ordered steps appear in the
+    nested #overige-projecten block
   - every such value in the section belongs to an entry that is still open, and no entry appears twice
   - the goal cards, drive KPI, per-goal KPI lines and all ring counts match the scoped truth.
     The lines show done/total, running, waiting and waits on you; total includes every item.
@@ -71,7 +80,6 @@ from concurrent.futures import ThreadPoolExecutor
 import csv
 import datetime
 import html
-from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -86,7 +94,8 @@ import time
 
 # The shell entry point uses Python isolated mode, which omits the script directory.
 sys.path.append(str(Path(__file__).resolve().parent))
-from goal_drive import TRUTH_SCHEMA, verify_goal_views
+from goal_drive import (DECISION_SECTIONS, OTHER_PROJECTS, TRUTH_SCHEMA, GoalPage, truth_path,
+                        verify_goal_views)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -275,8 +284,11 @@ def project_names(names):
     return {name.rstrip('/').rsplit('/', 1)[-1].casefold() for name in names if name}
 
 
-def export_goals(goal_home, ids, also_ids, exclude, scope, mates):
-    out = run(['bash', str(ROOT / 'bin' / 'fm-goal.sh'), 'export'], 'goal export', env=home_env(goal_home))
+def export_goals(goal_home, ids, also_ids, exclude, scope, mates, state=None):
+    env = home_env(goal_home)
+    if state is not None:
+        env['FM_STATE_OVERRIDE'] = str(state)
+    out = run(['bash', str(ROOT / 'bin' / 'fm-goal.sh'), 'export'], 'goal export', env=env)
     try:
         snapshot = json.loads(out)
         assert snapshot['schema'] == 'fm-goal-export.v1'
@@ -301,6 +313,74 @@ def export_goals(goal_home, ids, also_ids, exclude, scope, mates):
         wanted = (selected or goal['id'] in also_ids) and not (exclude and re.search(exclude, goal['id']))
         (goals if wanted else dropped).append(goal)
     return goals, dropped
+
+
+def waiting_goal_items(goals):
+    for goal in goals:
+        for item in goal['items']:
+            if item['state'] in CLOSED:
+                continue
+            wait = item.get('wait_on') or ''
+            explicit = item['state'] == 'waiting' and wait.startswith('captain:')
+            if item['class'] == 'captain' or explicit:
+                yield f'{goal["id"]}/{item["id"]}', goal, item, wait[8:] if explicit else None
+
+
+def other_project(item):
+    return bool(item.get('project') and not project_names([item['project']]) & {'miko', 'geris'})
+
+
+CAPTAIN_BUCKETS = ('must', 'can', 'later')
+
+
+def coverage_paths(state):
+    return [state / 'cockpit-truth.json', *sorted(state.glob('cockpit-truth.*.json'))]
+
+
+def audit_captain_waiting(args):
+    home = Path(args.goal_home).resolve()
+    state = args.state or home / 'state'
+    sources = set()
+    for path in [Path(args.out)] if args.out else coverage_paths(state):
+        if path.is_symlink() or not path.is_file():
+            continue
+        truth = json.loads(path.read_text(encoding='utf-8'))
+        if truth.get('schema') != SCHEMA:
+            raise SyncError(f'{path} is not a {SCHEMA} file')
+        for bucket in CAPTAIN_BUCKETS:
+            for e in truth['section1'][bucket]:
+                steps = e.get('steps') or {}
+                for source in e['sources']:
+                    if ((source.startswith('goal item ') and steps.get(source.removeprefix('goal item ')))
+                            or (source.startswith('captain hold ') and steps.get(source.split()[2]))
+                            or (source.startswith('needs-decision ') and steps)):
+                        sources.add(source)
+
+    if args.goal_items_stdin:
+        goals = json.load(sys.stdin)
+    else:
+        goals, _ = export_goals(home, set(), set(), None, [], [], state)
+    rows = []
+
+    def emit(present, kind, key, episode=''):
+        rows.append(('on-cockpit' if present else 'MISSING', kind, key, episode))
+
+    now = int(time.time())
+    for key, goal, item, wait in waiting_goal_items(goals):
+        reached = goal['driven'] and (wait or (not item['waiting_on'] and (item['until'] or now) >= now))
+        episode = (f'{goal["started_epoch"]}:{goal["drive_revision"]}:{item["since"]}:{wait or "captain"}'
+                   if reached else '')
+        emit(f'goal item {key}' in sources, 'goal', key, episode)
+    if not args.goal_items_stdin:
+        for row in captain_hold_rows(home):
+            task = row['id']
+            emit(f'captain hold {task} (main)' in sources, 'hold', task)
+        reserved, decisions = open_decisions(home, state)
+        for task, key, _ in decisions:
+            if key != 'default' and not key.startswith(reserved):
+                emit(f'needs-decision {key} ({task})' in sources, 'decision', f'{task}/{key}')
+    for row in rows:
+        print('\t'.join(row if args.goal_items_stdin else row[:3]))
 
 
 def item_pr_url(item, meta, lines):
@@ -392,7 +472,8 @@ def build_goals(goals, homes, deciding_tasks, samples):
             status, flags = verify_item(item, task_state, pr, must_wait)
             items.append({'id': item['id'], 'title': item['title'], 'owner': item['owner'], 'class': item['class'],
                           'task': item.get('task'), 'after': item.get('after') or [], 'mark': item['state'],
-                          'status': status, 'task_state': task_state,
+                          'status': status, 'task_state': task_state, 'state': item['state'],
+                          'project': item.get('project'), 'wait_on': item.get('wait_on'),
                           'last_line': plain(lines[-1]) if lines else '', 'pr': pr, 'flags': [f[0] for f in flags]})
             override = item.get('goal_item_title') or (meta or {}).get('goal_item_title')
             if override:
@@ -478,11 +559,11 @@ def question_context(body):
     return {}
 
 
-def open_decisions(home):
+def open_decisions(home, state=None):
     script = ('. "$1"; printf "#\\t%s\\n" "${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}"; '
               'for f in "$2"/*.status; do t=${f##*/}; t=${t%.status}; [ -f "$2/$t.meta" ] || continue; '
               'status_open_decisions "$f" | while IFS= read -r l || [ -n "$l" ]; do printf "%s\\t%s\\n" "$t" "$l"; done; done')
-    out = run(['bash', '-c', script, '_', str(ROOT / 'bin' / 'fm-classify-lib.sh'), str(home / 'state')],
+    out = run(['bash', '-c', script, '_', str(ROOT / 'bin' / 'fm-classify-lib.sh'), str(state or home / 'state')],
               f'open decisions of {home}', env=home_env(home), timeout=300)
     reserved, rows = ('remote-reply-continuity-',), []
     for line in out.splitlines():
@@ -502,7 +583,12 @@ def entry(key, title, about='', question='', options=(), recommendation=None, so
             'recommendation': recommendation, 'blocks': [], 'sources': [source]}
 
 
-def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
+def captain_hold_rows(home):
+    has_backlog = (home / 'data' / 'backlog.md').is_file() or (home / '.tasks.toml').is_file()
+    return [r for r in held_rows(home) if r.get('hold_kind') == 'captain'] if has_backlog else []
+
+
+def captain_list(goals, dropped, homes, scope, sm_projects, decisions, extra_waits):
     links = {}  # task or item id -> goal items it belongs to
     for goal in goals:
         for item in goal['items']:
@@ -512,7 +598,7 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
     foreign -= set(links)
 
     def waiting_on_item(goal, item):
-        return [i for i in goal['items'] if item['id'] in i['after'] and i['status'] not in CLOSED]
+        return [i for i in goal['items'] if item['id'] in i['after'] and i.get('status', i['state']) not in CLOSED]
 
     def in_scope(name, repo, home_name, project_dir=''):
         if name in foreign:
@@ -535,12 +621,17 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
                 have[field] = have[field] or new[field]
             have['blocks'] += [b for b in new['blocks'] if b not in have['blocks']]
             have['sources'] += [s for s in new['sources'] if s not in have['sources']]
+            if 'steps' in new:
+                have.setdefault('steps', {}).update(new['steps'])
+                if new.get('other_project'):
+                    have['other_project'] = True
         for key in keys:
             buckets[key] = old
             if key != old['entry']['key'] and key not in old['entry']['aliases']:
                 old['entry']['aliases'].append(key)
 
     today = datetime.date.today().isoformat()
+    waits = list(waiting_goal_items(goals)) + extra_waits
     held, known, rows_by_home = set(), {}, {}
     for name, home in homes:
         known.update(backlog_records(home))
@@ -558,14 +649,18 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
         for row in rows_by_home[name]:
             if row.get('hold_kind') != 'captain':
                 continue
-            if in_scope(row['id'], row.get('repo', ''), name):
-                wanted.append(row)
+            projects = project_names([row.get('repo'), *sm_projects.get(name, [])])
+            linked = any(ref == row['id'] or i['task'] == row['id'] or i['id'] == row['id']
+                         for _, _, i, ref in waits)
+            scoped = in_scope(row['id'], row.get('repo', ''), name)
+            if scoped or linked or not projects & {'miko', 'geris'}:
+                wanted.append((row, not scoped or bool(projects and not projects & {'miko', 'geris'})))
             else:
                 skipped += 1
         # the list truncates titles and bodies, so each held record is shown in full
         with ThreadPoolExecutor(max_workers=8) as pool:
-            records = list(pool.map(lambda row: show_task(home, row['id']), wanted))
-        for row, record in zip(wanted, records):
+            records = list(pool.map(lambda pair: show_task(home, pair[0]['id']), wanted))
+        for (row, other), record in zip(wanted, records):
             task = row['id']
             body = record.get('body', '')
             context = question_context(body)
@@ -575,6 +670,9 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
                         f'captain hold {task} ({name})')
             if context.get('purpose'):
                 new['about'] = plain(new['about'] + ' Waarom het telt: ' + context['purpose'], 900)
+            authored = context.get('question') or record.get('hold_reason') or record.get('title') or task
+            new['steps'] = {task: [line for line in authored.splitlines() if line.strip()] or [task]}
+            new['other_project'] = other
             aliases, blocked = [], False
             for goal, item in links.get(task, []):
                 blocked = True
@@ -588,33 +686,28 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
             deferred = (until not in ('', '-') and until[:10] > today) or row.get('blocked_by') not in ('', '-', 'none', None)
             add('later' if deferred else 'must' if blocked or new['blocks'] or working else 'can', new, *aliases)
 
-    for goal in goals:
-        by_id = {i['id']: i for i in goal['items']}
-        for item in goal['items']:
-            if item['class'] != 'captain' or item['status'] in CLOSED:
-                continue
-            key = f'{goal["id"]}/{item["id"]}'
-            task = item['task']
-            if task and task not in held and 'Captain decision:' in known.get(task, ''):
-                mismatches.append({'key': key, 'kind': 'answered-not-marked',
-                                   'text': f'the captain already answered {task}, the item is not marked done'})
-                continue
-            title = re.sub(r'^next: ', '', item['title'])
-            new = entry(key, title, f'Doel: {goal["title"]}', source=f'goal item {key}')
-            new['blocks'] = [plain(f'{goal["title"]}: {i["title"]}', 200) for i in waiting_on_item(goal, item)]
-            ready = all(by_id[a]['status'] in CLOSED for a in item['after'] if a in by_id)
-            aliases = [f'{goal["id"]}.{item["id"]}'] + [a for a in (task, item['id']) if a in held]
-            add('later' if not ready else 'must' if new['blocks'] else 'can', new, *aliases)
-
-    # A needs-decision key never makes its own entry: it counts only through a captain hold or an open
-    # captain goal item. Every other open key is a finding for firstmate to hold or resolve.
     captain_items = {}
-    for goal in goals:
-        for item in goal['items']:
-            if item['class'] == 'captain' and item['status'] not in CLOSED:
-                for ref in (item['id'], item['task']):
-                    if ref:
-                        captain_items[ref] = f'{goal["id"]}/{item["id"]}'
+    for key, goal, item, wait in waits:
+        if item['status'] in CLOSED:
+            continue
+        task = item['task']
+        if not wait and task and task not in held and 'Captain decision:' in known.get(task, ''):
+            mismatches.append({'key': key, 'kind': 'answered-not-marked',
+                               'text': f'the captain already answered {task}, the item is not marked done'})
+            continue
+        new = entry(key, item['title'], f'Doel: {goal["title"]}', source=f'goal item {key}')
+        new['steps'] = {key: [item['title']]}
+        new['other_project'] = item.get('other_project') or other_project(item)
+        new['blocks'] = [plain(f'{goal["title"]}: {i["title"]}', 200) for i in waiting_on_item(goal, item)]
+        by_id = {i['id']: i for i in goal['items']}
+        ready = all(by_id[a].get('status', by_id[a]['state']) in CLOSED for a in item['after'] if a in by_id)
+        aliases = [key.replace('/', '.', 1)] + [a for a in (wait, task, item['id']) if a in buckets]
+        add('must' if wait else 'later' if not ready else 'must' if new['blocks'] else 'can', new, *aliases)
+        for ref in (wait, item['id'], task):
+            if ref:
+                captain_items[ref] = key
+
+    # A status key is routed only via a hold or a goal step; otherwise firstmate must triage it.
     for name, home in homes:
         reserved, rows = decisions[home]
         for task, key, note in rows:
@@ -644,9 +737,12 @@ def captain_list(goals, dropped, homes, scope, sm_projects, decisions):
                                    'text': f'{task} has an open question with no captain hold or captain goal item; '
                                            f'hold it or resolve it: {plain(note, 160)}'})
 
-    section = {'must': [], 'can': [], 'later': []}
+    section = {b: [] for b in CAPTAIN_BUCKETS}
     for row in order:
-        section[row['bucket']].append(row['entry'])
+        e = row['entry']
+        if e.pop('other_project', False):
+            e['group'] = 'other_projects'
+        section[row['bucket']].append(e)
     return section, mismatches, skipped
 
 
@@ -698,8 +794,15 @@ def build_truth(args):
     decisions = {home: open_decisions(home) for _, home in unique}
     deciding_tasks = {(home, task) for home, (_, rows) in decisions.items() for task, _, _ in rows}
     verified, mismatches = build_goals(goals, unique, deciding_tasks, read_goal_pace(goal_home))
+    # Other projects need a captain entry, not a second goal card or a forge scan.
+    outside = [g for g in dropped if not (args.exclude_goal and re.search(args.exclude_goal, g['id']))]
+    native_owners = {'miko', 'geris'} | {sm.casefold() for sm, _, projects in mates
+                                        if project_names(projects) & {'miko', 'geris'}}
+    extra_waits = [(key, goal, dict(item, status=item['state'], other_project=True), wait)
+                   for key, goal, item, wait in waiting_goal_items(outside)
+                   if other_project(item) or (not item.get('project') and item['owner'].casefold() not in native_owners)]
     section, more, skipped = captain_list(verified, dropped, unique, set(args.scope),
-                                          {sm: projects for sm, _, projects in mates}, decisions)
+                                         {sm: projects for sm, _, projects in mates}, decisions, extra_waits)
     return {'schema': SCHEMA, 'goals': verified, 'mismatches': mismatches + more, 'section1': section,
             'out_of_scope': skipped}
 
@@ -734,63 +837,52 @@ def set_banner(page, reason):
         write_atomic(page, updated)
 
 
-class PageKeys(HTMLParser):
-    def __init__(self, page, sections, ignore):
-        super().__init__()
-        self.sections, self.ignore = sections, ignore
-        self.tag, self.depth, self.found = None, 0, False
-        self.questions, self.banner = [], False
-        self.feed(page)
-        self.close()
-
-    def handle_starttag(self, tag, attrs):
-        attrs = {k: v or '' for k, v in attrs}
-        if attrs.get('id') == 'cockpit-sync-banner':
-            self.banner = True
-        if self.tag is None and attrs.get('id') in self.sections:
-            self.tag, self.depth, self.found = tag, 1, True
-        elif tag == self.tag:
-            self.depth += 1
-        if self.tag is None:
-            return
-        keys = attrs.get('data-cockpit-captain', '').split()
-        question = attrs.get('data-lavish-question', '')
-        if question and not any(re.search(p, question, re.I) for p in self.ignore):
-            keys.append(question)
-        if keys:
-            self.questions.append(keys)
-
-    def handle_endtag(self, tag):
-        if tag == self.tag:
-            self.depth -= 1
-            if not self.depth:
-                self.tag = None
-
-
 def verify_page(page, truth, sections, ignore):
-    seen = PageKeys(page, sections, ignore)
+    parsed = GoalPage(page)
     problems = []
-    if seen.banner:
+    if parsed.by_id['cockpit-sync-banner']:
         problems.append('the failure banner is still on the page')
-    if not seen.found:
+    if not any(n.visible and n.id in sections for n in parsed.nodes):
         problems.append(f'no decisions section with id {" or ".join(sections)}')
-    section = truth['section1']
-    entries = [(bucket, e) for bucket in ('must', 'can', 'later') for e in section[bucket]]
+    problems += verify_captain_section(truth['section1'], parsed, sections, ignore)
+    problems.extend(verify_goal_views(page, truth['goals']))
+    return list(dict.fromkeys(problems))
+
+
+def verify_captain_section(section, parsed, sections, ignore):
+    problems = []
+    entries = [(bucket, e) for bucket in CAPTAIN_BUCKETS for e in section.get(bucket, [])]
     owner = {key: n for n, (_, e) in enumerate(entries) for key in [e['key'], *e['aliases']]}
-    shown = {}
-    for keys in seen.questions:
+    steps, shown = {}, {}
+    for n in parsed.nodes:
+        if not n.visible or not (decisions := n.ancestor(lambda a: a.id in sections)):
+            continue
+        key = n.attrs.get('data-cockpit-step')
+        if key:
+            other = n.ancestor(lambda a: a.id == OTHER_PROJECTS)
+            inside_other = bool(other and other.ancestor(lambda a: a is decisions))
+            ordered = n.tag == 'li' and n.parent.tag == 'ol'
+            steps.setdefault(key, []).append((n.text(), inside_other, ordered))
+        keys = (n.attrs.get('data-cockpit-captain') or '').split()
+        question = n.attrs.get('data-lavish-question')
+        if question and not any(re.search(p, question, re.I) for p in ignore):
+            keys.append(question)
         hits = {owner[k] for k in keys if k in owner}
-        if not hits:
+        if keys and not hits:
             problems.append(f'answered or unknown question still listed: {" ".join(keys)}')
-        for n in hits:
-            shown[n] = shown.get(n, 0) + 1
+        for match in hits:
+            shown[match] = shown.get(match, 0) + 1
     for n, (bucket, e) in enumerate(entries):
-        if bucket != 'later' and n not in shown:
+        if n not in shown:
             problems.append(f'missing captain item ({bucket}): {e["key"]} - {e["title"]}')
         if shown.get(n, 0) > 1:
             problems.append(f'question listed more than once: {e["key"]}')
-    problems.extend(verify_goal_views(page, truth['goals']))
-    return list(dict.fromkeys(problems))
+        for key, texts in e.get('steps', {}).items():
+            expected = [(text, e.get('group') == 'other_projects', True) for text in texts]
+            if steps.pop(key, []) != expected:
+                problems.append(f'missing or stale captain steps: {key}')
+    problems.extend(f'unknown captain steps: {key}' for key in steps)
+    return problems
 
 
 def env_list(name):
@@ -801,6 +893,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog='cockpit-sync.py', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--goal-home', default=os.environ.get('COCKPIT_GOAL_HOME'))
+    parser.add_argument('--captain-waiting', action='store_true')
+    parser.add_argument('--goal-items-stdin', action='store_true')
+    parser.add_argument('--state', type=Path)
     parser.add_argument('--goal-id', action='append')
     parser.add_argument('--also-goal-id', action='append', default=[])
     parser.add_argument('--exclude-goal', default=os.environ.get('COCKPIT_GOAL_EXCLUDE'))
@@ -822,15 +917,15 @@ def main(argv=None):
                 parser.error('--banner-only needs --page')
             set_banner(args.page, args.banner_only)
             return 0
-        if not args.out:
-            parser.error('--out (or COCKPIT_TRUTH) is required')
-        out = Path(args.out)
         if args.verify_page:
+            if not args.out:
+                parser.error('--verify-page needs --out (or COCKPIT_TRUTH)')
+            out = Path(args.out)
             truth = json.loads(out.read_text(encoding='utf-8'))
             if truth.get('schema') != SCHEMA:
                 raise SyncError(f'{out} is not a {SCHEMA} file')
             problems = verify_page(args.verify_page.read_text(encoding='utf-8'), truth,
-                                   args.section or ['captain-door', 'beslissingen'],
+                                   args.section or DECISION_SECTIONS,
                                    [r'^goal\.drive\.', r'^(ververs|refresh)', *(args.ignore_question or [])])
             for problem in problems:
                 print('STALE: ' + problem)
@@ -838,6 +933,10 @@ def main(argv=None):
             return 1 if problems else 0
         if not args.goal_home:
             parser.error('--goal-home (or COCKPIT_GOAL_HOME) is required')
+        if args.captain_waiting:
+            audit_captain_waiting(args)
+            return 0
+        out = Path(args.out) if args.out else truth_path(args.goal_home, args.scope)
         truth = build_truth(args)
         text = json.dumps(truth, ensure_ascii=False, indent=1) + '\n'
         changed = not out.is_file() or out.read_text(encoding='utf-8') != text

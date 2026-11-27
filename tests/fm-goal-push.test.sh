@@ -110,6 +110,14 @@ assert_equals open "$("$G" export on | jq -r '.goals[0].items[] | select(.id == 
 assert_absent "$H/state/goals/off.marks" 'OFF goal never gets a mark'
 assert_equals 1 "$(grep -c 'goal briefs needed:.*on/missing-a.*on/missing-b' "$H/state/.wake-queue")" 'missing briefs are asked in one deduped batch'
 assert_equals 1 "$(grep -c 'goal wait is stale: on/wait' "$H/state/.wake-queue")" 'stale wait is asked once'
+assert_equals 1 "$(grep -c 'captain item NOT on cockpit: on/captain' "$H/state/.wake-queue")" 'captain class wakes once'
+assert_grep 'enforce captain_missing=1' "$H/state/goal-push.log" 'pusher counts missing captain steps'
+capacity 0
+"$G" mark on wait waiting --on captain:verify -- 'new keyed wait' >/dev/null
+"$P" run
+"$P" run
+assert_equals 1 "$(grep -c 'captain item NOT on cockpit: on/wait' "$H/state/.wake-queue")" 'typed wait wakes once'
+"$G" mark on wait open -- 'no longer waiting on the captain' >/dev/null
 pass 'enforce starts only startable ON drive items, observes headroom and caps starts at three'
 
 # Publish the same canonical landing event as the PR watcher in the lab.
@@ -227,4 +235,18 @@ assert_absent "$M/data/draft-mate/brief.md" 'mate never drafts an item inherited
 "$P" run
 assert_grep 'Drafted by goal pusher' "$H/data/over-cap/brief.md" 'next pass can draft a deferred item'
 pass 'goal fallback drafts viable items and routes them through the broker without widening scope or ownership'
+
+printf 'shadow\n' > "$H/config/goal-push"
+printf '%s\n' 'item [id=review] [owner=captain] [class=captain]: Review the demo' > "$T/review.items"
+start review
+"$P" tick
+assert_equals 1 "$(grep -c 'captain item NOT on cockpit: review/review' "$H/state/.wake-queue")" 'shadow tick wakes on a missing captain step'
+"$ROOT/tools/cockpit/cockpit-sync.sh" --goal-home "$H" --goal-id review >/dev/null
+"$P" tick
+assert_equals 1 "$(grep -c 'captain item NOT on cockpit: review/review' "$H/state/.wake-queue")" 'coverage ends the episode without a wake'
+mv "$H/state/cockpit-truth.json" "$T/review-truth.json"
+"$P" tick
+"$P" tick
+assert_equals 2 "$(grep -c 'captain item NOT on cockpit: review/review' "$H/state/.wake-queue")" 'coverage disappearing starts one new episode'
+pass 'watcher reports each missing cockpit episode once, even in shadow mode'
 echo '# all fm-goal-push tests passed'

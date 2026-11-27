@@ -217,8 +217,8 @@ VOID = set('area base br col embed hr img input link meta param source track wbr
 
 
 class Node:
-    def __init__(self, tag, attrs, parent, end):
-        self.tag, self.attrs, self.parent, self.end = tag, dict(attrs), parent, end
+    def __init__(self, tag, attrs, parent, start, end):
+        self.tag, self.attrs, self.parent, self.start, self.end = tag, dict(attrs), parent, start, end
         self.parts, self.close = [], None
         self.classes = set((self.attrs.get('class') or '').split())
         self.id = self.attrs.get('id')
@@ -256,7 +256,8 @@ class GoalPage(HTMLParser):
 
     def start(self, tag, attrs, push):
         parent = self.stack[-1] if self.stack else None
-        node = Node(tag, attrs, parent, self.absolute_offset() + len(self.get_starttag_text()))
+        start = self.absolute_offset()
+        node = Node(tag, attrs, parent, start, start + len(self.get_starttag_text()))
         self.nodes.append(node)
         if node.id:
             self.by_id[node.id].append(node)
@@ -281,6 +282,69 @@ class GoalPage(HTMLParser):
     def handle_data(self, data):
         if self.stack:
             self.stack[-1].parts.append(data)
+
+
+def truth_path(home, scope):
+    projects = sorted({name.rstrip('/').rsplit('/', 1)[-1].casefold() for name in scope if name})
+    suffix = '.'.join(projects)
+    if suffix and not re.fullmatch(r'[a-z0-9_.-]+', suffix):
+        raise ValueError('use --out for a scope with non-slug characters')
+    return Path(home) / 'state' / ('cockpit-truth' + ('.' + suffix if suffix else '') + '.json')
+
+
+DECISION_SECTIONS = ('captain-door', 'beslissingen')
+OTHER_PROJECTS = 'overige-projecten'
+CAPTAIN_STEPS = re.compile(r'<!-- fm-captain-steps -->.*?<!-- /fm-captain-steps -->', re.S)
+
+
+def decision_keys(node):
+    return set((node.attrs.get('data-cockpit-captain') or '').split()) | {
+        node.attrs.get('data-lavish-question')}
+
+
+def render_captain_steps(page, truth):
+    page = CAPTAIN_STEPS.sub('', page)
+    parsed = GoalPage(page)
+    decisions = next((n for n in parsed.nodes if n.id in DECISION_SECTIONS and n.visible and n.close is not None), None)
+    if not decisions:
+        return page  # verification reports a missing host slot
+    other = next((n for n in parsed.by_id[OTHER_PROJECTS] if n.visible and n.close is not None), None)
+    if other and not other.ancestor(lambda a: a is decisions):
+        # Move the host's existing Other Projects block, preserving any forms in it.
+        end = page.index('>', other.close) + 1
+        at = decisions.close
+        if end <= at or at < other.start:
+            block = page[other.start:end]
+            rest = page[:other.start] + page[end:]
+            at -= end - other.start if end <= at else 0
+            return render_captain_steps(rest[:at] + block + rest[at:], truth)
+    cards = {False: [], True: []}
+    for entries in truth.get('section1', {}).values():
+        for entry in entries:
+            steps = entry.get('steps')
+            if not steps:
+                continue
+            aliases = {entry['key'], *entry['aliases']}
+            existing = any(n.visible and n.ancestor(lambda a: a is decisions) and decision_keys(n) & aliases
+                           for n in parsed.nodes)
+            # Do not replace or duplicate the host's keyed answer form.
+            attr = '' if existing else f' data-cockpit-captain="{html.escape(entry["key"], quote=True)}"'
+            lis = ''.join(f'<li data-cockpit-step="{html.escape(key, quote=True)}">{html.escape(text)}</li>'
+                          for key, texts in steps.items() for text in texts)
+            cards[entry.get('group') == 'other_projects'].append(
+                f'<li{attr}><b>{html.escape(entry["title"])}</b><ol>{lis}</ol></li>')
+    patches = []
+    for foreign, rows in cards.items():
+        if not rows:
+            continue
+        block = '<ul>' + ''.join(rows) + '</ul>'
+        if foreign and not other:
+            block = f'<section id="{OTHER_PROJECTS}"><h3>Overige projecten</h3>{block}</section>'
+        at = other.close if foreign and other else decisions.close
+        fragment = '<!-- fm-captain-steps -->' + block + '<!-- /fm-captain-steps -->'
+        # Two groups inserted at the same offset must leave the native group first.
+        patches.insert(0, (at, fragment))
+    return apply_patches(page, patches)
 
 
 def heading_end(page, parsed):
@@ -538,7 +602,7 @@ def main():
                 raise ValueError('unsupported cockpit truth schema')
             if args.goal_id and {g['id'] for g in truth['goals']} - set(args.goal_id):
                 raise ValueError('truth contains goals outside --goal-id; select goals in cockpit-sync.py')
-            updated = render_truth(page, truth['goals'])
+            updated = render_captain_steps(render_truth(page, truth['goals']), truth)
         else:
             updated = render_preview(page, goals_from(args.goal_home), args.goal_id)
         if target == args.page and updated == page:

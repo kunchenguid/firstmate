@@ -2079,6 +2079,7 @@ fm_goal_render_brief() {
   local home=$FM_GOAL_HOME state=$FM_GOAL_STATE data=$FM_GOAL_DATA
   local rc=0 id block out='' used=0 named='' away_kind='' mate away
   local block_len path paths duty mark_duty='' invalid=0 drive_duty=0
+  local captain_duty='Anything waiting on the captain goes on the cockpit; route missing items through cockpit-refresh.'
   duty='GOAL DUTY: the pusher drives ON goals; main uses PACE to steer what it cannot. Full view: bin/fm-goal.sh show <goal>'
   local -a order=()
   fm_parent_channel_destination "$home" "$state" >/dev/null 2>&1 || rc=$?
@@ -2100,6 +2101,7 @@ fm_goal_render_brief() {
     fm_goal_log "the secondmate identity of this home is unreadable; no goal brief"
     return 0
   fi
+  duty="$duty $captain_duty"
   # Named goals first in either home.
   away_kind=''
   [ "$(_fm_goal_regular_file_kind "$state/.afk-contract")" = 0 ] && away_kind=present
@@ -2175,7 +2177,7 @@ fm_goal_render_brief() {
   if [ "$drive_duty" -eq 1 ]; then
     printf '%s\n' "$duty"
   elif [ -n "$mark_duty" ]; then
-    printf 'GOAL DUTY: %s\n' "$mark_duty"
+    printf 'GOAL DUTY: %s. %s\n' "$mark_duty" "$captain_duty"
   fi
   return 0
 }

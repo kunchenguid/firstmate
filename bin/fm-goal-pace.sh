@@ -16,7 +16,8 @@
 # drive_ready carries the goal export readiness counts {ready, total}.
 # merge_after_ready counts work ready to START, not permission to merge a PR.
 # It consumes optional goal-export items[].merge_after (ids); typed waits use
-# items[].wait_on.kind. Never infer either field from an item's title or note.
+# the kind prefix of items[].wait_on. captain_missing counts open captain
+# goal steps absent from cockpit source data, not from page text.
 set -euo pipefail
 export LC_ALL=C
 
@@ -57,6 +58,12 @@ if [ "$goals" = '[]' ] && [ ! -e "$current" ] && [ ! -L "$current" ] && [ ! -e "
   exit 0
 fi
 
+missing=''
+if [ "$goals" != '[]' ]; then
+  missing=$(printf '%s\n' "$goals" | "$SCRIPT_DIR/../tools/cockpit/cockpit-sync.sh" \
+    --goal-home "$FM_HOME" --state "$STATE" --captain-waiting --goal-items-stdin \
+    | awk '$1 == "MISSING" && $2 == "goal" {print $3}')
+fi
 at=${FM_GOAL_PACE_NOW_EPOCH:-$(date +%s)}
 case "$at" in ''|*[!0-9]*|0[0-9]*) echo 'fm-goal-pace: invalid clock' >&2; exit 1 ;; esac
 
@@ -87,13 +94,14 @@ previous=/dev/null
 # are authoritative; the worker table refines liveness into working or parked.
 staged_current=$(mktemp "$STATE/.goal-pace.json.XXXXXX")
 printf '%s\n' "$goals" | jq -ec --argjson now "$at" \
-  --argjson capacity "$capacity" --argjson workers "$workers" --rawfile previous "$previous" '
+  --argjson capacity "$capacity" --argjson workers "$workers" --rawfile previous "$previous" \
+  --arg missing "$missing" '
   def worker($item):
     first($workers.homes[]? | select(.id == $item.owner and (.observed_at_epoch // $now) >= ($item.since // 0))
           | .workers[] | select(.id == $item.task)) // {};
   def bucket($w):
     if .state == "done" or .state == "dropped" then "closed"
-      elif .state == "waiting" then "wait:" + (.wait_on.kind // (if .class == "captain" then "captain" else "unspecified" end))
+      elif .state == "waiting" then "wait:" + ((.wait_on | strings | split(":")[0]) // (if .class == "captain" then "captain" else "unspecified" end))
       elif .state == "blocked" then (if .class == "captain" then "wait:captain" else "wait:blocked" end)
       elif .class == "captain" then
         if (.waiting_on | length) == 0 and (.until // $now) >= $now then "wait:captain" else "other" end
@@ -118,6 +126,7 @@ printf '%s\n' "$goals" | jq -ec --argjson now "$at" \
      | idle([$items[] | select(.bucket == "start")]; $old.startable_idle) as $start
      | idle([$items[] | select(.bucket == "merge")]; $old.merge_after_ready) as $merge
      | {id, started_epoch, drive_revision, drive_ready,
+        captain_missing: ([$missing | split("\n")[] | select(startswith($goal.id + "/"))] | length),
         running_by_home: ([$items[] | select(.bucket == "running")] | group_by(.owner)
           | map({key:.[0].owner, value:length}) | from_entries),
         startable_idle:$start, merge_after_ready:$merge,
@@ -148,6 +157,6 @@ jq -r '
     + " · waiting \([$wait[].value.count] | add // 0)"
     + (if ($wait | length) == 0 then "" else
         " (\($wait | map("\(.key) \(.value.count)") | join(", ")); oldest \([$wait[].value.oldest_age_seconds] | max | age))" end)
-    + " · behind \(.behind_after | length) · idle \(.idle_minutes)m"
+    + " · behind \(.behind_after | length) · idle \(.idle_minutes)m · captain_missing \(.captain_missing)"
     + " | host load \($host.load1 | val)/\($host.cores | val) · \($host.avail_gb | val) GB free · lanes \($host.free_lanes | val)/\($host.lane_target | val)"
 ' "$current"

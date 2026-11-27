@@ -16,13 +16,13 @@ Paths come from the environment (see tools/cockpit/README.md):
   COCKPIT_SCOPE      optional: override this wrapper's miko-systems/miko scope
 
 Every run starts with cockpit-sync.py (goal home COCKPIT_GOAL_HOME, else FM_HOME; its --help owns the
-other COCKPIT_* scope variables). The truth JSON lands in $COCKPIT_TRUTH, else cockpit-truth.json beside
-the page (COCKPIT_OUT.truth.json for a preview). A failed run puts a banner on the installed page and
+other COCKPIT_* scope variables). The truth JSON lands in $COCKPIT_TRUTH or the shared scoped default
+(COCKPIT_OUT.truth.json for a preview). A failed run puts a banner on the installed page and
 exits non-zero."""
 import os,re,sys,json,html,subprocess,time,fcntl,tempfile,collections
 # Isolated mode omits the script directory, including the shared goal-view renderer.
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
-from goal_drive import base_page, render_truth
+from goal_drive import base_page, render_captain_steps, render_truth, truth_path
 
 FM=os.environ.get('FM_HOME') or os.path.expanduser('~/.firstmate')
 D=os.environ.get('COCKPIT_DATA_DIR') or os.path.join(FM,'data','miko-all-in-one-lavish')
@@ -45,12 +45,14 @@ def main():
 def verify():
     # reality first: nothing is rendered from marks that were not checked
     preview=os.environ.get('COCKPIT_OUT')
-    truth_path=os.environ.get('COCKPIT_TRUTH') or (preview+'.truth.json' if preview else os.path.join(D,'cockpit-truth.json'))
+    home=os.environ.get('COCKPIT_GOAL_HOME') or FM
+    scope=[s.strip() for s in os.environ.get('COCKPIT_SCOPE','').split(',') if s.strip()] or ['miko-systems/miko']
+    target=os.environ.get('COCKPIT_TRUTH') or (preview+'.truth.json' if preview else str(truth_path(home,scope)))
     sys.stdout.flush()
-    scope=[] if os.environ.get('COCKPIT_SCOPE','').strip() else ['--scope','miko-systems/miko']
-    if sync(['--goal-home',os.environ.get('COCKPIT_GOAL_HOME') or FM,'--out',truth_path]+scope+([] if preview else ['--page',PAGE])):
+    selectors=[part for name in scope for part in ('--scope',name)]
+    if sync(['--goal-home',home,'--out',target]+selectors+([] if preview else ['--page',PAGE])):
         sys.exit('refresh-cockpit: the cockpit sync failed; the page was not refreshed')
-    return truth_path
+    return target
 def refresh(truth_path):
     preview=os.environ.get('COCKPIT_OUT')
     truth=json.load(open(truth_path))
@@ -440,7 +442,7 @@ def refresh(truth_path):
     ids=re.findall(r'\sid="([^"]+)"',s)
     assert len(ids)==len(set(ids)),'duplicate ids'
     assert 'id="kanban"' in s and 'id="wbs-blok"' in s and 'id="captain-door"' in s
-    s=render_truth(s,truth['goals'])
+    s=render_captain_steps(render_truth(s,truth['goals']),truth)
     staged=os.path.join(TMP,'verify.html')
     with open(staged,'w',encoding='utf-8') as f: f.write(s)
     if sync(['--verify-page',staged,'--out',truth_path]):

@@ -24,8 +24,8 @@ The order is fixed:
    Tell the captain the refresh failed and why.
 3. Build the page to a scratch file from the truth JSON of step 1.
    Item statuses come from `goals[]`, never from the raw goal marks.
-   The decisions section holds exactly the entries of `section1`, and nothing from memory or an older page.
-4. Run the shared drive pass with that same truth file, not a second goal export.
+   Render all captain actions from `section1`, including ordered manual steps and tests, never from memory or an older page.
+4. Run the shared drive pass with that same truth file, not a second goal export; it fills the keyed steps in section 1 automatically.
 5. Verify the scratch page with `cockpit-sync.sh --verify-page`, which rejects missing or stale goal views.
 6. Publish only when step 5 reports no problem.
    Otherwise keep the old page and mark it with `--banner-only`.
@@ -45,7 +45,7 @@ A page host may add its own sources and layout between steps 3 and 4, but may no
 - Everything the captain must or can do has a question or steps in the decisions section, in plain words.
 - A question appears once, and an answered or resolved one does not appear.
 - Entries under `must` come first; `can` and `later` may be collapsed but not left out silently.
-- Each page shows only its own project's goals and questions.
+- Each page shows only its own project's goal cards, with captain steps for other projects grouped under "Overige projecten" inside section 1.
 - Two refreshes in a row make zero differences when the world did not change.
 
 ## Miko page working rules
@@ -59,7 +59,7 @@ A mismatch is a finding, not a page failure.
 An `unrouted-decision-key` line is an open worker or secondmate question that is not on the captain's list: firstmate holds it through `captain-hold-lifecycle` when it is his, or answers and resolves it.
 The page shows the verified status; the goal record stays the record owner's to mark through `bin/fm-goal.sh` (see `drive-goal`).
 A `stale-decision-key` line means a status log still holds a key whose question is already answered: its writer appends the `resolved` line.
-A real captain question that appears in no `section1` entry is not held yet: hold it through `captain-hold-lifecycle`, never type it into the page.
+Use `cockpit-sync.sh --captain-waiting` to follow up on missing cockpit entries; route a real question not covered by a goal step through `captain-hold-lifecycle`, never by typing it into the page.
 Give an entry its plain-language question, options, and recommendation in the hold's question context, so every later refresh carries them.
 
 ## Improving the package

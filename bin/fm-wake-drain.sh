@@ -1102,8 +1102,16 @@ cap_outcome_line() {  # <line> <max-bytes>
 # read-only brief collapses its details. A goal readout fault must not hide
 # the wakes beside it or suppress the other readout.
 print_goal_section() {
-  local out
+  local out missing sync="$SCRIPT_DIR/../tools/cockpit/cockpit-sync.sh"
   [ -x "$SCRIPT_DIR/fm-goal.sh" ] || return 0
+  if [ -x "$sync" ]; then
+    if out=$(FM_CREW_STATE_NO_FORGE=1 fm_run_timed 15 "$sync" --goal-home "$FM_HOME" --state "$STATE" --captain-waiting); then
+      missing=$(awk '$1 == "MISSING" {printf " %s", $3}' <<< "$out")
+      [ -z "$missing" ] || printf 'captain items NOT on cockpit:%s\n' "$missing"
+    else
+      printf 'GOAL SKIPPED: captain cockpit audit failed; run cockpit-sync.sh --captain-waiting for details\n' >&2
+    fi
+  fi
   if [ -x "$SCRIPT_DIR/fm-goal-pace.sh" ]; then
     "$SCRIPT_DIR/fm-goal-pace.sh" || printf 'GOAL SKIPPED: pace sample failed; run bin/fm-goal-pace.sh for details\n' >&2
   fi

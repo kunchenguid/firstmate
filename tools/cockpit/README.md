@@ -10,7 +10,7 @@ The [cockpit-refresh skill](../../.agents/skills/cockpit-refresh/SKILL.md) owns 
 | `refresh-cockpit.sh` | One real-status pass; runs `refresh-cockpit.py` beside it. Read-only on GitHub, safe on a short timer. |
 | `refresh-cockpit.py` | The refresh itself: lane status files, PR state and production state into the page and `card-data.json`. |
 | `kanban-from-wbs.py` | Regenerates the kanban grid from the WBS boxes; `refresh-cockpit.py` calls it. |
-| `goal_drive.py` | Renders the shared goal views and drive controls from scoped cockpit truth. |
+| `goal_drive.py` | Renders the shared goal views, captain steps and drive controls from scoped cockpit truth. |
 
 ## Paths
 
@@ -41,7 +41,7 @@ A second run in the same minute changes nothing; `tests/cockpit-tools.test.sh` p
 
 Run the shared drive pass after the page generator has rendered `<h2 id="doelen">` and any project-specific content from the same scoped truth.
 The page keeps its existing `mikoSend(event, key)` handler from the Jouw beslissingen forms.
-Use `cockpit-sync.py --help` for project selection and required renderings.
+Use `cockpit-sync.py --help` for live truth paths, project selection, captain-waiting audit and required renderings.
 
 ```bash
 python3 -I tools/cockpit/goal_drive.py --page "$COCKPIT_PAGE" --truth "$COCKPIT_TRUTH"

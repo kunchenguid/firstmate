@@ -523,7 +523,7 @@ printf 'unknown\n' > "$SYNC_HOME/state/demo-asker.fake"
 printf 'unknown\n' > "$SYNC_HOME/state/demo-resolved.fake"
 printf '%s\n' 'needs-decision [key=demo-closed] [at=1]: question' \
   'resolved [key=demo-closed] [at=2]: answered' > "$SYNC_HOME/state/demo-resolved.status"
-printf '%s\n' '{"schema":"fm-captain-question.v1","close":"done","about":"The demo needs one colour.","purpose":"The page can then be finished.","question":"Which colour?","options":[{"value":"blue","label":"Blue","detail":"The page turns blue."},{"value":"green","label":"Green","detail":"The page turns green."}],"recommendation":"blue"}' > "$TMP_ROOT/ctx.json"
+printf '%s\n' '{"schema":"fm-captain-question.v1","close":"done","about":"The demo needs one colour.","purpose":"The page can then be finished.","question":"Which colour?\nCheck the result on the demo.","options":[{"value":"blue","label":"Blue","detail":"The page turns blue."},{"value":"green","label":"Green","detail":"The page turns green."}],"recommendation":"blue"}' > "$TMP_ROOT/ctx.json"
 in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" hold demo-colour --title 'Pick a colour' --category captain-only-fact \
   --reason 'Pick a colour.' --context-file "$TMP_ROOT/ctx.json" >/dev/null || fail 'could not hold demo-colour'
 in_sync_home bash "$ROOT/bin/fm-captain-hold.sh" hold demo-answered --title 'Answered call' --category captain-only-fact \
@@ -544,7 +544,16 @@ sync() { # sync [extra args]
   in_sync_home env PATH="$SYNC_BIN:$PATH" COCKPIT_CREW_STATE_BIN="$SYNC_BIN/crew-state" \
     bash "$TOOLS/cockpit-sync.sh" --goal-home "$SYNC_HOME" --out "$TRUTH" "$@"
 }
+sync --captain-waiting > "$TMP_ROOT/waiting.out" || fail 'audit before sync failed'
+grep -Fxq $'MISSING\thold\tdemo-colour' "$TMP_ROOT/waiting.out" || fail 'missing hold was not detected'
+grep -Fxq $'MISSING\tdecision\tdemo-asker/captain-hold-demo-colour-1' "$TMP_ROOT/waiting.out" \
+  || fail 'missing relayed decision was not detected'
 sync > "$TMP_ROOT/sync1.out" 2>&1 || fail "sync failed: $(cat "$TMP_ROOT/sync1.out")"
+sync --captain-waiting > "$TMP_ROOT/waiting.out" || fail 'audit after sync failed'
+grep -Fxq $'on-cockpit\thold\tdemo-colour' "$TMP_ROOT/waiting.out" || fail 'present hold was not detected'
+grep -Fxq $'on-cockpit\tdecision\tdemo-asker/captain-hold-demo-colour-1' "$TMP_ROOT/waiting.out" \
+  || fail 'present relayed decision was not detected'
+if grep -Fq 'demo-old' "$TMP_ROOT/waiting.out"; then fail 'resolved decision was audited'; fi
 python3 -I - "$TRUTH" <<'PY' || fail "truth is wrong: $(cat "$TRUTH")"
 import json, sys
 t = json.load(open(sys.argv[1]))
@@ -564,7 +573,7 @@ can = {e['key']: e for e in t['section1']['can']}
 assert set(must) == {'gamma/sign'}, must
 assert set(can) == {'demo-colour'}, can
 assert can['demo-colour']['recommendation'] == 'blue' and len(can['demo-colour']['options']) == 2
-assert can['demo-colour']['question'] == 'Which colour?'
+assert can['demo-colour']['question'] == 'Which colour? Check the result on the demo.'
 assert t['section1']['later'] == []
 assert ('gamma/asked', 'answered-not-marked') in kinds, kinds
 assert ('plan-review-ready', 'unrouted-decision-key') in kinds, kinds
@@ -702,6 +711,13 @@ sync_page "$good<form data-lavish-question=\"demo-answered\"></form>"
 verify && fail 'an answered question still listed passed'
 grep -q 'still listed: demo-answered' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
 sync_page '<form data-lavish-question="demo-colour"></form>'
+grep -Fq 'data-cockpit-captain="gamma/sign"' "$SYNC_PAGE" || fail 'a goal step did not automatically get a card'
+python3 -I - "$SYNC_PAGE" <<'PY' || fail 'captain step mutation failed'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace(' data-cockpit-captain="gamma/sign"', ''))
+PY
 verify && fail 'a missing captain item passed'
 grep -q 'missing captain item (must): gamma/sign' "$TMP_ROOT/verify.out" || fail "$(cat "$TMP_ROOT/verify.out")"
 sync_page "$good<form data-lavish-question=\"demo-colour\"></form>"
@@ -717,5 +733,38 @@ verify && fail 'a page with a failure banner passed'
 sync --goal-id gamma --page "$SYNC_PAGE" > /dev/null 2>&1 || fail 'recovery sync failed'
 cmp -s "$TMP_ROOT/sync-page.clean" "$SYNC_PAGE" || fail 'recovery did not remove exactly the banner'
 pass 'cockpit sync failure: non-zero exit, visible banner, truth kept, banner removed on recovery'
+
+printf '%s\n' 'item [id=check] [owner=captain] [class=captain] [project=demo]: next: Open the demo & verify the result.' \
+  > "$TMP_ROOT/items-overige"
+in_sync_home bash "$ROOT/bin/fm-goal.sh" start demo --title Demo --done-when 'demo complete' \
+  --named-by 'do this' --plan plan.md --items-file "$TMP_ROOT/items-overige" >/dev/null || fail 'could not start other project'
+sync --scope miko --out "$TMP_ROOT/overige.json" > /dev/null || fail 'other project sync failed'
+scoped="$TMP_ROOT/overige.html"
+printf '%s\n' '<section id="captain-door"></section><section id="overige-projecten"><h2>Overige projecten</h2></section><h2 id="doelen">Doelen</h2>' > "$scoped"
+python3 -I "$TOOLS/goal_drive.py" --truth "$TMP_ROOT/overige.json" --page "$scoped" || fail 'other project render failed'
+sync --verify-page "$scoped" --out "$TMP_ROOT/overige.json" || fail 'other project card is not in the correct section'
+grep -Fq '<ol><li data-cockpit-step="demo/check">next: Open the demo &amp; verify the result.</li></ol>' "$scoped" \
+  || fail 'other project did not use the exact ordered steps'
+grep -Fq '<ol><li data-cockpit-step="demo-colour">Which colour?</li><li data-cockpit-step="demo-colour">Check the result on the demo.</li></ol>' "$scoped" \
+  || fail 'captain hold did not get ordered steps'
+jq '(.section1.can[] | select(.key == "demo/check")) as $entry
+    | .section1.can |= map(select(.key != "demo/check")) | .other_projects = {can:[$entry]}' \
+  "$TMP_ROOT/overige.json" > "$TMP_ROOT/lower-only.json"
+sync --captain-waiting --out "$TMP_ROOT/lower-only.json" > "$TMP_ROOT/waiting.out" || fail 'lower-only audit failed'
+grep -Fxq $'MISSING\tgoal\tdemo/check' "$TMP_ROOT/waiting.out" || fail 'a lower-only item counted as covered'
+python3 -I - "$scoped" "$TMP_ROOT/lower-only.html" <<'PY' || fail 'lower-only page fixture failed'
+from pathlib import Path
+import re, sys
+page = Path(sys.argv[1]).read_text()
+match = re.search(r'<section id="overige-projecten">.*?</section>', page, re.S)
+assert match is not None
+Path(sys.argv[2]).write_text(page[:match.start()] + page[match.end():] + match[0])
+PY
+if sync --verify-page "$TMP_ROOT/lower-only.html" --out "$TMP_ROOT/overige.json" > "$TMP_ROOT/scope.out"; then
+  fail 'verified a manual step outside section 1'
+fi
+grep -Fq 'missing or stale captain steps: demo/check' "$TMP_ROOT/scope.out" || fail 'wrong lower-only finding'
+if grep -Fq 'id="doel-demo"' "$scoped"; then fail 'unscoped project got a second goal card'; fi
+pass 'cockpit routes other projects to Overige projecten with exact record steps'
 
 echo "all cockpit-tools tests passed"

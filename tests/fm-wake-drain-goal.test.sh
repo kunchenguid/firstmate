@@ -66,6 +66,34 @@ test_active_goal_prints_state_and_duty_on_an_empty_queue() {
   pass "an active goal prints its live state and the GOAL DUTY line on an empty queue"
 }
 
+test_captain_cockpit_round_trip() {
+  local dir out sync="$ROOT/tools/cockpit/cockpit-sync.sh" drive="$ROOT/tools/cockpit/goal_drive.py"
+  dir=$(lab_home captain-cockpit)
+  out="$dir/drain.out"
+  start_goal "$dir" I1
+  lab_env "$dir" bash "$GOAL" mark I1 build waiting --on captain:confirm -- 'captain needs to confirm' >/dev/null \
+    || fail 'typed captain wait failed'
+  start_goal "$dir" I2
+  lab_env "$dir" bash "$GOAL" mark I2 sign 'done' -- 'signed off' >/dev/null || fail 'done captain mark failed'
+  lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail 'captain cockpit drain failed'
+  grep -Fx 'captain items NOT on cockpit: I1/build I1/sign' "$out" || fail "wrong missing ids: $(cat "$out")"
+  grep -F 'PACE I1:' "$out" | grep -Fq 'captain_missing 2' || fail 'missing pace count'
+  lab_env "$dir" "$sync" --goal-home "$dir" --captain-waiting > "$out" || fail 'initial audit failed'
+  grep -Fx $'MISSING\tgoal\tI1/sign' "$out" || fail 'captain class item not detected as missing'
+  lab_env "$dir" "$sync" --goal-home "$dir" >/dev/null || fail 'cockpit sync failed'
+  printf '%s\n' '<section id="captain-door"></section><h2 id="doelen">Doelen</h2>' > "$dir/page.html"
+  python3 -I "$drive" --truth "$dir/state/cockpit-truth.json" --page "$dir/page.html" || fail 'cockpit render failed'
+  lab_env "$dir" "$sync" --out "$dir/state/cockpit-truth.json" --verify-page "$dir/page.html" || fail 'captain steps not rendered'
+  lab_env "$dir" "$sync" --goal-home "$dir" --captain-waiting > "$out" || fail 'captain cockpit audit failed'
+  grep -Fx $'on-cockpit\tgoal\tI1/sign' "$out" || fail 'captain class item not detected as present'
+  grep -Fx $'on-cockpit\tgoal\tI1/build' "$out" || fail 'typed captain wait not detected as present'
+  if grep -Fq 'I2/sign' "$out"; then fail 'done captain item was audited'; fi
+  lab_env "$dir" "$DRAIN" > "$out" 2>&1 || fail 'post-sync drain failed'
+  grep -F 'PACE I1:' "$out" | grep -Fq 'captain_missing 0' || fail 'present items still counted'
+  if grep -Fq 'captain items NOT on cockpit' "$out"; then fail 'post-sync drain listed missing items'; fi
+  pass 'captain cockpit: drain finds missing items; sync and render cover captain steps and typed waits, never done items'
+}
+
 test_goal_section_follows_queued_wake_rows() {
   local dir out
   dir=$(lab_home queued-rows)
@@ -257,6 +285,7 @@ test_session_start_carries_the_goal_section() {
 
 test_no_goal_prints_no_goal_section
 test_active_goal_prints_state_and_duty_on_an_empty_queue
+test_captain_cockpit_round_trip
 test_goal_section_follows_queued_wake_rows
 test_away_record_drives_named_and_unnamed_goals
 test_mark_moves_an_item_in_the_next_drain

@@ -1180,6 +1180,9 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
+    if [ "$kind" != secondmate ]; then
+      assert_grep 'so firstmate or its secondmate puts it on the cockpit' "$brief" "missing cockpit handoff in $kind brief"
+    fi
     # Fill the scaffold's generated status-append command the way a worker does
     # and run it. The stamp must be a value the worker supplies, so the command
     # may not carry an unevaluated substitution that a file-write tool would
@@ -1195,7 +1198,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     esac
     mkdir -p "$home/state"
     bash -c "$append" || fail "generated status command failed"
-    epoch=$(bash -c '. "$1"; status_line_at_epoch "$(cat "$2")"' _ \
+    epoch=$(bash -c '. "$1"; status_line_at_epoch "$(tail -n 1 "$2")"' _ \
       "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
     [ "$epoch" = "$now" ] || fail "$kind scaffold did not record the worker's event time"
     # Every status signal the brief instructs a worker to append is a template

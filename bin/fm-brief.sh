@@ -198,6 +198,8 @@ esac
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+# shellcheck disable=SC2016 # The Markdown backticks are literal.
+CAPTAIN_COCKPIT_RULE='   Record anything the captain must answer, approve, sign in for, test or check as a keyed `needs-decision` or to-do; list each under "To check" in the done report so firstmate or its secondmate puts it on the cockpit.'
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
    Before ending your turn with your own background shell or monitor still running, or before waiting on your own pipeline run or a long foreground command, append \`$PAUSED_VERB [at=<epoch>]: {job and completion condition}\` to the status file.
@@ -829,6 +831,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
    For standing answers and captain-facing report questions, route to firstmate, which applies \`ask-user-authority\`.
+$CAPTAIN_COCKPIT_RULE
 $RAISE_ON_BLOCK_RULE
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
@@ -923,6 +926,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
    For standing answers and captain-facing report questions, route to firstmate, which applies \`ask-user-authority\`, except any standing answer your Definition of done has you settle yourself.
+$CAPTAIN_COCKPIT_RULE
 $ASK_USER_BLOCK
 $RAISE_ON_BLOCK_RULE
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
