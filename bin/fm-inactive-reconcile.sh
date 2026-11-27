@@ -14,7 +14,7 @@
 # so that line is published on the parent channel at once through
 # bin/fm-parent-channel-lib.sh from this unstamped payload:
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
-# carrying the child's recorded PR, delivery mode, merge posture, and scout
+# carrying the child's delivered PR, delivery mode, merge posture, and scout
 # report pointer, without consulting fm-crew-state.sh. A ship `done:` is
 # published only when bin/fm-dod-lib.sh accepts the named head, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
