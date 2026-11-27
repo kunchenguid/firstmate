@@ -763,7 +763,7 @@ cap_outcome_line() {  # <line> <max-bytes>
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared
+  local snapshot=${1:-} fully_presented=${2:-} acknowledged prepared task endpoint ident marker tmp
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
   acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
@@ -788,6 +788,20 @@ print_status_sections() {
     rm -f -- "$prepared"
     return 1
   fi
+  # Publish direct receipts only after output and its fleet cursor commit.
+  # The watcher owns its own markers and can still be classifying a later append.
+  while IFS=$'\t' read -r task endpoint ident; do
+    case "
+$fully_presented
+" in *$'\n'"$task"$'\n'*) ;; *) continue ;; esac
+    marker=$(status_direct_presentation_marker "$STATE/$task.status")
+    [ ! -d "$marker" ] || continue
+    tmp=$(mktemp "$marker.tmp.XXXXXX") || continue
+    if ! status_presentation_marker_commit "$tmp" "$STATE/$task.status" "$endpoint" "$ident" \
+      || ! mv -f -- "$tmp" "$marker"; then
+      rm -f -- "$tmp"
+    fi
+  done <<< "$snapshot"
   rm -f -- "$prepared"
 }
 

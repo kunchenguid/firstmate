@@ -1679,7 +1679,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   FM_STATUS_SNAPSHOT_EVENT_ENDPOINT=$event_endpoint
 }
 
-status_presentation_cursor_offset() {  # <status-file>
+status_presentation_cursor_offset() {  # <status-file> [manifest-only]
   local f=$1 state task manifest data row_task offset ident backstop extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
@@ -1708,6 +1708,7 @@ EOF
     fi
     ident=$cur_ident
   else
+    [ "${2:-}" != manifest-only ] || { printf '0'; return 0; }
     legacy=$(_fm_open_decisions_cursor_path "$f")
     if [ -e "$legacy" ] || [ -L "$legacy" ]; then
       status_open_decisions_cursor_offset "$f"
@@ -1886,18 +1887,64 @@ status_presentation_marker_commit() {
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
+# Only direct status annotations present the entire captured span. The
+# serialized drain writes this per-file receipt alongside the fleet cursor,
+# which may also advance when it prints an incidental informational note.
+status_direct_presentation_marker() {  # <status-file>
+  printf '%s/.%s.direct-presentation' "${1%/*}" "${1##*/}"
+}
+
+# A fleet presentation can advance its annotation cursor across a mixed span
+# when it printed only its informational lines. Without a direct receipt, a
+# homogeneous span is unambiguous: either all lines were informational, or
+# only direct annotations could have advanced the cursor past them.
+_status_presentation_span_unambiguous() {  # <status-file> <start> <end>
+  local span line info=0 other=0
+  span=$(_fm_status_read_span "$1" "$2" "$(($3 - $2))") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    if status_line_is_unread_surface "$line"; then info=1; else other=1; fi
+    [ "$info" -eq 0 ] || [ "$other" -eq 0 ] || return 1
+  done <<< "$span"
+}
+
+# Catch an observer up to a completed presentation of the same file. The
+# annotation cursor alone is available for homes that predate direct receipts.
+status_watcher_adopt_presentation() {  # <observer-marker> <status-file> <classified-offset>
+  local marker=$1 file=$2 classified=$3 ident size direct=0 presented receipt
+  [ -f "${file%/*}/.status-presentation-cursor" ] || return 1
+  _fm_status_read_ident_size "$file" || return 1
+  ident=$_FM_STAT_IDENTITY size=$_FM_STAT_SIZE
+  [ "$classified" -lt "$size" ] || return 1
+  receipt=$(status_direct_presentation_marker "$file")
+  if [ -f "$receipt" ] && [ ! -L "$receipt" ]; then
+    direct=$(status_presentation_marker_offset "$receipt" "$file")
+    [ "$direct" -le "$size" ] || direct=0
+  fi
+  if [ "$direct" -lt "$size" ]; then
+    presented=$(status_presentation_cursor_offset "$file" manifest-only) || presented=0
+    if [ "$presented" -gt "$direct" ] && [ "$presented" -gt "$classified" ] \
+      && _status_presentation_span_unambiguous "$file" "$direct" "$presented"; then
+      direct=$presented
+    fi
+  fi
+  [ "$direct" -gt "$classified" ] || return 1
+  status_presentation_marker_commit "$marker" "$file" "$direct" "$ident"
+}
+
 # An optional archive filename is supplied only by teardown. The caller owns
 # path selection and retention; publication also checks for unsafe collisions.
 # No status consumer reads that archive.
 status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
   local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
-  local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
+  local signal_marker heartbeat_marker daemon_marker direct_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
   signal_marker=$(status_signal_seen_marker_path "$state" "$task")
   heartbeat_marker=$(status_heartbeat_seen_marker_path "$state" "$task")
   daemon_marker=$(status_daemon_seen_marker_path "$state" "$task")
+  direct_marker=$(status_direct_presentation_marker "$state/$task.status")
   home_appends="$state/.$task.home-appends"
   home_appends_lock="$home_appends.lock"
 
@@ -1915,7 +1962,8 @@ status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
     && [ ! -e "$home_appends_lock" ] && [ ! -L "$home_appends_lock" ] \
     && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
     && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
-    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ]; then
+    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ] \
+    && [ ! -e "$direct_marker" ] && [ ! -L "$direct_marker" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi
@@ -1981,7 +2029,7 @@ EOF
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
       "$state/.$task.open-decisions-cursor.timed" \
-      "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
+      "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" "$direct_marker" || rc=1
     fm_lock_remove_path "$home_appends_lock" 2>/dev/null || true
   fi
   if [ "$archive_published" -eq 1 ] && [ "$rc" -ne 0 ] \
@@ -2206,7 +2254,7 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
 status_line_is_unread_surface() {  # <status-line>
   local line=$1 verb key note resolve held prefix
   [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
+  status_line_verb "$line" verb
   [ "$verb" = note ] && return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}

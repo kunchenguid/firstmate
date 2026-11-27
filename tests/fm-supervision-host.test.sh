@@ -371,7 +371,10 @@ test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   ' "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$home/pi-offer-state" "signal: $home/state/demo.status")
   [ "$pi_offer" = true ] || fail "the host-only transition veto changed Pi's existing offer rule"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
-  watcher_live "$home" || fail "the pass-through left no successor watcher"
+  # The second offer appended a real decision. The one-shot successor can
+  # already have delivered it while Node was reading the frozen Pi snapshot.
+  watcher_live "$home" || assert_re $'\tsignal\tdemo\\.status\tneeds-decision:' "$home/state/.wake-queue" \
+    "the successor neither stayed live nor delivered the later decision"
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
 }
 

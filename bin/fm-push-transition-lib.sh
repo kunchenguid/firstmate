@@ -111,6 +111,9 @@ wake() {
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
   fi
   [ "$output_status" -eq 0 ] || exit "$output_status"
+  # A delivery exit is a planned close. The record, not the exit status,
+  # is what cleanup trusts (docs/watcher-continuity.md).
+  fm_watcher_planned_stop_record "$STATE" "${WATCHER_PID:-${BASHPID:-$$}}" || true
   exit 0
 }
 
@@ -127,7 +130,14 @@ _hb_surfaced_path() {
 # line) reads 0, so the log is re-classified and the backstop errs toward
 # surfacing rather than swallowing.
 hb_surfaced_offset() {  # <task>
-  status_presentation_marker_offset "$(_hb_surfaced_path "$1")" "$STATE/$1.status"
+  local marker file="$STATE/$1.status" offset
+  marker=$(_hb_surfaced_path "$1")
+  offset=$(status_presentation_marker_offset "$marker" "$file")
+  if status_watcher_adopt_presentation "$marker" "$file" "$offset"; then
+    status_presentation_marker_offset "$marker" "$file"
+  else
+    printf '%s' "$offset"
+  fi
 }
 
 # Record a status log as successfully classified through the captured endpoint.

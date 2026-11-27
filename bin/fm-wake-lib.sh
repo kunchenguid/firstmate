@@ -234,6 +234,52 @@ fm_watcher_lock_matches_pid() {
   FM_WATCHER_MATCHED_IDENTITY=$lock_identity
 }
 
+# docs/watcher-continuity.md: a planned close is this record, not the EXIT
+# status. Line 1 is the target pid. Line 2 is its fm_pid_identity.
+fm_watcher_planned_stop_record() {  # <state> <pid> [<identity>]
+  local state=$1 pid=$2 identity=${3:-} tmp
+  [ -n "$identity" ] || identity=$(fm_pid_identity "$pid") || return 1
+  tmp=$(mktemp "$state/.watcher-planned-stop.tmp.XXXXXX") || return 1
+  if ! printf '%s\n%s\n' "$pid" "$identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! mv -f "$tmp" "$state/.watcher-planned-stop"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+fm_watcher_planned_stop_matches() {  # <state> <pid>
+  local state=$1 pid=$2 record_pid record_identity current
+  [ -f "$state/.watcher-planned-stop" ] || return 1
+  record_pid=$(sed -n '1p' "$state/.watcher-planned-stop" 2>/dev/null || true)
+  record_identity=$(sed -n '2p' "$state/.watcher-planned-stop" 2>/dev/null || true)
+  [ "$record_pid" = "$pid" ] || return 1
+  [ -n "$record_identity" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$record_identity" = "$current" ]
+}
+
+fm_watcher_planned_stop_clear() {  # <state>
+  rm -f -- "$1/.watcher-planned-stop"
+}
+
+# Called under the watch lock's steal mutex after confirming that its holder
+# is stale. The taking arm supplies the identity whose TERM its owner observed.
+fm_watcher_reclaim_is_planned() {  # <stale-pid> <confirmed-pid:identity>
+  local pid=$1 confirmed=$2 identity lock holder
+  [ -n "$confirmed" ] || return 1
+  identity=$(cat "$STATE/.watch.lock/pid-identity" 2>/dev/null) || return 1
+  [ -n "$identity" ] && [ "$confirmed" = "$pid:$identity" ] || return 1
+  # The acknowledgement predates the stop. An abandoned queue or marker
+  # update can still require recovery even before a new row becomes visible.
+  for lock in "$FM_WAKE_QUEUE_LOCK" "$STATE/.watcher-down.lock"; do
+    [ -e "$lock" ] || [ -L "$lock" ] || continue
+    holder=$(cat "$lock/pid" 2>/dev/null) || return 1
+    [ "$holder" != "$pid" ] && fm_lock_holder_alive "$lock" "$holder" || return 1
+  done
+  return 0
+}
+
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
 fm_watcher_healthy() {
@@ -930,13 +976,13 @@ fm_recovery_marker_read() {
   local marker=$1 line extra
   FM_RECOVERY_MARKER_TOKEN=
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  # Exactly one newline byte: the first line is terminated and no second is.
-  { IFS= read -r line && ! IFS= read -r extra; } < "$marker" || return 1
+  # One terminated line with no partial write after it.
+  { IFS= read -r line && ! IFS= read -r extra && [ -z "$extra" ]; } < "$marker" || return 1
   case "$line" in
     pending:handling:*|pending:downtime:*|announced:handling:*|announced:downtime:*|acked:handling:*|acked:downtime:*) ;;
     *) return 1 ;;
   esac
-  case "${line##*:}" in
+  case "${line#*:*:}" in
     ''|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
   FM_RECOVERY_MARKER_TOKEN=$line
@@ -977,13 +1023,14 @@ _fm_recovery_marker_write_locked() {
 # Apply the downtime republication states owned by docs/watcher-continuity.md
 # while preserving an outstanding generation-bound acknowledgement. A handback
 # source republishes the current episode as already announced: the close it
-# hands to main is that episode's delivery.
+# hands to main is that episode's delivery. A close source leaves an
+# acknowledged episode unchanged.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
-  local lock saved_token generation='' status=pending previous_append_token='' guard=${5:-}
+  local lock saved_token generation='' status=pending previous_append_token='' guard=${5:-} leave_closed=0
   if [ "$#" -ge 5 ]; then shift 5; else set --; fi
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
-  case "$source" in watcher|append|handback) ;; *) return 1 ;; esac
+  case "$source" in watcher|append|handback|close) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
@@ -1028,10 +1075,19 @@ _fm_recovery_marker_publish() {
             status=announced
           fi
           ;;
+        acked:*)
+          # docs/watcher-continuity.md: a planned close must not open a fresh
+          # episode over a retired one. Appends and outage publication still do.
+          [ "$source" != close ] || leave_closed=1
+          ;;
       esac
     fi
     FM_RECOVERY_MARKER_TOKEN=$saved_token
     [ "$source" != handback ] || status=announced
+  fi
+  if [ "$leave_closed" -eq 1 ]; then
+    fm_lock_release "$lock"
+    return 0
   fi
   if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
@@ -1207,8 +1263,11 @@ fm_recovery_lock_wait() {  # <lockdir> <bound-seconds>
   fm_lock_acquire_wait "$1"
 }
 
+# FM_RECOVERY_MARKER_ACTION and FM_RECOVERY_MARKER_QUEUED are read by callers.
+# shellcheck disable=SC2034
 _fm_recovery_marker_arm_check() {
-  local marker=$1 bound=${2:-} lock line quarantine
+  local marker=$1 bound=${2:-} claimed=${3:-} lock line quarantine
+  FM_RECOVERY_MARKER_TOKEN=
   FM_RECOVERY_MARKER_ACTION='none'
   FM_RECOVERY_MARKER_QUEUED=0
   lock="${marker}.lock"
@@ -1217,7 +1276,6 @@ _fm_recovery_marker_arm_check() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
-  # shellcheck disable=SC2034 # Output read by callers after this function returns.
   [ ! -s "$FM_WAKE_QUEUE" ] || FM_RECOVERY_MARKER_QUEUED=1
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     if [ -s "$FM_WAKE_QUEUE" ]; then
@@ -1226,6 +1284,7 @@ _fm_recovery_marker_arm_check() {
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         return 1
       fi
+      FM_RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_WRITTEN_TOKEN
       FM_RECOVERY_MARKER_ACTION='recover'
     fi
     fm_lock_release "$lock"
@@ -1246,6 +1305,7 @@ _fm_recovery_marker_arm_check() {
       fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       return 1
     fi
+    FM_RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_WRITTEN_TOKEN
     FM_RECOVERY_MARKER_ACTION='recover'
     fm_lock_release "$lock"
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -1253,6 +1313,10 @@ _fm_recovery_marker_arm_check() {
   fi
   line=$FM_RECOVERY_MARKER_TOKEN
   case "$line" in
+    "announced:downtime:$claimed")
+      # This watcher claimed the announcement at startup and still owns it.
+      FM_RECOVERY_MARKER_ACTION='recover'
+      ;;
     pending:handling:*|announced:handling:*|announced:downtime:*)
       FM_RECOVERY_MARKER_ACTION='wait'
       fm_lock_release "$lock"
@@ -1265,7 +1329,7 @@ _fm_recovery_marker_arm_check() {
         fm_lock_release "$FM_WAKE_QUEUE_LOCK"
         return 1
       fi
-      FM_RECOVERY_MARKER_TOKEN="announced:downtime:${line##*:}"
+      FM_RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_WRITTEN_TOKEN
       FM_RECOVERY_MARKER_ACTION='recover'
       ;;
     acked:*)
@@ -1275,7 +1339,7 @@ _fm_recovery_marker_arm_check() {
           fm_lock_release "$FM_WAKE_QUEUE_LOCK"
           return 1
         fi
-        # shellcheck disable=SC2034 # Output read by callers after this function returns.
+        FM_RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_WRITTEN_TOKEN
         FM_RECOVERY_MARKER_ACTION='recover'
       fi
       ;;
@@ -1367,7 +1431,7 @@ _fm_recovery_marker_handover_restore() {
 }
 
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
+  local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-} source=${6:-}
   case "$action" in
     handover-restore)
       _fm_recovery_marker_handover_restore "$marker" "$target" "$value"
@@ -1379,7 +1443,7 @@ fm_recovery_transition() {
       _fm_recovery_marker_ack "$marker" "$target"
       ;;
     arm-check)
-      _fm_recovery_marker_arm_check "$marker" "$bound"
+      _fm_recovery_marker_arm_check "$marker" "$bound" "$target"
       ;;
     reopen-announced)
       _fm_recovery_marker_reopen_announced "$marker" "$bound"
@@ -1388,11 +1452,11 @@ fm_recovery_transition() {
       _fm_recovery_marker_handling_settled "$marker"
       ;;
     handback)
-      _fm_recovery_marker_publish "$marker" downtime "" handback
+      _fm_recovery_marker_publish "$marker" downtime "$bound" handback
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$bound" "${source:-watcher}" || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
@@ -1423,8 +1487,8 @@ fm_recovery_marker_publish() {
   fm_recovery_transition "$1" publish "${2:-downtime}"
 }
 
-fm_recovery_marker_handback() {
-  fm_recovery_transition "$1" handback
+fm_recovery_marker_handback() {  # <marker> [lock-bound-seconds]
+  fm_recovery_transition "$1" handback "" "" "${2:-}"
 }
 
 fm_recovery_marker_ack() {
@@ -1439,8 +1503,8 @@ fm_recovery_marker_begin_handling() {
   _fm_recovery_marker_begin_handling "$1" "${2:-}"
 }
 
-fm_recovery_marker_arm_check() {
-  fm_recovery_transition "$1" arm-check "" "" "${2:-}"
+fm_recovery_marker_arm_check() {  # <marker> [lock bound] [startup announcement generation]
+  fm_recovery_transition "$1" arm-check "${3:-}" "" "${2:-}"
 }
 
 fm_recovery_marker_reopen_announced() {
@@ -1533,6 +1597,7 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
 
 fm_lock_try_acquire() {
   local lockdir=$1 marker_publish_bound=${2:-} pid steal cur rc steal_owner primary_owner current
+  local publish_source=watcher
   FM_LOCK_HELD_PID=
   FM_LOCK_HELD_PATH=
   FM_LOCK_OWNER_DIR=
@@ -1610,8 +1675,11 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  if [ "$lockdir" = "$STATE/.watch.lock" ] && fm_watcher_reclaim_is_planned "$cur" "${3:-}"; then
+    publish_source=close
+  fi
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound" "$publish_source"; then
     fm_lock_release "$steal"
     if [ -n "$marker_publish_bound" ]; then
       # The marker lock refused inside the caller's bound: surface it as the
@@ -1630,7 +1698,9 @@ fm_lock_try_acquire() {
   if fm_lock_try_create "$lockdir" "$steal_owner"; then
     rc=0
     # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
-    FM_LOCK_RECOVERED_PID=$cur
+    # A confirmed close goes through the ordinary marker/queue arm check.
+    # Only an unplanned reclaim independently forces a recovery wake.
+    [ "$publish_source" = close ] || FM_LOCK_RECOVERED_PID=$cur
   fi
   if [ "$rc" -ne 0 ]; then
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
@@ -3224,9 +3294,10 @@ fm_wake_signal_reported_current() {  # <state> <file>
   esac
 }
 
-# 0 when the state was already reported, or when the file is a readable regular
-# file that grew past the watcher's classified offset and every grown byte is in
-# this home's owned-append ledger. Owned-only growth past the classified offset
+# 0 when the state was already reported or covered by a completed drain
+# presentation, or when a readable regular file grew past the watcher's
+# classified offset and every grown byte is in this home's owned-append ledger.
+# Owned-only growth past the classified offset
 # is this home's own bookkeeping and is not a new signal, so separate
 # --resolve-key answers do not each force a wake. Any other signature change
 # without owned growth is not a match, so uncertainty still reads as unreported.
@@ -3239,6 +3310,10 @@ fm_wake_signal_seen_current() {  # <state> <file>
   case "$2" in *.status) ;; *) return 1 ;; esac
   _fm_wake_require_classify || return 1
   classified=$(fm_wake_signal_seen_size "$1" "$2")
+  if status_watcher_adopt_presentation "$(fm_wake_signal_seen_path "$1" "$2")" "$2" "$classified"; then
+    fm_wake_signal_reported_current "$1" "$2" && return 0
+    classified=$(fm_wake_signal_seen_size "$1" "$2")
+  fi
   size=$(_fm_status_file_size "$2") || return 1
   size=${size//[[:space:]]/}
   case "$classified:$size" in *[!0-9:]*) return 1 ;; esac
