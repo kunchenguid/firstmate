@@ -12,7 +12,7 @@ Current empirical evidence lives in [`docs/verification/runtime-backends.md`](..
 | Launch | Positional instructions with `--settings state/<id>.droid-settings.json --auto high`. |
 | Autonomy | `--auto high` allows commands; a raw launch retains its caller's autonomy choice. |
 | Attribution | `includeCoAuthoredByDroid: false` is set in `state/<id>.droid-settings.json` unless `config/keep-ai-trailers` is present, and `bin/fm-git-strip-ai-trailers.sh` strips `factory-droid[bot]` trailers. |
-| Busy state | `UserPromptSubmit`, `Stop`, and `SessionEnd` hooks write `droid-hook` records through `bin/fm-busy-event.sh`; unarmed launches and `fm-interrupt` invalidations fall back to adapter-scoped `droid-regex`, and `fm_tmux_submit_busy_harness` maps foreground Droid panes for mid-turn `fm-send`. |
+| Busy state | `UserPromptSubmit`, `Stop`, and `SessionEnd` hooks write `droid-hook` records through `bin/fm-busy-event.sh`, except that a secondmate's `Stop` is written by its home's tracked Stop guard (`../../../../../docs/turnend-guard.md` owns that); unarmed launches and `fm-interrupt` invalidations fall back to adapter-scoped `droid-regex`, and `fm_tmux_submit_busy_harness` maps foreground Droid panes for mid-turn `fm-send`. |
 | Turn end | A process-local `Stop` command hook touches the task's turn-ended file; interrupt does not fire `Stop`, so `fm-control` invalidates the busy record to `unknown`. |
 | Interrupt and exit | One Escape (with Rewind-picker dismissal if open) and `/quit`, delivered through `../../../../../bin/fm-control.sh`. |
 | Recovery | Deterministic relaunch through the control plane; native resume is not part of this adapter's recovery contract. |

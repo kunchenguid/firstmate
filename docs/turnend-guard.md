@@ -284,6 +284,8 @@ The registrations in detail:
   The continuation's stop carries `stop_hook_active: true`, which bounds it to one per turn, and omp's own cap of eight consecutive continuations is the second backstop.
   `session_stop` never fires for an interrupted turn or a task session, so those boundaries are deliberately unguarded.
 - Droid registers a `Stop` hook in `.factory/settings.json`, anchors through `DROID_PROJECT_DIR`, and passes the native payload to the shared guard.
+  In a Droid secondmate home, `bin/fm-spawn.sh` likewise writes a `.fm-busy-stop` pointer with `source=droid-hook` and gives the mate no `Stop` busy hook, so the guard is the only Stop writer for that generation.
+  That holds only when the home's guard handles the `droid-hook` source and its `.factory/settings.json` registers the guard as a `Stop` hook; otherwise the launch stays unarmed and busy state falls back to `droid-regex`.
 - Cursor registers a `stop` hook in `.cursor/hooks.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-cursor.sh`, the park described below.
   Cursor also loads `<project>/.claude/settings.json`, so every tracked Claude-shaped entrypoint whose event Cursor covers stands down on a Cursor-delivered payload through `bin/fm-hook-host-lib.sh`.
   That predicate reads the delivered payload's own `cursor_version`, never the environment.
