@@ -47,7 +47,7 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 herdr_forget_inherited_pane
 
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-launcher-e2e.XXXXXX")
-HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name fm-herdr-launcher-ws) || {
   rm -rf "$TMP_ROOT"
   printf 'not ok - could not generate an isolated Herdr lab session name\n' >&2
@@ -78,6 +78,31 @@ trap cleanup_all EXIT
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not provision isolated Herdr lab session"
 
 lab() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
+
+# Production spawn and teardown reach Herdr through this PATH shim, which drops
+# only the adapter's own trailing lab-session flag, refuses any other session,
+# and sends every call through the lab helper's guarded run.
+FAKEBIN="$TMP_ROOT/fakebin"
+mkdir -p "$FAKEBIN"
+{
+  printf '#!/usr/bin/env bash\nset -u\n'
+  printf 'LAB_SESSION=%q LAB_HELPER=%q ORIGINAL_PATH=%q\n' "$HERDR_LAB_SESSION" "$HERDR_LAB_HELPER" "$PATH"
+  cat <<'SH'
+args=("$@")
+last=$((${#args[@]} - 1))
+if [ "$last" -ge 1 ] && [ "${args[$((last - 1))]}" = --session ] && [ "${args[$last]}" = "$LAB_SESSION" ]; then
+  unset "args[$last]" "args[$((last - 1))]"
+fi
+set -- ${args[@]+"${args[@]}"}
+for arg in "$@"; do
+  case "$arg" in
+    --session|--session=*) echo "lab herdr shim: refusing a call addressed outside $LAB_SESSION" >&2; exit 1 ;;
+  esac
+done
+exec env PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$LAB_SESSION" "$@"
+SH
+} > "$FAKEBIN/herdr"
+chmod +x "$FAKEBIN/herdr"
 
 # --- helpers ----------------------------------------------------------------
 
@@ -129,13 +154,13 @@ spawn_from_launcher() {
   shift 4
   SPAWN_OUT="$TMP_ROOT/$id.out"; SPAWN_ERR="$TMP_ROOT/$id.err"
   if [ -n "$pane" ]; then
-    env HERDR_ENV=1 HERDR_PANE_ID="$pane" HERDR_SESSION="$HERDR_LAB_SESSION" \
+    env PATH="$FAKEBIN:$PATH" HERDR_ENV=1 HERDR_PANE_ID="$pane" HERDR_SESSION="$HERDR_LAB_SESSION" \
       HERDR_SOCKET_PATH="$LAB_SOCKET" \
       FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "sh -c 'echo launcher-ws-ok'" --backend herdr "$@" \
       >"$SPAWN_OUT" 2>"$SPAWN_ERR"
   else
-    env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH HERDR_SESSION="$HERDR_LAB_SESSION" \
+    env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SOCKET_PATH PATH="$FAKEBIN:$PATH" HERDR_SESSION="$HERDR_LAB_SESSION" \
       FM_SPAWN_NO_GUARD=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
       "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "sh -c 'echo launcher-ws-ok'" --backend herdr "$@" \
       >"$SPAWN_OUT" 2>"$SPAWN_ERR"
@@ -198,7 +223,7 @@ Verify the worker is placed in the correct workspace.
 EOF
 }
 
-for id in uniqA uniqB dupC dupD staleF smE presU presD; do
+for id in uniqA uniqB dupC dupD staleF smE presU presD namedA1 namedB1 namedA2 namedB2 namedNL namedNT; do
   mkdir -p "$PRIMARY_HOME/data/$id" "$SM_HOME/data/$id" "$PRES_HOME/data/$id"
   write_ship_brief "$PRIMARY_HOME/data/$id/brief.md" "$id"
   write_ship_brief "$SM_HOME/data/$id/brief.md" "$id"
@@ -295,7 +320,7 @@ WS_PRIMARY_TABS_BEFORE=$(tab_labels_of_workspace "$WS_PRIMARY")
 cat > "$TMP_ROOT/spawn-in-pane.sh" <<SPAWN
 #!/usr/bin/env bash
 set -u
-FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
+PATH="$FAKEBIN:\$PATH" FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \\
   "$ROOT/bin/fm-spawn.sh" dupC "$PROJ" "sh -c 'echo launcher-ws-ok'" --mode no-mistakes --yolo off --backend herdr \\
   > "$TMP_ROOT/dupC.out" 2> "$TMP_ROOT/dupC.err"
 echo \$? > "$TMP_ROOT/dupC.rc"
@@ -355,6 +380,68 @@ PRESD_ORDER=$(lab workspace list 2>/dev/null | jq -r --arg dup "$WS_PRIMARY_DUP"
   || fail "the other same-labeled workspace was mutated by a projected spawn"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
 pass "real herdr E2E: with a duplicated home label, a projected worker still hangs off the launcher's exact workspace and the sibling stays untouched"
+
+# --- 3c. arbitrary parent labels and interleaved launches keep each block ---
+
+read -r WS_NAMED_A _ LAUNCH_NAMED_A <<EOF
+$(make_workspace project-a)
+EOF
+read -r WS_NAMED_B _ LAUNCH_NAMED_B <<EOF
+$(make_workspace project-b)
+EOF
+for id in namedA1 namedB1 namedA2 namedB2; do
+  case "$id" in
+    namedA*) parent=$WS_NAMED_A; launcher=$LAUNCH_NAMED_A; parent_label=project-a ;;
+    namedB*) parent=$WS_NAMED_B; launcher=$LAUNCH_NAMED_B; parent_label=project-b ;;
+  esac
+  spawn_from_launcher "$launcher" "$PRES_HOME" "$id" "$PROJ" --mode no-mistakes --yolo off
+  [ "$SPAWN_RC" -eq 0 ] || fail "a projected spawn under $parent_label failed"$'\n'"$(cat "$SPAWN_ERR")"
+  meta="$PRES_HOME/state/$id.meta"
+  record_worktree "$meta"
+  journal="$PRES_HOME/state/$id.herdr-presentation"
+  [ "$(journal_field "$journal" version)" = 2 ] \
+    && [ "$(journal_field "$journal" parent_workspace_id)" = "$parent" ] \
+    && [ "$(journal_field "$journal" parent_label)" = "$parent_label" ] \
+    || fail "a named parent must publish its exact id and actual label in the restart binding"
+  child=$(workspace_of_pane "$(grep '^herdr_pane_id=' "$meta" | cut -d= -f2-)")
+  case "$id" in *1) expected=1 ;; *2) expected=2 ;; esac
+  lab workspace list 2>/dev/null | jq -e --arg parent "$parent" --arg child "$child" --argjson expected "$expected" '
+    .result.workspaces | map(.workspace_id)
+    | (index($child) - index($parent)) == $expected
+  ' >/dev/null || fail "a projected child must follow its own named parent's existing block"
+  [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a named-parent spawn changed the unrelated selected workspace"
+done
+pass "real herdr E2E: named parents retain their own contiguous children and exact bindings across interleaved launches without changing focus"
+
+# --- 3d. a parent label with a line break cannot fit the restart journal ----
+
+# Both an internal and a trailing-only line break; the trailing one is lost by
+# a plain shell capture, so it must still be caught before any allocation.
+for id in namedNL namedNT; do
+  case "$id" in
+    namedNL) nl_label=$'project-c\nline-two' ;;
+    namedNT) nl_label=$'project-d\n' ;;
+  esac
+  read -r WS_NAMED_NL _ LAUNCH_NAMED_NL <<EOF
+$(make_workspace "$nl_label")
+EOF
+  [ -n "$WS_NAMED_NL" ] || fail "could not create the line-break-labeled parent workspace for $id"
+  lab workspace list 2>/dev/null | jq -e --arg id "$WS_NAMED_NL" --arg label "$nl_label" '
+    [.result.workspaces[]? | select(.workspace_id == $id) | .label] == [$label]
+  ' >/dev/null || fail "Herdr did not keep the exact line-break parent label $id depends on"
+  NL_SPACES_BEFORE=$(lab workspace list 2>/dev/null | jq -r '.result.workspaces | length')
+  spawn_from_launcher "$LAUNCH_NAMED_NL" "$PRES_HOME" "$id" "$PROJ" --mode no-mistakes --yolo off
+  [ "$SPAWN_RC" -eq 0 ] || fail "a line-break parent label must fall back flat, not fail the spawn ($id)"$'\n'"$(cat "$SPAWN_ERR")"
+  record_worktree "$PRES_HOME/state/$id.meta"
+  assert_contains_local "$(cat "$SPAWN_ERR")" "contains a line break" "a line-break parent label must warn why it spawned flat ($id)"
+  [ ! -e "$PRES_HOME/state/$id.herdr-presentation" ] || fail "a line-break parent label left a presentation journal ($id)"$'\n'"$(cat "$PRES_HOME/state/$id.herdr-presentation")"
+  [ "$(lab workspace list 2>/dev/null | jq -r '.result.workspaces | length')" = "$NL_SPACES_BEFORE" ] \
+    || fail "a line-break parent label still allocated a projection workspace ($id)"
+  [ "$(workspace_of_pane "$(grep '^herdr_pane_id=' "$PRES_HOME/state/$id.meta" | cut -d= -f2-)")" = "$WS_NAMED_NL" ] \
+    || fail "the flat fallback did not place the worker in its launcher's exact workspace ($id)"
+  [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a line-break parent spawn changed the unrelated selected workspace ($id)"
+done
+pass "real herdr E2E: a parent label with an internal or trailing line break spawns flat in its exact workspace with no journal or projection"
 
 # --- 4. duplicate label with NO launcher identity refuses before publishing --
 
@@ -429,8 +516,8 @@ pass "real herdr E2E: a --secondmate launch still stands up that secondmate's ow
 
 # --- 8. teardown closes only the worker's own pane --------------------------
 
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
-  FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
+PATH="$FAKEBIN:$PATH" FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" \
+  FM_DATA_OVERRIDE="$PRIMARY_HOME/data" FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" dupC >"$TMP_ROOT/teardown.out" 2>&1
 status=$?
 [ "$status" -eq 0 ] || fail "fm-teardown.sh failed for dupC"$'\n'"$(cat "$TMP_ROOT/teardown.out")"
@@ -442,6 +529,39 @@ lab pane get "$LAUNCH_DUP_PANE" >/dev/null 2>&1 || fail "teardown closed the lau
 lab pane get "$UNIQB_PANE" >/dev/null 2>&1 || fail "teardown closed an unrelated worker's pane in the other same-labeled workspace"
 [ "$(label_of_workspace "$WS_PRIMARY_DUP")" = firstmate ] || fail "teardown removed or renamed the launcher's workspace"
 pass "real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact"
+
+# --- 9. a restart reclaims a named parent's child; a renamed parent refuses --
+
+NAMED_A1_JOURNAL="$PRES_HOME/state/namedA1.herdr-presentation"
+NAMED_A1_WS=$(journal_field "$NAMED_A1_JOURNAL" workspace_id)
+NAMED_A1_OLD_PANE=$(journal_field "$NAMED_A1_JOURNAL" pane_id)
+NAMED_B1_WS=$(journal_field "$PRES_HOME/state/namedB1.herdr-presentation" workspace_id)
+NAMED_B1_LABEL=$(label_of_workspace "$NAMED_B1_WS")
+lab workspace rename "$WS_NAMED_B" project-b-renamed >/dev/null 2>&1 \
+  || fail "could not rename the project-b parent workspace"
+"$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null || fail "could not stop the isolated session for restart reclaim"
+"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" || fail "could not reprovision the isolated session for restart reclaim"
+RESTART_FOCUS=$(focused_workspace)
+
+spawn_from_launcher "$LAUNCH_NAMED_A" "$PRES_HOME" namedA1 "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "a restarted child under a named parent failed to relaunch"$'\n'"$(cat "$SPAWN_ERR")"
+record_worktree "$PRES_HOME/state/namedA1.meta"
+NAMED_A1_NEW_PANE=$(grep '^herdr_pane_id=' "$PRES_HOME/state/namedA1.meta" | cut -d= -f2-)
+[ "$(workspace_of_pane "$NAMED_A1_NEW_PANE")" = "$NAMED_A1_WS" ] && [ "$NAMED_A1_NEW_PANE" != "$NAMED_A1_OLD_PANE" ] \
+  || fail "a named parent's restarted child must be reclaimed in its own workspace, not spawned flat"$'\n'"$(cat "$SPAWN_ERR")"
+[ "$(journal_field "$NAMED_A1_JOURNAL" pane_id)" = "$NAMED_A1_NEW_PANE" ] \
+  && [ "$(journal_field "$NAMED_A1_JOURNAL" parent_label)" = project-a ] \
+  || fail "restart reclaim did not advance the named parent's exact binding"
+[ "$(focused_workspace)" = "$RESTART_FOCUS" ] || fail "restart reclaim changed the selected workspace"
+
+spawn_from_launcher "$LAUNCH_NAMED_B" "$PRES_HOME" namedB1 "$PROJ" --mode no-mistakes --yolo off
+[ "$SPAWN_RC" -eq 0 ] || fail "a renamed parent must fall back flat, not fail the relaunch"$'\n'"$(cat "$SPAWN_ERR")"
+record_worktree "$PRES_HOME/state/namedB1.meta"
+assert_contains_local "$(cat "$SPAWN_ERR")" "ambiguous, renamed, foreign, or non-nested live shape" "a renamed parent must refuse restart reclaim through its live binding"
+[ "$(workspace_of_pane "$(grep '^herdr_pane_id=' "$PRES_HOME/state/namedB1.meta" | cut -d= -f2-)")" != "$NAMED_B1_WS" ] \
+  || fail "a renamed parent's child was reclaimed anyway"
+[ "$(label_of_workspace "$NAMED_B1_WS")" = "$NAMED_B1_LABEL" ] || fail "a refused reclaim renamed or removed the old projection"
+pass "real herdr E2E: after a restart a named parent's child is reclaimed in place, while a renamed parent refuses reclaim and spawns flat"
 
 if ! cleanup_all; then
   trap - EXIT
