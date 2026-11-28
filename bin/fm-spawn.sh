@@ -431,7 +431,7 @@
 #   only the task's own status, turn-ended, steering inbox, data directory,
 #   read-only hooks, busy extension and the code root's bin/,
 #   .agents/ and .omp/, its private temp root, and the busy relay
-#   spool state/<id>.sbx/events; never state/, the code root itself, or
+#   spool state/<id>.sbx/events.<gen>; never state/, the code root itself, or
 #   FM_HOME. The omp busy extension drops edge files into that spool and
 #   bin/fm-sandbox-relay.sh, started by the wrapper as --host-helper, applies
 #   them through bin/fm-busy-event.sh. The chosen profile is recorded as
@@ -4248,7 +4248,7 @@ $dirs
 EOF
   [ "$GIT_HOOKS_INSTALLED" != 1 ] || binds+=(--ro "$GIT_HOOKS_DIR")
   binds+=(--ro "$STATE_REAL/$ID.omp-ext.ts" --rw "$TASK_TMP"
-    --rw "$(fm_sandbox_events_dir "$STATE_REAL" "$ID")"
+    --rw "$(fm_sandbox_events_dir "$STATE_REAL" "$ID" "$BUSY_GEN")"
     --env COMPACT_ADVISER_DISABLE --env FM_TASK_INBOX --env FM_TASK_ID --env GOTMPDIR
     --env TRACEPARENT --env LAVISH_AXI_HOST --env LAVISH_AXI_PORT --host-helper "$SANDBOX_HELPER")
   prefix=$(shell_quote "$SANDBOX_BIN")
@@ -7279,7 +7279,7 @@ EOF
         exit 1
       }
       SANDBOX_HELPER=$(fm_sandbox_prepare_task "$STATE_REAL" "$ID" "$BUSY_GEN" "$FM_ROOT") || exit 1
-      SANDBOX_EVENTS=$(fm_sandbox_events_dir "$STATE_REAL" "$ID")
+      SANDBOX_EVENTS=$(fm_sandbox_events_dir "$STATE_REAL" "$ID" "$BUSY_GEN")
       IFS= read -r -d '' omp_busy_transport <<EOT || true
 import { renameSync, writeFileSync } from "node:fs";
 let edgeSeq = 0;

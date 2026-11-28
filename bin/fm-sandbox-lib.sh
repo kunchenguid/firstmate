@@ -21,8 +21,9 @@
 #   project:<name>=<profile>  <name> is the registered project name (the basename
 #                           of its clone directory)
 #   kind:ship=<profile>, kind:scout=<profile>
-# A profile name is the wrapper's own: [A-Za-z0-9][A-Za-z0-9._-]*; the profile's
-# content belongs to the wrapper, never here. Resolution order: explicit
+# A profile name is the wrapper's own: [A-Za-z0-9][A-Za-z0-9._-]*, never `off`
+# (the record's waiver value); the profile's content belongs to the wrapper,
+# never here. Resolution order: explicit
 # --sandbox <profile>, then project:, then kind:, then default. Secondmates are
 # never mapped.
 # enforce=off     mappings are inactive (a kill switch that keeps them on file);
@@ -46,10 +47,11 @@
 # the worker needs at minimum, kept even by a wrapper that otherwise filters the
 # environment, and skipped when unset at launch.
 
-# fm_sandbox_profile_valid <name>
+# fm_sandbox_profile_valid <name>: `off` is reserved, because sandbox=off in the
+# task record is the waiver a relaunch honors without the wrapper.
 fm_sandbox_profile_valid() {
   case "${1:-}" in
-  '' | [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*) return 1 ;;
+  '' | off | [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*) return 1 ;;
   esac
   return 0
 }
@@ -231,29 +233,32 @@ fm_sandbox_path_plain() {
   return 0
 }
 
-# fm_sandbox_events_dir <state-real> <id>: the relay spool, the ONLY writable
-# path the sandbox gets under state/.
+# fm_sandbox_events_dir <state-real> <id> <gen>: the relay spool of one
+# incarnation, the ONLY writable path the sandbox gets under state/.
 fm_sandbox_events_dir() {
-  printf '%s/%s.sbx/events' "$1" "$2"
+  printf '%s/%s.sbx/events.%s' "$1" "$2" "$3"
 }
 
 # fm_sandbox_prepare_task <state-real> <id> <gen> <fm-root>
-# Creates state/<id>.sbx/{events/,inflight/,relay-helper} for this incarnation and prints
-# the helper path. A relaunch reaches here with the previous incarnation's files
-# on disk: the old relay is gone with its worker, so its spool is emptied and
-# the helper is rewritten with the new busy gen. The sandbox sees only events/.
+# Creates state/<id>.sbx/{events.<gen>/,inflight/,relay-helper} for this
+# incarnation and prints the helper path. A relaunch reaches here with the
+# previous incarnation's files on disk: its spool is removed, so a process the
+# old worker left behind cannot drop edges the new relay would apply, the
+# inflight leftovers go with it, and the helper is rewritten with the new busy
+# gen. The sandbox sees only its own events.<gen>/.
 fm_sandbox_prepare_task() {
   local state=$1 id=$2 gen=$3 root=$4 sbx events helper tmp
   sbx="$state/$id.sbx"
-  events=$(fm_sandbox_events_dir "$state" "$id")
+  events=$(fm_sandbox_events_dir "$state" "$id" "$gen")
   helper="$sbx/relay-helper"
   fm_sandbox_path_plain "$helper" || {
     echo "error: sandbox helper path '$helper' carries characters the wrapper cannot take as one word; move the home to a plain path" >&2
     return 1
   }
+  (umask 077 && mkdir -p "$sbx") || return 1
+  find "$sbx" -mindepth 1 -maxdepth 1 \( -name 'events*' -o -name inflight \) -exec rm -rf {} + 2>/dev/null || true
   (umask 077 && mkdir -p "$events" "$sbx/inflight") || return 1
   chmod 700 "$sbx" "$events" "$sbx/inflight" || return 1
-  find "$events" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
   tmp="$sbx/.relay-helper.$$"
   (
     umask 077

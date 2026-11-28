@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-sandbox-relay.sh: the host-side relay that applies a
 # sandboxed omp worker's busy edges (the worker may write only
-# state/<id>.sbx/events/, never state/).
+# its incarnation spool state/<id>.sbx/events.<gen>/, never state/).
 #
 # Load-bearing contracts:
 #   1. A valid edge file produces the same busy-state record as a direct
@@ -10,6 +10,8 @@
 #      move its replacement's record, and a gen inside the file is ignored.
 #   3. A malformed, schema-violating, oversize, non-regular, or flooded event is
 #      dropped and leaves the record unchanged; the spool never accumulates.
+#   3b. One pass takes at most FM_SANDBOX_RELAY_PASS entries and leaves the rest
+#      for the next poll, logs a flood once per pass, and never walks a tree.
 #   4. `run` applies edges until the events directory disappears (teardown).
 # Hermetic over temp dirs; no sandbox wrapper and no agent is invoked.
 set -u
@@ -113,12 +115,16 @@ test_bad_events_are_dropped_without_a_state_change() {
   printf '{"state":"idle","event":"agent-end","pad":"%s"}' "$(printf 'x%.0s' $(seq 1 600))" >"$e/0000000000001-1-000007.json"
   printf '%s' '{"state":"idle","event":"agent-end"}' >"$e/stray.txt"
   mkdir "$e/0000000000001-1-000008.json"
+  mkdir -p "$e/0000000000001-1-000009.json/deep"
+  : >"$e/0000000000001-1-000009.json/deep/kept"
   relay_once "$state" relay-b1 "$gen" || fail "relay pass failed"
   [ "$(cat "$state/relay-b1.busy-state")" = "$before" ] || fail "a bad event moved the record: $(cat "$state/relay-b1.busy-state")"
   spool_empty "$state" relay-b1 || fail "dropped events must still be removed from the spool"
   for i in malformed oversize nonregular; do
     grep -q "reason=$i" "$state/relay-b1.sbx/relay.log" || fail "drop reason $i was not logged"
   done
+  [ -n "$(find "$state/relay-b1.sbx/inflight" -name kept -print -quit)" ] \
+    || fail "a worker-made tree must be moved out of the spool, never walked and deleted by the relay"
   pass "relay: malformed, oversize, schema-violating, and stray entries are dropped and the record is unchanged"
 }
 
@@ -181,7 +187,7 @@ SH
 }
 
 test_flood_is_bounded() {
-  local c state gen i seq_before seq_after e started elapsed applied_edges dropped
+  local c state gen i seq_before seq_after e started elapsed applied_edges left
   c=$(new_case flood relay-f1)
   state=${c% *}
   gen=${c#* }
@@ -196,13 +202,20 @@ test_flood_is_bounded() {
   elapsed=$(($(date +%s) - started))
   seq_after=$(sed -n 's/.* seq=\([0-9]*\) .*/\1/p' "$state/relay-f1.busy-state")
   applied_edges=$((seq_after - seq_before))
-  [ "$applied_edges" -le 10 ] || fail "a flood applied $applied_edges edges, the per-pass cap is 10"
   [ "$applied_edges" -le $((2 * (elapsed + 1))) ] || fail "a flood applied $applied_edges edges in ${elapsed}s, the rate cap is 2 per second"
   [ "$applied_edges" -ge 1 ] || fail "the first edges of a flood must still apply"
-  spool_empty "$state" relay-f1 || fail "a flood must leave the spool empty"
-  dropped=$(grep -c 'reason=flood' "$state/relay-f1.sbx/relay.log")
-  [ "$dropped" -ge 190 ] || fail "the 190 files beyond the per-pass cap must be logged as flood drops, got $dropped"
-  pass "relay: a flood is bounded by the per-pass and per-second caps, and the spool drains"
+  left=$(find "$e" -mindepth 1 | wc -l | tr -d ' ')
+  [ "$left" = 190 ] || fail "one pass must take exactly the 10-entry budget and leave 190 for the next poll, left $left"
+  [ -e "$e/0000000000001-1-000011.json" ] && [ ! -e "$e/0000000000001-1-000010.json" ] \
+    || fail "a pass must take the oldest entries first"
+  [ "$(grep -c 'reason=flood' "$state/relay-f1.sbx/relay.log")" = 1 ] || fail "a pass must log its flood drops as one line"
+  grep -q "reason=flood count=$((10 - applied_edges))" "$state/relay-f1.sbx/relay.log" \
+    || fail "the flood line must count every rate-capped drop of the pass: $(cat "$state/relay-f1.sbx/relay.log")"
+  for i in $(seq 1 19); do
+    relay_once "$state" relay-f1 "$gen" FM_SANDBOX_RELAY_RATE=2 FM_SANDBOX_RELAY_PASS=10 || fail "relay pass failed"
+  done
+  spool_empty "$state" relay-f1 || fail "later polls must drain the spool"
+  pass "relay: a flood costs one bounded pass per poll, is logged once per pass, and the spool drains"
 }
 
 test_run_applies_edges_and_ends_with_the_spool() {

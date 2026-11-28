@@ -177,7 +177,7 @@ test_mapped_project_is_wrapped_at_the_seam() {
   assert_not_contains "$launch" "'--ro' '$ROOT'" "the code root itself must never be bound"
   assert_contains "$launch" "'--env' 'FM_TASK_INBOX'" "the steering doorbell must reach the sandbox"
   assert_contains "$launch" "'--rw' '/tmp/fm-$id'" "the private temp root must be writable"
-  assert_contains "$launch" "'--rw' '$s/$id.sbx/events'" "the relay spool must be the only writable state path"
+  assert_contains "$launch" "'--rw' '$s/$id.sbx/events.$(cat "$s/$id.busy-gen")'" "the incarnation's relay spool must be the only writable state path"
   assert_contains "$launch" "'--host-helper' '$s/$id.sbx/relay-helper'" "the relay must start as the wrapper's helper"
   assert_contains "$launch" "'--env' 'COMPACT_ADVISER_DISABLE'" "the compact-adviser switch must reach the sandbox"
   assert_contains "$launch" ' -- env -u CLAUDECODE ' "the unchanged agent segment must follow the wrapper"
@@ -396,7 +396,7 @@ test_enforce_levels() {
 test_malformed_config_refuses() {
   local id=sbx-bad-a1 out status body
   read_case "$(make_case bad "$id")"
-  for body in 'enforce=maybe' 'bogus=1' 'default=' 'default=a b' 'project:=x' 'kind:secondmate=x' 'noequals' $'enforce=on\nenforce=strict'; do
+  for body in 'enforce=maybe' 'bogus=1' 'default=' 'default=a b' 'project:=x' 'kind:secondmate=x' 'default=off' 'project:project=off' 'kind:scout=off' 'noequals' $'enforce=on\nenforce=strict'; do
     printf '%s\n' "$body" > "$HOME_DIR/config/sandbox"
     out=$(run_spawn "$id" "$PROJ_DIR" --scout --harness omp)
     status=$?
@@ -591,6 +591,9 @@ test_relaunch_rewraps_with_the_recorded_profile() {
     echo "sandbox=strict"
   } > "$home/state/$id.meta"
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$s" "$id")
+  # The previous incarnation's spool, with an edge a leftover process dropped.
+  mkdir -p "$s/$id.sbx/events.$gen_before"
+  printf '%s' '{"state":"idle","event":"agent-end"}' > "$s/$id.sbx/events.$gen_before/0000000000001-1-000000.json"
   : > "$dir/fake-state/literal"
   : > "$dir/sandbox.log"
   # The relaunch takes its profile from the record, whatever config/sandbox now
@@ -608,6 +611,8 @@ test_relaunch_rewraps_with_the_recorded_profile() {
   gen_after=$(cat "$s/$id.busy-gen")
   [ "$gen_after" != "$gen_before" ] || fail "a relaunch must arm a fresh busy gen"
   assert_contains "$(cat "$s/$id.sbx/relay-helper")" "--gen '$gen_after'" "the relaunch's relay must pin the NEW gen, not the old one"
+  assert_contains "$launch" "'--rw' '$s/$id.sbx/events.$gen_after'" "the relaunch must bind a spool of its own incarnation"
+  assert_absent "$s/$id.sbx/events.$gen_before" "the superseded incarnation's spool must be removed, so a leftover process cannot reach the new relay"
   assert_equals strict "$(sed -n 's/^sandbox=//p' "$home/state/$id.meta")" "the relaunched record must keep sandbox=strict"
 
   # The wrapper comes from the current config/sandbox: with the file gone, a
@@ -703,7 +708,7 @@ test_sandboxed_extension_reports_through_the_relay() {
   expect_code 0 $? "a sandboxed spawn should succeed: $out"
   s=$STATE_DIR
   ext="$s/$id.omp-ext.ts"
-  events="$s/$id.sbx/events"
+  events="$s/$id.sbx/events.$(cat "$s/$id.busy-gen")"
   assert_not_contains "$(cat "$ext")" "fm-busy-event.sh" "a sandboxed extension must not run the state writer"
   assert_contains "$(cat "$ext")" "$events" "a sandboxed extension must write into the relay spool"
   [ "$(fm_busy_classify tmux w omp "$id" "$s")" = "busy fm-spawn" ] || fail "spawn must seed the busy record"

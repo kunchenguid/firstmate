@@ -2112,7 +2112,7 @@ One `key=value` per line, no spaces around `=`, blank lines and `#` comment line
 | `project:<name>=<profile>` | Profile for one registered project; `<name>` is the clone directory's basename. |
 | `kind:ship=<profile>`, `kind:scout=<profile>` | Profile for every ship or every scout. |
 
-A profile name is the wrapper's own, `[A-Za-z0-9][A-Za-z0-9._-]*`; the profile's content belongs to the wrapper and is never copied here.
+A profile name is the wrapper's own, `[A-Za-z0-9][A-Za-z0-9._-]*`, except `off`, which the task record reserves for a waiver; the profile's content belongs to the wrapper and is never copied here.
 Resolution order is the explicit `--sandbox <profile>` flag, then `project:`, then `kind:`, then `default=`.
 A malformed file stops the spawn rather than launching unsandboxed.
 
@@ -2164,9 +2164,10 @@ Each `--env NAME` names a variable the worker needs at minimum, which a wrapper 
 ### Busy relay
 
 The omp busy extension cannot run `bin/fm-busy-event.sh` inside the sandbox, because that needs a writable `state/`, which would let the worker rewrite other workers' inboxes and extensions.
-A sandboxed extension instead writes one small JSON file per turn edge into `state/<id>.sbx/events/`, one of the few task-own `state/` paths it may write, and `bin/fm-sandbox-relay.sh` applies it on the host through `bin/fm-busy-event.sh`.
-The busy gen is fixed on the helper's command line at spawn, never read from a file, so a worker from a superseded incarnation cannot move its replacement's record.
-The relay drops, counts in `state/<id>.sbx/relay.log`, and never applies an event that is malformed, over 512 bytes, not a regular file, beyond the per-second or per-pass cap, or refused by the writer.
+A sandboxed extension instead writes one small JSON file per turn edge into `state/<id>.sbx/events.<gen>/`, one of the few task-own `state/` paths it may write, and `bin/fm-sandbox-relay.sh` applies it on the host through `bin/fm-busy-event.sh`.
+The busy gen is fixed on the helper's command line at spawn, never read from a file, and each incarnation gets a fresh spool (a relaunch removes the old one), so a worker or leftover process from a superseded incarnation cannot move its replacement's record.
+The relay drops, counts in `state/<id>.sbx/relay.log`, and never applies an event that is malformed, over 512 bytes, not a regular file, beyond the per-second cap, or refused by the writer.
+Each poll takes a bounded number of spool entries and leaves the rest for the next poll, so a flooded spool costs the host bounded work per poll.
 It ends with the wrapper, when teardown removes the spool, or when the task is re-armed.
 The helper's task id, state directory, and spool path are also fixed on its command line, so an event can only ever update this task's own busy record and never another task's records or inboxes.
 It authenticates the incarnation, not the claim: a worker can still misreport its own busy state.
