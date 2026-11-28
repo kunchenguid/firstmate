@@ -219,8 +219,9 @@
 #   is published. Under that same lock it writes the slot's owner claim, which is
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
-#   cannot be claimed refuses the spawn rather than launching a worker whose slot
-#   could later be released out from under its successor. A spawn that aborts
+#   cannot be claimed, or that another local task record still names, refuses
+#   the spawn rather than launching a worker whose slot could later be released
+#   out from under it or its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place, and
 #   the next spawn's claim replaces it. A fresh polytoken spawn that fails and
@@ -6216,7 +6217,21 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # under its successor.
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
+  # A slot another task record still names is refused too: Treehouse frees a
+  # slot once its worker exits, but that record's teardown would still return
+  # the copy out from under this task, and the two records would refuse each
+  # other's teardown (bin/fm-wake-lib.sh's fm_slot_other_record_namer).
+  # An unreadable local home only narrows the scan, with a warning: it must not
+  # stop every spawn on the machine, while teardown still refuses on it.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    slot_named=0
+    fm_slot_other_record_namer "$WT" "$STATE/$ID.meta" "$STATE" best-effort && slot_named=1
+    [ -z "$FM_LOCAL_FIRSTMATE_ERROR" ] \
+      || echo "warning: checked Treehouse pool slot $WT for other task records only in the local Firstmate homes that could be read; skipped: $FM_LOCAL_FIRSTMATE_ERROR" >&2
+    if [ "$slot_named" = 1 ]; then
+      echo "error: Treehouse handed task $ID pool slot $WT, but task $FM_SLOT_NAMER_ID's record still names it as its $FM_SLOT_NAMER_FIELD; refusing to put two task records on one copy. Clean up or reconcile $FM_SLOT_NAMER_ID (bin/fm-crew-state.sh $FM_SLOT_NAMER_ID), then spawn again; $(spawn_endpoint_hint)" >&2
+      exit 1
+    fi
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; $(spawn_endpoint_hint)" >&2
       exit 1
@@ -6607,7 +6622,15 @@ BUSY_GEN=
       j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
-    hooks_json="\"hooks\":{\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
+    # A crewmate also gets the pattern-kill seatbelt (docs/arm-pretool-check.md)
+    # so its pkill/killall can never sweep every other agent on the machine.
+    # A secondmate home already registers it in its tracked hooks.
+    pretool_entry=
+    if [ "$KIND" != secondmate ]; then
+      j_pretool=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-arm-pretool-check.sh") --claude")
+      pretool_entry="\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"$j_pretool\"}]}],"
+    fi
+    hooks_json="\"hooks\":{${pretool_entry}\"UserPromptSubmit\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_submit\"}]}],${stop_entry}\"StopFailure\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stopfail\"}]}],\"SessionEnd\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_sessionend\"}]}]}"
     if [ "$KIND" = secondmate ]; then
       session_keys='"feedbackDrafts":"off",'
       if [ "$KEEP_AI_TRAILERS" != 1 ]; then

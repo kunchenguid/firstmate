@@ -149,6 +149,10 @@ matrix_case E14 allow '$FM_HOME/bin/fm-teardown.sh &'
 matrix_case E15 allow '$FM_HOME/bin/fm-watch-arm.sh'
 matrix_case E16 allow '~/firstmate/bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case E17 allow 'for f in 1; do echo fm-watch; done'
+matrix_case K01 deny 'pkill -f "chrome-devtools-axi" ; for p in a b; do echo "$p"; done'
+matrix_case K02 deny 'killall node'
+matrix_case K03 allow 'kill 4242'
+matrix_case K04 allow "rg -n 'pkill -f' docs"
 
 MATRIX_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-arm-policy-matrix.XXXXXX")
 FM_TEST_CLEANUP_DIRS+=("$MATRIX_TMP")
@@ -192,7 +196,7 @@ run_matrix_entry() {
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|pattern-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
@@ -230,6 +234,26 @@ test_direct_policy_contract() {
   assert_policy direct-loop-broad-pkill $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch; done'
   assert_policy direct-loop-broad-kill-pgrep $'deny\tbroad-watcher-kill' 'until false; do kill $(pgrep -f fm-watch); done'
   assert_policy direct-loop-no-kill-allowed allow 'for f in 1; do echo fm-watch; done'
+  assert_policy direct-pattern-pkill $'deny\tpattern-kill' 'pkill -f chrome-devtools-axi'
+  assert_policy direct-pattern-pkill-path $'deny\tpattern-kill' '/usr/bin/pkill python3'
+  assert_policy direct-pattern-pkill-wrapped $'deny\tpattern-kill' 'sudo pkill -f "run.py --port 8092"'
+  assert_policy direct-pattern-pkill-nested $'deny\tpattern-kill' 'bash -c "pkill -f run.py"'
+  assert_policy direct-pattern-pkill-substitution $'deny\tpattern-kill' 'out=$(pkill -f run.py)'
+  assert_policy direct-pattern-killall $'deny\tpattern-kill' 'killall -9 node'
+  assert_policy direct-pattern-loop $'deny\tpattern-kill' 'for p in a; do pkill -f "$p"; done'
+  assert_policy direct-pattern-data allow 'git commit -m "refuse pkill and killall"'
+  assert_policy direct-pattern-pgrep allow 'pgrep -fl chrome-devtools-axi'
+  assert_policy direct-exact-kill allow 'kill -TERM 4242'
+  assert_policy direct-pattern-pkill-name $'deny\tpattern-kill' 'pkill chrome'
+  assert_policy direct-pattern-pkill-user $'deny\tpattern-kill' 'pkill -u agent'
+  assert_policy direct-pattern-pkill-attached-uid $'deny\tpattern-kill' 'pkill -U501'
+  assert_policy direct-pattern-pkill-attached-gid $'deny\tpattern-kill' 'pkill -TERM -G20'
+  assert_policy direct-pattern-pkill-f-parent $'deny\tpattern-kill' 'pkill -f -P $$'
+  assert_policy direct-pattern-pkill-after-dashdash $'deny\tpattern-kill' 'pkill -- -P'
+  assert_policy direct-targeted-pkill-parent allow 'pkill -P $$'
+  assert_policy direct-targeted-pkill-signal-parent allow 'pkill -TERM -P$$'
+  assert_policy direct-targeted-pkill-pidfile allow 'pkill --signal KILL -F /tmp/worker.pid'
+  assert_policy direct-targeted-pkill-group allow 'pkill -9 -g 4242'
   assert_policy direct-pipeline $'deny\twatcher-pipeline' 'bin/fm-watch-arm.sh | cat'
   assert_policy direct-leading-redirection $'deny\twatcher-redirection' '>/tmp/out bin/fm-watch-arm.sh'
   assert_policy direct-unclassifiable $'deny\tunclassifiable-protected-command' "bin/fm-watch-arm.sh 'unterminated"
@@ -357,7 +381,12 @@ test_prefilter_is_strict_superset() {
   "$CHECK" --command "echo 'pkill -f fm-watch'" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || fail "a benign fm-watch-substring command must be classified and allowed, got exit $rc"
-  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch and quoting-decoder-marker command reaches the classifier"
+  # A pattern kill carries pkill or killall rather than fm-watch, so the
+  # prefilter must delegate on those bytes too, even quote-split.
+  "$CHECK" --command 'p"kill" -f chrome-devtools-axi' >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "prefilter must delegate a quote-split pattern kill, not fast-allow it, got exit $rc"
+  pass "transport prefilter is a strict superset: non-fm-watch fast-allows, every fm-watch, pattern-kill, and quoting-decoder-marker command reaches the classifier"
 }
 
 # --- fail-open ----------------------------------------------------------------

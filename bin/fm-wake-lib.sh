@@ -1921,16 +1921,20 @@ fm_firstmate_root_home() {
 # FM_LOCAL_FIRSTMATE_ERROR naming what could not be proved - an unresolvable
 # root, an unsafe or malformed registry, or an unavailable registered local
 # home - so a caller refuses rather than treating an unreadable home as one
-# with no tasks. Requires bin/fm-secondmate-registry-lib.sh to be sourced first.
+# with no tasks. With best-effort, it instead skips each such registry, entry,
+# or home, appends what it skipped to FM_LOCAL_FIRSTMATE_ERROR ("; "-joined),
+# and returns 0 with the homes it could read.
+# Requires bin/fm-secondmate-registry-lib.sh to be sourced first.
 # shellcheck disable=SC2034 # FM_LOCAL_FIRSTMATE_ERROR is read by callers.
-fm_local_firstmate_state_dirs() {  # <first-state>
-  local first=$1 root home reg line child known existing i=0
+fm_local_firstmate_state_dirs() {  # <first-state> [best-effort]
+  local first=$1 best=${2:-} root home reg line child known existing i=0
   local -a homes
   FM_LOCAL_FIRSTMATE_STATES=("$first")
   FM_LOCAL_FIRSTMATE_ERROR=
   root=$(fm_firstmate_root_home "$FM_HOME") || {
     FM_LOCAL_FIRSTMATE_ERROR="cannot resolve the root Firstmate home"
-    return 1
+    [ "$best" = best-effort ]
+    return
   }
   homes=("$root")
   while [ "$i" -lt "${#homes[@]}" ]; do
@@ -1946,21 +1950,24 @@ fm_local_firstmate_state_dirs() {  # <first-state>
     reg="$home/data/secondmates.md"
     [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
     [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      FM_LOCAL_FIRSTMATE_ERROR="local Firstmate registry is unsafe at $reg"
-      return 1
+      FM_LOCAL_FIRSTMATE_ERROR="${FM_LOCAL_FIRSTMATE_ERROR:+$FM_LOCAL_FIRSTMATE_ERROR; }local Firstmate registry is unsafe at $reg"
+      [ "$best" = best-effort ] || return 1
+      continue
     }
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
         "- "*)
           secondmate_registry_parse_line "$line" || {
-            FM_LOCAL_FIRSTMATE_ERROR="malformed local Firstmate registry entry in $reg"
-            return 1
+            FM_LOCAL_FIRSTMATE_ERROR="${FM_LOCAL_FIRSTMATE_ERROR:+$FM_LOCAL_FIRSTMATE_ERROR; }malformed local Firstmate registry entry in $reg: $line"
+            [ "$best" = best-effort ] || return 1
+            continue
           }
           [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
           child=$([ -d "$SECONDMATE_REGISTRY_HOME" ] &&
             CDPATH='' cd -- "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P) || {
-            FM_LOCAL_FIRSTMATE_ERROR="registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME"
-            return 1
+            FM_LOCAL_FIRSTMATE_ERROR="${FM_LOCAL_FIRSTMATE_ERROR:+$FM_LOCAL_FIRSTMATE_ERROR; }registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME"
+            [ "$best" = best-effort ] || return 1
+            continue
           }
           known=0
           for existing in "${homes[@]}"; do
@@ -2160,6 +2167,46 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
+}
+
+# Record exclusivity for a Treehouse pool slot: the first task record, in any
+# local Firstmate home (fm_local_firstmate_state_dirs), other than <own-meta>
+# whose worktree= or home= resolves to <slot>, an existing directory. Teardown
+# refuses to return a slot another record still names, and spawn refuses to
+# hand one out, so two records never claim one copy.
+# Returns 0 with FM_SLOT_NAMER_ID and FM_SLOT_NAMER_FIELD set when such a
+# record exists, 1 when none does, and 2 with FM_LOCAL_FIRSTMATE_ERROR set when
+# the local homes cannot be enumerated; with best-effort it scans the homes it
+# can read instead, leaving what it skipped in FM_LOCAL_FIRSTMATE_ERROR.
+# <own-meta> is skipped by identity, not
+# spelling: the same file reached through a differently resolved state dir is
+# still it, while a differently named hardlink is another task's record.
+# Requires fm_meta_get (bin/fm-backend.sh) and the registry library that
+# fm_local_firstmate_state_dirs needs.
+# shellcheck disable=SC2034 # FM_SLOT_NAMER_* are read by callers.
+fm_slot_other_record_namer() {  # <slot> <own-meta> <first-state> [best-effort]
+  local slot=$1 own=$2 first=$3 best=${4:-} state_dir other field other_path other_slot
+  FM_SLOT_NAMER_ID=
+  FM_SLOT_NAMER_FIELD=
+  FM_LOCAL_FIRSTMATE_ERROR=
+  slot=$(CDPATH='' cd -- "$slot" 2>/dev/null && pwd -P) || return 1
+  fm_local_firstmate_state_dirs "$first" "$best" || return 2
+  for state_dir in "${FM_LOCAL_FIRSTMATE_STATES[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -f "$other" ] && [ ! -L "$other" ] || continue
+      [ "${other##*/}" = "${own##*/}" ] && [ "$other" -ef "$own" ] && continue
+      for field in worktree home; do
+        other_path=$(fm_meta_get "$other" "$field")
+        [ -n "$other_path" ] && [ -d "$other_path" ] || continue
+        other_slot=$(CDPATH='' cd -- "$other_path" 2>/dev/null && pwd -P) || continue
+        [ "$other_slot" = "$slot" ] || continue
+        FM_SLOT_NAMER_ID=$(basename "$other" .meta)
+        FM_SLOT_NAMER_FIELD=$field
+        return 0
+      done
+    done
+  done
+  return 1
 }
 
 fm_failure_episode_reset() {

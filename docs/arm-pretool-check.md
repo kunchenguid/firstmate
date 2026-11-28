@@ -33,17 +33,17 @@ The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
 It passes both roots and the exact command string to the Node policy owner.
 
-The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
+The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch`, `pkill`, or `killall` byte sequence even after the classifier's decoders run.
 The fast path may allow only when both of these hold:
 
-1. The stripped text lacks the `fm-watch` watcher substring, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
+1. The stripped text lacks the `fm-watch` watcher substring and the `pkill` and `killall` pattern-kill substrings, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
 2. The raw command carries no quoting-decoder marker: a `$` immediately followed by a single quote (ANSI-C `$'...'`) or a double quote (bash locale `$"..."`).
 
-Any `fm-watch` match or any quoting-decoder marker delegates to the classifier.
+Any `fm-watch`, `pkill`, or `killall` match, or any quoting-decoder marker, delegates to the classifier.
 Normalizing first keeps this a strict superset: a protected watcher path obfuscated as `fm-watc\<newline>h-arm.sh` or `fm-"watch"-arm.sh` still delegates, and stripping only those non-alphanumeric bytes can never destroy an existing `fm-watch` run.
 The quoting-decoder marker closes the case the byte strip cannot: `bin/fm-$'\x77'atch-arm.sh` and `bin/fm-$"watch"-arm.sh` both resolve to `bin/fm-watch-arm.sh` only after the classifier decodes the encoded character, so a cheap byte strip would otherwise lose the `fm-watch` bytes and fast-allow them.
 This marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending this marker set in the same change, or the prefilter stops being a strict superset.
-The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely not a watcher command, so it never flips a classification and the classifier remains the single owner of every decision.
+The prefilter owns no semantic exception: it can only ever fast-allow a command that is definitely neither a watcher command nor a pattern kill, so it never flips a classification and the classifier remains the single owner of every decision.
 
 The seatbelt's threat model is agent mistakes: no one accidentally writes an ANSI-C- or locale-obfuscated watcher path, and deliberate obfuscation is the post-arm liveness guard's territory.
 The marker guard closes the static gap anyway because it is cheap and provable per encoding class.
@@ -129,6 +129,19 @@ When the command carries such grammar and its raw bytes reference both a `fm-wat
 This backstop mirrors the protected-execution fail-closed rule and covers forms like `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done`.
 It is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` and a loop that only names the watcher without a kill verb such as `for f in 1; do echo fm-watch; done` remain allowed.
 
+## Pattern kills
+
+Any actually executed `killall`, and any actually executed `pkill` that selects by pattern, is denied with `pattern-kill`; a watcher-targeted `pkill` keeps the more specific `broad-watcher-kill`.
+A `pkill` selects by pattern unless every argument is a signal or an exact-target option (`-P` parent pid, `-F` pidfile, `-g` process group, `-s` session), so `pkill -f`, a name pattern, and any unrecognized option are denied while `pkill -P $$` stays allowed.
+A pattern kill matches every process on the machine whose name or command line fits, so one agent resetting its own browser bridge with `pkill -f chrome-devtools-axi` can terminate every other agent whose command line carries that word.
+The deny reason points the agent at `pgrep` or `ps` to find the exact process and `kill <pid>` to stop only that one.
+Data mentions, `pgrep`, and `kill <pid>` stay allowed, and unsupported compound grammar whose raw bytes name `pkill` or `killall` fails closed as for broad watcher kills.
+
+`bin/fm-spawn.sh` registers this checker as a Claude crewmate's Bash `PreToolUse` hook in the worktree's `.claude/settings.local.json`, beside its busy hooks, so a delegated Claude worker in any project is covered.
+Agents Firstmate does not launch, such as no-mistakes pipeline agents, run with their own settings and are not covered.
+Other crewmate harnesses (Codex, OpenCode, Pi, Grok, Cursor, and the rest) do not get this hook yet; wiring them is a follow-up.
+Give no-mistakes agents the same guard on the no-mistakes side, for example by registering `bin/fm-arm-pretool-check.sh --claude` as a Bash `PreToolUse` hook in the settings those agents load, or an equivalent rule in their prompt.
+
 ## Stable reason codes
 
 Every semantic deny includes one stable code in square brackets before its prose reason.
@@ -141,6 +154,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
+| `pattern-kill` | An actual `killall`, or a `pkill` that selects by pattern, runs; kill by exact pid instead. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 

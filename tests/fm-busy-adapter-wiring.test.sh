@@ -650,6 +650,9 @@ test_claude_hooks_semantic_lifecycle() {
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
+  jq -cn '{tool_name:"Bash",tool_input:{command:"pkill -f chrome-devtools-axi"}}' \
+    | sh -c "$(jq -r '.hooks.PreToolUse[] | select(.matcher == "Bash") | .hooks[0].command' "$settings")" >/dev/null 2>&1
+  expect_code 2 $? "a crewmate's Bash PreToolUse hook must refuse a machine-wide pattern kill"
 
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"

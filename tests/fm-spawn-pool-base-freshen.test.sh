@@ -753,6 +753,61 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# A slot Treehouse hands out while another task record still names it is
+# refused before the claim: two records on one copy would refuse each other's
+# teardown, and either one's return would reset the other's work.
+test_pool_slot_named_by_another_record_is_refused() {
+  local rec id out status before
+
+  id='pool-slot-shared-r1'
+  rec=$(make_case slot-shared "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  printf 'task=stale-owner-r1\nhome=%s\n' "$HOME_DIR" > "$SLOT_CLAIM"
+  printf 'worktree=%s\n' "$POOL_DIR" > "$HOME_DIR/state/stale-owner-r1.meta"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot another task record still names"
+  assert_contains "$out" "task stale-owner-r1's record still names it as its worktree" \
+    "spawn did not name the record that still holds the slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for a slot another record names"
+  grep -Fxq -- "task=stale-owner-r1" "$SLOT_CLAIM" \
+    || fail "the refused spawn rewrote the slot claim: $(cat "$SLOT_CLAIM")"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot's HEAD after refusing it"
+
+  # A registered local home that cannot be read only narrows the scan: the
+  # record in the readable home still refuses the slot, with a warning naming
+  # the skipped entry.
+  # The refusal keeps its window for inspection, so each retry is a new task.
+  printf -- '- gone - fixture (home: %s; scope: fixture; projects: sample; added 2026-11-27)\n' \
+    "$HOME_DIR/missing-secondmate" > "$HOME_DIR/data/secondmates.md"
+  id='pool-slot-shared-r2'
+  mkdir -p "$HOME_DIR/data/$id"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unreadable registered home let spawn skip a readable home's record"
+  assert_contains "$out" "task stale-owner-r1's record still names it as its worktree" \
+    "spawn did not name the readable record that still holds the slot"
+  assert_contains "$out" "registered local Firstmate home is unavailable: $HOME_DIR/missing-secondmate" \
+    "spawn did not warn about the unreadable registered home"
+
+  rm -f "$HOME_DIR/state/stale-owner-r1.meta"
+  id='pool-slot-shared-r3'
+  mkdir -p "$HOME_DIR/data/$id"
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should launch once no readable record names the slot, despite an unreadable home"$'\n'"$out"
+  assert_contains "$out" "warning: checked Treehouse pool slot" \
+    "spawn did not warn that it skipped an unreadable home"
+  grep -Fxq -- "task=$id" "$SLOT_CLAIM" \
+    || fail "the slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
+  pass "a Treehouse slot another task record still names is refused until that record is gone, and an unreadable home only narrows the scan"
+}
+
 # A stateful terminal and pool stand-in for the refused-launch sequence. Each
 # window is a file recording its stable id and the path its shell sits in; a
 # `treehouse get` typed into a window moves it into the lowest slot no live
@@ -1380,6 +1435,7 @@ test_opt_in_still_refuses_an_unclean_slot_first() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_pool_slot_named_by_another_record_is_refused
 test_refused_launch_leaves_the_pool_for_a_retry_and_a_second_task
 test_refused_launch_spares_per_id_paths_under_a_contended_spawn_lock
 test_non_polytoken_refused_launch_keeps_its_window
