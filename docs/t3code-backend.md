@@ -78,7 +78,15 @@ Every selected option is checked against the model's catalog descriptors.
 
 ### Capability gate
 
-Every call first runs `tools/list` and refuses unless T3 offers every tool in `REQUIRED_TOOLS` in `bin/fm-t3-mcp.mjs` (the thread, project, configuration, pending-request, and catalog tools) and `t3_environment_read`.
+Every call first runs `tools/list` and refuses unless T3 offers every tool in `REQUIRED_TOOLS` in `bin/fm-t3-mcp.mjs` (the thread, project, and catalog tools), `t3_environment_read`, and one complete family for each `TOOL_FAMILIES` capability.
+T3 stable 0.1.3 merged two tool families, and the gate accepts either generation based on the listed tools, without comparing server versions.
+When T3 lists both, pending questions use the merged `t3_pending_request`, but the binding read keeps `t3_thread_configuration`, because earlier T3 also lists `t3_thread_configure` as a write that requires `modelSelection`:
+
+| Capability | Current tool family | Earlier tool family |
+|---|---|---|
+| Read a thread's binding | `t3_thread_configure` with only `threadId` (a read; the helper never sends `modelSelection`) | `t3_thread_configuration` |
+| Pending questions | `t3_pending_request` with `action` `list`, `read`, or `respond` | `t3_pending_request_list`, `t3_pending_request_read`, `t3_pending_request_respond` |
+
 It then refuses unless `t3_environment_read` reports the environment id recorded at sign-in, so a different T3 server behind the same address is never driven with this credential.
 A refusal names the missing tool or both environment ids, and spawn, control, and teardown stop before their first mutation.
 This gate replaces the HTTP dispatch probe and version floor of the pre-V2 transport, which T3 0.0.46 removed.
@@ -121,7 +129,7 @@ A `claude` task checks the leased worktree and refuses a tracked, existing, or s
 ## Current lifecycle and safety
 
 Spawn matches the project (the home, for a secondmate) by real path against T3's live projects, creating one titled `fm-<directory name>` with `t3_project_create` when absent, and leases the worktree for a worker.
-It then launches an idle thread with `t3_thread_launch` (the workspace strategy and branch, `full-access` runtime mode, the model selection) and reads the thread and its `t3_thread_configuration` back; a thread T3 bound to another workspace, runtime mode, instance, model, or option value is archived and the spawn refuses.
+It then launches an idle thread with `t3_thread_launch` (the workspace strategy and branch, `full-access` runtime mode, the model selection) and reads the thread and its configuration back through the [capability gate](#capability-gate)'s configuration tool; a thread T3 bound to another workspace, runtime mode, instance, model, or option value is archived and the spawn refuses.
 It installs the harness hooks, records metadata, installs the [per-directory harness environment](#per-directory-harness-environment), and sends the encoded brief (the charter, for a secondmate) as the thread's first message with `t3_thread_send`.
 Exact call payloads are owned by `bin/fm-t3-mcp.mjs` and `bin/backends/t3code.sh`.
 
@@ -211,7 +219,7 @@ The poll loop, its wedge timer, and the `FM_BUSY_TURN_MAX_SECS` bound on a runni
 Secondmate threads stay off the splice, as on Herdr.
 In a home that also records Herdr or Rex workers, that backend keeps the push wait and the T3 workers stay on the poll loop, so adding a T3 task never slows Herdr or Rex escalation.
 
-Read and answer a worker's pending questions with [`bin/fm-t3-answer.sh`](../bin/fm-t3-answer.sh), which uses T3's `t3_pending_request_*` tools.
+Read and answer a worker's pending questions with [`bin/fm-t3-answer.sh`](../bin/fm-t3-answer.sh), which uses T3's pending-request tools (see the [capability gate](#capability-gate) for the two generations).
 Those tools list and answer questions only; a permission approval is visible through `t3_thread_read`'s activity view as an `approval_request` item, which is how the wake identifies it, but no `/mcp` tool answers it, so it is surfaced as a count and answered only in T3 Code itself.
 
 <a id="away-mode"></a>

@@ -18,7 +18,15 @@
 //   - archive is distinct from run end: the active run ends asynchronously;
 //   - a send is committed before its reply, which dropReplyTools can lose;
 //   - pendingRequestCount counts every pending runtime request, while the
-//     t3_pending_request_* tools see only user-input questions.
+//     pending-request tools see only user-input questions;
+//   - T3 0.1.3 merged t3_thread_configuration into t3_thread_configure (a
+//     read when called without modelSelection; earlier T3 also lists
+//     t3_thread_configure but refuses it without modelSelection) and
+//     t3_pending_request_list, _read, and _respond into t3_pending_request
+//     {action}. The fake serves both generations; tools/list offers the
+//     earlier one by default and CURRENT_TOOLS when the world sets toolset
+//     "current", and a tools/call for a tool tools/list does not offer is
+//     refused, as T3 refuses it.
 //
 // Usage: t3-fake-server.mjs --case-file <file> --port-file <file> [--parent-pid <pid>]
 // <case-file> holds the path of the current case directory. Every request
@@ -26,7 +34,8 @@
 // one JSON line to <case-dir>/requests.jsonl, so a test can switch cases and
 // edit the world between calls. World keys (all optional):
 //   tokens (accepted bearers; sign-in appends), environmentId, serverVersion,
-//   tools (array of names; default all), revoked (every /mcp call is 401),
+//   tools (array of names; default all), toolset ("current": the T3 0.1.3
+//   tool names instead of the earlier default), revoked (every /mcp call is 401),
 //   sse (SSE replies), expiresIn (seconds), bindWorktree, bindInstance,
 //   bindRuntimeMode, bindModel, bindOptions (override what a launch binds),
 //   archiveKeepsRun (archive never ends the run), interruptStuck or
@@ -61,10 +70,13 @@ for (let i = 2; i < process.argv.length; i += 2) args[process.argv[i].slice(2)] 
 
 const ALL_TOOLS = [
   "t3_thread_launch", "t3_thread_send", "t3_thread_read", "t3_thread_wait", "t3_thread_interrupt",
-  "t3_thread_organize", "t3_thread_list", "t3_thread_configuration", "t3_project_list", "t3_project_create",
+  "t3_thread_organize", "t3_thread_list", "t3_thread_configuration", "t3_thread_configure", "t3_project_list", "t3_project_create",
   "t3_pending_request_list", "t3_pending_request_read", "t3_pending_request_respond",
   "orchestrator_capabilities", "t3_environment_read",
 ];
+const CURRENT_TOOLS = ALL_TOOLS.filter((n) => n !== "t3_thread_configuration" && !n.startsWith("t3_pending_request_"))
+  .concat(["t3_pending_request"]);
+const offeredTools = (w) => w.tools ?? (w.toolset === "current" ? CURRENT_TOOLS : ALL_TOOLS);
 const ACTIVE = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted", "rolled_back"]);
 const select = (id, values) => ({ id, label: id, type: "select", options: values.map((v) => ({ id: v, label: v })) });
@@ -260,6 +272,12 @@ async function callTool(w, name, a) {
       const nextCursor = cursor + page.length < list.length ? cursor + page.length : null;
       return [ok({ projectId: a.projectId, currentThreadId: null, threads: page.map(listItem), nextCursor, total: list.length }), false];
     }
+    case "t3_thread_configure":
+      if (a.modelSelection === undefined && offeredTools(w).includes("t3_thread_configuration")) {
+        return [err("invalid_params", "Invalid parameters for tool 't3_thread_configure': Missing key at [\"modelSelection\"]"), false];
+      }
+      if (a.modelSelection !== undefined) return [err("unsupported", "the fake serves only the configuration read"), false];
+    // falls through: from T3 0.1.3, without modelSelection it is the read
     case "t3_thread_configuration": {
       if (!t) return [notFound(a.threadId), false];
       const modelSelection = t.modelSelection ?? { instanceId: t.providerInstanceId, model: t.model };
@@ -296,6 +314,9 @@ async function callTool(w, name, a) {
       }
       return [ok({ threadId: t.threadId, action: a.action }), true];
     }
+    case "t3_pending_request":
+      if (!["list", "read", "respond"].includes(a.action)) return [err("invalid_action", `unknown action ${a.action}`), false];
+      return callTool(w, `t3_pending_request_${a.action}`, a);
     case "t3_pending_request_list": {
       if (!t) return [notFound(a.threadId), false];
       return [ok({ requestIds: pendingRequests(t).filter((r) => r.kind === "user_input").map((r) => r.id) }), false];
@@ -363,7 +384,9 @@ async function mcp(req, res) {
     res.writeHead(202);
     return res.end();
   } else if (msg.method === "tools/list") {
-    result = { tools: (w.tools ?? ALL_TOOLS).map((name) => ({ name, inputSchema: { type: "object" } })) };
+    result = { tools: offeredTools(w).map((name) => ({ name, inputSchema: { type: "object" } })) };
+  } else if (msg.method === "tools/call" && !offeredTools(w).includes(msg.params.name)) {
+    result = err("unknown_tool", `Tool ${msg.params.name} not found`);
   } else if (msg.method === "tools/call") {
     let changed = settle(w);
     let mutated;
