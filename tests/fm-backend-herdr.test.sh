@@ -1603,6 +1603,89 @@ test_server_ensure_reports_a_replacement_that_never_ends() {
   pass "fm_backend_herdr_server_ensure: a replacement that never ends fails naming its marker instead of starting or using a server"
 }
 
+# run_owned_op: run one adapter function against make_herdr_owned_server_fakebin
+# rooted at <dir>, printing its stderr and stdout, then rc=<n> on its own line.
+# The fake's `pane` and `agent` calls answer empty, so only the server-start
+# decision is under test.
+run_owned_op() {  # <dir> <function> [args...]
+  local dir=$1 fb
+  shift
+  fb=$(make_herdr_owned_server_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_SESSION_DIR="$dir/session" FM_HERDR_SERVER_MARKER="$dir/running" \
+    FM_HERDR_STATUS_COUNT="$dir/status-count" FM_HERDR_SLEEP_COUNT="$dir/sleep-count" FM_HERDR_START_LOG="$dir/starts" \
+    bash -c '. "$0/bin/backends/herdr.sh"; out=$("$@"); rc=$?; printf "%s\nrc=%s\n" "$out" "$rc"' "$ROOT" "$@" 2>&1
+}
+
+test_passive_reads_never_start_a_stopped_server() {
+  local dir out op
+  for op in capture busy_state; do
+    dir="$TMP_ROOT/passive-read-stopped-$op"; mkdir -p "$dir/session"
+    case "$op" in
+      capture) out=$(run_owned_op "$dir" fm_backend_herdr_capture fmtest:w1:p2 40) ;;
+      busy_state) out=$(run_owned_op "$dir" fm_backend_herdr_busy_state fmtest:w1:p2) ;;
+    esac
+    [ ! -e "$dir/starts" ] || fail "$op started a stopped session server; a read must leave a session the operator stopped stopped: $out"
+    [ ! -e "$dir/sleep-count" ] || fail "$op waited on a stopped session server instead of failing at once: $out"
+    [ "$(cat "$dir/status-count")" = 1 ] || fail "$op should read status exactly once, got $(cat "$dir/status-count")"
+    case "$op" in
+      capture) assert_contains "$out" "rc=1" "capture of a stopped session should fail, got: $out" ;;
+      busy_state) [ "$out" = $'unknown\nrc=0' ] || fail "busy_state of a stopped session should read unknown, got: $out" ;;
+    esac
+  done
+  pass "fm_backend_herdr_capture and _busy_state: a read of a stopped session fails at once and never starts its server"
+}
+
+test_passive_reads_never_wait_for_an_externally_managed_server() {
+  local dir out
+  dir="$TMP_ROOT/passive-read-owned-down"; mkdir -p "$dir/session"
+  printf 'systemd user unit herdr-fmtest.service\n' > "$dir/session/firstmate-server-owner"
+  out=$(run_owned_op "$dir" fm_backend_herdr_capture fmtest:w1:p2 40)
+  assert_contains "$out" "rc=1" "capture of a stopped externally managed session should fail, got: $out"
+  [ ! -e "$dir/starts" ] || fail "capture started a server that an external owner manages"
+  [ ! -e "$dir/sleep-count" ] || fail "capture waited $(cat "$dir/sleep-count") times on a stopped externally managed server; a read must fail at once"
+  pass "fm_backend_herdr_capture: a stopped externally managed server fails a read at once, with no start and no bounded wait"
+}
+
+test_passive_reads_are_held_off_a_server_being_replaced() {
+  local dir out op
+  for op in capture busy_state visible_capture; do
+    dir="$TMP_ROOT/passive-read-replacing-$op"; mkdir -p "$dir/session"
+    : > "$dir/session/firstmate-server-replacing"
+    : > "$dir/running"
+    case "$op" in
+      capture) out=$(run_owned_op "$dir" fm_backend_herdr_capture fmtest:w1:p2 40) ;;
+      busy_state) out=$(run_owned_op "$dir" fm_backend_herdr_busy_state fmtest:w1:p2) ;;
+      visible_capture) out=$(run_owned_op "$dir" fm_backend_herdr_visible_capture fmtest:w1:p2) ;;
+    esac
+    [ ! -e "$dir/starts" ] || fail "$op started a server during a replacement"
+    [ ! -e "$dir/sleep-count" ] || fail "$op waited on a replacement instead of failing at once"
+    case "$op" in
+      busy_state) [ "$out" = $'unknown\nrc=0' ] || fail "busy_state during a replacement should read unknown, got: $out" ;;
+      *) assert_contains "$out" "rc=1" "$op during a replacement should fail even though the server reports running, got: $out" ;;
+    esac
+  done
+  pass "fm_backend_herdr reads: a replacement marker holds reads off a running server and fails them at once"
+}
+
+test_passive_reads_use_a_running_server() {
+  local dir out
+  dir="$TMP_ROOT/passive-read-running"; mkdir -p "$dir/session"
+  : > "$dir/running"
+  out=$(run_owned_op "$dir" fm_backend_herdr_capture fmtest:w1:p2 40)
+  assert_contains "$out" "rc=0" "capture of a running session should read its pane, got: $out"
+  [ ! -e "$dir/starts" ] || fail "capture started a server that was already running"
+  pass "fm_backend_herdr_capture: a running session server is read at once"
+}
+
+test_worker_sends_still_start_a_stopped_server() {
+  local dir out
+  dir="$TMP_ROOT/send-key-stopped"; mkdir -p "$dir/session"
+  out=$(run_owned_op "$dir" fm_backend_herdr_send_key fmtest:w1:p2 Enter)
+  assert_contains "$out" "rc=0" "send_key should reach a worker whose session was stopped, got: $out"
+  [ "$(cat "$dir/starts" 2>/dev/null)" = started ] || fail "send_key did not start the stopped session server it must reach: $out"
+  pass "fm_backend_herdr_send_key: an operation that must reach the worker still starts a stopped session server"
+}
+
 test_container_ensure_reuses_existing_workspace() {
   local dir log resp fb out
   dir="$TMP_ROOT/container-reuse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4196,10 +4279,10 @@ test_capture_preserves_pane_read_failure() {
   status=$?
   [ "$status" -ne 0 ] || fail "capture should fail when pane read fails, got output '$out'"
   assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''status'$'\x1f''--json' \
-    "capture did not ensure the herdr server before reading the pane"
+    "capture did not check the herdr server before reading the pane"
   assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''read'$'\x1f''w1:p2' \
     "capture did not try to read the requested pane"
-  pass "fm_backend_herdr_capture: ensures the session and preserves pane read failure"
+  pass "fm_backend_herdr_capture: checks the session is running and preserves pane read failure"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -6592,6 +6675,11 @@ test_server_ensure_waits_out_a_server_replacement
 test_server_ensure_holds_callers_off_a_running_server_during_a_replacement
 test_server_ensure_resumes_ownership_after_a_replacement_clears
 test_server_ensure_reports_a_replacement_that_never_ends
+test_passive_reads_never_start_a_stopped_server
+test_passive_reads_never_wait_for_an_externally_managed_server
+test_passive_reads_are_held_off_a_server_being_replaced
+test_passive_reads_use_a_running_server
+test_worker_sends_still_start_a_stopped_server
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

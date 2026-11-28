@@ -2195,6 +2195,25 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 `tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
+### Reads of a stopped session
+
+Measured 2026-11-20 on Linux x86_64 against Herdr 0.9.1 in an isolated `fm-lab-` session: a task record names a real pane, the session is stopped through the guarded lab helper, and each read runs against the real binary.
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-herdr-passive-read-e2e.test.sh
+```
+
+```text
+ok - setup: a task record names a pane in a named Herdr session that is now stopped
+ok - real herdr 0.9.1: fm-crew-state.sh reports the stopped session's task as gone and leaves the session stopped
+ok - real herdr 0.9.1: fm-peek.sh fails on the stopped session and leaves it stopped
+ok - real herdr 0.9.1: the watcher's capture and the native busy read leave the stopped session stopped
+ok - real herdr 0.9.1: a key send still starts the stopped session to reach its worker
+```
+
+Each adapter read stops at its `status --json` check, which reports the stopped server without starting it; the current-state read then classifies the endpoint through the recovery-grade probe described in "Endpoint recovery classification" above.
+`tests/fm-backend-herdr.test.sh` pins the same rule portably, including the externally managed owner and replacement markers.
+
 ### Stale agent registration
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) and Pi 0.85.1 in an isolated `fm-lab-` session (upstream issue #4115, duplicates #3639, #3487, #2908, #3545).
