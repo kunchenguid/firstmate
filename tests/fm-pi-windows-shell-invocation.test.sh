@@ -12,6 +12,14 @@ if [ "$(node -p 'process.platform')" != win32 ]; then
   exit 0
 fi
 
+# The extension is TypeScript loaded straight by Node, which strips types by
+# default only from Node 22.18; an older Node cannot import it at all.
+printf 'const probe: number = 1;\nvoid probe;\n' > "$TMP_ROOT/type-strip-probe.ts"
+if ! node "$TMP_ROOT/type-strip-probe.ts" >/dev/null 2>&1; then
+  echo "skip: Node $(node --version) cannot load .ts modules; type stripping needs Node >= 22.18"
+  exit 0
+fi
+
 project="$TMP_ROOT/project"
 mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/"

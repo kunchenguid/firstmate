@@ -184,6 +184,11 @@ test_untagged_values_reach_the_numeric_helpers_unchanged() {
   sh -c 'exit 0' &
   dead=$!
   wait "$dead" 2>/dev/null || true
+  # The live process's identity comes from the per-case /proc tree, as it does
+  # on Git Bash, whose ps has no -o fallback; the dead pid has no entry there.
+  mkdir -p "$home/proc/$live"
+  printf '%s (sleep) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 %s 0 0\n' "$live" "$live" > "$home/proc/$live/stat"
+  printf '%s\0' sleep 300 > "$home/proc/$live/cmdline"
   out=$(lib_eval posix "$home" '
     _fm_wake_require_session_lock
     for v in "$1" "$2" "" abc 12x win:7204; do
