@@ -163,6 +163,13 @@ pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmat
 # exactly this call - AGENTS.md task herdr-sm-spaces-k4, requirement 3.)
 
 SM_OUT="$TMP_ROOT/sm.out"; SM_ERR="$TMP_ROOT/sm.err"
+# A --secondmate spawn refuses unless the launching home's own registry binds the
+# id to that home, exactly as bin/fm-home-seed.sh writes it before a real launch.
+# The home is recorded physically resolved because fm-spawn compares it against
+# the resolved path.
+mkdir -p "$PRIMARY_HOME/data"
+printf -- '- e2esm1 - workspace fixture (home: %s; scope: workspace fixture; projects: ; added 2026-08-05)\n' \
+  "$(cd "$SM_HOME" && pwd -P)" >> "$PRIMARY_HOME/data/secondmates.md"
 FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
   "$ROOT/bin/fm-spawn.sh" e2esm1 "$SM_HOME" "sh -c 'echo secondmate-launch-ok'" --secondmate --backend herdr \
   >"$SM_OUT" 2>"$SM_ERR"

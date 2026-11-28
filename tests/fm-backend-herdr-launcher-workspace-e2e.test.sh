@@ -416,6 +416,13 @@ pass "real herdr E2E: a secondmate launching its own worker gets the same exact-
 
 # --- 7. a --secondmate launch is NOT collapsed into the launcher's workspace -
 
+# A --secondmate spawn refuses unless the launching home's own registry binds the
+# id to that home, exactly as bin/fm-home-seed.sh writes it before a real launch.
+# The home is recorded physically resolved because fm-spawn compares it against
+# the resolved path.
+mkdir -p "$PRIMARY_HOME/data"
+printf -- '- %s - launcher fixture (home: %s; scope: launcher fixture; projects: ; added 2026-08-05)\n' \
+  "$SM2_ID" "$(cd "$SM2_HOME" && pwd -P)" >> "$PRIMARY_HOME/data/secondmates.md"
 spawn_from_launcher "$LAUNCH_DUP_PANE" "$PRIMARY_HOME" "$SM2_ID" "$SM2_HOME" --secondmate
 [ "$SPAWN_RC" -eq 0 ] || fail "the primary's --secondmate launch failed"$'\n'"$(cat "$SPAWN_ERR")"
 SM2_META="$PRIMARY_HOME/state/$SM2_ID.meta"

@@ -108,6 +108,13 @@ printf '#!/usr/bin/env bash\nexec %q -e %q "$@"\n' "$REAL_PI" "$CAPTURE_EXTENSIO
 chmod +x "$FAKEBIN/pi"
 
 "$LAB_HELPER" provision "$SESSION"
+# A --secondmate spawn refuses unless the launching home's own registry binds the
+# id to that home, exactly as bin/fm-home-seed.sh writes it before a real launch.
+# The home is recorded physically resolved because fm-spawn compares it against
+# the resolved path.
+mkdir -p "$SENDER_HOME/data"
+printf -- '- %s - marker fixture (home: %s; scope: marker fixture; projects: ; added 2026-08-05)\n' \
+  "$ID" "$(cd "$SECOND_HOME" && pwd -P)" >> "$SENDER_HOME/data/secondmates.md"
 PATH="$FAKEBIN:$ORIGINAL_PATH" FM_GATE_REFUSE_BYPASS=1 FM_HOME="$SENDER_HOME" HERDR_SESSION="$SESSION" \
   "$ROOT/bin/fm-spawn.sh" "$ID" "$SECOND_HOME" --secondmate --harness pi --backend herdr >/dev/null
 

@@ -155,6 +155,7 @@ spawn_secondmate_claude() {
   mkdir -p "$case_dir/claude-config"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$primary" claude
+  fm_register_secondmate "$primary/data/secondmates.md" "$id" "$home"
   FM_TEST_CLAUDE_CONFIG_DIR="$case_dir/claude-config" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     fm_test_run_spawn "$primary" "$home" "$fakebin" "$id" "$home" claude --secondmate
 }

@@ -584,6 +584,10 @@ test_spawn_refuses_orca_secondmate_before_home_mutation() {
   printf 'firstmate\n' > "$subhome/AGENTS.md"
   printf 'claude\n' > "$config/crew-harness"
   touch "$state/.last-watcher-beat"
+  # The refusal under test is orca's, so the spawn has to get past the earlier
+  # registry-binding precondition a --secondmate spawn requires of its launching
+  # home - the same binding bin/fm-home-seed.sh writes before a real launch.
+  fm_register_secondmate "$data/secondmates.md" "$id" "$subhome"
   set +e
   out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
