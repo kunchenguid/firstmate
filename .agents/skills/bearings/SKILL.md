@@ -208,6 +208,7 @@ That explicit task link, rather than repository membership or a text similarity 
 Filing is local record-keeping; the work itself still publishes only under the destination's authority, so a task targeting firstmate's own repository remains gated by this home's role (`firstmate-self-repo`) and a user/operator home carries it as a local draft instead.
 After a signal's disposition is durable as filed work, a captain hold, or a recorded no-action decision in the task, acknowledge that exact event token through `ack`.
 Do not acknowledge merely because the signal was read.
+When [contribution acknowledgement receipts](../../../docs/configuration.md#contribution-acknowledgement-receipts-configcontribution-ack-receipts) are enabled, follow the command's header for the required receipt forms.
 For secondmate-owned contributions, handle and acknowledge in that home and use the existing parent channel for any captain call.
 
 ## Supervision discipline
