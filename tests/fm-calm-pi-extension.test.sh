@@ -4749,6 +4749,33 @@ check(
   !ui.widgets.has(boatKey) && liveTimers === 0,
   `the later settle reinstated the spaceship after the standalone boat settled: ${liveTimers} timers`,
 );
+// Toggling Calm off and back on while the standalone boat owns the slot reinstates the
+// spaceship mid-session: the narrowed dual-install claim is "next session start or when
+// Calm is turned back on", not "next session start only".
+standaloneDisposed = false;
+ui.setWidget(boatKey, () => standaloneWidget);
+reset();
+await calmCommand.handler("", ctx);
+check(
+  ui.widgetOps.length === 0 && !standaloneDisposed,
+  `toggling Calm off while the standalone boat owned the slot touched the shared widget: ${JSON.stringify(ui.widgetOps)}`,
+);
+reset();
+await calmCommand.handler("", ctx);
+check(
+  ui.widgetOps.length === 1 && ui.widgetOps[0].key === boatKey && ui.widgetOps[0].action === "set",
+  `toggling Calm on while the standalone boat owned the slot did not re-apply the spaceship banner: ${JSON.stringify(ui.widgetOps)}`,
+);
+check(standaloneDisposed, "toggling Calm on did not dispose the standalone boat");
+check(
+  ui.widgets.size === 1 && strip(widgetOf(boatKey).render(44)[0]).includes(SAUCER_IDLE),
+  "toggling Calm on did not install the spaceship banner in the shared slot",
+);
+check(liveTimers === 1, `toggling Calm on while the standalone boat owned the slot left ${liveTimers} timers`);
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === false,
+  "toggling Calm on while the standalone boat owned the slot did not hide Pi's stock working row",
+);
 // A fresh session reinstates the selected presentation under that one slot.
 reset();
 await fire("session_start", { reason: "new" });

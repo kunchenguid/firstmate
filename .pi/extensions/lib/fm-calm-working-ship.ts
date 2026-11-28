@@ -48,7 +48,7 @@ const RESET = "\u001b[39m";
 // extension, which installs its boat under the same "calm-working-ship" key, and with
 // the selectable spaceship presentation under that one key. Pi replaces widgets under
 // one key, so a session that loads both Calms renders one working animation and a
-// session loading either alone is unchanged. Rename the slot in both implementations
+// session loading either alone is unchanged. Rename the slot in every implementation
 // together, or dual-install sessions duplicate the working widget.
 export const CALM_WORKING_SHIP_WIDGET_KEY = "calm-working-ship";
 
