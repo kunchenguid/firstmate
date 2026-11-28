@@ -2368,6 +2368,33 @@ test_degraded_wake_survives_an_unsaved_marker() {
     || fail "a degraded transition whose marker could not be saved was not queued as a wake"
   pass "a degraded wake is queued before its dedupe marker, so a failed marker save never silences it"
 }
+
+# A degraded wake must not end the check sweep: a check sorted after the
+# degraded poll still runs, and the sweep wakes once with the degraded reason.
+test_degraded_wake_does_not_end_the_sweep() {
+  local dir state url marker
+  dir=$(make_case degraded-sweep-continues)
+  state="$dir/home/state"
+  marker="$dir/later-check-ran"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  url=https://gitlab.example/group/subgroup/project/-/merge_requests/7
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gitlab "$url" gitlab.example group/subgroup/project 7 "$POLL" \
+    || fail "could not prepare the degraded sweep poll"
+  fm_pr_poll_publish_prepared || fail "could not publish the degraded sweep poll"
+  printf '#!/usr/bin/env bash\n: > %q\n' "$marker" > "$state/zz-later.check.sh"
+  chmod 0700 "$state/zz-later.check.sh"
+  FM_HOME="$dir/home" "$REGISTER" zz-later >/dev/null || fail "could not register the later custom check"
+  rm -f "$state/.last-check"
+  FM_TEST_GLAB_STATE=opened FM_TEST_GLAB_PIPELINE=failed \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" \
+    || fail "bounded watcher did not complete the degraded sweep: $(cat "$dir/watch.err")"
+  [ -e "$marker" ] || fail "the check after a degraded poll did not run in the same sweep"
+  [ "$(grep -c '' "$dir/watch.out")" -eq 1 ] || fail "the degraded sweep printed more than one wake line: $(cat "$dir/watch.out")"
+  grep -q 'degraded after ready: degraded pipeline=941' "$dir/watch.out" \
+    || fail "the sweep wake did not carry the degraded reason: $(cat "$dir/watch.out")"
+  pass "a degraded wake does not end the sweep; later checks run and one wake follows"
+}
 test_arming_baselines_an_already_degraded_change() {
   local dir state url url1 fail_env value
   dir=$(make_case degraded-baseline)
@@ -5781,6 +5808,7 @@ test_degraded_watch_flag_in_an_overridden_home
 test_github_degraded_poll
 test_degraded_poll_wakes_once_per_transition
 test_degraded_wake_survives_an_unsaved_marker
+test_degraded_wake_does_not_end_the_sweep
 test_rearm_failure_after_partial_publish_restores_watch_identities
 test_term_during_pr_baseline_move_restores_registration
 test_atomic_interruption_leaves_no_partial_artifact

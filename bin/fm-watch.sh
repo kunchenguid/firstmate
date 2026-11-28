@@ -263,8 +263,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
 # Single owner of durable merge-outcome publication, shared with
 # bin/fm-pr-merge.sh so self and poll origins use the same role-routed outcome.
-# The watcher still owns immediate delivery of its actionable poll result and
-# poll retirement.
+# The watcher owns poll retirement and delivers the actionable poll result
+# with the rest of its check sweep.
 # This library is a canonical lint root in its own right, and it reaches the
 # wake queue, PR identity, and secondmate parent libraries. Keep it an analysis
 # boundary here for the same reason as the transition and inbox owners above and
@@ -3764,6 +3764,11 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
+# A sweep's checks are bounded one by one, not in total, so it beats between
+# them; a replaced watcher must not vouch for its successor.
+sweep_beat() {
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" != "$WATCHER_PID" ] || touch "$BEAT"
+}
 while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
     # The reclaim helper releases its steal and marker locks on publish
@@ -4232,7 +4237,11 @@ while :; do
   # keeps producing signals - the slow poll (e.g. merge detection) would then
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
+  # One sweep runs every due check and the park-on-review tick, queues each
+  # actionable result, then wakes once with the first as its reason: a result
+  # must not end the sweep, or every step after it waits for a quiet interval.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    sweep_wake=
     rejected_checks=
     contribution_check_output=
     # Record each PR a task reported but nobody recorded, so its merge poll
@@ -4248,6 +4257,7 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       watcher_checkpoint
       [ -e "$c" ] || continue
+      sweep_beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -4364,7 +4374,8 @@ EOF
             triage_log "absorbed duplicate merged PR poll result for $id"
             continue
           fi
-          wake "$reason"
+          [ -n "$sweep_wake" ] || sweep_wake=$reason
+          continue
         elif [ "$is_pr_poll" -eq 1 ] \
           && { [ "$out" = ontrain ] || [ "${out%% *}" = degraded ]; } \
           && [ "$PR_DEGRADED_WATCH_ENABLED" != 1 ]; then
@@ -4431,37 +4442,36 @@ EOF
           fi
           pr_poll_control_release || exit 1
           touch "$STATE/.last-check"
-          wake "$reason"
+          [ -n "$sweep_wake" ] || sweep_wake=$reason
+          continue
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
-        wake "$reason"
+        [ -n "$sweep_wake" ] || sweep_wake=$reason
       fi
       pr_poll_control_release || exit 1
     done
     if [ -n "$rejected_checks" ]; then
       reason="check: rejected unauthenticated state checks:$rejected_checks"
       fm_wake_append check unauthenticated-state-checks "$reason" || exit 1
-      touch "$STATE/.last-check"
-      wake "$reason"
+      [ -n "$sweep_wake" ] || sweep_wake=$reason
     fi
     # Parked-on-review lanes, close detection, opt-in automatic parking, and
     # the outcomes of detached park, relaunch, and cleanup actions
     # (bin/fm-park.sh owns all of them, bounds the whole tick, and records its
     # wake before printing it, so the watcher only rings).
+    sweep_beat
     park_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-park.sh" tick 2>/dev/null) || true
     if [ -n "$park_out" ]; then
       reason="check: park-on-review: $(printf '%s' "$park_out" | paste -sd ';' - | sed 's/;/; /g')"
-      touch "$STATE/.last-check"
-      wake "$reason"
+      [ -n "$sweep_wake" ] || sweep_wake=$reason
     fi
     touch "$STATE/.last-check"
-    [ -z "$pr_register_reason" ] || wake "$pr_register_reason"
-    if [ -n "$contribution_check_output" ]; then
-      wake "$contribution_check_output"
-    fi
+    [ -n "$sweep_wake" ] || sweep_wake=$pr_register_reason
+    [ -n "$sweep_wake" ] || sweep_wake=$contribution_check_output
+    [ -z "$sweep_wake" ] || wake "$sweep_wake"
   fi
 
   # On the first changed signal, linger one grace period and re-scan before
