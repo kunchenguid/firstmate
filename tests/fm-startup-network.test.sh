@@ -51,9 +51,9 @@ new_world() {
 #!/usr/bin/env bash
 # Scriptable stand-in: records how it was invoked, then behaves as the test asks.
 set -u
-printf 'network=%s detect_only=%s\n' \
+printf 'network=%s detect_only=%s deadline=%s\n' \
   "${FM_BOOTSTRAP_NETWORK:-all}" "${FM_BOOTSTRAP_DETECT_ONLY:-0}" \
-  >> "${FM_FAKE_BOOTSTRAP_LOG:?}"
+  "${FM_BOOTSTRAP_NETWORK_DEADLINE:-}" >> "${FM_FAKE_BOOTSTRAP_LOG:?}"
 # The real sweeps record their elapsed times through fm-timing-lib.sh, which
 # reaches them as an exported FM_TIMING_LOG. Recording the same way here proves
 # the stage actually hands that channel to its child and publishes what the child
@@ -442,6 +442,26 @@ EOF
   assert_grep 'network=only detect_only=0' "$log" \
     "the worker refused sweeps for the very session that still holds the lock"
   pass "fm-startup-network: manual callers cannot forge mutation authority"
+}
+
+# The mutating sweeps learn when the stage bound will kill them, so a
+# dead-secondmate relaunch that cannot finish in time is skipped, not cut off.
+test_the_mutating_sweeps_receive_the_stage_deadline() {
+  local rec home root log before after deadline
+  rec=$(new_world stage-deadline)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  before=$(date +%s)
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_STARTUP_NETWORK_TIMEOUT=45 \
+    run_stage "$home" "$root" run --locked 1 --lock-pid $$
+  after=$(date +%s)
+  deadline=$(sed -n 's/^network=only detect_only=0 deadline=//p' "$log")
+  case "$deadline" in ''|*[!0-9]*) fail "the mutating sweeps got no numeric deadline: $(cat "$log")" ;; esac
+  [ "$deadline" -ge $((before + 45)) ] && [ "$deadline" -le $((after + 45)) ] \
+    || fail "deadline $deadline is not the 45s stage bound from a run between $before and $after"
+  pass "fm-startup-network: the mutating sweeps receive the stage deadline"
 }
 
 # The unbounded per-call network work is exactly what could wedge a startup. The
@@ -868,6 +888,7 @@ test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
 test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
+test_the_mutating_sweeps_receive_the_stage_deadline
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
 test_locked_start_is_not_satisfied_by_an_inflight_probe

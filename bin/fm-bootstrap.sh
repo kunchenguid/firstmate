@@ -154,6 +154,11 @@
 #          A relaunch that the liveness sweep performs during an `only` run is
 #          always reported, because a digest composed before that run already
 #          printed the superseded endpoint record.
+#          Set FM_BOOTSTRAP_NETWORK_DEADLINE=<epoch> when an outer bound will
+#          kill this run at that time; the liveness sweep then skips, with a
+#          SECONDMATE_LIVENESS skipped line, any relaunch that could not finish
+#          before it (fm_secondmate_liveness_relaunch owns the test) and leaves
+#          that mate to the watcher. A non-numeric value is ignored.
 #          Set FM_BOOTSTRAP_LOCKED=1 alongside it when the sweeps are skipped
 #          because THIS session already ran them while holding the fleet lock,
 #          rather than because it has no lock at all. The two cases differ in
@@ -764,6 +769,10 @@ report_relaunch() {  # <id> <cause> <where>
   echo "BOOTSTRAP_INFO: secondmate $1 relaunched after $2 ($3)"
 }
 
+bootstrap_deadline() {
+  case "${FM_BOOTSTRAP_NETWORK_DEADLINE:-}" in ''|*[!0-9]*) ;; *) printf '%s' "$FM_BOOTSTRAP_NETWORK_DEADLINE" ;; esac
+}
+
 secondmate_liveness_sweep() {
   # Idempotent secondmate liveness guarantee at session start; the watcher's
   # secondmate_liveness_tick owns the same guarantee mid-session. The detailed
@@ -829,7 +838,7 @@ secondmate_liveness_one() {  # <meta> <id>
       [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
       ;;
     relaunchable)
-      if fm_secondmate_liveness_relaunch "$meta" "$id"; then
+      if fm_secondmate_liveness_relaunch "$meta" "$id" '' "$(bootstrap_deadline)"; then
         [ "$FM_SM_LIVE_RESUME" = 1 ] || secondmate_note_respawned "$id"
         report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
       elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then

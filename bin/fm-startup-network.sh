@@ -112,6 +112,8 @@
 # A lock that a live process still holds at either deadline ends the worker with
 # a failed record naming that holder and the rerun command, never a wait that
 # outlives the budget with its output discarded.
+# The deadline is handed to bootstrap so a dead-secondmate relaunch that would
+# not finish inside it is skipped and reported rather than killed midway.
 # Hitting the bound is reported as an actionable NETWORK_CHECKS: line, never as
 # silence. bin/fm-timeout-lib.sh remains the single owner of bounded execution.
 set -u
@@ -577,6 +579,7 @@ EOF
     # shellcheck disable=SC2016  # Child-shell variables expand inside the bound.
     fm_run_timed "$budget" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
+      FM_BOOTSTRAP_NETWORK_DEADLINE="$stage_deadline" \
       bash -c '
         script_dir=$1
         "$script_dir/fm-inactive-reconcile.sh" scan --startup >/dev/null 2>&1 || true
