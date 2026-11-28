@@ -57,8 +57,11 @@
 # caller owns the busy and recovery-grade endpoint checks: due actions deferred
 # by the caller's delivery guard consume a separate durable consecutive-poll budget,
 # FM_TASK_INBOX_BUSY_MAX. At that bound the same escalation path surfaces a
-# stuck-busy reason without submission. An allowed due check or acknowledgement
-# resets this budget. fm-busy-lib.sh owns the backend-specific delivery guard.
+# stuck-busy reason without submission, but only once the oldest unhandled
+# message is also at least FM_TASK_INBOX_BUSY_BOUND_SECS old, so a long
+# instruction is not reported as stuck while the worker is acting on it. An
+# allowed due check or acknowledgement resets this budget. fm-busy-lib.sh owns
+# the backend-specific delivery guard.
 # Fire-and-forget retries remain outside escalation. A positively
 # dead or missing endpoint skips delivery and the ladder and escalates directly.
 # This library owns the schedule, durable budgets, and escalation marker.
@@ -93,6 +96,8 @@
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
 #   FM_TASK_INBOX_RING_MAX     default 3; delivery attempts before escalation
 #   FM_TASK_INBOX_BUSY_MAX     default 2; consecutive busy-deferred due polls before escalation
+#   FM_TASK_INBOX_BUSY_BOUND_SECS  default 900; minimum age of the oldest unhandled message
+#                              before busy deferrals escalate (the count above is a floor)
 
 _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Both dependencies are canonical lint roots in their own right. Keep them as
@@ -107,6 +112,7 @@ FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
 FM_TASK_INBOX_BUSY_MAX_DEFAULT=2
+FM_TASK_INBOX_BUSY_BOUND_DEFAULT=900
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=5
 
 fm_task_inbox_grace_secs() {
@@ -129,6 +135,16 @@ fm_task_inbox_busy_max() {
     m=$FM_TASK_INBOX_BUSY_MAX_DEFAULT
   fi
   printf '%s' "$m"
+}
+
+fm_task_inbox_busy_bound_secs() {
+  local b=${FM_TASK_INBOX_BUSY_BOUND_SECS:-$FM_TASK_INBOX_BUSY_BOUND_DEFAULT}
+  case "$b" in ''|*[!0-9]*) b=$FM_TASK_INBOX_BUSY_BOUND_DEFAULT ;; esac
+  # Check the length before numeric comparison so oversized input cannot overflow.
+  if [ "${#b}" -gt 9 ] || [ "$b" -eq 0 ]; then
+    b=$FM_TASK_INBOX_BUSY_BOUND_DEFAULT
+  fi
+  printf '%s' "$b"
 }
 
 # Persist before returning the new count, so a fresh watcher continues the same

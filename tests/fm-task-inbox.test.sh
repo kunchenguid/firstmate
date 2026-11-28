@@ -971,6 +971,7 @@ test_watcher_successor_busy_reset_failure_surfaces() {
   dir=$(busy_case "successor-reset-failure-$mode")
   busy_steer_check "$dir"
   rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "queued successor")
+  age_path "$rec"
   mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
   block_busy_reset "$dir"
   capture=$(idle_capture "$dir")
@@ -1044,6 +1045,84 @@ test_watcher_busy_limit_validation() {
   pass "watcher: busy limit '$limit' escalates exactly once at $expected"
 }
 
+# Age one record to <secs> seconds old, the message age the busy bound measures.
+age_record_secs() {  # <path> <secs>
+  fm_touch_epoch "$(( $(date +%s) - $2 ))" "$1"
+}
+
+# A long instruction keeps a worker busy past the doorbell budget: the busy
+# count alone must not alert while the message is younger than the time bound.
+test_watcher_busy_bound_holds_a_young_message() {
+  local dir rec check wakes
+  dir=$(busy_case busy-bound-young)
+  rec="$dir/state/t1.inbox/001.msg"
+  age_record_secs "$rec" 120
+  for check in 1 2 3; do
+    busy_steer_check "$dir"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "a 120s-old message alerted at check $check, before the 900s bound"
+  done
+  [ "$(cut -f2 "$dir/state/t1.inbox/.busy-state")" = 3 ] || fail "held checks stopped counting busy deferrals"
+  age_record_secs "$rec" 901
+  busy_steer_check "$dir"
+  grep -q 'unread firstmate instruction: stuck-busy after 4 consecutive busy-deferred due doorbells' "$dir/state/.wake-queue" \
+    || fail "a message past the bound did not escalate:"$'\n'"$(cat "$dir/state/.wake-queue" 2>/dev/null)"
+  grep -Eq 'oldest unhandled message 9[0-9][0-9]s old' "$dir/state/.wake-queue" \
+    || fail "the stuck-busy alert did not report the message age:"$'\n'"$(cat "$dir/state/.wake-queue")"
+  wakes=$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')
+  busy_steer_check "$dir"
+  [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = "$wakes" ] || fail "the bounded escalation repeated"
+  [ ! -s "$dir/send.log" ] || fail "the bounded escalation typed into the pane"
+  [ -f "$rec" ] || fail "the bounded escalation lost the steer"
+  pass "watcher: busy escalation waits for the 900s message-age bound, then fires once and never types"
+}
+
+# The bound is a second condition on top of the count floor, so a custom bound
+# below the age escalates as soon as the count is met, and a bad value is the default.
+test_watcher_busy_bound_validation() {
+  local value=$1 expected=$2 dir check
+  dir=$(busy_case "busy-bound-$expected-${value:-empty}")
+  age_record_secs "$dir/state/t1.inbox/001.msg" 120
+  if [ "$expected" = default ]; then
+    for check in 1 2 3; do
+      FM_TASK_INBOX_BUSY_BOUND_SECS=$value busy_steer_check "$dir"
+      [ ! -s "$dir/state/.wake-queue" ] || fail "bound '$value' alerted a 120s-old message instead of using the 900s default"
+    done
+    age_record_secs "$dir/state/t1.inbox/001.msg" 1000
+    FM_TASK_INBOX_BUSY_BOUND_SECS=$value busy_steer_check "$dir"
+  else
+    FM_TASK_INBOX_BUSY_BOUND_SECS=$value busy_steer_check "$dir"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "bound '$value' ignored the busy count floor"
+    FM_TASK_INBOX_BUSY_BOUND_SECS=$value busy_steer_check "$dir"
+  fi
+  grep -q 'stuck-busy after' "$dir/state/.wake-queue" 2>/dev/null \
+    || fail "bound '$value' did not escalate once the count floor and the effective bound were both met"
+  [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] || fail "bound '$value' escalated more than once"
+  [ ! -s "$dir/send.log" ] || fail "bound '$value' typed into the pane"
+  pass "watcher: busy bound '$value' uses $expected"
+}
+
+# The idle path is untouched by the busy bound: a young message on an idle pane
+# is rung to the ring budget and then escalates once with the idle-pane reason.
+test_watcher_idle_pane_ignores_the_busy_bound() {
+  local dir rec check rings
+  dir=$(busy_case idle-ignores-bound)
+  rec="$dir/state/t1.inbox/001.msg"
+  age_record_secs "$rec" 120
+  for check in 1 2 3; do
+    busy_steer_check "$dir" "$(idle_capture "$dir")"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "an idle ring alerted at check $check"
+  done
+  rings=$(grep -c 'Firstmate instruction waiting' "$dir/send.log" || true)
+  [ "$rings" = 3 ] || fail "an idle pane should be rung to the budget of 3, got $rings"
+  busy_steer_check "$dir" "$(idle_capture "$dir")"
+  grep -q 'still unhandled after 3 doorbell delivery attempts with an idle pane' "$dir/state/.wake-queue" \
+    || fail "the spent idle ladder did not escalate at the ring max:"$'\n'"$(cat "$dir/state/.wake-queue" 2>/dev/null)"
+  ! grep -q 'stuck-busy' "$dir/state/.wake-queue" || fail "an idle escalation used the stuck-busy reason"
+  busy_steer_check "$dir" "$(idle_capture "$dir")"
+  [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] || fail "the idle escalation repeated"
+  pass "watcher: an idle pane is rung to the ring max and escalates once regardless of the busy bound"
+}
+
 test_watcher_retry_ignores_busy_reset_failure() {
   local dir rec check
   dir=$(busy_case retry-reset-failure)
@@ -1071,6 +1150,7 @@ test_watcher_successor_escalation_stays_quiet() {
   busy_steer_check "$dir" "$(idle_capture "$dir")"
   grep -q 'Firstmate instruction waiting' "$dir/send.log" || fail "predecessor did not ring"
   rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "queued successor")
+  age_path "$rec"
   mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
   case "$mode" in
     busy)
@@ -1407,6 +1487,13 @@ test_watcher_busy_limit_validation '' 2
 test_watcher_busy_limit_validation invalid 2
 test_watcher_busy_limit_validation 1 1
 test_watcher_busy_limit_validation 3 3
+test_watcher_busy_bound_holds_a_young_message
+test_watcher_busy_bound_validation 0 default
+test_watcher_busy_bound_validation '' default
+test_watcher_busy_bound_validation invalid default
+test_watcher_busy_bound_validation 1000000000 default
+test_watcher_busy_bound_validation 60 custom
+test_watcher_idle_pane_ignores_the_busy_bound
 test_watcher_retry_ignores_busy_reset_failure
 test_watcher_successor_escalation_stays_quiet busy
 test_watcher_successor_escalation_stays_quiet dead
