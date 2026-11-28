@@ -46,9 +46,10 @@
 #                          stands: until the next episode-ending reset,
 #                          FM_CAP_HORIZON_SECS elapses, or the operator removes
 #                          the marker (wedge_timer_check owns that opt-in).
-#                          When the pane shows the Claude background-task
-#                          exit picker, that same parenthetical ends with
-#                          "blocked-on-prompt:" and the picker's name, after the
+#                          When the pane shows a recognised blocking dialog
+#                          (fm_composer_blocking_dialog owns that set), that
+#                          same parenthetical ends with "blocked-on-prompt:"
+#                          and the dialog's name, after the
 #                          demand-deep-inspection clause when that clause is
 #                          present; a plain stale reason gains the parenthetical
 #                          to carry the name, and no other reason carries it: the
