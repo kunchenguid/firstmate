@@ -21,12 +21,16 @@
 # cursor-agent and the far-too-generic legacy alias `agent`, and it runs as a
 # bundled node script. bin/fm-cursor-lib.sh is the fleet's single owner of that
 # decision, so this file delegates to it rather than widening the name match.
+# Auggie is the same shape - a node bundle whose comm is node-MainThread - and
+# bin/fm-auggie-lib.sh owns its identity for the same reason.
 _FM_SESSION_LOCK_LIB_DIR=${BASH_SOURCE[0]%/*}
 [ "$_FM_SESSION_LOCK_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_SESSION_LOCK_LIB_DIR=.
 # shellcheck source=bin/fm-cursor-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-omp-process-lib.sh
 . "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-omp-process-lib.sh"
+# shellcheck source=bin/fm-auggie-lib.sh
+. "${_FM_SESSION_LOCK_LIB_DIR:-/}/fm-auggie-lib.sh"
 unset _FM_SESSION_LOCK_LIB_DIR
 
 # Known harness command names; extend when a new adapter is verified. omp and
@@ -138,9 +142,10 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 #   5. omp's structural identity, owned by bin/fm-omp-process-lib.sh, which
 #      also covers the bun-package install whose process name is `bun`.
+#   6. Auggie's own structural identity, owned by bin/fm-auggie-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [pid]
+  local comm=$1 args=$2 pid=${3:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   fm_omp_daemon_worker "$args" && return 1
   base=$(basename -- "$comm")
@@ -168,7 +173,8 @@ fm_harness_process_matches() {  # <comm> <args>
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   fm_omp_process_matches "$comm" "$args" && return 0
-  return 1
+  # Auggie: preserve its unknown-identity status for live-holder protection.
+  fm_auggie_process_matches "$comm" "$args" "$pid"
 }
 
 # --- Windows process-boundary bridge -----------------------------------------
@@ -302,7 +308,7 @@ fm_win_harness_ancestry_pids() {
       case "${CLAUDE_CODE_SESSION_ID:-}" in ''|*$'\n'*|*$'\r'*) continue ;; esac
     fi
     comm=$(fm_win_command "$winpid") || continue
-    fm_harness_process_matches "$comm" "$comm" || continue
+    fm_harness_process_matches "$comm" "$comm" "$FM_WIN_PID_PREFIX$winpid" || continue
     printf '%s%s\n' "$FM_WIN_PID_PREFIX" "$winpid"
     return 0
   done
@@ -617,7 +623,7 @@ fm_harness_ancestry_pids() {
     # belongs to whichever omp launched that shared worker, not to the session
     # that asked for this command (see fm_omp_daemon_worker).
     fm_omp_daemon_worker "$FM_PROC_ARGS" && break
-    if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+    if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$pid"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -748,9 +754,10 @@ fm_session_lock_pid_verdict() {
 # kill -0 cannot see across that boundary and would report a live harness as
 # dead - which would hand a running session's home to a second one.
 fm_harness_pid_alive() {
+  local pid=$1
   fm_session_lock_pid_verdict "$1"
   [ "$FM_SESSION_LOCK_PID_VERDICT" = readable ] || return 1
-  fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"
+  fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$pid"
 }
 
 # Liveness and identity of a session-lock pid for readers outside this file:
@@ -796,6 +803,7 @@ fm_session_pid_identity() {  # <value>
 # interpretation, integer overflow, or an arbitrarily long digit string change a
 # verdict.
 fm_session_lock_pid_blocks_reclaim() {
+  local pid=$1
   fm_session_pid_valid "$1" || return 1
   case "$1" in
     "$FM_WIN_PID_PREFIX"*) ;;
@@ -807,7 +815,12 @@ fm_session_lock_pid_blocks_reclaim() {
     dead) return 1 ;;
     unreadable) return 0 ;;
     unknown) return 1 ;;
-    readable) fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" ;;
+    readable)
+      local rc=0
+      fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$pid" || rc=$?
+      # An unresolved relative Auggie script is unknown, not a gone holder.
+      [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]
+      ;;
   esac
 }
 
@@ -853,7 +866,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
     case "$pid" in
       "$claude_pid")
         fm_proc_info "$pid" || return 1
-        fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" || return 1
+        fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$pid" || return 1
         ;;
       "$FM_WIN_PID_PREFIX$claude_pid")
         fm_harness_pid_alive "$pid" || return 1
@@ -1015,7 +1028,7 @@ fm_session_lock_inspect() {  # <state>
       FM_LOCK_INSPECT_LIVE_HARNESS=false
       ;;
     readable)
-      if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
+      if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$pid"; then
         # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
         FM_LOCK_INSPECT_STATE=held
         # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
