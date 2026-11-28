@@ -36,7 +36,9 @@
 # linked worktrees and the code root itself, and a project holding a root commit
 # of the code root's history covers any fork, the parent, and any clone of
 # either. Lineage that cannot be determined (no code root history, or a shallow
-# side sharing no root) refuses rather than permits. The publication target is
+# side sharing no root) is treated as possibly firstmate's: it refuses unless the
+# same explicit grant that authorizes a firstmate task names its target, so a
+# shallow unrelated project needs that grant or full history. The publication target is
 # compared only against a maintainer scope or task consent: the first remote
 # whose remote.<name>.gh-resolved is base, otherwise the first remote named
 # upstream, github, or origin, reduced to lowercase host/owner/repo; a local-path remote
@@ -498,7 +500,7 @@ fm_role_inherit_payload() (
 # and the boundary does not apply. FM_ROLE_PUB_TARGET is the normalized
 # publication target when determinable.
 fm_role_gate_self_publish() {
-  local home=$1 config=$2 proj=$3 root=$4 consent=${5:-} lineage=0
+  local home=$1 config=$2 proj=$3 root=$4 consent=${5:-} lineage=0 subject
   FM_ROLE_PUB_TARGET=
   # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_ROLE_PUB_AUTHORITY=
@@ -509,11 +511,6 @@ fm_role_gate_self_publish() {
     return 2
   fi
   FM_ROLE_PUB_TARGET=$(fm_role_publication_target "$proj")
-  if [ "$lineage" -eq 2 ]; then
-    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
-    FM_ROLE_PUB_DENIAL="cannot determine whether $proj shares firstmate's history (the code root $root has no readable history, or a shallow clone shares no root commit); fetch full history (git fetch --unshallow) before dispatching publishing work"
-    return 1
-  fi
   fm_role_resolve "$home" "$config"
   if [ -n "$consent" ]; then
     consent=$(fm_role_scope_norm "$consent")
@@ -523,9 +520,15 @@ fm_role_gate_self_publish() {
       return 1
     fi
   fi
+  # Unknown lineage is gated as firstmate's: the same explicit grant for the
+  # project's own target authorizes it, and every refusal names why it applies.
+  subject="this task targets firstmate's own repository"
+  if [ "$lineage" -eq 2 ]; then
+    subject="cannot determine whether $proj shares firstmate's history (the code root $root has no readable history, or a shallow clone shares no root commit), so publishing needs an explicit grant for its target or full history (git fetch --unshallow)"
+  fi
   if [ -z "$FM_ROLE_PUB_TARGET" ]; then
     # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
-    FM_ROLE_PUB_DENIAL="this task targets firstmate's own repository but no publication target can be determined (no upstream, github, or origin remote on $proj)"
+    FM_ROLE_PUB_DENIAL="$subject, but no publication target can be determined (no upstream, github, or origin remote on $proj)"
     return 1
   fi
   if [ -n "$consent" ] && [ "$consent" = "$FM_ROLE_PUB_TARGET" ]; then
@@ -540,5 +543,6 @@ fm_role_gate_self_publish() {
   fi
   # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
   FM_ROLE_PUB_DENIAL="this home runs as firstmate user/operator and holds no publication authority for $FM_ROLE_PUB_TARGET"
+  [ "$lineage" -ne 2 ] || FM_ROLE_PUB_DENIAL="$subject; $FM_ROLE_PUB_DENIAL"
   return 1
 }

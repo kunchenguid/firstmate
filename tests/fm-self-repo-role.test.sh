@@ -320,25 +320,42 @@ test_check_gh_resolved_base_selects_fork() {
   pass "fm-role.sh check: gh-resolved base selects the exact fork target, otherwise legacy precedence holds"
 }
 
-# Lineage that cannot be determined refuses, and a firstmate-lineage project
-# with no determinable publication target is refused even under consent.
+# Lineage that cannot be determined is gated like firstmate's own: it refuses
+# without an explicit grant, an exact grant for its own target authorizes it,
+# and no grant authorizes an undeterminable publication target.
 test_check_undeterminable_lineage_and_target_refuse() {
   local root shallow bare home out rc
   root=$(make_lineage_root undet-root https://github.com/kunchenguid/firstmate)
   home=$(make_role_home undet-user)
   shallow="$TMP_ROOT/undet-shallow"
   git clone -q --depth 1 "file://$root" "$shallow" || fail "could not make a shallow clone"
-  git -C "$shallow" remote set-url origin https://github.com/kunchenguid/firstmate
-  out=$(check_as "$root" "$home" "$shallow" upstream-consent github.com/kunchenguid/firstmate); rc=$?
-  expect_code 1 "$rc" "a shallow clone sharing no root commit must be refused (got: $out)"
+  git -C "$shallow" remote set-url origin https://github.com/acme/mono
+  out=$(check_as "$root" "$home" "$shallow"); rc=$?
+  expect_code 1 "$rc" "a shallow clone sharing no root commit must be refused without a grant (got: $out)"
   assert_contains "$out" "cannot determine whether" "the refusal must name undeterminable lineage"
+  assert_contains "$out" "no publication authority for github.com/acme/mono" "the refusal must name the missing grant"
+  out=$(check_as "$root" "$home" "$shallow" upstream-consent github.com/kunchenguid/firstmate); rc=$?
+  expect_code 1 "$rc" "consent for another target must not authorize unknown lineage (got: $out)"
+  out=$(check_as "$root" "$home" "$shallow" upstream-consent github.com/acme/mono); rc=$?
+  expect_code 0 "$rc" "consent for the project's own target must authorize unknown lineage (got: $out)"
+  assert_contains "$out" "authorized: task consent for github.com/acme/mono" "the authority must name the consent"
+  home=$(make_role_home undet-maint 'maintainer github.com/acme/mono')
+  out=$(check_as "$root" "$home" "$shallow"); rc=$?
+  expect_code 0 "$rc" "a maintainer scope for the project's own target must authorize unknown lineage (got: $out)"
+
+  home=$(make_role_home undet-user2)
+  git -C "$shallow" remote remove origin
+  out=$(check_as "$root" "$home" "$shallow" upstream-consent github.com/acme/mono); rc=$?
+  expect_code 1 "$rc" "consent must not authorize unknown lineage with no publication target (got: $out)"
+  assert_contains "$out" "cannot determine whether" "the refusal must still name undeterminable lineage"
+  assert_contains "$out" "no publication target can be determined" "the refusal must name the missing target"
 
   bare=$(clone_with_origin "$root" undet-no-remote https://github.com/kunchenguid/firstmate)
   git -C "$bare" remote remove origin
   out=$(check_as "$root" "$home" "$bare" upstream-consent github.com/kunchenguid/firstmate); rc=$?
   expect_code 1 "$rc" "consent must not authorize an undeterminable publication target (got: $out)"
   assert_contains "$out" "no publication target can be determined" "the refusal must name the missing target"
-  pass "fm-role.sh check: undeterminable lineage or publication target refuses"
+  pass "fm-role.sh check: undeterminable lineage needs an exact grant, and an undeterminable target refuses"
 }
 
 test_check_task_consent_authorizes_one_task() {
@@ -672,6 +689,44 @@ test_spawn_consent_agreement() {
 
 # --- fm-promote.sh ----------------------------------------------------------
 
+# An unrelated shallow project reaches the gate as undeterminable lineage: the
+# remedy the refusal names must actually let it through, and a refusal no grant
+# can change must not advertise one.
+test_spawn_shallow_unrelated_project() {
+  local home src proj out rc
+  src="$TMP_ROOT/spawn-shallow-src"
+  git init -q "$src" || fail "could not initialize the unrelated source"
+  # Distinct messages: fixture commits otherwise share SHAs with other roots.
+  git_commit "$src" unrelated-root
+  git_commit "$src" unrelated-tip
+  proj="$TMP_ROOT/spawn-shallow-mono"
+  git clone -q --depth 1 "file://$src" "$proj" || fail "could not make a shallow clone"
+  git -C "$proj" remote set-url origin https://github.com/acme/mono.git
+  home=$(make_role_home spawn-shallow)
+
+  write_ship_brief "$home" spawn-shallow-c1
+  rc=0
+  out=$(run_spawn "$home" spawn-shallow-c1 "$proj" claude --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an ungranted shallow project must not launch a publishing task"
+  assert_contains "$out" "spawn refused for spawn-shallow-c1: cannot determine whether" \
+    "the refusal must name undeterminable lineage"
+  assert_contains "$out" "--upstream-consent github.com/acme/mono" "the refusal must name the working remedy"
+
+  write_ship_brief "$home" spawn-shallow-c2 " upstream-consent=github.com/acme/mono"
+  out=$(run_spawn "$home" spawn-shallow-c2 "$proj" claude --mode no-mistakes --yolo off \
+    --upstream-consent github.com/acme/mono)
+  assert_not_contains "$out" "spawn refused" "the named consent must carry the shallow project through the gate"
+
+  git -C "$proj" remote remove origin
+  write_ship_brief "$home" spawn-shallow-c3
+  rc=0
+  out=$(run_spawn "$home" spawn-shallow-c3 "$proj" claude --mode no-mistakes --yolo off) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a shallow project with no publication target must not launch"
+  assert_contains "$out" "no publication target can be determined" "the refusal must name the missing target"
+  assert_not_contains "$out" "--upstream-consent" "a refusal no grant can change must not advertise one"
+  pass "fm-spawn.sh: an unrelated shallow project publishes under its named grant and is never sent a dead remedy"
+}
+
 test_promote_gate_on_self_repo() {
   local home meta out rc
   home=$(make_role_home promote-user)
@@ -736,6 +791,7 @@ test_brief_consent_flag_bounds
 test_brief_self_repo_pre_gate
 test_spawn_gate_on_self_repo
 test_spawn_consent_agreement
+test_spawn_shallow_unrelated_project
 test_promote_gate_on_self_repo
 test_secondmate_spawn_refuses_consent_flag
 
