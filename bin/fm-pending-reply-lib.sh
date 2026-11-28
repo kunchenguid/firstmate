@@ -171,15 +171,23 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
   printf '%s/%s' "$(fm_pending_reply_dir "$1")" "$2"
 }
 
-# Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
+# Privacy-safe correlation id: 16 lowercase hex chars. openssl's rand supplies
+# 64 random bits; where it is absent or returns nothing, the id falls back to a
+# shasum/sha256sum hash of pid, clock, and $RANDOM, so it stays unique rather
+# than unguessable. With neither hashing tool it prints nothing, so a
+# pending-reply expectation cannot be created.
 fm_pending_reply_new_id() {
-  local raw hex
+  local raw='' hex=''
   if command -v openssl >/dev/null 2>&1; then
     raw=$(openssl rand -hex 8 2>/dev/null || true)
   fi
   if [ -z "$raw" ]; then
     raw=$(printf '%s' "$$-$(date +%s%N 2>/dev/null || date +%s)-$RANDOM$RANDOM" | cksum 2>/dev/null | awk '{print $1}')
-    hex=$(printf '%s' "$raw$RANDOM$RANDOM" | shasum -a 256 2>/dev/null | awk '{print $1}')
+    if command -v shasum >/dev/null 2>&1; then
+      hex=$(printf '%s' "$raw$RANDOM$RANDOM" | shasum -a 256 2>/dev/null | awk '{print $1}')
+    elif command -v sha256sum >/dev/null 2>&1; then
+      hex=$(printf '%s' "$raw$RANDOM$RANDOM" | sha256sum 2>/dev/null | awk '{print $1}')
+    fi
     raw=${hex:0:16}
   fi
   printf '%s' "$(printf '%s' "$raw" | tr 'A-F' 'a-f' | tr -cd 'a-f0-9' | cut -c1-16)"

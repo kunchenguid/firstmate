@@ -170,9 +170,11 @@ test_done_recording_preserves_caller_locks() {
   for caller in ledger teardown; do
     make_case "locked-$caller"
     (
+      # shellcheck disable=SC2030 # The fixture environment stays inside this isolated subshell.
       local FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state"
       # shellcheck source=bin/fm-wake-lib.sh
       . "$ROOT/bin/fm-wake-lib.sh"
+      # shellcheck disable=SC2030 # The fixture control lock is subshell-local by design.
       local lock control='' owner
       lock=$(fm_meta_lock_path "$META") || exit 1
       if [ "$caller" = teardown ]; then
@@ -198,6 +200,60 @@ test_done_recording_preserves_caller_locks() {
     ) || fail "$caller: done recording failed or changed the caller's locks"
   done
   pass 'ledger and teardown record the first done head without reacquiring or releasing caller locks'
+}
+
+test_control_locked_done_recording_takes_metadata_lock() {
+  (
+    local holder i control lock
+    make_case control-locked
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    local FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state"
+    (
+      local FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state"
+      # shellcheck source=bin/fm-wake-lib.sh
+      . "$ROOT/bin/fm-wake-lib.sh"
+      lock=$(fm_meta_lock_path "$META") || exit 1
+      fm_lock_try_acquire "$lock" || exit 1
+      trap 'fm_lock_release "$lock"' EXIT
+      : > "$CASE/meta-held"
+      i=0
+      while [ ! -e "$CASE/release-meta" ] && [ "$i" -lt 600 ]; do
+        sleep 0.05
+        i=$((i + 1))
+      done
+      [ -e "$CASE/release-meta" ] || exit 1
+      fm_lock_release "$lock" || exit 1
+      : > "$CASE/meta-released"
+    ) &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+    holder=$!
+    # shellcheck disable=SC2031 # The cleanup releases the control lock this shell acquired.
+    trap 'kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true; [ -z "$control" ] || fm_lock_release "$control" || true' EXIT
+    i=0
+    while [ ! -e "$CASE/meta-held" ] && [ "$i" -lt 600 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    [ -e "$CASE/meta-held" ] || exit 1
+    control="$HOME_DIR/state/.control-local-task.lock"
+    fm_lock_try_acquire "$control" || exit 1
+    FM_HOME="$HOME_DIR" fm_dod_accept_ship_done ship local-only "$WT" "$PROJ" \
+      'done: ready' "$HOME_DIR/state" local-task "$META" control-locked >/dev/null 2>&1 && exit 1
+    assert_no_regex '^local_done_head=' "$META" 'the pin published while another process held the metadata lock'
+    : > "$CASE/release-meta"
+    wait "$holder" || exit 1
+    holder=''
+    [ -e "$CASE/meta-released" ] || exit 1
+    FM_HOME="$HOME_DIR" fm_dod_accept_ship_done ship local-only "$WT" "$PROJ" \
+      'done: ready' "$HOME_DIR/state" local-task "$META" control-locked || exit 1
+    [ "$(fm_dod_local_done_head "$META")" = "$X" ] || exit 1
+    [ "$(grep -c '^local_done_head=' "$META")" = 1 ] || exit 1
+    fm_lock_release "$control" || exit 1
+    control=''
+    trap - EXIT
+  ) || fail 'control-locked done recording did not take and honour the metadata lock'
+  pass 'control-locked done recording skips only the control lock and publishes the head once'
 }
 
 test_two_tasks_cannot_undo_a_same_tree_landing() {
@@ -311,4 +367,5 @@ SH
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_control_locked_done_recording_takes_metadata_lock
