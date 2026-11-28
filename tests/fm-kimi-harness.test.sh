@@ -111,7 +111,13 @@ case "$*" in
   *"#{cursor_y}"*) fake_cursor_y; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    case "$*" in
+      *"#{pane_current_command}"*) printf 'bash\n' ;;
+      *) printf 'firstmate\n' ;;
+    esac
+    exit 0
+    ;;
   list-windows)
     [ ! -s "$FM_FAKE_KIMI_STATE.window" ] || cat "$FM_FAKE_KIMI_STATE.window"
     exit 0 ;;
@@ -292,7 +298,14 @@ EOF
 
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
+  local -a spawn_args
   shift 6
+  if [ "${1:-}" = --relaunch ]; then
+    shift
+    spawn_args=("$id" --relaunch --harness kimi "$@")
+  else
+    spawn_args=("$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@")
+  fi
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -316,7 +329,7 @@ run_spawn() {
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "${spawn_args[@]}" 2>&1
 }
 
 read_spawn_record() {
@@ -757,6 +770,172 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
+}
+
+# The lifecycle tools the failed-delivery case drives after the spawn, against
+# the same fake pane. Session start reads the real tools on PATH, as the
+# backlog atomicity suite's own bootstrap runs do.
+run_kimi_lifecycle() {  # <case-dir> <home> <wt> <fakebin> <script> [args...]
+  local case_dir=$1 home=$2 wt=$3 fakebin=$4 script=$5 path
+  shift 5
+  path="$fakebin:$BASE_PATH"
+  [ "$script" != "$ROOT/bin/fm-bootstrap.sh" ] || path="$fakebin:$PATH"
+  HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_BOOTSTRAP_NETWORK=skip FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
+    FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    PATH="$path" "$script" "$@" 2>&1
+}
+
+kimi_row_state() {  # <backlog> <id>
+  tasks-axi show "$2" --file "$1" 2>/dev/null | sed -n 's/^  state: *//p' | head -1
+}
+
+# A failed delivery confirmation can still be a live worker that did receive its
+# brief, so the spawn keeps its record as a cleanup-only record rather than
+# discarding the pane or stranding it, the local copy, the turn-end tokens, the
+# hooks directory and the slot claim with no record naming them. In a
+# backlog-enabled home that record must never move the item: session start
+# must not heal it In flight and teardown must not then close it as Done - the
+# false Done that silently loses a work item that never ran. Teardown stays the
+# ordinary guarded path, so unlanded work still refuses it.
+test_kimi_failed_delivery_keeps_a_cleanup_record_teardown_can_use() {
+  local id rec out rc meta backlog token slot_root claim tasks_axi node
+  if ! tasks_axi=$(command -v tasks-axi) || ! node=$(command -v node); then
+    printf 'ok - skipped (the failed-delivery backlog case needs tasks-axi and node)\n'
+    return 0
+  fi
+  id=kimi-strand-z10
+  rec=$(make_spawn_case strand "$id")
+  read_spawn_record "$rec"
+  ln -s "$tasks_axi" "$FAKEBIN_DIR/tasks-axi"
+  ln -s "$node" "$FAKEBIN_DIR/node"
+  backlog="$HOME_DIR/data/backlog.md"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$backlog"
+  printf '%s\n' 'backend = "markdown"' '' '[markdown]' 'path = "data/backlog.md"' \
+    > "$HOME_DIR/.tasks.toml"
+  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  # Lay the local copy out as a Treehouse pool slot so the spawn claims it.
+  slot_root="$CASE_DIR/slots"
+  mkdir -p "$slot_root/1"
+  git -C "$PROJ_DIR" worktree move "$WT_DIR" "$slot_root/1/project"
+  WT_DIR="$slot_root/1/project"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$WT_DIR" > "$slot_root/treehouse-state.json"
+  claim="$slot_root/1/.fm-slot-owner"
+  meta="$HOME_DIR/state/$id.meta"
+
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "unconfirmed kimi delivery lacked its diagnostic"
+  assert_contains "$out" "run bin/fm-teardown.sh $id" \
+    "failed kimi delivery did not name the cleanup path"
+  assert_grep 'cleanup_recovery=delivery-unconfirmed' "$meta" \
+    "failed kimi delivery did not keep a cleanup-only record: $out"
+  [ "$(kimi_row_state "$backlog" "$id")" = queued ] \
+    || fail "failed kimi delivery moved its item to $(kimi_row_state "$backlog" "$id")"
+  if grep -q 'kill-window' "$CASE_DIR/tmux-calls.log"; then
+    fail "failed kimi delivery closed a pane that may hold a live worker"
+  fi
+  token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
+  [ -n "$token" ] || fail "failed kimi delivery left no turn-end pointer to clean up"
+  assert_present "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "failed kimi delivery lost its registry token"
+  assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "failed kimi delivery lost its token record"
+  assert_present "$HOME_DIR/state/$id.git-hooks" "failed kimi delivery lost its hooks directory"
+  grep -Fxq -- "task=$id" "$claim" || fail "failed kimi delivery lost its slot claim"
+
+  out=$(run_kimi_lifecycle "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$ROOT/bin/fm-bootstrap.sh")
+  [ "$(kimi_row_state "$backlog" "$id")" = queued ] \
+    || fail "session start moved a never-delivered item In flight: $out"
+  assert_present "$meta" "session start removed the cleanup-only record"
+
+  printf 'unlanded\n' > "$WT_DIR/unlanded.txt"
+  rc=0
+  out=$(run_kimi_lifecycle "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$TEARDOWN" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown discarded unlanded work in a failed-delivery local copy: $out"
+  assert_present "$WT_DIR/unlanded.txt" "refused teardown removed the unlanded work"
+  assert_present "$meta" "refused teardown removed the cleanup-only record"
+  rm "$WT_DIR/unlanded.txt"
+
+  out=$(run_kimi_lifecycle "$CASE_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$TEARDOWN" "$id") \
+    || fail "teardown could not clean up a failed kimi delivery: $out"
+  [ "$(kimi_row_state "$backlog" "$id")" = queued ] \
+    || fail "teardown closed a never-delivered item as $(kimi_row_state "$backlog" "$id"): $out"
+  assert_not_contains "$out" "to Done" "teardown told the supervisor to close a never-delivered item"
+  grep -q "kill-window.*fm-$id" "$CASE_DIR/tmux-calls.log" \
+    || fail "teardown left the failed-delivery pane open"
+  assert_absent "$meta" "teardown kept the cleanup-only record"
+  assert_absent "$WT_DIR/.fm-kimi-turnend" "teardown kept the kimi turn-end pointer"
+  assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "teardown kept the kimi registry token"
+  assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "teardown kept the kimi token record"
+  assert_absent "$HOME_DIR/state/$id.git-hooks" "teardown kept the hooks directory"
+  assert_absent "$claim" "teardown kept the slot claim"
+  pass "fm-spawn: a failed kimi delivery keeps a cleanup-only record that teardown cleans without closing its queued item"
+}
+
+# An unmarked record kept for a failed delivery is what lets session start heal
+# its item In flight and teardown close it as Done, so a record the spawn cannot
+# mark is rolled back as before and the leftovers are named for hand cleanup.
+test_kimi_failed_delivery_appends_cleanup_state_when_publish_fails() {
+  local id rec out rc real_mv
+  id=kimi-unmarked-z11
+  rec=$(make_spawn_case unmarked "$id")
+  read_spawn_record "$rec"
+  real_mv=$(command -v mv)
+  cat > "$FAKEBIN_DIR/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in *.meta.cleanup.*) exit 1 ;; esac
+done
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/mv"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
+  assert_grep 'cleanup_recovery=delivery-unconfirmed' "$HOME_DIR/state/$id.meta" \
+    "a failed publication did not fall back to the cleanup marker: $out"
+  pass "fm-spawn: a failed Kimi publication appends cleanup state"
+}
+
+test_kimi_relaunch_keeps_cleanup_state_after_delivery_failure() {
+  local id rec out rc real_mv meta marker
+  id=kimi-relaunch-pending-z12
+  rec=$(make_spawn_case relaunch-pending "$id")
+  read_spawn_record "$rec"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || {
+    fail "the initial kimi spawn failed: $out"
+  }
+  meta="$HOME_DIR/state/$id.meta"
+  marker="$HOME_DIR/state/$id.delivery-unconfirmed"
+  printf 'ready\n' > "$CASE_DIR/kimi.state"
+  real_mv=$(command -v mv)
+  cat > "$FAKEBIN_DIR/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in *.meta.cleanup.*) exit 1 ;; esac
+done
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/mv"
+  chmod 400 "$meta"
+  rc=0
+  out=$(FM_FAKE_KIMI_DELIVERY=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --relaunch) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed relaunch delivery should fail"
+  if [ -e "$marker" ]; then
+    assert_grep 'cleanup_recovery=delivery-unconfirmed' "$marker" \
+      "failed relaunch did not leave its cleanup marker: $out"
+  else
+    assert_grep 'cleanup_recovery=delivery-unconfirmed' "$meta" \
+      "failed relaunch did not retain cleanup state: $out"
+  fi
+  pass "fm-spawn: failed Kimi relaunch keeps cleanup state"
 }
 
 test_kimi_readiness_gate_precedes_pointer() {
@@ -1262,6 +1441,8 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_failed_delivery_appends_cleanup_state_when_publish_fails
+test_kimi_relaunch_keeps_cleanup_state_after_delivery_failure
 test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
@@ -1269,6 +1450,7 @@ test_kimi_teardown_removes_pointer_and_registry_token
 test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
+test_kimi_failed_delivery_keeps_a_cleanup_record_teardown_can_use
 test_kimi_readiness_gate_precedes_pointer
 test_kimi_fresh_worktree_trust_is_answered_and_verified
 test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears

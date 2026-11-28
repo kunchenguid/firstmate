@@ -1,6 +1,7 @@
 ---
 name: quiet
 description: >-
+  Invoke /quiet to enter quiet supervision mode.
   Enter quiet supervision mode when the captain invokes /quiet or asks for quiet mode, quiet-while-present, or fewer routine wake turns while they stay in the session.
   Unlike /afk, ordinary captain chat does not exit it; only an explicit `/quiet off` does.
 user-invocable: true

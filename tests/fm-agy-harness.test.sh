@@ -848,6 +848,35 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn() {
   pass "fm-spawn: an agy dialog that never turns busy fails the spawn and closes the endpoint"
 }
 
+# A failed gate keeps its record as a cleanup-only record
+# (bin/fm-backlog-transition-lib.sh), so the local copy and hooks directory of
+# the closed endpoint are cleaned through ordinary teardown instead of being
+# stranded with no record naming them.
+test_agy_failed_gate_keeps_a_cleanup_record_teardown_can_use() {
+  local id rec out rc meta
+  id="agy-strand-z14-$$"
+  rec=$(make_agy_spawn_case strand "$id")
+  read_agy_spawn_record "$rec"
+  meta="$HOME_DIR/state/$id.meta"
+  rc=0
+  out=$(FM_FAKE_AGY_IGNORE_TRUST=1 FM_FAKE_AGY_ANSWER=stuck run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dialog that never turns into a busy turn must fail the spawn"
+  assert_grep 'cleanup_recovery=delivery-unconfirmed' "$meta" \
+    "a failed agy gate did not keep a cleanup-only record: $out"
+  assert_present "$HOME_DIR/state/$id.git-hooks" "a failed agy gate lost its hooks directory"
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" FM_FAKE_AGY_STATE="$CASE_DIR/agy.state" \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" "$ROOT/bin/fm-teardown.sh" "$id" 2>&1) \
+    || fail "teardown could not clean up a failed agy gate: $out"
+  assert_absent "$meta" "teardown kept the cleanup-only record"
+  assert_absent "$HOME_DIR/state/$id.git-hooks" "teardown kept the hooks directory"
+  pass "fm-spawn: a failed agy gate keeps a cleanup-only record that teardown cleans up"
+}
+
 test_agy_missing_binary_refuses_before_pane_creation() {
   local id rec out rc
   id="agy-missing-z5-$$"
@@ -941,6 +970,7 @@ test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
+test_agy_failed_gate_keeps_a_cleanup_record_teardown_can_use
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_launch_pre_trusts_home_and_records_meta
 test_agy_spawn_arms_no_busy_wiring
