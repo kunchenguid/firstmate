@@ -19,8 +19,13 @@
 #     [-- <forge merge flags>]
 #   fm-pr-merge.sh -h | --help
 #
-# Merge method on GitHub defaults to --squash when the caller passes none of
-# --squash, --merge, --rebase, or --method after the optional -- separator.
+# Merge method on GitHub, when the caller passes none of --squash, --merge,
+# --rebase, or --method after the optional -- separator, is the repository's
+# only allowed method when all three settings (allow_merge_commit,
+# allow_squash_merge, and allow_rebase_merge) are JSON booleans and exactly one
+# is true. Otherwise it keeps --squash, including when all three are false or
+# settings are unreadable, missing, null, or non-boolean. An explicit caller
+# method is preserved without reading the repository's merge-method settings.
 # With the opt-in config/pr-squash-summary presence flag, a GitHub squash merge
 # whose caller passed no subject or body takes the PR title and the body's
 # "## What Changed" section as its commit text; github_add_squash_summary owns it.
@@ -450,6 +455,29 @@ caller_merge_method() {
   printf '%s' "$method"
 }
 
+# The merge method flag the repository allows when exactly one method is enabled,
+# read from its own settings; any other count, or an unreadable setting, prints
+# nothing and returns 1 so the caller keeps its default.
+github_sole_allowed_merge_method() {
+  local settings pair method='' count=0
+  settings=$(gh api "repos/$PR_OWNER/$PR_REPO" --jq 'if ((.allow_merge_commit | type) == "boolean") and ((.allow_squash_merge | type) == "boolean") and ((.allow_rebase_merge | type) == "boolean") then "merge=\(.allow_merge_commit) squash=\(.allow_squash_merge) rebase=\(.allow_rebase_merge)" else empty end' 2>/dev/null) || return 1
+  case "$settings" in
+    "merge="*" squash="*" rebase="*) ;;
+    *) return 1 ;;
+  esac
+  for pair in $settings; do
+    case "$pair" in
+      merge=true) method=--merge; count=$((count + 1)) ;;
+      squash=true) method=--squash; count=$((count + 1)) ;;
+      rebase=true) method=--rebase; count=$((count + 1)) ;;
+      merge=false|squash=false|rebase=false) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$method"
+}
+
 # Whether the caller's own extra arguments asked for auto-merge, including the
 # --flag=value spelling the forge's flag parser accepts. --disable-auto cancels
 # the request, and gh exposes no short option that could bundle either flag.
@@ -541,7 +569,8 @@ what_changed_section() {
 github_add_squash_summary() {
   local json title body
   case "$(caller_merge_method "$@")" in
-    ''|[sS][qQ][uU][aA][sS][hH]) ;;
+    '') [ "${merge_args[0]:-}" = --squash ] || return 0 ;;
+    [sS][qQ][uU][aA][sS][hH]) ;;
     *) return 0 ;;
   esac
   [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/pr-squash-summary" ] || return 0
@@ -1854,6 +1883,9 @@ case "$PROVIDER" in
     merge_args=()
     if ! caller_has_merge_method "$@"; then
       merge_args=(--squash)
+      if sole_method=$(github_sole_allowed_merge_method); then
+        merge_args=("$sole_method")
+      fi
     fi
     github_add_squash_summary "$@"
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
