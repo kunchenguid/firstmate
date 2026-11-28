@@ -308,16 +308,19 @@ HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
 
-# A torn-down (or never-created) worktree has no current state to read. A
-# remote secondmate's recorded worktree is a path on ITS host, so the local
-# probe proves nothing for it - the remote arm below reads the true source.
-if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
-  emit unknown none "worktree gone (torn down?)"
-fi
-
 # A lane parked on review (bin/fm-park.sh) stopped its agent on purpose; its
 # record, not the stopped pane or an old run, is the current state.
 PARK_RECORD=$STATE/$ID.review-park
+
+# A torn-down (or never-created) worktree has no current state to read. A
+# remote secondmate's recorded worktree is a path on ITS host, so the local
+# probe proves nothing for it - the remote arm below reads the true source.
+# A parked lane whose copy went back to the pool has none on purpose.
+if [ -z "$REMOTE_HOST" ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; } \
+  && [ -z "$(fm_meta_get "$PARK_RECORD" slot_released 2>/dev/null)" ]; then
+  emit unknown none "worktree gone (torn down?)"
+fi
+
 if [ -f "$PARK_RECORD" ]; then
   PARK_PR=$(fm_meta_get "$PARK_RECORD" pr)
   PARK_HEAD=$(fm_meta_get "$PARK_RECORD" head)
@@ -328,6 +331,9 @@ if [ -f "$PARK_RECORD" ]; then
   fi
   if [ -n "$(fm_meta_get "$PARK_RECORD" pending)" ]; then
     emit paused review-park "parking on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; the agent's stop is not yet confirmed"
+  fi
+  if [ -n "$(fm_meta_get "$PARK_RECORD" slot_released)" ]; then
+    emit paused review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; agent stopped and copy returned to the pool, relaunches in a new copy on review activity"
   fi
   emit paused review-park "parked on review: PR $PARK_PR at ${PARK_HEAD:0:12} since $PARK_WHEN; agent stopped, relaunches on review activity"
 fi

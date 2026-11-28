@@ -396,6 +396,18 @@ fm_control_backend_relaunch_supported() {  # <backend>
   return 1
 }
 
+# Whether a relaunch on <backend> can start its replacement in a copy other
+# than the one its endpoint's shell sits in. Herdr and Rex move an adopted
+# endpoint into the recorded worktree and re-create one proven gone there; a
+# tmux endpoint must already sit in the recorded worktree, and a gone one
+# refuses (fm_control_endpoint_absence_verdict).
+fm_control_backend_relaunch_moves_copy() {  # <backend>
+  case "${1-}" in
+    herdr|rex) return 0 ;;
+  esac
+  return 1
+}
+
 # Whether a raw fm_backend_agent_state reading on <backend> goes through
 # fm_control_endpoint_absence_verdict before a recovery verb (exit, relaunch)
 # acts or refuses. `missing` always does. A Rex `unreadable` does too: Rex's
