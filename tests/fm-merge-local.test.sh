@@ -308,7 +308,24 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
+# A forge-delivered task is refused here and pointed at the merge tool that
+# covers every forge, so a GitLab merge request is never hand-merged around it.
+test_forge_task_is_pointed_at_the_pr_or_mr_merge_tool() {
+  local out rc=0
+  make_case forge-mode
+  record_done || fail 'done head was not accepted'
+  sed 's/^mode=local-only$/mode=no-mistakes/' "$META" > "$META.tmp" && mv "$META.tmp" "$META"
+  out=$(land 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a forge-delivered task unexpectedly landed locally: $out"
+  [ "$(git -C "$PROJ" rev-parse HEAD)" = "$BASE" ] || fail 'refusal moved main'
+  assert_contains "$out" "bin/fm-pr-merge.sh" "the refusal must name the merge tool"
+  assert_contains "$out" "GitHub, GitLab or Forgejo" "the refusal must say the merge tool covers every forge"
+  assert_contains "$out" "PR or MR url" "the refusal must accept a merge request URL"
+  pass 'a forge-delivered task is pointed at the PR or MR merge tool for every forge'
+}
+
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_forge_task_is_pointed_at_the_pr_or_mr_merge_tool
