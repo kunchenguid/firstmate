@@ -571,8 +571,8 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch> <drain-
     for superseded in "$archive_dir/$since-superseded-"*.afk-contract; do
       [ -f "$superseded" ] || continue
       stamp=${superseded##*/"$since"-superseded-}
-      stamp=${stamp%%-*}
       stamp=${stamp%.afk-contract}
+      stamp=${stamp%%-*}
       case "$stamp" in ''|*[!0-9]*) superseded_at=unknown ;; *) superseded_at=$(epoch_to_iso "$stamp") ;; esac
       render_words_record "$superseded" "$superseded_at"
     done

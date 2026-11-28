@@ -662,8 +662,11 @@ test_return_brief_keeps_refresh_history() {
   [ "$(contract_in "$dir" field entered_epoch)" = "$first_epoch" ] || fail "refresh changed the away-window boundary"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
+  for archived in "$dir/home/state/afk-contracts/$first_epoch-superseded-"*.afk-contract; do
+    mv "$archived" "$dir/home/state/afk-contracts/$first_epoch-superseded-1788000000.afk-contract"
+  done
   out=$(run_return "$dir" begin) || fail "refreshed posture return did not clear: $out"
-  assert_contains "$out" $'  your words superseded at ' "the superseded words were omitted"
+  assert_contains "$out" $'  your words superseded at 2026-08-29T10:40:00Z:' "the superseded time was not parsed from the archive name"
   assert_contains "$out" '    first mandate: merge task first PR when green' "the superseded words were not rendered verbatim"
   assert_contains "$out" $'  your words at entry:\n    replacement mandate' "the final words were omitted"
   assert_contains "$out" 'first: completed before the mandate refresh' "the pre-refresh outcome was omitted"
