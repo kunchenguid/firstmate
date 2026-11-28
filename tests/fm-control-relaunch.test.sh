@@ -3007,6 +3007,32 @@ test_herdr_reclaim_adopts_a_pane_that_outlived_its_server() {
   pass "reclaim: a herdr pane that outlived its stopped server is adopted, never orphaned beside a new tab"
 }
 
+# A relaunch from firstmate's own Herdr pane publishes the home summary from
+# a helper process. That helper must still see the launcher's pane as its own,
+# not the task pane this relaunch just adopted.
+test_herdr_relaunch_summary_keeps_the_launcher_pane_as_self() {
+  local dir out rc=0 summary
+  herdr_case_or_skip self-summary rl73 || {
+    echo "skip - herdr reclaim needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  mkdir -p "$dir/user-home"
+
+  out=$(env -u HERDR_SOCKET_PATH -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    HERDR_ENV=1 HERDR_SESSION=fmlab HERDR_PANE_ID=%2 \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    "$SPAWN" rl73 --relaunch --harness claude 2>&1) || rc=$?
+  expect_code 0 "$rc" "a relaunch from firstmate's own Herdr pane should adopt the surviving task pane"$'\n'"$out"
+  summary=$(jq -c '.endpoints[] | select(.id == "rl73") | .endpoint | {target, exists}' \
+    "$dir/home/state/home-summary.json")
+  assert_equals '{"target":"fmlab:%7","exists":true}' "$summary" \
+    "the adopted task pane is not the launcher's pane, so the summary must not report it gone"
+  pass "fm-spawn --relaunch: the published home summary keeps the launcher pane as self"
+}
+
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server() {
   local dir out rc=0
   herdr_case_or_skip gone-herdr-exit rl72 || {
@@ -3382,6 +3408,7 @@ test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint
 test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
+test_herdr_relaunch_summary_keeps_the_launcher_pane_as_self
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back

@@ -1668,6 +1668,27 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   pass "fm_backend_herdr_create_task: a same-labeled tab with a live (even idle) registered agent still refuses exactly as before"
 }
 
+# A restored self-pane tab must be renamed before a replacement can be created.
+test_create_task_names_the_callers_own_tab_holding_the_label() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/dup-own-tab"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-dup1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # shellcheck disable=SC2016  # Expanded by the child bash.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    HERDR_ENV=1 HERDR_SESSION=fmtest HERDR_PANE_ID=w1:p2 \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source herdr; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "create_task should refuse while the caller's own tab holds the task label"
+  assert_contains "$out" "is this firstmate session's own tab" "the refusal should name the caller's own tab"
+  assert_contains "$out" "tab rename w1:t2" "the refusal should name the rename that frees the label"
+  assert_not_contains "$(cat "$log")" $'\x1f''agent'$'\x1f''get' "the caller's own pane must not be classified as a husk"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' "no replacement tab may be created"
+  assert_not_contains "$(cat "$log")" $'\x1f''close' "nothing may be closed"
+  pass "fm_backend_herdr_create_task: a task label held by the caller's own tab refuses and names the rename"
+}
+
 test_create_task_refuses_when_any_duplicate_label_is_live() {
   local dir log resp fb out status
   dir="$TMP_ROOT/dup-mixed-live"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6602,6 +6623,7 @@ test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
+test_create_task_names_the_callers_own_tab_holding_the_label
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
 test_create_task_closes_and_replaces_no_agent_husk

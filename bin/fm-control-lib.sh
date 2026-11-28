@@ -465,6 +465,11 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 # drift into two answers for the same endpoint.
 fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
   local backend=${1-} target=${2-} meta=${3-}
+  # Apply fm_backend_target_is_self before any runtime probe or lifecycle input.
+  if fm_backend_target_is_self "$backend" "$target"; then
+    printf 'gone\t'
+    return 0
+  fi
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in

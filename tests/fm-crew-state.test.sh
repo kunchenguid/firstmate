@@ -2837,6 +2837,29 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   pass "herdr's native busy verdict reads working with no record present"
 }
 
+# A restored self-pane record must not inherit the supervisor's busy state.
+test_no_run_herdr_record_naming_the_callers_own_pane_reads_gone() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr own-pane fallback skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-own-pane)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-own
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-own.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_HERDR_BUSY=1
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  local out; out=$(HERDR_ENV=1 HERDR_SESSION=default HERDR_PANE_ID=w1:p2 run_crew_state "$d" feat-herdr-own)
+  assert_contains "$out" "backend target gone: default:w1:p2 is this firstmate session's own pane" \
+    "a record naming the caller's own pane should read gone"
+  assert_not_contains "$out" "state: working" "the session's own busy pane must not read as the task working"
+  out=$(HERDR_ENV=1 HERDR_SESSION=default HERDR_PANE_ID=w1:p9 run_crew_state "$d" feat-herdr-own)
+  assert_contains "$out" "state: working" "the same record read from another pane keeps its native busy verdict"
+  pass "herdr: a record naming the caller's own pane reads gone instead of the session's own busy state"
+}
+
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
 # stalls under load made pane_readable's capture fail, and the fallback read
 # that single failure as "backend target gone" - text the stale sweep matches
@@ -6835,6 +6858,7 @@ test_no_run_launch_prompt_parked_is_not_working
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
+test_no_run_herdr_record_naming_the_callers_own_pane_reads_gone
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone

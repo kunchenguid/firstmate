@@ -1287,6 +1287,13 @@ else
   T=$FM_BACKEND_VALIDATED_TARGET
   [ "$BACKEND" != orca ] || T_ORCA=$T
 fi
+# A record naming this session's own pane would close the session itself
+# (bin/fm-backend.sh fm_backend_target_is_self). --force does not override this.
+if [ -n "$T" ] && fm_backend_target_is_self "$BACKEND" "$T"; then
+  echo "REFUSED: task $ID's recorded endpoint $T is this firstmate session's own pane, so teardown would close the session itself. Nothing was changed." >&2
+  echo "The task's worker is gone: recover it ($(fm_backend_self_pane_recovery "$META" "$ID")), which records a fresh endpoint, then retry teardown; the recovery names the tab to rename first if this session's tab still carries fm-$ID." >&2
+  exit 1
+fi
 # The recorded backend, including every sibling its adapter sources, has to
 # be readable before the first destructive step. --force does not override
 # this. A forced descendant is proved in validate_firstmate_home_children_removal.
@@ -3362,6 +3369,10 @@ validate_firstmate_home_children_removal() {
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    if fm_backend_target_is_self "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET"; then
+      echo "REFUSED: child $child_id's recorded endpoint $FM_BACKEND_VALIDATED_TARGET is this firstmate session's own pane, so forced cleanup would close the session itself. Nothing was changed." >&2
+      return 1
+    fi
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)

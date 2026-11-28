@@ -3541,6 +3541,38 @@ EOF
   pass "punctuation, percent escapes and Unicode have distinct stable filename keys"
 }
 
+# Read another task in the same scan to prove the self-pane skip is exercised.
+test_herdr_record_naming_the_watchers_own_pane_is_never_read() {
+  local dir state fakebin out pid
+  dir=$(make_case herdr-own-pane); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"client":{"version":"0.9.5","protocol":22},"server":{"running":true}}\n' ;;
+  "pane read") printf 'idle\n> \n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
+  "agent get") printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/herdr"
+  : > "$dir/herdr.log"
+  printf 'window=lab:w1:p2\nkind=ship\nharness=claude\nbackend=herdr\n' > "$state/own.meta"
+  printf 'window=lab:w1:p3\nkind=ship\nharness=claude\nbackend=herdr\n' > "$state/other.meta"
+  watch_bg "$state" "$fakebin" "$out" env FM_FAKE_HERDR_LOG="$dir/herdr.log" \
+    HERDR_ENV=1 HERDR_SESSION=lab HERDR_PANE_ID=w1:p2
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher did not complete a poll cycle"; }
+  reap "$pid"
+  grep -F 'pane read w1:p3' "$dir/herdr.log" >/dev/null \
+    || fail "the other task's pane was not read, so the scan did not run: $(cat "$dir/herdr.log")"
+  ! grep -F 'w1:p2' "$dir/herdr.log" >/dev/null \
+    || fail "the watcher addressed its own pane as a worker: $(grep -F 'w1:p2' "$dir/herdr.log")"
+  ! grep -F 'lab:w1:p2' "$out" >/dev/null || fail "the watcher woke about its own pane: $(cat "$out")"
+  pass "watcher: a Herdr record naming the watcher's own pane is never read, subscribed, or surfaced"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 # Adding another stock-bash case means adding it to this list, not to ci.yml.
@@ -3555,6 +3587,7 @@ fi
 
 fm_test_run \
   test_colliding_endpoints_keep_independent_stale_history \
+  test_herdr_record_naming_the_watchers_own_pane_is_never_read \
   test_long_endpoint_keeps_stale_history \
   test_window_keys_encode_supported_endpoint_bytes \
   test_pi_stream_silence_uses_inspection_timer \

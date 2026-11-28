@@ -103,6 +103,40 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_BACKEND_KNOWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 FM_BACKEND_SPAWN="tmux herdr zellij orca cmux paseo rex t3code tern hc"
 
+# Snapshot the caller's inherited Herdr identity once, so a later in-process
+# reassignment of HERDR_PANE_ID cannot move it. These variables stay
+# unexported so a new process snapshots its own environment.
+if [ -z "${FM_BACKEND_SELF_SNAPSHOT_TAKEN:-}" ]; then
+  FM_BACKEND_SELF_SNAPSHOT_TAKEN=1
+  FM_BACKEND_SELF_HERDR_TARGET=
+  if [ "${HERDR_ENV:-}" = 1 ] && [ -n "${HERDR_PANE_ID:-}" ]; then
+    FM_BACKEND_SELF_HERDR_TARGET="${HERDR_SESSION:-default}:$HERDR_PANE_ID"
+  fi
+fi
+
+# fm_backend_target_is_self: 0 when a Herdr target names the caller's pane.
+# Restored task records can name a pane now hosting the supervisor (#6167);
+# task-facing callers must treat that worker endpoint as gone. Raw capture,
+# composer, and submit dispatchers stay unguarded because supervision handoff
+# deliberately uses the supervisor's pane. Other backends return 1.
+fm_backend_target_is_self() {  # <backend> <target>
+  case "$1" in
+    herdr) [ -n "$FM_BACKEND_SELF_HERDR_TARGET" ] && [ "$2" = "$FM_BACKEND_SELF_HERDR_TARGET" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_self_pane_recovery: the command that gives a self-pane task a
+# fresh endpoint. A secondmate's gone endpoint is respawned, never relaunched
+# (bin/fm-spawn.sh refuses that relaunch).
+fm_backend_self_pane_recovery() {  # <meta-file> <id>
+  if [ "$(fm_meta_get "$1" kind)" = secondmate ]; then
+    printf 'bin/fm-spawn.sh %s --secondmate' "$2"
+  else
+    printf 'bin/fm-control.sh %s relaunch' "$2"
+  fi
+}
+
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
 # zsh diagnostics can source it too, so backend-name matching must stay portable.
@@ -1536,8 +1570,13 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # no control-plane verb treats a Tern verdict as proof that an agent stopped.
 # hc classifies the one foreground process `hc get` reports through the same
 # classifier and is likewise absent from fm_control_backend_state_verified.
+# A self-pane target reads `missing` under fm_backend_target_is_self's contract.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
+  if fm_backend_target_is_self "$backend" "$target"; then
+    printf 'missing'
+    return 0
+  fi
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;

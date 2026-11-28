@@ -26,6 +26,7 @@ Herdr provides the terminal session while Treehouse continues to provide task wo
 | What task metadata records for a Herdr endpoint | [Endpoint metadata](#endpoint-metadata) |
 | How text and keys reach a worker and how delivery is confirmed | [Current transport behavior](#current-transport-behavior) and [Composer and injection safety](#composer-and-injection-safety) |
 | What happens after a Herdr server restart and how liveness is judged | [Restart and liveness behavior](#restart-and-liveness-behavior) |
+| Why Firstmate ignores a task whose record names its own pane | [Firstmate started inside a restored task pane](#firstmate-started-inside-a-restored-task-pane) |
 | Keeping Firstmate from starting a server a service manager owns | [Externally managed servers](#externally-managed-servers) |
 | How blocked transitions arrive and what happens without protocol 16 | [Push events and polling fallback](#push-events-and-polling-fallback) |
 | Where the away daemon runs and how it stops | [Away-mode supervisor support](#away-mode-supervisor-support) |
@@ -831,6 +832,19 @@ A restored same-labeled tab with a missing pane or no registered agent is a husk
 
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
+
+### Firstmate started inside a restored task pane
+
+A firstmate session started or resumed in a restored task pane inherits the pane id that the task's record still names.
+Firstmate never treats its own pane as that task's endpoint.
+The session-start digest reports the task's endpoint dead, and the recovery-grade agent state reads it missing.
+The watcher neither reads that pane nor subscribes to its status.
+Peek, steer, interrupt, exit, and teardown, including a forced secondmate teardown's descendant records, refuse or report the endpoint gone without sending anything to it.
+`bin/fm-control.sh <id> relaunch` creates a fresh endpoint for the task in its recorded worktree.
+A secondmate is recovered with `bin/fm-spawn.sh <id> --secondmate` instead, because relaunch refuses a secondmate whose endpoint is gone; each recovery hint names the command that fits the record's kind.
+While the session's own tab still carries the task's `fm-<id>` label in that workspace, either recovery refuses and names the `herdr tab rename` that frees the label.
+The check compares the recorded `<session>:<pane-id>` with the Herdr pane identity a firstmate process inherited when it started.
+It therefore covers the session's own tool calls, hooks, and supervision cycles, but not a process running in a different terminal, such as the away-mode daemon.
 
 ### Stale agent registrations
 

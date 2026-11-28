@@ -43,4 +43,11 @@ T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
 BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 
+if fm_backend_target_is_self "$BACKEND" "$T"; then
+  SELF_ID=${REMOTE_META##*/}
+  SELF_ID=${SELF_ID%.meta}
+  echo "error: $RAW_TARGET resolves to $T, which is this firstmate session's own pane, not a worker; the task's worker is gone - recover it with $(fm_backend_self_pane_recovery "$REMOTE_META" "${SELF_ID:-<task-id>}"), which creates a fresh endpoint" >&2
+  exit 1
+fi
+
 fm_backend_capture "$BACKEND" "$T" "$N" "$EXPECTED_LABEL"
