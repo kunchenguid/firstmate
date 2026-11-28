@@ -9,10 +9,21 @@
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
 # rule #1 "never run state-changing git in projects/", and it is narrow: it only
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
-# auto-approves), and only as a clean fast-forward. A diverged branch needs a
-# rebase and a new task/approval record under bin/fm-dod-lib.sh's head-latching
-# contract before landing. See AGENTS.md prime directives,
-# project management, and task lifecycle.
+# auto-approves), and only as a clean fast-forward. See AGENTS.md prime
+# directives, project management, and task lifecycle.
+# Rebased lanes: when another landing moved the default branch after this lane
+# reported ready, the lane may rebase its own recorded branch and land that new
+# head N in place of the recorded head R only by an exact content-identity
+# proof against the current default head D (bin/fm-dod-lib.sh's
+# fm_dod_rebased_identity_proof): N is on refs/heads/<branch>, D is a strict
+# ancestor of N, R and D have diverged (neither contains the other) from
+# exactly one merge base, `git merge-tree --write-tree D R` merges cleanly, and
+# its tree object id equals N^{tree}. That proof is the whole gate; a rebase
+# whose tree differs, or anything else, refuses as before. After the
+# captain-hold read, bin/fm-dod-lib.sh's fm_dod_rebind_local_done_head swaps the
+# record from R to N; every other check then runs against N exactly as for an
+# unrebased lane. A later refusal leaves that rebound record, which names the
+# same proven content.
 # The task's existing per-task control lock serializes the captain-hold check
 # through that fast-forward. A still-held or unreadable row refuses before the
 # merge, so a captain approval must be recorded as an `answer --release` before
@@ -20,7 +31,8 @@
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
 # A per-checkout lock in the project's Git directory serializes different
 # tasks across the checks, checkout update, ref transaction, and rollback.
-# tests/fm-merge-local.test.sh covers pinned-head landing and race refusals.
+# tests/fm-merge-local.test.sh covers pinned-head and identical-rebase landing
+# and race refusals.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -126,8 +138,11 @@ if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
   echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
   exit 1
 fi
-local_head_matches() {
-  [ "$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}")" = "$MERGE_HEAD" ]
+branch_head() {
+  git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}"
+}
+local_head_matches() {  # <head>
+  [ "$(branch_head)" = "$1" ]
 }
 project_git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir) || {
   echo "error: cannot determine the project checkout's Git directory" >&2
@@ -135,7 +150,13 @@ project_git_dir=$(git -C "$PROJ" rev-parse --absolute-git-dir) || {
 }
 MERGE_PROJECT_LOCK="$project_git_dir/fm-local-landing.lock"
 fm_lock_acquire_wait "$MERGE_PROJECT_LOCK"
-local_head_matches || { echo "error: branch $BRANCH differs from the recorded local done head; refusing" >&2; exit 1; }
+LAND_HEAD=$MERGE_HEAD
+if ! local_head_matches "$MERGE_HEAD"; then
+  LAND_HEAD=$(branch_head) || {
+    echo "error: branch $BRANCH is missing; refusing" >&2
+    exit 1
+  }
+fi
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
@@ -150,7 +171,11 @@ fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
 before=$(git -C "$PROJ" rev-parse "$DEFAULT")
-if ! git -C "$PROJ" merge-base --is-ancestor "$before" "$MERGE_HEAD"; then
+if [ "$LAND_HEAD" != "$MERGE_HEAD" ] && ! rebase_refusal=$(fm_dod_rebased_identity_proof "$PROJ" "$DEFAULT" "$MERGE_HEAD" "$LAND_HEAD" "$before"); then
+  echo "error: branch $BRANCH differs from the recorded local done head and is not a provably identical rebase: $rebase_refusal; refusing" >&2
+  exit 1
+fi
+if ! git -C "$PROJ" merge-base --is-ancestor "$before" "$LAND_HEAD"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
@@ -170,9 +195,21 @@ case "$hold_status" in
     exit 1
     ;;
 esac
+if [ "$(fm_dod_local_done_head "$META")" != "$MERGE_HEAD" ] || ! local_head_matches "$LAND_HEAD"; then
+  echo "error: local done head or branch changed during approval check; refusing" >&2
+  exit 1
+fi
+if [ "$LAND_HEAD" != "$MERGE_HEAD" ]; then
+  if ! fm_dod_rebind_local_done_head "$STATE" "$ID" "$MERGE_HEAD" "$LAND_HEAD"; then
+    echo "error: could not record the proven rebased head for task $ID; refusing" >&2
+    exit 1
+  fi
+  echo "recorded rebased head $LAND_HEAD for task $ID (identical content to $MERGE_HEAD on $DEFAULT)"
+  MERGE_HEAD=$LAND_HEAD
+fi
 # Recheck after the approval read. Git's ref transaction below verifies and
 # locks the worker head together with the default-branch update.
-if [ "$(fm_dod_local_done_head "$META")" != "$MERGE_HEAD" ] || ! local_head_matches; then
+if [ "$(fm_dod_local_done_head "$META")" != "$MERGE_HEAD" ] || ! local_head_matches "$MERGE_HEAD"; then
   echo "error: local done head or branch changed during approval check; refusing" >&2
   exit 1
 fi
