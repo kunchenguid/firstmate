@@ -48,7 +48,7 @@ Membership is derived rather than enumerated, so a newly added test lands here b
 `portable-serial-<k>of<n>` splits the remainder across `n` separate CI runners.
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
 
-`bin/fm-test-run.sh` owns `n` (currently 19) and refuses any lane whose `of<n>` disagrees with it.
+`bin/fm-test-run.sh` owns `n` (currently 20) and refuses any lane whose `of<n>` disagrees with it.
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over the committed duration hints.
@@ -95,7 +95,7 @@ The workflow uploads each partition's quiet telemetry plus its per-root lifecycl
 The packing target is a complete green run under fifteen minutes including start delay.
 One indivisible serial suite (`tests/fm-remote-secondmate-lifecycle-e2e.test.sh`) currently measures above that target on its own; it occupies a singleton shard rather than raising the job timeout. It is one sequential fixture lifecycle, not independently invocable cases, so splitting it would re-run provision/seed/launch per file and change how the lifecycle is asserted.
 Job timeouts remain hang tripwires under the policy in [Timeouts](#timeouts) below; they are not the desired healthy duration.
-The layout uses nineteen serial jobs, two parallel jobs with `--jobs 2`, four lint partitions, Herdr, herdr-core, plus short checks and macOS.
+The layout uses twenty serial jobs, two parallel jobs with `--jobs 2`, four lint partitions, Herdr, herdr-core, plus short checks and macOS.
 The workflow retains per-PR supersession and keeps only the newest of close main pushes' runs, without changing the compliance workflow's event semantics.
 
 ## Local entry points
