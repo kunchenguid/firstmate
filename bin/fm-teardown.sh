@@ -2173,11 +2173,12 @@ teardown_note_dirty_return() {
 # it removes only a merged, clean, idle, unleased worktree and otherwise skips
 # with a nonzero exit - so no extra landed-work check is needed here; a skip or
 # failure is a warning, not a teardown failure, because the slot already made
-# it back to the pool. Opt out home-wide with the config/keep-pool-slots
-# presence flag (see docs/configuration.md "Pool slot reclaim").
+# it back to the pool. Off by default: opt in home-wide with the
+# config/reclaim-pool-slots presence flag (see docs/configuration.md "Pool
+# slot reclaim"). Unconfigured teardown never destroys anything here.
 teardown_destroy_pool_slot() {  # <dir> <cd_dir> <label>
   local dir=$1 cd_dir=$2 label=$3 out
-  [ -e "$CONFIG/keep-pool-slots" ] && return 0
+  [ -e "$CONFIG/reclaim-pool-slots" ] || return 0
   command -v treehouse >/dev/null 2>&1 || return 0
   if out=$( ( cd "$cd_dir" && treehouse destroy "$dir" --yes ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
