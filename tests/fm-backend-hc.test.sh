@@ -13,7 +13,8 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-hc-tests)
 
 # The stub answers `get` from <dir>/<address>.json (exit from <address>.exit,
 # 3 = not_found when no file exists), `ls` from <dir>/ls.json, `run` with
-# <dir>/run.json, and removes <address>.json on `rm` unless <dir>/rm-sticks
+# <dir>/run.json (a named `run` prints <dir>/run-name.err and exits 1 when that
+# file exists), and removes <address>.json on `rm` unless <dir>/rm-sticks
 # exists. Every call is logged with its HC_SESSION and HC_SOCKET.
 make_hc_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
@@ -38,7 +39,12 @@ case "$cmd" in
     printf '{"jsonrpc":"2.0","id":1,"result":{"generation":%s}}\n' "${FAKE_HC_GENERATION:-1}"
     ;;
   ls) cat "$D/ls.json" 2>/dev/null || printf '{"terminals":[]}\n' ;;
-  run) cat "$D/run.json" ;;
+  run)
+    for a in "$@"; do
+      case "$a" in --name=*) [ -f "$D/run-name.err" ] && { cat "$D/run-name.err" >&2; exit 1; } ;; esac
+    done
+    cat "$D/run.json"
+    ;;
   get)
     [ -f "$D/$last.exit" ] && exit "$(cat "$D/$last.exit")"
     [ -f "$D/$last.json" ] || { printf '{"error":{"kind":"not_found"}}\n' >&2; exit 3; }
@@ -120,6 +126,37 @@ test_hc_is_spawn_capable_and_needs_app_signals() {
   pass "hc: spawn-capable, detects only on the Herdr app signals, with its tool set"
 }
 
+test_create_task_names_the_terminal_after_the_task_id() {
+  local out
+  setup_case create-name
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  hc_shell 'fm_backend_hc_create_task fmtest "fm-Fix.Login Bug_2-abcdefghijklmnopqrstuvwxyz" /proj' >/dev/null
+  out=$(grep $'\x1frun\x1f' "$D/log")
+  assert_contains "$out" '--name=fix-login-bug_2-abcdefghijklmnop' "the name is the lowercased task id, other characters as -, cut to 32"
+  : > "$D/log"
+  hc_shell 'fm_backend_hc_create_task fmtest fm- /proj' >/dev/null
+  assert_not_contains "$(cat "$D/log")" --name "an empty sanitized name must start the terminal unnamed"
+  pass "hc: create_task names the terminal after the sanitized, truncated task id"
+}
+
+test_create_task_starts_unnamed_when_the_name_is_taken() {
+  local out
+  setup_case create-name-taken
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  printf '{"error":{"kind":"name_taken","message":"a live terminal is already named \\"a1\\""}}\n' > "$D/run-name.err"
+  out=$(hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /proj')
+  assert_equals "$out" t9 "a taken name must fall back to an unnamed terminal"
+  out=$(grep -c $'\x1frun\x1f' "$D/log")
+  assert_equals "$out" 2 "a taken name retries exactly once"
+  assert_not_contains "$(grep $'\x1frun\x1f' "$D/log" | tail -1)" --name "the retry carries no name"
+  printf '{"error":{"kind":"bad_request"}}\n' > "$D/run-name.err"
+  : > "$D/log"
+  expect_refused hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /proj'
+  out=$(grep -c $'\x1frun\x1f' "$D/log")
+  assert_equals "$out" 1 "any other hc run failure must not retry"
+  pass "hc: create_task starts unnamed only when the name is taken"
+}
+
 test_create_task_is_independent_labeled_and_refuses_duplicates() {
   local out tag
   setup_case create
@@ -129,7 +166,7 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   tag=$(hometag_of)
   out=$(grep $'\x1frun\x1f' "$D/log")
   for want in HC_SESSION=fmtest --no-parent --outlive-parent --no-notify $'--cwd\x1f/proj' \
-    "firstmate.task=fm-a1" "firstmate.home=$tag" "herdr.space=fm-$tag" "herdr.tab=$tag-fm-a1"; do
+    "firstmate.task=fm-a1" "firstmate.home=$tag" "herdr.space=fm-$tag" "herdr.tab=$tag-fm-a1" --name=a1; do
     assert_contains "$out" "$want" "hc run must carry $want"
   done
   printf '{"terminals":[{"address":"t9"}]}\n' > "$D/ls.json"
@@ -364,6 +401,8 @@ fm_test_run \
   test_hc_is_spawn_capable_and_needs_app_signals \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
+  test_create_task_names_the_terminal_after_the_task_id \
+  test_create_task_starts_unnamed_when_the_name_is_taken \
   test_control_interrupt_delivers_the_harness_keys \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \
