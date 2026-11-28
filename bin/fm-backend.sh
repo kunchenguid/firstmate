@@ -1033,13 +1033,13 @@ fm_backend_source() {  # <name>
   # word-split an unquoted expansion, so a space-separated string is one path.
   case "$name" in
     tmux)
-      set -- fm-tmux-lib.sh fm-composer-lib.sh fm-cursor-lib.sh fm-session-lock-lib.sh fm-agent-process-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh
+      set -- fm-backend-launch-env-lib.sh fm-tmux-lib.sh fm-composer-lib.sh fm-cursor-lib.sh fm-session-lock-lib.sh fm-agent-process-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh
       ;;
     herdr)
-      set -- fm-composer-lib.sh fm-transition-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh
+      set -- fm-backend-launch-env-lib.sh fm-composer-lib.sh fm-transition-lib.sh fm-agent-process-lib.sh fm-session-lock-lib.sh fm-gemini-lib.sh fm-hermes-process-lib.sh
       ;;
     zellij)
-      set -- fm-backend-hometag-lib.sh fm-composer-lib.sh
+      set -- fm-backend-launch-env-lib.sh fm-backend-hometag-lib.sh fm-composer-lib.sh
       ;;
     orca)
       set -- fm-composer-lib.sh
