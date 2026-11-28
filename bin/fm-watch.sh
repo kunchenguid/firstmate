@@ -658,12 +658,19 @@ inbox_steer_note_ring_failure() {  # <task> <record-path> <ring-result>
   [ "$(cat "$marker" 2>/dev/null || true)" != "$base $result" ] || return 0
   case "$result" in
     1) detail='the composer holds text that is not this doorbell, so the doorbell was not typed over it' ;;
-    2) detail='the backend did not confirm the doorbell' ;;
+    2) detail='the backend send failed, so the doorbell was not submitted' ;;
     *) return 0 ;;
   esac
   statusf="$STATE/$task.status"
   line="note [key=inbox-ring-$base]: the steering-inbox doorbell for $base did not land ($detail); the instruction stays durable and the retry ladder continues"
-  if fm_wake_status_append_self_announced "$STATE" "$statusf" "$line"; then
+  append_rc=0
+  fm_wake_status_append_self_announced "$STATE" "$statusf" "$line" || append_rc=$?
+  # 0 appended and self-announced, 1 appended but left for the watcher, 2 not
+  # appended at all (bin/fm-wake-lib.sh owns those codes). Anything but 2 means
+  # the note is in the file, so the marker has to record it: withholding the
+  # marker over an unverified append would repeat the same note on every retry of
+  # the same failure, which is the noise this reporter exists to replace.
+  if [ "$append_rc" -ne 2 ]; then
     printf '%s %s\n' "$base" "$result" > "$marker" 2>/dev/null || true
     return 0
   fi
@@ -2169,8 +2176,16 @@ wedge_episode_alarms() {  # <window-key> <pane-hash>
 # Spend one alarm slot for <hash>. A failed write is reported so the caller can
 # log it, and never withholds the alarm itself: an unwritable budget must not
 # silence a wedge, and the next threshold simply starts a fresh budget.
+# The budget belongs to the UNCONFIGURED ladder, so a configured
+# FM_WEDGE_MAX_ESCALATIONS owns its ladder outright and this is a no-op there.
+# That guard lives here, in the function that owns the budget, because a caller
+# that forgot it would let a capped run accrue a budget nobody is checking: the
+# counter would then already be spent the moment an operator turned the cap back
+# off, and the unconfigured ladder would answer that pane state with silence
+# instead of the alarms it had just restored.
 wedge_episode_alarm_spend() {  # <window-key> <pane-hash>
   local path count
+  [ "$FM_WEDGE_MAX_ESCALATIONS" -eq 0 ] || return 0
   path=$(wedge_episode_alarm_path "$1")
   count=$(wedge_episode_alarms "$1" "$2")
   printf '%s\t%s\n' "$2" "$((count + 1))" > "$path" 2>/dev/null || return 1

@@ -1066,6 +1066,76 @@ test_watcher_never_types_over_foreign_text_while_generating() {
   pass "watcher: foreign composer text is never typed over on a generating pane and the skip is recorded, while an empty composer still rings"
 }
 
+# A skipped doorbell is an observation about the worker's INBOX, not a
+# transition in its state: the note the watcher writes must never retract the
+# wait the worker declared, or a doorbell that could not be typed would earn the
+# worker a false stale alarm on top of it.
+test_watcher_skip_note_preserves_a_declared_wait() {
+  local dir statusf declared
+  dir=$(busy_case note-wait)
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\npaused: waiting on the vendor release\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  busy_steer_check "$dir" "$dir/draft.capture"
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "the skip was not recorded in the task status:"$'\n'"$(cat "$statusf")"
+  declared=$(bash -c '
+    . "$1"
+    status_declared_wait_line "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$statusf")
+  [ "$declared" = 'paused: waiting on the vendor release' ] \
+    || fail "a skipped doorbell retracted the worker's declared wait: '$declared'"
+  pass "watcher: a skipped doorbell's note never retracts the worker's declared wait"
+}
+
+# The note is written once per (record, failure) episode. The status append's
+# own return 1 means the line WAS appended but this home could not prove the
+# append was its own; only return 2 means nothing was written
+# (bin/fm-wake-lib.sh owns those codes). Withholding the marker over an
+# unverified append would repeat the same note on every retry of the same
+# failure, which is the noise this reporter exists to replace. The helper is
+# driven at that documented return so the case does not depend on a fixture that
+# can only be made to fail one way on one platform.
+test_watcher_note_recorded_when_the_append_is_unverified() {
+  local dir statusf
+  dir=$(busy_case note-unverified)
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  unverified_poll() {  # one watcher delivery check against an unverified append
+    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_SEND_LOG="$dir/send.log" \
+      FM_FAKE_TMUX_CAPTURE="$dir/draft.capture" FM_BUSY_REGEX=BUSYTOKEN \
+      FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2 \
+      bash -c '
+        . "$1"
+        fm_wake_status_append_self_announced() {
+          printf "%s\n" "$3" >> "$2"
+          return 1
+        }
+        inbox_steer_check sess:fm-t1 t1
+      ' _ "$WATCH" > "$dir/check.out" 2>&1
+  }
+  unverified_poll
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "the unverified append did not land at all:"$'\n'"$(cat "$statusf")"
+  unverified_poll
+  [ "$(grep -c 'inbox-ring-001.msg' "$statusf")" = 1 ] \
+    || fail "an unverified append repeated its note on the next poll:"$'\n'"$(cat "$statusf")"
+  pass "watcher: a note appended without proof is still recorded once per (record, failure)"
+}
+
 test_watcher_waits_on_busy_pane() {
   local dir wakes
   dir=$(busy_case busywait)
@@ -1555,6 +1625,8 @@ test_ring_never_types_over_foreign_composer_text
 test_watcher_rerings_idle_pane_quietly
 test_watcher_generating_pane_rings
 test_watcher_ring_failure_is_visible_in_status
+test_watcher_skip_note_preserves_a_declared_wait
+test_watcher_note_recorded_when_the_append_is_unverified
 test_watcher_never_types_over_foreign_text_while_generating
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack

@@ -3304,13 +3304,17 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # and one that suppresses a repeat must ask status_event_recorded rather than
 # compare exact bytes.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
-# (the safe direction), 2 the append itself failed.
+# (the safe direction), 2 nothing was written: the append itself failed, or this
+# library's classifier could not even be loaded to stamp the line. A caller that
+# records "this line is handled" must treat 1 as written and only 2 as not, so
+# the pre-append failure is deliberately 2 rather than 1: 1 is the code that
+# promises the bytes are in the file.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
   local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident
   local classified folded lag span_rc=0
   local LC_ALL=C stamped=()
   shift 2
-  _fm_wake_require_classify || return 1
+  _fm_wake_require_classify || return 2
   for line in "$@"; do
     stamped+=("$(status_stamp_line "$line")")
   done

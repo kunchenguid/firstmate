@@ -1617,6 +1617,46 @@ test_wedge_cap_off_ignores_leftover_markers() {
   pass "with the cap off, a leftover cap marker or rollback-failure sentinel silences nothing"
 }
 
+# The default per-episode budget (FM_WEDGE_ALARM_MAX) belongs to the
+# unconfigured ladder. A configured cap must not accrue it while it runs: the
+# counter would then already be spent when an operator turns the cap back off,
+# and the unconfigured ladder would answer that pane state with silence instead
+# of the alarms it just restored. Turning the cap off is the operator asking for
+# the ladder back, so it must never be the moment the ladder goes quiet.
+test_wedge_cap_off_restores_alarms_after_a_configured_cap() {
+  local dir state out capture_file window key pane_hash budget
+  dir=$(make_case wedge-cap-off-restores); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"
+  window="test:fm-wedge-cap-off-restores"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-off-restores.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-off-restores.status"
+  key=$(watch_window_key "$window")
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  budget="$state/.wedge-episode-alarms-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  prime_and_ack "$dir" 2 || fail "prime-and-ack failed"
+  poll_wedge_round "$dir" 2 ""
+  poll_wedge_round "$dir" 2 ""
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    || fail "the configured cap never fired: $(cat "$out")"
+  [ ! -e "$budget" ] \
+    || fail "a configured cap spent the default per-episode budget: $(cat "$budget")"
+
+  # The operator asks for the unconfigured ladder back: drop the cap marker and
+  # turn the cap off.
+  rm -f "$state/.wedge-permanent-$key"
+  poll_wedge_round "$dir" 0 ""
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "turning the cap off published nothing for a wedged pane: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    && fail "the cap fired while FM_WEDGE_MAX_ESCALATIONS was off: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a configured cap spends no default per-episode budget, so turning it off restores the alarms"
+}
+
 # The release boundary is a wedge EPISODE, so the first-sight routes have to
 # honour it as strictly as the reset routes do: each ends the episode the cap
 # fired in and opens a new one on the very next render, and a window left capped
@@ -1942,3 +1982,4 @@ test_wedge_cap_reports_gone_endpoint_on_terminal_override_route() {
 }
 
 test_wedge_cap_reports_gone_endpoint_on_terminal_override_route
+test_wedge_cap_off_restores_alarms_after_a_configured_cap
