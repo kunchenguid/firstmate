@@ -5338,6 +5338,129 @@ EOF
   pass "second-mate signal rows route by their new span while crewmate and stale routing stay unchanged"
 }
 
+# A line this home appended itself through the self-announced writer (a
+# --resolve-key answer, proven by the home-owned ledger) is main's own act, so
+# it never makes a second mate's span main-only; foreign lines in the same span
+# are judged exactly as before.
+test_branch_dispatch_ignores_home_owned_lines_in_secondmate_span() {
+  local repo home out status
+  repo="$TMP_ROOT/dispatch-owned-span-root"
+  home="$TMP_ROOT/dispatch-owned-span-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  printf 'project=%s/projects/approved\nwindow=mate-window\nkind=secondmate\n' "$home" > "$home/state/mate.meta"
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" CLASSIFY_LIB="$ROOT/bin/fm-classify-lib.sh" \
+    WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
+
+const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+const path = `${state}/mate.status`;
+const hold = "needs-decision [at=1790000000] [key=old-hold]: deferred captain call\n";
+
+// Present the open hold, then answer it through this home's own writer, which
+// records the appended bytes in the home-owned ledger, then add foreign lines.
+function stage(ownedAnswer, foreign) {
+  rmSync(`${state}/.mate.home-appends`, { force: true });
+  writeFileSync(path, hold);
+  execFileSync("bash", ["-c",
+    'set -e; . "$1"; ident=$(_fm_open_decisions_file_ident "$2/mate.status"); ' +
+    'status_commit_presentation_snapshot "$2" "$(printf "mate\\t%s\\t%s" "$3" "$ident")"',
+    "_", process.env.CLASSIFY_LIB, state, String(Buffer.byteLength(hold))]);
+  if (ownedAnswer) {
+    execFileSync("bash", ["-c", '. "$1"; fm_wake_status_append_self_announced "$2" "$2/mate.status" "$3" || [ $? -eq 1 ]',
+      "_", process.env.WAKE_LIB, state, "resolved [key=old-hold]: answered: ship it"]);
+    if (!existsSync(`${state}/.mate.home-appends`)) throw new Error("the self-announced writer recorded no ledger");
+  } else {
+    appendFileSync(path, "resolved [key=old-hold]: answered: ship it\n");
+  }
+  appendFileSync(path, foreign);
+  writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\tmate.status\tsignal: mate.status");
+}
+
+function expectRoute(label, ownedAnswer, foreign, toBranch) {
+  stage(ownedAnswer, foreign);
+  for (const attendedHost of [false, true]) {
+    const eligible = scopeForUnreadWake(state, false, false, attendedHost).eligibleSeqs.includes("1");
+    if (eligible !== toBranch) {
+      throw new Error(`${label}: expected ${toBranch ? "branch" : "main"}, got ${eligible ? "branch" : "main"} (attendedHost=${attendedHost})`);
+    }
+  }
+}
+
+expectRoute("owned resolution then a foreign working ack", true, "working [at=1790000200]: ack, continuing\n", true);
+expectRoute("owned resolution then a foreign new decision", true,
+  "needs-decision [at=1790000200] [key=new-call]: pick an option\n", false);
+// Control: the same resolution written by a foreign hand still forces main.
+expectRoute("foreign resolution then a foreign working ack", false, "working [at=1790000200]: ack, continuing\n", false);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "home-owned lines must not make a second mate's span main-only: $out"
+  pass "home-owned resolutions stay out of second-mate span ownership while foreign decisions still force main"
+}
+
+# The ledger lands after the status append it covers, so a scan in that window
+# sees a foreign resolution; once the ledger lands, a rescan of the unchanged
+# log must not reuse that cached verdict.
+test_branch_dispatch_rescans_secondmate_span_after_ledger_lands() {
+  local repo home out status
+  repo="$TMP_ROOT/dispatch-ledger-late-root"
+  home="$TMP_ROOT/dispatch-ledger-late-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  printf 'project=%s/projects/approved\nwindow=mate-window\nkind=secondmate\n' "$home" > "$home/state/mate.meta"
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" CLASSIFY_LIB="$ROOT/bin/fm-classify-lib.sh" \
+    WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { execFileSync } from "node:child_process";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
+
+const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+const path = `${state}/mate.status`;
+const ledger = `${state}/.mate.home-appends`;
+const hold = "needs-decision [at=1790000000] [key=old-hold]: deferred captain call\n";
+
+writeFileSync(path, hold);
+execFileSync("bash", ["-c",
+  'set -e; . "$1"; ident=$(_fm_open_decisions_file_ident "$2/mate.status"); ' +
+  'status_commit_presentation_snapshot "$2" "$(printf "mate\\t%s\\t%s" "$3" "$ident")"',
+  "_", process.env.CLASSIFY_LIB, state, String(Buffer.byteLength(hold))]);
+execFileSync("bash", ["-c", '. "$1"; fm_wake_status_append_self_announced "$2" "$2/mate.status" "$3" || [ $? -eq 1 ]',
+  "_", process.env.WAKE_LIB, state, "resolved [key=old-hold]: answered: ship it"]);
+const published = readFileSync(ledger);
+const statusBytes = readFileSync(path);
+writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\tmate.status\tsignal: mate.status");
+
+const eligible = () => scopeForUnreadWake(state, false, false, false).eligibleSeqs.includes("1");
+
+// The window between the status append and the ledger publish.
+renameSync(ledger, `${ledger}.held`);
+if (eligible()) throw new Error("before the ledger lands the resolution must read as foreign and go to main");
+// The ledger lands; the status log is byte-for-byte unchanged.
+renameSync(`${ledger}.held`, ledger);
+if (!readFileSync(ledger).equals(published) || !readFileSync(path).equals(statusBytes)) {
+  throw new Error("fixture drifted: the ledger or status log changed");
+}
+if (!eligible()) throw new Error("after the ledger lands the cached foreign verdict was reused instead of rescanning");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a late ledger must invalidate the cached second-mate span verdict: $out"
+  pass "a second-mate span verdict cached before the home-owned ledger lands is recomputed once it lands"
+}
+
 # The model picker's bounded scrolling and its search ranking are Pi's own
 # SelectList and fuzzyFilter, so the guarantee only holds while the installed
 # Pi still exports them and still bounds what it renders. Stubs cannot answer
@@ -6246,6 +6369,8 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_resolves_terminal_keyed_orca_stale_row
 test_branch_dispatch_keeps_project_with_canonical_owner
 test_branch_dispatch_routes_secondmate_signal_by_new_span
+test_branch_dispatch_ignores_home_owned_lines_in_secondmate_span
+test_branch_dispatch_rescans_secondmate_span_after_ledger_lands
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_away_record_parks_main_and_presents_after_archive
