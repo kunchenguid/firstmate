@@ -37,7 +37,35 @@ FJ_URL="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO/pulls/9"
 FJ_HEAD=cccccccccccccccccccccccccccccccccccccccc
 FJ_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
 
-JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
+# The merge path reads glab's JSON with the real jq, and the fixtures symlink
+# that binary into their own mirrored PATH directories (add_gh_mocks, the
+# Forgejo case builder). A candidate that works from the ambient PATH is not
+# enough: a wrapper which locates its own runtime, such as a mise shim, resolves
+# from the PATH it was installed on and stops answering once it is symlinked
+# into a foreign directory. Probe every candidate through exactly that symlink
+# and keep the first real binary that answers, so the fixture jq is the same
+# binary the host would run and never a shim that dies in the mirrored PATH.
+resolve_real_jq() {
+  local probe_dir candidate found=
+  probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-jq-probe.XXXXXX") || return 1
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    ln -sf "$candidate" "$probe_dir/jq" 2>/dev/null || continue
+    if "$probe_dir/jq" --version >/dev/null 2>&1; then
+      found=$candidate
+      break
+    fi
+  done <<EOF
+$(type -ap jq 2>/dev/null || true)
+/usr/bin/jq
+/bin/jq
+EOF
+  rm -rf "$probe_dir"
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+JQ_BIN=$(resolve_real_jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
 # Build a fresh sandbox for one test case: a state dir with task metadata and a
@@ -646,8 +674,18 @@ write_forgejo_status_json() {
   if [ "$total" = 0 ]; then
     printf '{"state":"","total_count":0,"statuses":[]}\n' > "$file"
   else
-    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" \
-      "$(seq "$total" | sed "s/.*/{\"context\":\"ci-&\",\"status\":\"$state\"}/" | paste -sd, -)" \
+    # Build the status list with a plain loop. A seq|sed|paste pipeline cannot
+    # do this portably: bash 3.2, which is /bin/bash on macOS and what the
+    # stock CI job runs, re-splits the replacement text on its braces and comma
+    # and writes a corrupt document, so the merge path reads a status array it
+    # cannot parse. Concatenating in shell is identical under both shells.
+    local i=1 entries=
+    while [ "$i" -le "$total" ]; do
+      [ "$i" -eq 1 ] || entries=$entries,
+      entries=$entries"{\"context\":\"ci-$i\",\"status\":\"$state\"}"
+      i=$((i + 1))
+    done
+    printf '{"state":"%s","total_count":%s,"statuses":[%s]}\n' "$state" "$total" "$entries" \
       > "$file"
   fi
 }
