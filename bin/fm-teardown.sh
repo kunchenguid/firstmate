@@ -72,6 +72,13 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# With config/retain-open-pr, a ship task with a recorded pr= on GitHub,
+# Forgejo, or GitLab also REFUSES while the forge reports it open,
+# even when the proofs above hold, because the guarded merge command needs this
+# record. A merged or closed PR takes the checks above unchanged.
+# An unreadable record refuses, and --force skips this gate.
+# Without that flag, this gate skips all three forges without a read.
+# The existing landed-work checks above, including the GitLab opt-in, are unchanged.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -210,7 +217,7 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
-#   --force skips ordinary-task dirty and landed-work checks, skips scout report
+#   --force skips ordinary-task dirty, landed-work, and open-PR checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
 #   captain has explicitly said to discard the work.
@@ -3815,6 +3822,27 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
     && [ "${PUBLIC_FOLLOWUP_RELAY_ACTIVE:-0}" = 1 ] \
     && fm_pf_has_delivered_open_loops "$PUBLIC_FOLLOWUP_STATE"; then
   echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
+fi
+
+if [ "$KIND" = ship ] && [ -n "$PR_URL" ] && [ "$FORCE" != "--force" ] \
+    && [ -e "$CONFIG/retain-open-pr" ] && fm_pr_url_parse "$PR_URL"; then
+  PR_RECORD_CHECKED=1
+  case "$FM_PR_PROVIDER" in
+    github) fm_pr_github_read_record "$FM_PR_HOST" "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" || true ;;
+    gitlab) fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true ;;
+    forgejo) fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || true ;;
+    *) PR_RECORD_CHECKED=0 ;;
+  esac
+  if [ "$PR_RECORD_CHECKED" = 1 ] && [ "$FM_PR_RECORD_MERGED" != true ]; then
+    case "$FM_PR_RECORD_STATE" in
+      CLOSED|closed) ;;
+      *)
+        echo "REFUSED: ship task $ID still has an open or unreadable PR at $PR_URL. Stop the worker with bin/fm-control.sh $ID exit and keep its task record until the PR merges." >&2
+        echo "Use --force only after explicit discard approval." >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 # Non-blocking: the legacy Relay link is not guarded as a refusal.
