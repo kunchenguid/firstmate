@@ -208,7 +208,7 @@ test_matrix_claude_named_session_titled_rule() {
   # A multiword session name renders the same way, at the same width.
   multi='────────────────── Andrew Chen ─'
   assert_screen "multiword named claude idle on herdr" empty "$CAPS_STYLED" \
-    "${idle/"$titled"/$multi}" '' "$claude_idle"
+    "${idle/"$titled"/"$multi"}" '' "$claude_idle"
   assert_screen "multiword named claude typed on herdr" pending "$CAPS_STYLED" \
     "transcript line"$'\n'"$multi"$'\n'"❯ fix the login bug"$'\n'"$rule" '' "$claude_idle"
   # Claude's prompt suggestion is dim ghost text, not input.
@@ -823,17 +823,21 @@ test_matrix_pi_separated_needs_identity() {
 }
 
 test_matrix_agy_separated_needs_identity() {
-  local screen typed agy_idle agy_working
+  local screen auto_screen typed agy_idle agy_working
   screen=$'transcript\n────────────────────────\n>\n────────────────────────\n ? for shortcuts'
+  auto_screen=$'transcript\n────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────\n ? for shortcuts'
   agy_idle=$(printf 'agy\tidle'); agy_working=$(printf 'agy\tworking')
   assert_screen "agy idle with identity" empty "$CAPS_STYLED" "$screen" '' "$agy_idle"
+  assert_screen "agy auto-mode placeholder idle with identity" empty "$CAPS_STYLED" "$auto_screen" '' "$agy_idle"
   assert_screen "agy idle on zellij" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "agy auto-mode placeholder on zellij" unknown "$CAPS_STYLED_NOID" "$auto_screen"
   assert_screen "working agy defers" unknown "$CAPS_STYLED" "$screen" '' "$agy_working"
+  assert_screen "working agy auto-mode placeholder defers" unknown "$CAPS_STYLED" "$auto_screen" '' "$agy_working"
   typed=$'transcript\n────────────────────────\n> fix the bug\n────────────────────────\n ? for shortcuts'
   assert_screen "agy typed with identity" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
   typed=$'transcript\n────────────────────────\n>\n> quoted line\n────────────────────────\n ? for shortcuts'
   assert_screen "agy multiline blockquote stays pending" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
-  pass "matrix: agy's separated composer needs identity + structure; idle > reads empty and typed stays pending"
+  pass "matrix: agy's separated composer needs identity + structure; idle > and auto-mode placeholder read empty and typed stays pending"
 }
 
 test_matrix_pi_dollar_status_footer_is_empty() {

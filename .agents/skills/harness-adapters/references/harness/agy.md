@@ -21,7 +21,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
-| Composer | Separated `>` row framed by full-width horizontal rules; `bin/fm-composer-lib.sh` classifies an idle `agy` composer as `empty` when identity and structure match (for example on Herdr), `pending` when unsubmitted text is present, and `unknown` while working or without identity. |
+| Composer | Separated `>` row framed by full-width horizontal rules (verified live on `agy 1.5.19` through Herdr, 2026-11-28, including the single-row Auto-mode placeholder `Auto mode: edits & safe commands auto-approved (shift+tab to cycle)`); `bin/fm-composer-lib.sh` classifies an idle/done `agy` composer as `empty` when identity and structure match, `pending` when unsubmitted text is present, and `unknown` while working or without identity. |
 
 ## Trust, and where the decision persists
 

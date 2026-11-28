@@ -2529,6 +2529,15 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled> [agent]
         content="${content#'>'}"
         fm_composer_normalize_trim_var content
       fi
+      # agy 1.5.19 in --dangerously-skip-permissions (Auto mode) draws a single-row
+      # muted placeholder (`Auto mode: edits & safe commands auto-approved (shift+tab to cycle)`)
+      # in truecolor slate (rgb 131,148,150, above the default ghost-luma ceiling) that
+      # clears on the first typed character. Match only the exact single-row placeholder
+      # so any typed or multiline draft stays `pending`.
+      if [ "$FM_COMPOSER_SCAN_PI_CLOSE" -eq $((FM_COMPOSER_SCAN_PI_OPEN + 2)) ] \
+        && [ "$content" = 'Auto mode: edits & safe commands auto-approved (shift+tab to cycle)' ]; then
+        content=''
+      fi
     fi
     if [ -n "$content" ]; then
       printf 'pending'
