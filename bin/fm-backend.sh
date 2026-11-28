@@ -1276,6 +1276,21 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   esac
 }
 
+# fm_backend_send_literal: type <text> as literal, UNSUBMITTED input through the
+# selected adapter, so the caller can restore a composer draft it cleared. Only
+# tmux and paseo, the backends the draft rescue runs on, type; every other
+# backend declines (nonzero), never types lines.
+fm_backend_send_literal() {  # <backend> <target> <text> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_send_literal "$@" ;;
+    paseo) fm_backend_paseo_send_literal "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_send_text_submit: submit and verify through the selected adapter.
 # Pane backends type once and retry only submission; T3 uses a native send.
 # Echoes the backend's verdict; callers require exact empty for confirmed delivery.

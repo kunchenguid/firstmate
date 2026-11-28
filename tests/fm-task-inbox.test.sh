@@ -312,7 +312,11 @@ test_ring_skips_dead_agent() {
 # A fake tmux whose pane is a Claude-style composer that keeps its content in
 # FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
 # between rules, and Enter submits it (logged as SUBMIT) unless
-# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow.
+# FM_FAKE_DROP_ENTERS still holds a count of Enters to swallow. While the file
+# FM_FAKE_PARTIAL_LITERAL exists, the next literal send types only its first
+# ten characters, removes the file, and fails. While the file FM_FAKE_CURSOR
+# exists it holds the cursor column: Ctrl-U deletes only before it, Backspace
+# at it does nothing, and C-e (unless FM_FAKE_NO_CTRL_E=1) moves it to the end.
 make_composer_stub() {  # <dir>
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/tmux" <<'SH'
@@ -329,8 +333,30 @@ case "${1:-}" in
         *) break ;;
       esac
     done
-    if [ "$literal" = 1 ]; then
-      printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
+    cursor=${FM_FAKE_CURSOR:-/dev/null/none}
+    if [ "$literal" = 0 ] && [ "${1:-}" = C-e ] && [ "${FM_FAKE_NO_CTRL_E:-0}" != 1 ]; then
+      rm -f "$cursor"
+    elif [ "$literal" = 0 ] && [ -f "$cursor" ] && [ "${1:-}" = C-u ]; then
+      cur=$(cat "$FM_FAKE_COMPOSER"); col=$(cat "$cursor")
+      printf '%s' "${cur:$col}" > "$FM_FAKE_COMPOSER"; echo 0 > "$cursor"
+    elif [ "$literal" = 0 ] && [ -f "$cursor" ] && [ "${1:-}" = BSpace ]; then
+      :
+    elif [ "$literal" = 1 ] && [ -n "${FM_FAKE_PARTIAL_LITERAL:-}" ] && [ -e "$FM_FAKE_PARTIAL_LITERAL" ]; then
+      rm -f "$FM_FAKE_PARTIAL_LITERAL"
+      printf '%s' "${1:0:10}" >> "$FM_FAKE_COMPOSER"
+      exit 1
+    elif [ "$literal" = 1 ]; then
+      # Like real tmux: a trailing ';' is a command separator, '\;' a literal ';'.
+      text=$1
+      case "$text" in
+        *'\;') text="${text%??};" ;;
+        *';') text="${text%;}" ;;
+      esac
+      printf '%s' "$text" >> "$FM_FAKE_COMPOSER"
+    elif [ "${1:-}" = C-u ] && [ "${FM_FAKE_NO_CTRL_U:-0}" != 1 ]; then
+      : > "$FM_FAKE_COMPOSER"
+    elif [ "${1:-}" = BSpace ]; then
+      cur=$(cat "$FM_FAKE_COMPOSER"); printf '%s' "${cur%?}" > "$FM_FAKE_COMPOSER"
     elif [ "${1:-}" = Enter ]; then
       drops=$(cat "$FM_FAKE_DROP_ENTERS" 2>/dev/null || echo 0)
       if [ "$drops" -gt 0 ]; then
@@ -393,13 +419,20 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the stuck doorbell once, not retype it:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the stuck doorbell unsubmitted"
 
-  for other in 'a half-typed draft' "$doorbell and a draft"; do
-    : > "$log"; printf '%s' "$other" > "$composer"
-    rc=0; ring || rc=$?
-    [ "$rc" = 1 ] || fail "other pending text should skip the ring, got rc $rc for: $other"
-    [ ! -s "$log" ] || fail "other pending text was submitted:"$'\n'"$(cat "$log")"
-    [ "$(cat "$composer")" = "$other" ] || fail "other pending text was changed: $(cat "$composer")"
-  done
+  : > "$log"; printf '%s' 'a half-typed draft' > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "other pending text must not block the ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "only the doorbell may be submitted:"$'\n'"$(cat "$log")"
+  [ "$(cat "$composer")" = 'a half-typed draft' ] \
+    || fail "other pending text was not restored exactly: $(cat "$composer")"
+
+  # A draft that wraps past one row cannot be read back exactly: defer untouched.
+  : > "$log"; printf '%s' "$doorbell and a draft" > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 1 ] || fail "a wrapped draft should defer the ring, got rc $rc"
+  [ ! -s "$log" ] || fail "nothing may be submitted over a wrapped draft"
+  [ "$(cat "$composer")" = "$doorbell and a draft" ] || fail "a wrapped draft must be left untouched"
 
   : > "$log"; : > "$composer"; echo 1 > "$drops"
   rc=0; ring || rc=$?
@@ -407,7 +440,138 @@ test_ring_submits_its_own_stuck_doorbell() {
   [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
     || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
-  pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
+  pass "inbox: the ring submits its own stuck doorbell, clears and restores other pending text, and retries a lost Enter once on both paths"
+}
+
+# The stray-character stall: one character left in a remote composer skipped
+# the doorbell and left 16 steers unread. The ring now captures the text,
+# clears it, rings, and types the text back; every backend step is a stub.
+test_ring_clears_rings_and_restores_stray_text() {
+  local dir state rec doorbell log composer drops rc out other
+  dir="$TMP_ROOT/ring-restore"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"; drops="$dir/drops"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$drops" FM_TASK_INBOX_RESTORE_SETTLE=0 \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+  ring_note() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$drops" FM_TASK_INBOX_RESTORE_SETTLE=0 FM_STATE_OVERRIDE="$state" \
+      bash -c '. "$1"; rc=0; fm_task_inbox_ring tmux sess:fm-t1 "$2" fm-t1 || rc=$?
+        printf "rc=%s note=%s\n" "$rc" "${FM_TASK_INBOX_RING_NOTE:-}"' \
+      _ "$ROOT/bin/fm-task-inbox-lib.sh" "$rec"
+  }
+  : > "$log"; printf 'x' > "$composer"; echo 0 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a stray character must not block the ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] || fail "the doorbell alone should be submitted:"$'\n'"$(cat "$log")"
+  [ "$(cat "$composer")" = x ] || fail "the stray character was not restored: $(cat "$composer")"
+
+  # A harness whose Ctrl-U does nothing is still cleared by Backspace.
+  : > "$log"; printf 'xy' > "$composer"
+  rc=0; FM_FAKE_NO_CTRL_U=1 ring || rc=$?
+  [ "$rc" = 0 ] || fail "a Backspace-cleared composer must not block the ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] || fail "backspace path should submit only the doorbell"
+  [ "$(cat "$composer")" = xy ] || fail "backspace path did not restore: $(cat "$composer")"
+
+  # A long draft cannot be backspaced away when Ctrl-U fails: defer, as before.
+  : > "$log"; printf '%0100d' 7 > "$composer"
+  rc=0; FM_FAKE_NO_CTRL_U=1 ring || rc=$?
+  [ "$rc" = 1 ] || fail "an uncleared long draft should still defer the ring, got rc $rc"
+  [ ! -s "$log" ] || fail "nothing may be submitted when the composer cannot be cleared"
+
+  # Drafts the one-row read cannot reproduce exactly defer, left untouched.
+  for other in $'first line\nsecond line' 'two  spaces'; do
+    : > "$log"; printf '%s' "$other" > "$composer"
+    out=$(ring_note) || true
+    [ ! -s "$log" ] || fail "nothing may be submitted over an inexact draft: $other"
+    [ "$(cat "$composer")" = "$other" ] || fail "an inexact draft must be left untouched: $(cat "$composer")"
+    assert_contains "$out" "rc=1" "an inexact draft should defer the ring"
+    assert_contains "$out" "cannot be restored exactly" "the note should say the draft was left in place"
+  done
+
+  # A ring that types part of the doorbell and then fails leaves that part
+  # cleared and the draft restored exactly.
+  : > "$log"; printf 'draft' > "$composer"; : > "$dir/partial"
+  out=$(FM_FAKE_PARTIAL_LITERAL="$dir/partial" ring_note) || true
+  assert_contains "$out" "rc=2" "a failed partial ring should report the send failure"
+  assert_contains "$out" "cleared for the ring and typed back" "the note should report the draft typed back"
+  [ "$(cat "$composer")" = draft ] || fail "a partial doorbell must not be left with the draft: $(cat "$composer")"
+  [ ! -s "$log" ] || fail "nothing may be submitted after a partial ring"
+
+  # The one-row read cannot see a trailing space, so the note never claims an
+  # exact restore.
+  : > "$log"; printf 'fix the ' > "$composer"
+  out=$(ring_note) || true
+  assert_contains "$out" "rc=0" "a draft ending in a space should not block the ring"
+  assert_contains "$out" "typed back; leading or trailing spaces may not be preserved" \
+    "the note should say spaces at the draft's ends may be lost"
+
+  # A draft ending in ';' is typed back with its ';', which tmux would
+  # otherwise read as a command separator and drop.
+  : > "$log"; printf 'foo;' > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a draft ending in ';' should not block the ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] || fail "only the doorbell should be submitted over 'foo;'"
+  [ "$(cat "$composer")" = 'foo;' ] || fail "a trailing ';' was not typed back: $(cat "$composer")"
+
+  # A cursor moved back into the draft: C-e first lets Ctrl-U take it all.
+  : > "$log"; printf 'fix the bug' > "$composer"; echo 8 > "$dir/cursor"
+  out=$(FM_FAKE_CURSOR="$dir/cursor" ring_note) || true
+  assert_contains "$out" "rc=0" "a draft with the cursor moved back should not block the ring"
+  [ "$(cat "$composer")" = 'fix the bug' ] || fail "a mid-cursor draft was not typed back whole: $(cat "$composer")"
+
+  # Without C-e, Ctrl-U takes only part of it; the note says the draft changed.
+  : > "$log"; printf 'fix the bug' > "$composer"; echo 8 > "$dir/cursor"
+  out=$(FM_FAKE_CURSOR="$dir/cursor" FM_FAKE_NO_CTRL_E=1 ring_note) || true
+  rm -f "$dir/cursor"
+  assert_contains "$out" "rc=1" "a clear that fails should defer the ring"
+  assert_contains "$out" "partly cleared and could not be restored" \
+    "the note should say a failed clear changed the draft"
+  [ ! -s "$log" ] || fail "nothing may be submitted when the composer cannot be cleared"
+
+  # A lost first Enter leaves our doorbell in the composer; it is cleared
+  # before the draft returns so the draft never runs into it.
+  : > "$log"; printf 'draft' > "$composer"; echo 9 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a doorbell whose Enters all drop should still report rung, got rc $rc"
+  [ "$(cat "$composer")" = draft ] || fail "draft must not be mixed with the unsent doorbell: $(cat "$composer")"
+  pass "inbox: the ring clears stray composer text, rings, and restores the text on a stub pane"
+}
+
+# The draft rescue is verified only on tmux and paseo; every other backend
+# defers exactly as before, sending no key at all over a pending draft.
+test_ring_defers_untouched_off_tmux_and_paseo() {
+  local dir state rec log backend out
+  dir="$TMP_ROOT/ring-other-backends"
+  state="$dir/state"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/keys.log"
+  for backend in herdr zellij cmux tern rex orca; do
+    : > "$log"
+    out=$(FM_STATE_OVERRIDE="$state" FM_KEYS_LOG="$log" bash -c '
+      . "$1"
+      fm_backend_agent_state() { echo alive; }
+      fm_backend_busy_state() { echo idle; }
+      fm_backend_composer_state() { echo pending; }
+      fm_backend_capture() { printf "● done\n────\n❯ a draft\n────\n"; }
+      fm_backend_send_key() { printf "key %s\n" "$3" >> "$FM_KEYS_LOG"; }
+      fm_backend_send_literal() { printf "literal %s\n" "$3" >> "$FM_KEYS_LOG"; }
+      fm_backend_send_text_submit() { printf "submit %s\n" "$3" >> "$FM_KEYS_LOG"; }
+      rc=0; fm_task_inbox_ring "$2" endpoint "$3" label || rc=$?
+      printf "rc=%s\n" "$rc"
+    ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$backend" "$rec")
+    assert_contains "$out" "rc=1" "$backend should defer the ring over a pending draft"
+    [ ! -s "$log" ] || fail "$backend must send no key over a pending draft:"$'\n'"$(cat "$log")"
+  done
+  pass "inbox: off tmux and paseo the ring defers over a pending draft without sending a key"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -1377,6 +1541,8 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_ring_clears_rings_and_restores_stray_text
+test_ring_defers_untouched_off_tmux_and_paseo
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_prefilters_history
 test_idempotent_write_prefilter_preserves_exact_bodies
