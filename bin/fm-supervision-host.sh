@@ -259,6 +259,7 @@ ENGINE_RECORD="$STATE/.supervision-host-engine"
 TURN_FILE="$STATE/.supervision-host-turn"
 RECEIPTS="$STATE/.supervision-host-receipts"
 PROMPT_FILE="$STATE/.supervision-host-prompt"
+PROMPT_DIGEST=
 WAKE_FILE="$STATE/.supervision-host-wake"
 HOST_LOG="$STATE/.supervision-host.log"
 ENGINE_PID_FILE="$STATE/.supervision-host.engine-pid"
@@ -892,7 +893,8 @@ leave_successor_for_main() {
 }
 
 # The engine conversation for this turn: the recorded one while it belongs to
-# this main session and has turns left, otherwise a new one. Sets ENGINE_SESSION
+# this main session, has turns left and was opened on the prompt generated now,
+# otherwise a new one. Sets ENGINE_SESSION
 # and ENGINE_MODE (new|resume).
 # Succeed, setting RECORD_KEY, RECORD_SESSION and RECORD_TURNS, when the
 # recorded conversation is one the next turn resumes.
@@ -911,8 +913,31 @@ engine_record_resumable() {
     && [ "$RECORD_TURNS" -lt "$ROTATE_TURNS" ] && [ -s "$PROMPT_FILE" ]
 }
 
+# Generate the current branch prompt into PROMPT_FILE and set PROMPT_DIGEST to
+# its digest. A failure is logged, never read as proof the saved prompt is current.
+refresh_branch_prompt() {
+  local tmp
+  tmp=$(mktemp "$PROMPT_FILE.tmp.XXXXXX") || return 1
+  if ! "$SCRIPT_DIR/fm-branch-prompt.sh" > "$tmp" 2>/dev/null \
+    || [ "$(wc -c < "$tmp" | tr -d ' ')" -lt 1024 ]; then
+    rm -f "$tmp"
+    log_line "prompt-generation-failed	fm-branch-prompt.sh produced no usable prompt; the saved conversation is not resumed"
+    return 1
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    PROMPT_DIGEST=$(shasum -a 256 "$tmp" | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    PROMPT_DIGEST=$(sha256sum "$tmp" | awk '{print $1}')
+  else
+    PROMPT_DIGEST=$(cksum < "$tmp" | awk '{print $1 "-" $2}')
+  fi
+  mv -f "$tmp" "$PROMPT_FILE" || return 1
+}
+
 choose_conversation() {
-  if engine_record_resumable; then
+  refresh_branch_prompt || return 1
+  if engine_record_resumable \
+    && [ "$(sed -n 's/^prompt_digest=//p' "$ENGINE_RECORD" 2>/dev/null | head -n 1)" = "$PROMPT_DIGEST" ]; then
     ENGINE_SESSION=$RECORD_SESSION
     ENGINE_MODE=resume
     ENGINE_TURNS=$RECORD_TURNS
@@ -929,22 +954,13 @@ choose_conversation() {
   ENGINE_TURNS=0
   ENGINE_COST=0
   ENGINE_KEY=$RECORD_KEY
-  local tmp
-  tmp=$(mktemp "$PROMPT_FILE.tmp.XXXXXX") || return 1
-  if ! "$SCRIPT_DIR/fm-branch-prompt.sh" > "$tmp" 2>/dev/null \
-    || [ "$(wc -c < "$tmp" | tr -d ' ')" -lt 1024 ]; then
-    rm -f "$tmp"
-    return 1
-  fi
-  mv -f "$tmp" "$PROMPT_FILE" || return 1
-  return 0
 }
 
 write_engine_record() {  # <turns> <conversation-cost>
   local tmp
   tmp=$(mktemp "$ENGINE_RECORD.tmp.XXXXXX") || return 1
-  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nturns=%s\nconversation_cost=%s\nended=%s\n' \
-    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "$1" "$2" "$(date +%s)" > "$tmp" \
+  printf 'engine=%s\nmodel=%s\nsession=%s\nkey=%s\nturns=%s\nconversation_cost=%s\nended=%s\nprompt_digest=%s\n' \
+    "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL" "$ENGINE_SESSION" "$ENGINE_KEY" "$1" "$2" "$(date +%s)" "$PROMPT_DIGEST" > "$tmp" \
     && mv -f "$tmp" "$ENGINE_RECORD"
 }
 

@@ -916,6 +916,64 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
 
+test_changed_branch_prompt_opens_a_new_conversation() {
+  local home first second session
+  home=$(make_home prompt-changed away)
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "prompt-changed: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 || fail "prompt-changed: the first wake was not handled"
+  printf 'Prefer the low-effort workers for routine checks.\n' > "$home/config/branch-prompt-include.md"
+  append_status "$home" 'step two'
+  wait_until 250 handled_at_least "$home" 2 || fail "prompt-changed: the second wake was not handled: $(cat "$home/state/.supervision-host.log")"
+  first="$home/engine-call.1"
+  second="$home/engine-call.2"
+  session=$(sed -n '/^arg=--session-id$/{n;s/^arg=//p;}' "$first")
+  assert_re '^arg=--session-id$' "$second" "a changed branch prompt must open a new conversation"
+  assert_no_re '^arg=--resume$' "$second" "a changed branch prompt must not resume the saved conversation"
+  assert_no_re "^arg=$session\$" "$second" "the new conversation must not reuse the old session id"
+  assert_grep 'Prefer the low-effort workers for routine checks.' "$home/state/.supervision-host-prompt" \
+    "the new conversation must run on the current generated prompt"
+  kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
+  wait_until_deadline 60 host_exited "$home" || fail "prompt-changed: the host did not stop on TERM"
+  pass "host: a branch prompt that changed between turns opens a new conversation on the current prompt"
+}
+
+test_unchanged_branch_prompt_resumes_the_conversation() {
+  local home session second
+  home=$(make_home prompt-same away)
+  printf 'Prefer the low-effort workers for routine checks.\n' > "$home/config/branch-prompt-include.md"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "prompt-same: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 || fail "prompt-same: the first wake was not handled"
+  append_status "$home" 'step two'
+  wait_until 250 handled_at_least "$home" 2 || fail "prompt-same: the second wake was not handled"
+  session=$(sed -n '/^arg=--session-id$/{n;s/^arg=//p;}' "$home/engine-call.1")
+  second="$home/engine-call.2"
+  assert_re '^arg=--resume$' "$second" "an unchanged branch prompt must resume the conversation"
+  assert_re "^arg=$session\$" "$second" "an unchanged branch prompt must resume the same conversation"
+  kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")"
+  wait_until_deadline 60 host_exited "$home" || fail "prompt-same: the host did not stop on TERM"
+  pass "host: an unchanged branch prompt resumes the same conversation"
+}
+
+test_branch_prompt_failure_is_reported_and_does_not_resume() {
+  local home
+  home=$(make_home prompt-failure away)
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "prompt-failure: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until 250 handled_at_least "$home" 1 || fail "prompt-failure: the first wake was not handled"
+  mkdir "$home/config/branch-prompt-include.md"
+  append_status "$home" 'step two'
+  wait_until_deadline 60 host_exited "$home" || fail "prompt-failure: the host did not hand the wake to main"
+  [ "$(engine_calls "$home")" -eq 1 ] || fail "a failed prompt generation must not run an engine turn on the saved conversation"
+  assert_re '	prompt-generation-failed	' "$home/state/.supervision-host.log" "the failed generation must be logged"
+  assert_re 'branch prompt or engine conversation could not be prepared' "$home/host.out" "the handback must say why"
+  pass "host: a branch prompt that cannot be generated is reported and never resumes the saved conversation"
+}
+
 fm_test_run \
   test_park_exit_probe_uses_half_second_child_sleeps \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
@@ -945,4 +1003,7 @@ fm_test_run \
   test_next_host_clears_a_turn_its_killed_predecessor_left \
   test_report_without_acknowledgement_hands_the_wake_to_main \
   test_return_during_a_failed_turn_still_hands_its_outcomes_to_main \
-  test_incomplete_engine_result_hands_the_wake_to_main
+  test_incomplete_engine_result_hands_the_wake_to_main \
+  test_changed_branch_prompt_opens_a_new_conversation \
+  test_unchanged_branch_prompt_resumes_the_conversation \
+  test_branch_prompt_failure_is_reported_and_does_not_resume

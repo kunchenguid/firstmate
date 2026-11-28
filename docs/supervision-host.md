@@ -370,10 +370,14 @@ A captain message typed during the park waits for the checkpoint to return, at m
 
 The engine keeps one conversation across wakes so the byte-stable prompt stays cached.
 That conversation is keyed to the current main session.
-A new one opens in two cases:
+A new one opens in three cases:
 
 - At every main session start.
 - Every `FM_SUPERVISION_HOST_ROTATE_TURNS` turns, because each wake adds history and the per-wake cost grows with it.
+- When the digest of the prompt `bin/fm-branch-prompt.sh` generates now differs from the digest recorded with the conversation, so an instruction update reaches the next turn.
+
+The host generates the prompt before every turn.
+When generation fails, the host logs `prompt-generation-failed`, hands that wake to main, and does not resume the saved conversation.
 
 Nothing captain-facing rides on that conversation, because the outcome store carries every result.
 The captain context it acts on is the [dialog mirror](#the-dialog-mirror) at the head of every attended wake and the away record's read-back at the tail of every away wake.
