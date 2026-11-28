@@ -31,8 +31,8 @@ pass "real rex: created the test's own session $SMOKE_SID"
 
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$ROOT/bin/fm-supervisor-target-lib.sh"
-TARGET=$(TERM_PROGRAM=rex REX_BLOCK="$MAIN_BLOCK" FM_SUPERVISOR_TARGET= \
-  TMUX_PANE= HERDR_ENV= discover_supervisor_target) || fail "could not resolve the Rex supervisor target"
+TARGET=$(TERM_PROGRAM=rex REX_BLOCK="$MAIN_BLOCK" FM_SUPERVISOR_TARGET="" \
+  TMUX_PANE="" HERDR_ENV="" discover_supervisor_target) || fail "could not resolve the Rex supervisor target"
 [ "$TARGET" = "${SMOKE_SID#session:}:${MAIN_BLOCK#block:}" ] || fail "supervisor discovery returned a different endpoint"
 pass "real rex: supervisor target resolves from the launcher block"
 

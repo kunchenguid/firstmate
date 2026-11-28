@@ -199,6 +199,7 @@ test_create_secondmate_orders_new_session_after_launcher() {
   pass "Rex orders a new secondmate session after its resolved launcher session"
 }
 
+# shellcheck disable=SC2016
 test_discover_rex_supervisor() {
   local dir out
   dir=$(new_case supervisor)
