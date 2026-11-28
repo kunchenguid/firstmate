@@ -861,6 +861,44 @@ EOF
   pass ".omp watch extension: an opted-in home runs the supervision host and relays every host line ($kind record)"
 }
 
+test_watch_extension_confirmation_statuses() {
+  local code repo home log out status
+  for code in 3 1; do
+    repo="$TMP_ROOT/watch-confirm-$code/repo"; home="$TMP_ROOT/watch-confirm-$code/home"; log="$TMP_ROOT/watch-confirm-$code/arm.log"
+    install_omp_extension_fixture "$repo"; mkdir -p "$home/state" "$home/config"
+    cat > "$repo/bin/fm-watch-arm.sh" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --handling-delivered ]; then exit $code; fi
+printf 'arm=%s\n' "\$\$" >> "\${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "\$\$" "\$\$"
+if [ "\$(grep -c '^arm=' "\$FM_ARM_LOG")" -eq 1 ]; then
+  sleep 1
+  printf 'signal: confirmation-status\n'
+  exit 0
+fi
+sleep 30
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 EXPECT_SUPERSEDED=$([ "$code" = 3 ] && echo 1 || echo 0) EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url"; import { writeFileSync, readFileSync } from "node:fs";
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`); const handlers=new Map(); let tool; const sent=[];
+const pi={on(e,h){handlers.set(e,h)},registerCommand(){},registerTool(t){tool=t},sendUserMessage(m,o){sent.push({m,o})}}; const mod=await import(pathToFileURL(process.env.EXT).href); mod.default(pi); await tool.execute();
+for(let i=0;i<60&&sent.length<1;i++) await new Promise(r=>setTimeout(r,100)); if(sent.length!==1) throw new Error(`expected one wake: ${JSON.stringify(sent)}`);
+const failed=sent[0].m.includes("watcher: FAILED"); if(process.env.EXPECT_SUPERSEDED === "1" ? failed : !failed) throw new Error(`wrong confirmation result: ${sent[0].m}`);
+const arms=readFileSync(process.env.FM_ARM_LOG,"utf8").split("\n").filter(x=>x.startsWith("arm=")).map(x=>Number(x.slice(4)));
+if(process.env.EXPECT_SUPERSEDED === "1") {
+  if(arms.length<2) throw new Error("superseded confirmation did not establish successor arm");
+  process.kill(arms[1], 0);
+}
+await handlers.get("before_agent_start")({type:"before_agent_start",prompt:sent[0].m},{}); await handlers.get("session_shutdown")({},{});
+process.exit(0);
+EOF
+)
+    status=$?; expect_code 0 "$status" "omp watch confirmation status $code: $out"; [ -z "$out" ] || fail "omp watch confirmation test printed output ($code): $out"
+  done
+  pass ".omp watch extension: superseded handling confirmation preserves successor; rejected confirmation reports failure"
+}
+
 # The omp owner stays file-gated: a home without config/supervision-host, or
 # one opted out by config/supervision-host-off, spawns the plain arm and never the host.
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off() {
@@ -1074,3 +1112,4 @@ test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off
 test_watch_extension_replays_a_host_only_boundary_across_replacement
 test_watch_extension_delivers_a_split_host_close_whole
+test_watch_extension_confirmation_statuses

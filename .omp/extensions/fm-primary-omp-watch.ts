@@ -604,6 +604,7 @@ export default function (pi: ExtensionAPI) {
   function confirmHandlingDelivery(recovery: { generation: string; watcherPid: string }): {
     ok: boolean;
     detail: string;
+    superseded?: boolean;
   } {
     try {
       const result = spawnSync(
@@ -616,6 +617,7 @@ export default function (pi: ExtensionAPI) {
         },
       );
       if (result.status === 0) return { ok: true, detail: "" };
+      if (result.status === 3) return { ok: false, detail: "", superseded: true };
       const stderr = (result.stderr || "").trim();
       return {
         ok: false,
@@ -631,16 +633,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   function confirmHandlingDeliveryWithRetry(
-    owner: SessionGeneration,
     recovery: { generation: string; watcherPid: string },
-  ): { ok: boolean; detail: string } {
-    const snapshot = (): { generation: string; watcherPid: string } => {
-      const current = owner.child ? armRecovery.get(owner.child) : undefined;
-      return current ?? recovery;
-    };
-    const first = confirmHandlingDelivery(snapshot());
-    if (first.ok) return first;
-    return confirmHandlingDelivery(snapshot());
+  ): { ok: boolean; detail: string; superseded?: boolean } {
+    const first = confirmHandlingDelivery(recovery);
+    if (first.ok || first.superseded) return first;
+    return confirmHandlingDelivery(recovery);
   }
 
   async function deliverActionableWake(
@@ -651,8 +648,8 @@ export default function (pi: ExtensionAPI) {
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
     if (recovery) {
-      const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
-      if (!confirmed.ok) {
+      const confirmed = confirmHandlingDeliveryWithRetry(recovery);
+      if (!confirmed.ok && !confirmed.superseded) {
         const watcherPid = recovery.watcherPid;
         if (!pidAlive(watcherPid)) {
           await retireArm(owner.child);

@@ -3862,7 +3862,7 @@ watcher_cleanup() {
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
+    if { [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] || [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; } \
       && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
       transition=release-lock-existing
     fi
