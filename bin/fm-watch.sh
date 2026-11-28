@@ -39,13 +39,21 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Where FM_WEDGE_MAX_ESCALATIONS is set above 0,
+#                          resume. One episode - one pane state, meaning the
+#                          window plus the exact stale render it is stuck on -
+#                          publishes at most FM_WEDGE_ALARM_MAX escalations
+#                          (default 2): the last one says so, and the ladder then
+#                          stays quiet until that pane renders something new. A
+#                          flapping pane that returns to the same render is still
+#                          that one episode, so it stays quiet too.
+#                          Where FM_WEDGE_MAX_ESCALATIONS is set above 0,
 #                          the escalation at that count carries an extra
 #                          "PERMANENTLY-WEDGED" clause and is the last wedge
 #                          escalation for that WINDOW while its cap marker
 #                          stands: until the next episode-ending reset,
 #                          FM_CAP_HORIZON_SECS elapses, or the operator removes
-#                          the marker (wedge_timer_check owns that opt-in).
+#                          the marker (wedge_timer_check owns that opt-in, and a
+#                          configured cap supersedes the episode bound).
 #                          When the pane shows the Claude background-task
 #                          exit picker, that same parenthetical ends with
 #                          "blocked-on-prompt:" and the picker's name, after the
@@ -528,6 +536,24 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
+# window_busy_verdict: print the semantic busy-state contract's
+# (bin/fm-busy-lib.sh) classification for <window>, e.g. "busy pi-ext" or
+# "unknown missing". Callers that must tell an active generation apart from
+# every other verdict read this rather than re-deriving backend, harness, and
+# metadata themselves. <tail40> is the same bounded capture the stale path
+# already read for hashing.
+window_busy_verdict() {  # <window> <tail40>
+  local w=$1 tail40=$2 task meta
+  task=$(window_to_task "$w" "$STATE")
+  meta="$STATE/$task.meta"
+  if [ -n "$task" ] && [ -f "$meta" ]; then
+    fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40"
+    return 0
+  fi
+  fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+    "${task:-unknown}" "$STATE" "$tail40"
+}
+
 # window_is_busy: 0 when the semantic busy-state contract (bin/fm-busy-lib.sh)
 # reports busy. Idle, unknown, and dead return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
@@ -537,16 +563,7 @@ hash_pane() {
 # busy fallbacks and the launch-prompt backstop that keeps a launch pinned at
 # its fm-spawn seed from reading as provably working.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
-  task=$(window_to_task "$w" "$STATE")
-  meta="$STATE/$task.meta"
-  if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
-  else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40")
-  fi
-  case "$verdict" in
+  case "$(window_busy_verdict "$1" "$2")" in
     busy\ *) return 0 ;;
     *) return 1 ;;
   esac
@@ -611,28 +628,82 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   wake "$reason"
 }
 
-# inbox_steer_busy: the steering-inbox delivery guard. Every backend keeps the
-# recorded task's busy verdict (window_is_busy). T3 Code alone also treats its
-# native uncertainty as busy (fm_busy_is_busy), so a doorbell waits for proven
-# idle; pane staleness elsewhere still needs busy proof.
-inbox_steer_busy() {  # <window> <backend> <task> <tail40>
-  local w=$1 backend=$2 task=$3 tail40=$4
-  if [ "$backend" = t3code ]; then
-    fm_busy_is_busy t3code "$w" "$(window_harness "$w")" "$task" "$STATE" "$tail40"
-  else
-    window_is_busy "$w" "$tail40"
+# inbox_steer_verdict: the semantic classification (bin/fm-busy-lib.sh) of the
+# pane this steering inbox belongs to, e.g. "busy pi-ext" or "unknown
+# missing". One read serves both questions the delivery guard asks: is a turn
+# in flight, and is the composer's content that turn's own. T3 Code's native
+# uncertainty arrives as `unknown t3code-native`, the one unknown the delivery
+# guard still defers on.
+inbox_steer_verdict() {  # <window> <tail40>
+  window_busy_verdict "$1" "$2"
+}
+
+# inbox_steer_busy: the steering-inbox delivery guard. A `busy` verdict is busy
+# proof, and T3 Code's native uncertainty counts as busy too so its doorbell
+# waits for proven idle; every other unknown and idle is not busy proof.
+inbox_steer_busy() {  # <verdict>
+  case "${1:-}" in
+    busy\ *|unknown\ t3code-native) return 0 ;;
+  esac
+  return 1
+}
+
+# inbox_steer_note_ring_failure: record a doorbell that did not land in the
+# task's own status, instead of leaving it only in the deletable triage log. A
+# message whose bell never rang is the failure the captain must be able to see,
+# and the status is where the next supervision read looks. One line per
+# (record, result) episode: the same failure repeated on every retry stays
+# quiet, and a later success drops the marker so a new failure is reported
+# again. Best-effort - a status this watcher cannot safely append to never
+# blocks the retry ladder, which still escalates on its own budget.
+inbox_steer_note_ring_failure() {  # <task> <record-path> <ring-result>
+  local task=$1 rec=$2 result=$3 marker statusf base detail line
+  base=${rec##*/}
+  case "$base" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  marker="$STATE/.inbox-ring-failure-$task"
+  if [ "$result" = 0 ]; then
+    rm -f "$marker" 2>/dev/null || true
+    return 0
   fi
+  [ "$(cat "$marker" 2>/dev/null || true)" != "$base $result" ] || return 0
+  case "$result" in
+    1) detail='the composer holds text that is not this doorbell, so the doorbell was not typed over it' ;;
+    2) detail='the backend send failed, so the doorbell was not submitted' ;;
+    *) return 0 ;;
+  esac
+  statusf="$STATE/$task.status"
+  line="note [key=inbox-ring-$base]: the steering-inbox doorbell for $base did not land ($detail); the instruction stays durable and the retry ladder continues"
+  append_rc=0
+  fm_wake_status_append_self_announced "$STATE" "$statusf" "$line" || append_rc=$?
+  # 0 appended and self-announced, 1 appended but left for the watcher, 2 not
+  # appended at all (bin/fm-wake-lib.sh owns those codes). Anything but 2 means
+  # the note is in the file, so the marker has to record it: withholding the
+  # marker over an unverified append would repeat the same note on every retry of
+  # the same failure, which is the noise this reporter exists to replace.
+  if [ "$append_rc" -ne 2 ]; then
+    printf '%s %s\n' "$base" "$result" > "$marker" 2>/dev/null || true
+    return 0
+  fi
+  triage_log "steer-inbox doorbell for $task $base did not land ($detail) and the failure could not be written to $statusf"
+  return 1
 }
 
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # bin/fm-task-inbox-lib.sh owns delivery, busy-deferral, retry, and escalation policy.
-# Endpoint and busy checks precede delivery so recovery never types into a busy,
-# dead, or missing worker; the ring helper protects pending composer text.
+# Endpoint and busy checks precede delivery so recovery never types into a dead
+# or missing worker; the ring helper protects pending composer text.
+# A pane inside an active generation is WORKING, not stuck: its doorbell is
+# attempted now rather than deferred by the busy guard, and the busy-deferral
+# budget is not spent on an agent that is simply generating. Being busy is not a
+# licence to type, though - the ring still refuses a composer holding text that
+# is not its own doorbell line, and records that skip.
+# Only a turn that has outlived BUSY_TURN_MAX_SECS - busy proof with nothing to
+# show for it - spends that budget and can surface as stuck-busy.
 # Normal retries keep the watcher blocking rather than waking firstmate.
 # Runs for secondmates too: their pane-staleness exemption is about quiet panes
 # being healthy, while an unacknowledged instruction can still be a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state verdict
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -661,17 +732,33 @@ inbox_steer_check() {  # <window> <task>
   esac
   watcher_capture "$backend" "$w" 40 "$(window_label "$w")" || WATCHER_CAPTURE=
   tail40=$WATCHER_CAPTURE
-  if inbox_steer_busy "$w" "$backend" "$task" "$tail40"; then
-    [ "$verb" != retry ] || return 0
-    if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
+  verdict=$(inbox_steer_verdict "$w" "$tail40")
+  if inbox_steer_busy "$verdict"; then
+    # An agent that is GENERATING is working, not stuck. A proven turn in flight
+    # that has not outlived BUSY_TURN_MAX_SECS has something to show for its busy
+    # verdict, so the doorbell is attempted on this cycle - retry mark included -
+    # and the busy-deferral budget is reserved for a pane whose busy proof has run
+    # past its bound with nothing completed, which is the stuck-busy case that
+    # budget exists for. Attempting is not typing: the ring itself still refuses a
+    # composer holding text that is not ours, busy or not.
+    if [ "$(fm_busy_working_class "$verdict")" = working ] \
+      && ! busy_turn_over_age "$task"; then
+      if [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
+        reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a generating check; inspect the inbox directory)"
+        verb=escalate
+      fi
+    elif [ "$verb" = retry ]; then
+      return 0
+    elif ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
       [ -f "$rec" ] || return 0
       reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory)"
+      verb=escalate
     elif [ "$count" -ge "$(fm_task_inbox_busy_max)" ]; then
-      reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells; $rec stays unhandled and no doorbell was typed; inspect the worker)"
+      reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells past the busy-turn bound; $rec stays unhandled and no doorbell was typed; inspect the worker)"
+      verb=escalate
     else
       return 0
     fi
-    verb=escalate
   elif [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
     reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory)"
     verb=escalate
@@ -685,6 +772,11 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
+      # A ring that did not land is a message whose bell did not ring: record it
+      # durably before the ladder advances, so a silent skip is visible where
+      # supervision reads instead of only in the deletable triage log. A landed
+      # ring drops the record so the next failure is reported again.
+      inbox_steer_note_ring_failure "$task" "$rec" "$ring_rc" || true
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
@@ -702,6 +794,7 @@ inbox_steer_check() {  # <window> <task>
       ring_rc=0
       FM_COMPOSER_HARNESS=$(window_harness "$w") \
         fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      inbox_steer_note_ring_failure "$task" "$rec" "$ring_rc" || true
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
         fm_wake_append stale "$w" "$reason" || exit 1
@@ -2051,6 +2144,83 @@ wedge_defer_guard() {  # <window> <since-file> <triage-label> <idle-age> <guard-
   return 0
 }
 
+# --- wedge episode alarm bound ---------------------------------------------
+#
+# An EPISODE is one pane state: the window plus the exact stale render it is
+# stuck on. One episode may publish at most FM_WEDGE_ALARM_MAX wedge
+# escalations - the first alarm, then either the episode closes or it escalates
+# ONCE more and stays quiet until the pane renders a different state. Without
+# this bound the ladder published one escalation every STALE_ESCALATE_SECS for
+# as long as the pane sat still: twelve identical alarms for one panel in a
+# night, each costing a supervision turn and each asking for the same action.
+#
+# The budget is keyed to the pane's stale hash, not to a poll cycle and not to
+# the window's episode markers. That is what makes a FLAPPING pane one episode:
+# a pane that flips busy and back to the same idle render keeps the same hash,
+# so it keeps the same spent budget and stays quiet, while a pane that finally
+# renders something new - the state change this bound waits for - starts a
+# fresh budget and may alarm again.
+#
+# It applies to the unconfigured ladder only. A home that sets
+# FM_WEDGE_MAX_ESCALATIONS has asked for that explicit, window-scoped ceiling
+# instead, and owns the resulting ladder - including climbing to its own bound
+# and being re-engaged by deleting its marker - so this default bound stays out
+# of its way.
+#
+# The marker is .wedge-episode-alarms-<key> holding "<hash>\t<count>". It is
+# deliberately NOT cleared by wedge_episode_end: that choke point ends
+# episodes on every busy frame and hash change, so clearing here would reset a
+# flapping pane's budget each time it flapped - the exact loop this bound
+# exists to stop. A changed hash rebases the budget instead.
+FM_WEDGE_ALARM_MAX=${FM_WEDGE_ALARM_MAX:-2}
+_wedge_cap_int FM_WEDGE_ALARM_MAX "$FM_WEDGE_ALARM_MAX" 2 1
+
+wedge_episode_alarm_path() {  # <window-key>
+  printf '%s/.wedge-episode-alarms-%s' "$STATE" "$1"
+}
+
+# Alarms already published for <hash> in this window. A marker recording a
+# DIFFERENT hash describes the previous pane state, so it reports 0 and the
+# caller treats this as the episode's first attempt.
+wedge_episode_alarms() {  # <window-key> <pane-hash>
+  local path recorded count
+  path=$(wedge_episode_alarm_path "$1")
+  [ -f "$path" ] || { printf '0'; return 0; }
+  IFS=$(printf '\t') read -r recorded count < "$path" 2>/dev/null || { printf '0'; return 0; }
+  [ "$recorded" = "$2" ] || { printf '0'; return 0; }
+  case "${count:-}" in ''|*[!0-9]*) count=0 ;; esac
+  printf '%s' "$count"
+}
+
+# Spend one alarm slot for <hash>. A failed write is reported so the caller can
+# log it, and never withholds the alarm itself: an unwritable budget must not
+# silence a wedge, and the next threshold simply starts a fresh budget.
+# The budget belongs to the UNCONFIGURED ladder, so a configured
+# FM_WEDGE_MAX_ESCALATIONS owns its ladder outright and this is a no-op there.
+# That guard lives here, in the function that owns the budget, because a caller
+# that forgot it would let a capped run accrue a budget nobody is checking: the
+# counter would then already be spent the moment an operator turned the cap back
+# off, and the unconfigured ladder would answer that pane state with silence
+# instead of the alarms it had just restored.
+wedge_episode_alarm_spend() {  # <window-key> <pane-hash>
+  local path count
+  [ "$FM_WEDGE_MAX_ESCALATIONS" -eq 0 ] || return 0
+  path=$(wedge_episode_alarm_path "$1")
+  count=$(wedge_episode_alarms "$1" "$2")
+  printf '%s\t%s\n' "$2" "$((count + 1))" > "$path" 2>/dev/null || return 1
+  return 0
+}
+
+# wedge_episode_budget_ready: 0 while this episode may still publish one more
+# escalation, 1 once its bound is spent. Prints the alarms already spent so the
+# caller can word the LAST alarm as the last one.
+wedge_episode_budget_ready() {  # <window-key> <pane-hash>
+  local spent
+  spent=$(wedge_episode_alarms "$1" "$2")
+  printf '%s' "$spent"
+  [ "$spent" -lt "$FM_WEDGE_ALARM_MAX" ] || return 1
+}
+
 # wedge_write_escalation_count: commit one validated escalation count.
 # The count is cap state - the only state the ceiling below is computed from - so
 # whatever the counter file held was validated to a count by the caller, like
@@ -2135,8 +2305,13 @@ wedge_write_escalation_count() {  # <window> <window-key> <escalation-file> <sin
 # above, immediately before the wake it authorized is published: a close, a
 # fresh progress write, or a replacement request during those reads cancels
 # that wake and its count instead of surfacing an obsolete observation.
+# One episode, one alarm: on the unconfigured ladder the settled escalation is
+# checked against this pane state's alarm budget (FM_WEDGE_ALARM_MAX,
+# wedge_episode_budget_ready) before it is counted or published, and a spent
+# budget re-arms the idle timer and publishes nothing at all.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name] [stream snapshot]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
+  local _wrb_spent _wrb_suffix
   local stream_snapshot=${8:-} stream_ts stream_detail='' append_status
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
   local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
@@ -2269,6 +2444,27 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           read -r _ _ _ stream_ts <<< "$stream_snapshot"
           stream_detail=", model stream silent for $(( $(date +%s) - stream_ts ))s (foreground request)"
         fi
+        # One episode, one alarm. The pane's stale hash IS the episode identity:
+        # a budget spent for this exact render silences every later rung of the
+        # same wedge, while a different render is a different state and starts a
+        # fresh budget. A flapping pane keeps rendering the same idle frame, so
+        # it keeps the same spent budget and stays quiet - one episode, one
+        # alarm, however many times it flaps. The idle timer is re-armed rather
+        # than left to fire every poll, so the bound costs one check per
+        # STALE_ESCALATE_SECS and publishes nothing. A configured window cap
+        # owns its own ladder instead (see FM_WEDGE_ALARM_MAX).
+        if [ "$FM_WEDGE_MAX_ESCALATIONS" -eq 0 ] \
+          && ! _wrb_spent=$(wedge_episode_budget_ready "$_wkey" "$hash"); then
+          triage_log "absorbed $label (idle ${age}s, escalation bound $FM_WEDGE_ALARM_MAX already published for this pane state; staying quiet until the pane renders a different state): $win"
+          date +%s > "$since_file"
+          clear_write_tracking "$_wkey"
+          return 0
+        fi
+        _wrb_suffix=''
+        if [ "$FM_WEDGE_MAX_ESCALATIONS" -eq 0 ] \
+          && [ "$(( _wrb_spent + 1 ))" -ge "$FM_WEDGE_ALARM_MAX" ]; then
+          _wrb_suffix=", last alarm for this pane state: FM_WEDGE_ALARM_MAX=$FM_WEDGE_ALARM_MAX reached, so no further wedge escalation is published until this pane renders something new"
+        fi
         # The count is cap state - the only state the ceiling below is computed
         # from - so whatever the counter file holds is validated to a count here,
         # like every other marker this ladder reads, rather than reaching the
@@ -2280,9 +2476,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         # so a close, progress, or replacement during the publication lock wait
         # cannot leave an escalation counted for a wake that never went out.
         [ -n "$stream_snapshot" ] || wedge_write_escalation_count "$win" "$_wkey" "$escalation_file" "$since_file" "$n"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail$guard_note)"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail$guard_note$_wrb_suffix)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note$_wrb_suffix)"
         fi
         # Cap-fire block: when FM_WEDGE_MAX_ESCALATIONS is configured above 0
         # and the per-window escalation counter has reached the bound, emit
@@ -2358,7 +2554,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             esac
           fi
           triage_log "wedge permanently capped: $win (escalation $n, max $FM_WEDGE_MAX_ESCALATIONS, hash ${hash:0:12})"
-          [ "$_wrb_cap_status" -eq 3 ] || wake "$_wrb_cap_reason"
+          if [ "$_wrb_cap_status" -eq 3 ]; then
+            :
+          else
+            wedge_episode_alarm_spend "$_wkey" "$hash" \
+              || triage_log "wedge episode alarm budget for $win could not be recorded; the next threshold starts a fresh budget"
+            wake "$_wrb_cap_reason"
+          fi
           return 0
         fi
         reason=$(stale_reason_naming_dialog "$reason" "$dialog")
@@ -2376,6 +2578,8 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         else
           fm_wake_append stale "$win" "$reason" || exit 1
         fi
+        wedge_episode_alarm_spend "$_wkey" "$hash" \
+          || triage_log "wedge episode alarm budget for $win could not be recorded; the next threshold starts a fresh budget"
         # The ladder's own step, not an episode end: this pane is still wedged,
         # so the idle timer restarts for the next rung of the same escalation
         # count and the cap that fired stays exactly where it is.

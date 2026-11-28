@@ -9,6 +9,11 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-busy-tests)
 
+# These fixtures drive one pane through as many rungs as the busy-ladder behavior
+# under test needs, so they pin the default per-episode alarm bound out of the
+# way; the bound itself is owned by tests/fm-watch-wedge-episode-bound.test.sh.
+export FM_WEDGE_ALARM_MAX=8
+
 # --- held downtime-marker lock must not wedge a TERM'd watcher -------------
 # fm-watch-triage-r1 flake (serial-1 CI): the EXIT cleanup publishes the
 # downtime marker under .watcher-down.lock through an unbounded acquire, so a

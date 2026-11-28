@@ -257,15 +257,44 @@ status_prefix_unrecognized() {  # <status-line>
 # it, so continuation prose that merely mentions one cannot hide a declaration.
 # An unrecognized status prefix is an event too, so that declaration is the
 # latest line instead of disappearing behind an earlier recognized one.
+# The one thing the scan drops is this home's own delivery annotation (see
+# _fm_status_line_is_inbox_ring_note): it reports an observation about the
+# worker's inbox, not a transition in the worker's state, so the worker's newest
+# real event stays the newest event.
 _fm_status_event_scan() {
   local line last='' prev='' fallback='' legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    _fm_status_line_is_inbox_ring_note "$line" && continue
+    fallback=$line
     _fm_status_line_is_event "$line" "$legacy_re" && { prev=$last; last=$line; }
   done
   printf '%s\n%s\n' "$prev" "${last:-$fallback}"
   [ -n "$last" ]
+}
+
+# 0 when <line> is THIS HOME's own delivery annotation on a task's status: the
+# `note [key=inbox-ring-<record>]` line bin/fm-watch.sh writes when a
+# steering-inbox doorbell could not be typed. It records an observation about the
+# worker's INBOX - one doorbell, one failed delivery attempt - and not a
+# transition in the worker's own state, so the newest-event scan above looks past
+# it: a doorbell that could not be typed must never retract the worker's declared
+# pause or hide the open decision it just failed to deliver an answer for. The
+# line stays in the file, in the tail, and in the drain's UNREAD STATUS section;
+# only the newest-event reads skip it. A note the WORKER writes is not this: it
+# carries no inbox-ring key and stays an event that can end an earlier wait.
+FM_CLASSIFY_INBOX_RING_KEY_PREFIX_DEFAULT='inbox-ring-'
+_fm_status_line_is_inbox_ring_note() {  # <line>
+  local verb key prefix=${FM_CLASSIFY_INBOX_RING_KEY_PREFIX:-$FM_CLASSIFY_INBOX_RING_KEY_PREFIX_DEFAULT}
+  case "$1" in *:*) ;; *) return 1 ;; esac
+  status_line_verb "$1" verb
+  [ "$verb" = note ] || return 1
+  key=$(_fm_decision_key "$1") || return 1
+  case "$key" in
+    "$prefix"*) return 0 ;;
+  esac
+  return 1
 }
 
 # 0 when a nonblank <line> is a recognized status event for the scan above.

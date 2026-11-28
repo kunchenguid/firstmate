@@ -253,9 +253,11 @@ queued_wakes_carrying() {  # <state> <window> <needle>
     "$1/.wake-queue" 2>/dev/null || printf '0\n'
 }
 
-# 1. Disabled by default: FM_WEDGE_MAX_ESCALATIONS=0 leaves the cap inert,
-# and a wedged worker keeps receiving stale wakes without ever firing
-# PERMANENTLY-WEDGED.
+# 1. Disabled cap: FM_WEDGE_MAX_ESCALATIONS=0 leaves the cap inert, so no
+# PERMANENTLY-WEDGED wake and no cap marker ever appear. The ladder itself is
+# still bounded per pane state by the episode alarm bound (FM_WEDGE_ALARM_MAX,
+# default 2), so the first two rounds escalate and every later round on the SAME
+# render stays quiet: one episode, at most two alarms.
 test_wedge_cap_disabled_by_default() {
   local dir state out capture_file window key pane_hash sig pid
   dir=$(make_case wedge-cap-disabled); state="$dir/state"; capture_file="$dir/pane.txt"
@@ -270,8 +272,9 @@ test_wedge_cap_disabled_by_default() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
-  # Drive five wedge polls. Each must escape (escalation n, no PERMANENTLY-WEDGED),
-  # and no cap marker may ever appear.
+  # Drive five wedge polls. The first two escape as ordinary escalations (no
+  # PERMANENTLY-WEDGED, no cap marker); the rest are absorbed by the episode
+  # bound, so the watcher keeps polling instead of publishing another alarm.
   local fakebin n
   fakebin="$dir/fakebin"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -295,16 +298,27 @@ test_wedge_cap_disabled_by_default() {
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
       "$WATCH" > "$out" &
     pid=$!
-    if ! wait_for_exit "$pid" 100; then
-      reap "$pid"; fail "wedge round $n (default config) failed to exit"
+    if [ "$n" -le 2 ]; then
+      if ! wait_for_exit "$pid" 100; then
+        reap "$pid"; fail "wedge round $n (default config) failed to exit"
+      fi
+      grep -F "escalation $n" "$out" >/dev/null \
+        || fail "default-config round $n did not publish escalation $n: $(cat "$out")"
+    else
+      wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "default-config round $n did not reach a poll: $(cat "$out")"; }
+      reap "$pid"
+      [ ! -s "$out" ] \
+        || fail "default-config round $n published another alarm for the same pane state, past the episode bound: $(cat "$out")"
     fi
     grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null && fail "default-config round $n fired PERMANENTLY-WEDGED - cap should be disabled"
     [ ! -e "$state/.wedge-permanent-$key" ] || fail "default-config wrote the window-scoped cap marker (cap must stay inert)"
     ack_stopped_cycle "$state" || fail "default-config round $n ack failed"
     n=$((n + 1))
   done
+  [ "$(cat "$state/.wedge-escalations-$key")" = 2 ] \
+    || fail "the escalation count grew past the episode bound: $(cat "$state/.wedge-escalations-$key")"
   unset FM_FAKE_CREW_STATE
-  pass "FM_WEDGE_MAX_ESCALATIONS=0 keeps the cap inert and never writes a cap marker"
+  pass "FM_WEDGE_MAX_ESCALATIONS=0 keeps the cap inert and never writes a cap marker, while one pane state still alarms at most FM_WEDGE_ALARM_MAX times"
 }
 
 # 2. Cap fires at threshold with PERMANENTLY-WEDGED and writes the
@@ -1603,6 +1617,46 @@ test_wedge_cap_off_ignores_leftover_markers() {
   pass "with the cap off, a leftover cap marker or rollback-failure sentinel silences nothing"
 }
 
+# The default per-episode budget (FM_WEDGE_ALARM_MAX) belongs to the
+# unconfigured ladder. A configured cap must not accrue it while it runs: the
+# counter would then already be spent when an operator turns the cap back off,
+# and the unconfigured ladder would answer that pane state with silence instead
+# of the alarms it just restored. Turning the cap off is the operator asking for
+# the ladder back, so it must never be the moment the ladder goes quiet.
+test_wedge_cap_off_restores_alarms_after_a_configured_cap() {
+  local dir state out capture_file window key pane_hash budget
+  dir=$(make_case wedge-cap-off-restores); state="$dir/state"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"
+  window="test:fm-wedge-cap-off-restores"
+  printf 'idle wedged content' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/wedge-cap-off-restores.meta"
+  printf 'working: still wedged\n' > "$state/wedge-cap-off-restores.status"
+  key=$(watch_window_key "$window")
+  pane_hash=$(hash_text "idle wedged content")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  budget="$state/.wedge-episode-alarms-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  prime_and_ack "$dir" 2 || fail "prime-and-ack failed"
+  poll_wedge_round "$dir" 2 ""
+  poll_wedge_round "$dir" 2 ""
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    || fail "the configured cap never fired: $(cat "$out")"
+  [ ! -e "$budget" ] \
+    || fail "a configured cap spent the default per-episode budget: $(cat "$budget")"
+
+  # The operator asks for the unconfigured ladder back: drop the cap marker and
+  # turn the cap off.
+  rm -f "$state/.wedge-permanent-$key"
+  poll_wedge_round "$dir" 0 ""
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "turning the cap off published nothing for a wedged pane: $(cat "$out")"
+  grep -F "PERMANENTLY-WEDGED" "$out" >/dev/null \
+    && fail "the cap fired while FM_WEDGE_MAX_ESCALATIONS was off: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a configured cap spends no default per-episode budget, so turning it off restores the alarms"
+}
+
 # The release boundary is a wedge EPISODE, so the first-sight routes have to
 # honour it as strictly as the reset routes do: each ends the episode the cap
 # fired in and opens a new one on the very next render, and a window left capped
@@ -1928,3 +1982,4 @@ test_wedge_cap_reports_gone_endpoint_on_terminal_override_route() {
 }
 
 test_wedge_cap_reports_gone_endpoint_on_terminal_override_route
+test_wedge_cap_off_restores_alarms_after_a_configured_cap

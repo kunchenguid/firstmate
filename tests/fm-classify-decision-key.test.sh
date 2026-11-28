@@ -603,4 +603,46 @@ test_recorded_line_stays_recorded_across_a_resolve() {
   pass "a recorded line stays recorded across a later resolve"
 }
 
+# The home's own delivery annotations - the `note [key=inbox-ring-<record>]`
+# line bin/fm-watch.sh writes when a steering-inbox doorbell could not be typed -
+# report an observation about the worker's INBOX, not a transition in the
+# worker's own state. The newest-event reads must look past them: a skipped
+# doorbell must never retract a worker's declared pause or hide the open decision
+# it just failed to deliver an answer for. A worker's own note is untouched.
+test_delivery_notes_never_stand_in_for_the_workers_state() {
+  local dir f note
+  dir=$(case_dir delivery-note)
+  note='note [key=inbox-ring-001.msg] [at=1700000000]: the steering-inbox doorbell for 001.msg did not land (the composer holds text that is not this doorbell, so the doorbell was not typed over it); the instruction stays durable and the retry ladder continues'
+
+  f="$dir/paused.status"
+  printf 'working: drafting\npaused: waiting on the vendor release\n' > "$f"
+  printf '%s\n' "$note" >> "$f"
+  [ "$(last_status_line "$f")" = 'paused: waiting on the vendor release' ] \
+    || fail "a delivery note became the newest event: '$(last_status_line "$f")'"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on the vendor release' ] \
+    || fail "a delivery note retracted a declared pause: '$(status_declared_wait_line "$f")'"
+
+  f="$dir/blocked.status"
+  printf 'blocked [key=need-color]: which color\n' > "$f"
+  printf '%s\n' "$note" >> "$f"
+  [ "$(status_worker_wait_verb "$f")" = blocked ] \
+    || fail "a delivery note hid the worker's open blocker: '$(status_worker_wait_verb "$f")'"
+
+  # The class is exactly our own annotation: a note the WORKER wrote is still the
+  # newest event and still ends an earlier wait, and so is a keyed note that is
+  # not this home's doorbell bookkeeping.
+  f="$dir/worker-note.status"
+  printf 'paused: waiting on the vendor release\nnote: routine reply\n' > "$f"
+  [ "$(last_status_line "$f")" = 'note: routine reply' ] \
+    || fail "a worker's own note stopped being the newest event: '$(last_status_line "$f")'"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a worker's own note stopped ending an earlier pause: '$(status_declared_wait_line "$f")'"
+  f="$dir/other-key-note.status"
+  printf 'paused: waiting on the vendor release\nnote [key=other-thing]: not our own bookkeeping\n' > "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "an unrelated keyed note was read as a delivery annotation"
+  pass "delivery notes never stand in for the worker's newest state, while a worker note still does"
+}
+
 test_recorded_line_stays_recorded_across_a_resolve
+test_delivery_notes_never_stand_in_for_the_workers_state

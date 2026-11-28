@@ -20,7 +20,9 @@
 #      acknowledgement resets the ladder for the next message.
 #   5. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
 #      aged message on an idle pane WITHOUT waking firstmate, waits on a busy
-#      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
+#      pane, never types over composer text that is not its own doorbell line
+#      even on a generating pane (and records that skip in the task status),
+#      stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, and emits exactly
 #      one stale wake once the ring budget is spent.
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
@@ -408,6 +410,53 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
+}
+
+# The invariant restored after the maintainer's P1 finding: the ring types over
+# composer text that is NOT its own doorbell line in no state at all. One
+# condition, read from the composer content alone, decides it - turn state is not
+# consulted, because text sitting in a composer belongs to whoever typed it (the
+# captain, or the worker queueing its own follow-up), never to the running turn,
+# and an Enter over it submits their draft with our constant line appended.
+test_ring_never_types_over_foreign_composer_text() {
+  local dir state rec doorbell log composer rc text
+  dir="$TMP_ROOT/ring-foreign"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_composer_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_DROP_ENTERS="$dir/drops" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+
+  # Foreign text: nothing typed, nothing submitted, the text left as it was.
+  for text in 'a half-typed draft' 'a long answer still streaming' \
+    "some other line and $doorbell"; do
+    : > "$log"; printf '%s' "$text" > "$composer"
+    rc=0; ring || rc=$?
+    [ "$rc" = 1 ] || fail "foreign composer text must skip the ring, got rc $rc for: $text"
+    [ ! -s "$log" ] || fail "foreign composer text was submitted:"$'\n'"$(cat "$log")"
+    [ "$(cat "$composer")" = "$text" ] || fail "foreign composer text was typed over: $(cat "$composer")"
+  done
+
+  # Our own line is ours to submit, so a stuck doorbell still rings.
+  : > "$log"; printf '%s' "$doorbell" > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "our own stuck doorbell should still be submitted, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "our own stuck doorbell was not submitted exactly once:"$'\n'"$(cat "$log")"
+
+  # An empty composer takes the doorbell normally.
+  : > "$log"; : > "$composer"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "an empty composer should ring, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "an empty composer did not receive the doorbell:"$'\n'"$(cat "$log")"
+  pass "inbox: the ring never types over composer text that is not its own doorbell, and still rings an empty composer or its own stuck line"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -903,7 +952,188 @@ busy_case() {
   printf 'some output\nBUSYTOKEN active\n' > "$dir/busy.capture"
   rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "please continue")
   age_path "$rec"
+  # The busy-deferral budget belongs to a pane whose busy proof has outlived
+  # BUSY_TURN_MAX_SECS - busy with nothing to show for it. Age the spawn record
+  # past that bound so the fixture is the stuck-busy pane, not a generating one;
+  # test_watcher_generating_pane_rings covers the generating case.
+  touch -t 200001010000 "$dir/state/t1.meta"
   printf '%s' "$dir"
+}
+
+# One episode, one delivery: a pane that is GENERATING is working, not stuck.
+# Its doorbell is attempted on this very cycle and the busy-deferral budget is
+# never touched, so a worker writing a long answer neither loses its message nor
+# escalates as stuck-busy. Attempting is not typing: a composer holding text that
+# is not our own doorbell line is still refused (see
+# test_watcher_never_types_over_foreign_text_while_generating).
+test_watcher_generating_pane_rings() {
+  local dir wakes
+  dir=$(busy_case generating)   # busy capture, but a FRESH spawn record: inside the turn bound
+  touch "$dir/state/t1.meta"
+  busy_steer_check "$dir"
+  grep -q 'Firstmate instruction waiting' "$dir/send.log" \
+    || fail "a generating pane did not ring the due doorbell:"$'\n'"$(cat "$dir/send.log")"
+  [ ! -s "$dir/state/.wake-queue" ] \
+    || fail "a generating pane was escalated as stuck-busy:"$'\n'"$(cat "$dir/state/.wake-queue")"
+  [ ! -e "$dir/state/t1.inbox/.busy-state" ] \
+    || fail "a generating pane spent the busy-deferral budget"
+  [ -f "$dir/state/t1.inbox/001.msg" ] || fail "the generating-pane ring lost the steer"
+  wakes=0
+  [ ! -s "$dir/state/.wake-queue" ] || wakes=$(wc -l < "$dir/state/.wake-queue")
+  [ "$wakes" = 0 ] || fail "a generating pane produced $wakes wakes"
+  pass "watcher: a generating pane rings its due doorbell and is never escalated as stuck-busy"
+}
+
+# A ring that does not land must be visible in the status, not only in the
+# deletable triage log. Here the composer provably holds an idle draft, so the
+# guard correctly refuses - and the refusal is recorded once, in the task's own
+# status, while the instruction stays durable and the ladder keeps going.
+test_watcher_ring_failure_is_visible_in_status() {
+  local dir rec statusf
+  dir=$(busy_case ring-failure-visible)
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  busy_steer_check "$dir" "$dir/draft.capture"
+  [ ! -s "$dir/send.log" ] || fail "a protected idle composer was typed into"
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "a skipped doorbell was not written to the task status:"$'\n'"$(cat "$statusf")"
+  # Once per failure episode, not once per poll.
+  busy_steer_check "$dir" "$dir/draft.capture"
+  [ "$(grep -c 'inbox-ring-001.msg' "$statusf")" = 1 ] \
+    || fail "the same ring failure was reported again on the next poll:"$'\n'"$(cat "$statusf")"
+  rec="$dir/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "the un-rung instruction stopped being durable"
+  [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 2 ] \
+    || fail "the retry ladder did not advance after the failures"
+  pass "watcher: a doorbell that cannot be typed is recorded in the task status, once per failure"
+}
+
+# The maintainer's P1 finding, end to end: a pane in the middle of a generation
+# whose composer holds text that is not our doorbell line is never typed into.
+# A busy pane does not make that text the turn's own - it belongs to whoever
+# typed it, the captain or the worker queueing a follow-up - so the ring skips
+# it, the skip is recorded in the task status with its reason, and the
+# instruction stays durable. The same generating pane with an empty composer
+# still rings, which is the other half of the invariant.
+test_watcher_never_types_over_foreign_text_while_generating() {
+  local dir statusf rec gen
+  dir=$(busy_case generating-foreign)
+  # A semantic busy record for a claude worker: proof of a turn in flight, with
+  # a spawn record still inside the turn bound.
+  gen=bb1
+  printf '%s\n' "$gen" > "$dir/state/t1.busy-gen"
+  fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  printf 'v1 gen=%s seq=1 state=busy source=claude-hook event=UserPromptSubmit ts=%s\n' \
+    "$gen" "$(date +%s)" > "$dir/state/t1.busy-state"
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+
+  # The captain's (or the worker's own queued) draft sitting in the composer.
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  busy_steer_check "$dir" "$dir/draft.capture"
+  [ ! -s "$dir/send.log" ] \
+    || fail "a generating pane's foreign composer text was typed over:"$'\n'"$(cat "$dir/send.log")"
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "the skip over foreign composer text was not recorded in the task status:"$'\n'"$(cat "$statusf")"
+  grep -qF 'not this doorbell' "$statusf" \
+    || fail "the recorded skip did not say why the doorbell was not typed:"$'\n'"$(cat "$statusf")"
+  rec="$dir/state/t1.inbox/001.msg"
+  [ -f "$rec" ] || fail "a skipped doorbell stopped being durable"
+  [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 1 ] \
+    || fail "the skip did not advance the retry ladder"
+  [ ! -s "$dir/state/.wake-queue" ] \
+    || fail "a generating pane with foreign composer text was escalated:"$'\n'"$(cat "$dir/state/.wake-queue")"
+
+  # The same generating pane, composer empty: the doorbell rings.
+  printf '╭──────────────────╮\n│                  │\n╰──────────────────╯\n' > "$dir/empty.capture"
+  : > "$dir/send.log"
+  busy_steer_check "$dir" "$dir/empty.capture"
+  grep -qF 'Firstmate instruction waiting' "$dir/send.log" \
+    || fail "an empty composer on a generating pane did not ring the doorbell:"$'\n'"$(cat "$dir/send.log")"
+  pass "watcher: foreign composer text is never typed over on a generating pane and the skip is recorded, while an empty composer still rings"
+}
+
+# A skipped doorbell is an observation about the worker's INBOX, not a
+# transition in its state: the note the watcher writes must never retract the
+# wait the worker declared, or a doorbell that could not be typed would earn the
+# worker a false stale alarm on top of it.
+test_watcher_skip_note_preserves_a_declared_wait() {
+  local dir statusf declared
+  dir=$(busy_case note-wait)
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\npaused: waiting on the vendor release\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  busy_steer_check "$dir" "$dir/draft.capture"
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "the skip was not recorded in the task status:"$'\n'"$(cat "$statusf")"
+  declared=$(bash -c '
+    . "$1"
+    status_declared_wait_line "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$statusf")
+  [ "$declared" = 'paused: waiting on the vendor release' ] \
+    || fail "a skipped doorbell retracted the worker's declared wait: '$declared'"
+  pass "watcher: a skipped doorbell's note never retracts the worker's declared wait"
+}
+
+# The note is written once per (record, failure) episode. The status append's
+# own return 1 means the line WAS appended but this home could not prove the
+# append was its own; only return 2 means nothing was written
+# (bin/fm-wake-lib.sh owns those codes). Withholding the marker over an
+# unverified append would repeat the same note on every retry of the same
+# failure, which is the noise this reporter exists to replace. The helper is
+# driven at that documented return so the case does not depend on a fixture that
+# can only be made to fail one way on one platform.
+test_watcher_note_recorded_when_the_append_is_unverified() {
+  local dir statusf
+  dir=$(busy_case note-unverified)
+  touch "$dir/state/t1.meta"
+  statusf="$dir/state/t1.status"
+  printf 'working: drafting\n' > "$statusf"
+  FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$dir/state" "$statusf" \
+    || fail "could not adopt the fixture status log"
+  printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$dir/draft.capture"
+  unverified_poll() {  # one watcher delivery check against an unverified append
+    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$dir/state" FM_SEND_LOG="$dir/send.log" \
+      FM_FAKE_TMUX_CAPTURE="$dir/draft.capture" FM_BUSY_REGEX=BUSYTOKEN \
+      FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2 \
+      bash -c '
+        . "$1"
+        fm_wake_status_append_self_announced() {
+          printf "%s\n" "$3" >> "$2"
+          return 1
+        }
+        inbox_steer_check sess:fm-t1 t1
+      ' _ "$WATCH" > "$dir/check.out" 2>&1
+  }
+  unverified_poll
+  grep -qF 'inbox-ring-001.msg' "$statusf" \
+    || fail "the unverified append did not land at all:"$'\n'"$(cat "$statusf")"
+  unverified_poll
+  [ "$(grep -c 'inbox-ring-001.msg' "$statusf")" = 1 ] \
+    || fail "an unverified append repeated its note on the next poll:"$'\n'"$(cat "$statusf")"
+  pass "watcher: a note appended without proof is still recorded once per (record, failure)"
 }
 
 test_watcher_waits_on_busy_pane() {
@@ -1391,7 +1621,13 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
+test_ring_never_types_over_foreign_composer_text
 test_watcher_rerings_idle_pane_quietly
+test_watcher_generating_pane_rings
+test_watcher_ring_failure_is_visible_in_status
+test_watcher_skip_note_preserves_a_declared_wait
+test_watcher_note_recorded_when_the_append_is_unverified
+test_watcher_never_types_over_foreign_text_while_generating
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces

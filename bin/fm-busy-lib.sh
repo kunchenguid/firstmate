@@ -1342,3 +1342,44 @@ fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     *) return 1 ;;
   esac
 }
+
+# fm_busy_turn_active: 0 when a classification proves a turn is in flight.
+# Only a `busy` verdict from a trusted source is proof; t3code-native
+# uncertainty and every other unknown are not.
+fm_busy_turn_active() {  # <verdict>
+  case "${1:-}" in
+    busy\ *) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_busy_working_class: the delivery vocabulary ONE pane's turn state and
+# composer content resolve to. Prints exactly one token:
+#   working  an active generation - a proven turn in flight. Its composer may
+#            hold text, and that text is the turn's own: a long answer
+#            streaming through the pane, or the worker's queued follow-up.
+#            An agent that is generating is WORKING, never stuck, so a caller
+#            may queue delivery behind it instead of refusing as if the text
+#            were an idle draft.
+#   idle     no active turn and nothing unsent in the composer.
+#   blocked  no active turn and the composer PROVENLY holds unsent text: the
+#            one state where typing would submit somebody else's draft, and
+#            the one state the delivery guards must keep refusing.
+#   unknown  anything else: an unreadable endpoint, or a screen the composer
+#            classifier cannot attribute.
+# The turn verdict comes from fm_busy_classify (or a recorded backend
+# equivalent), so "active" means the same thing here as everywhere else in
+# the contract. A non-empty composer NEVER degrades an active generation to
+# blocked: that misreading is what interrupted generating workers.
+fm_busy_working_class() {  # <verdict> [composer-state]
+  local verdict=${1:-} cstate=${2:-unknown}
+  if fm_busy_turn_active "$verdict"; then
+    printf 'working'
+    return 0
+  fi
+  case "$cstate" in
+    empty) printf 'idle' ;;
+    pending) printf 'blocked' ;;
+    *) printf 'unknown' ;;
+  esac
+}
