@@ -186,6 +186,7 @@ test_version_check_refuses_missing_paseo() {
 # --- target parsing -----------------------------------------------------------
 
 test_parse_target() {
+  # shellcheck source=/dev/null
   (. "$ROOT/bin/backends/paseo.sh"
     fm_backend_paseo_parse_target "aaaaaaaa-0000-0000-0000-000000000000:wks_bbbbbbbbbbbbbbbb" || exit 1
     [ "$FM_BACKEND_PASEO_TERMINAL" = "aaaaaaaa-0000-0000-0000-000000000000" ] || {

@@ -415,7 +415,7 @@ test_many_recorded_contributions_do_not_starve_a_new_branch_pr() {
   real_jq=$(command -v jq)
   printf '#!/bin/sh\nsleep 0.05\nexec %s "$@"\n' "$real_jq" > "$home/fakebin/jq"
   chmod +x "$home/fakebin/jq"
-  # shellcheck source=bin/fm-timeout-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-timeout-lib.sh"
   with_home "$home" fm_run_timed 20 bash "$home/state/pr-health.check.sh" >/dev/null 2>&1 || rc=$?
   rm "$home/fakebin/jq"

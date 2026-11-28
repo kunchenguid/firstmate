@@ -557,7 +557,7 @@ EOF
 
 classify_muse() {  # <state-dir> <id>
   (
-    # shellcheck source=bin/fm-busy-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-busy-lib.sh"
     fm_busy_classify tmux fake:0 muse "$2" "$1"
   )
@@ -565,7 +565,7 @@ classify_muse() {  # <state-dir> <id>
 
 run_state() {  # <log>
   (
-    # shellcheck source=bin/fm-busy-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-busy-lib.sh"
     fm_busy_muse_run_state "$1"
   )
@@ -928,7 +928,7 @@ EOF
 test_muse_trusts_no_record_sources() {
   local out
   out=$(
-    # shellcheck source=bin/fm-busy-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-busy-lib.sh"
     fm_busy_sources_for_harness muse
   )

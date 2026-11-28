@@ -16,7 +16,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-test-safety.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
-# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-timeout-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
@@ -4133,6 +4133,7 @@ test_list_live_scoped_to_this_homes_workspace_only() {
 # --- target parsing, key normalization ---------------------------------------
 
 test_parse_target() {
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/backends/herdr.sh"
     fm_backend_herdr_parse_target "default:w1:p2" || exit 1
     [ "$FM_BACKEND_HERDR_SESSION" = default ] || { echo "session mismatch: $FM_BACKEND_HERDR_SESSION" >&2; exit 1; }
@@ -4142,6 +4143,7 @@ test_parse_target() {
 }
 
 test_normalize_key() {
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/backends/herdr.sh"
     [ "$(fm_backend_herdr_normalize_key Enter)" = enter ] || exit 1
     [ "$(fm_backend_herdr_normalize_key Escape)" = escape ] || exit 1
@@ -5881,7 +5883,7 @@ test_dispatch_routes_herdr_backend() {
 }
 
 test_dispatch_busy_state_unknown_for_tmux() {
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state tmux 'sess:win')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for tmux (no native agent-state primitive; watcher falls back to regex)"
@@ -5897,8 +5899,9 @@ test_dispatch_composer_state_routes_by_backend() {
   # for an unrecognized backend name.
   # Sourced-guards are pre-set so fm_backend_source no-ops and these stubs are
   # never clobbered by the real per-backend files trying (and failing) a live call.
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced backend dispatcher.
   (
-    # shellcheck source=bin/fm-backend.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-backend.sh"
     _FM_BACKEND_TMUX_SOURCED=1
     _FM_BACKEND_HERDR_SOURCED=1
@@ -6472,7 +6475,7 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 # fm_backend_herdr_canonical_socket_path folds a Windows drive-letter spelling
 # into the POSIX spelling of the same socket, so the launcher's claimed socket

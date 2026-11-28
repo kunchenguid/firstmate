@@ -529,6 +529,7 @@ unit_mode_refresh_preserves_quiet() {
   lock="$qhome/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
   # The exact real-entry shape: a bare direct re-write with no explicit mode,
   # simulating the terminal-side fm-afk-start.sh redundant write that would
@@ -561,6 +562,7 @@ unit_mode_quiet_daemon_to_away() {
     lock="$qhome/state/.supervise-daemon.lock"
     mkdir -p "$lock"
     printf '%s' "$sleep_pid" > "$lock/pid"
+    # shellcheck source=/dev/null
     ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
 
     FM_HOME="$qhome" FM_STATE_OVERRIDE="$qhome/state" FM_SUPERVISOR_TARGET=unused \
@@ -1841,6 +1843,7 @@ e2e_rex() {
   # shellcheck source=tests/rex-test-safety.sh
   . "$ROOT/tests/rex-test-safety.sh"
   rex_test_prepare || { rc=$?; [ "$rc" = 1 ] && { echo "skip: Rex CLI or jq unavailable (rex e2e)"; return 0; }; fail "rex e2e: private Rex server setup failed"; return 1; }
+  # shellcheck source=/dev/null
   rex_e2e() { (unset REX_SESSION REX_BLOCK; . "$ROOT/bin/fm-backend.sh"; fm_backend_source rex; "$@"); }
   rex_e2e_shape() {  # <session-id>: window and block ids, or empty when gone
     rex_e2e fm_backend_rex_session_view "$1" | jq -c '[.windows[] | {window_id, blocks: [.layers[].blocks[].block_id]}]'

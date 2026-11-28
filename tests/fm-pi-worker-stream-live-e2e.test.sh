@@ -13,7 +13,7 @@ fm_live_gate default-on FM_PI_WORKER_STREAM_LIVE node pi jq
 PI_EXECUTABLE=$(command -v pi)
 PI_PACKAGE_DIR=$(node -e 'const fs=require("node:fs"),p=require("node:path"); console.log(p.resolve(p.dirname(fs.realpathSync(process.argv[1])),"../.."));' "$PI_EXECUTABLE")
 PI_VERSION=$(jq -r '.version' "$PI_PACKAGE_DIR/package.json") || fail "Pi package version unavailable"
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 cases="enabled disabled stalled"
 verified=1

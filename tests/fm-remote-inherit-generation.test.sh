@@ -3,9 +3,9 @@
 set -eu
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-wake-lib.sh"
-# shellcheck source=bin/fm-secondmate-nudge-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-secondmate-nudge-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-remote-inherit-generation)

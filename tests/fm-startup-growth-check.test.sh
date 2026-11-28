@@ -4,7 +4,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-pr-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-growth-check)

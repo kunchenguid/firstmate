@@ -590,6 +590,7 @@ test_optional_event_time() {
   dir=$(make_case event-time)
   # The real parent publisher deduplicates a retry against both timed and
   # legacy records without rewriting the first event's time.
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-parent-channel-lib.sh"
   line="done [corr=$CORR]: path: C:\\notes"
   printf '%s\n' "$(status_stamp_line "$line")" > "$dir/state/retry.status"
@@ -746,6 +747,7 @@ test_malformed_event_time_is_ordinary_bytes() {
       ) || fail "override lost a terminal event to a malformed tag: $line"
       printf '%s\n' "$line" > "$dir/state/scan.status"
       (
+        # shellcheck disable=SC2034 # Read by the sourced classifier.
         FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
         event=$(last_status_line "$dir/state/scan.status")
         [ "$event" = "$line" ] || exit 1

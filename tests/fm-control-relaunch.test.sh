@@ -2471,6 +2471,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   printf 'zsh' > "$dir/fake/command"
   lock="$dir/home/state/.control-rl26.lock"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
@@ -2498,6 +2499,7 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   add_ship_task "$dir" rl29 claude
   lock="$dir/home/state/.control-rl29.lock"
   (
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30

@@ -4,17 +4,17 @@
 set -u
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
-# shellcheck source=bin/fm-hermes-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-hermes-lib.sh"
-# shellcheck source=bin/fm-control-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=bin/fm-composer-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
-# shellcheck source=bin/fm-hermes-process-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-hermes-process-lib.sh"
-# shellcheck source=bin/fm-agent-process-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-agent-process-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-hermes-harness)
 unset HERMES_HOME HERMES_MANAGED_DIR

@@ -135,9 +135,9 @@ SH
   export FM_REMOTE_JOB_QUEUE_TIMEOUT=60 FM_REMOTE_JOB_TIMEOUT=30
   # shellcheck disable=SC2030 # The recording executable is local to this fixture.
   export PATH="$poll_dir/bin:$PATH" FM_POLL_SLEEP_LOG="$poll_dir/sleeps"
-  # shellcheck source=bin/fm-remote-job-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-remote-job-lib.sh"
-  # shellcheck source=bin/fm-remote-job-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-remote-job-lib.sh"
   fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
     fm-delay-job.sh 0.8 "$poll_dir/ran" </dev/null >/dev/null || fail "$FM_REMOTE_JOB_ERROR"
@@ -197,7 +197,7 @@ DEFAULT_BOUNDS=$(
   # shellcheck disable=SC2030 # This source intentionally initializes subshell-only defaults.
   FM_REMOTE_JOB_STATE_ROOT="$DEFAULT_STATE"
   export FM_REMOTE_JOB_STATE_ROOT
-  # shellcheck source=bin/fm-remote-job-lib.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-remote-job-lib.sh"
   fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-probe-job.sh </dev/null >/dev/null
   printf '%s %s\n' \
@@ -217,7 +217,7 @@ export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
 export FM_REMOTE_JOB_QUEUE_TIMEOUT=5
 # shellcheck disable=SC2031 # The sourced defaults above were confined to DEFAULT_BOUNDS.
 export FM_REMOTE_JOB_TIMEOUT=5
-# shellcheck source=bin/fm-remote-job-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-remote-job-lib.sh"
 
 # ps lstart follows the caller's locale (de_DE renders "Fr. 16 Okt. ..."),

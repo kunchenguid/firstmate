@@ -847,6 +847,7 @@ test_remote_secondmate_is_refused_by_placement() {
 
 hold_lifecycle_lock() {  # <lock-path>
   local lifecycle_lock_path=$1
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-wake-lib.sh"
   fm_lock_try_acquire "$lifecycle_lock_path" || return 1
   sleep 30

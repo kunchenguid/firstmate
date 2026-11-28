@@ -4,7 +4,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-classify-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 
 # bin/fm-harness.sh checks verified ENV markers before ancestry, but that

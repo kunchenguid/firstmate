@@ -18,7 +18,7 @@ AFK_START="$ROOT/bin/fm-afk-start.sh"
 # pane/submit helpers become defined.
 if [ -z "${FM_TEST_DAEMON_SOURCED:-}" ]; then
   export FM_TEST_DAEMON_SOURCED=1
-  # shellcheck source=bin/fm-supervise-daemon.sh
+  # shellcheck source=/dev/null
   . "$DAEMON"
 fi
 
@@ -501,6 +501,7 @@ EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
   (
     FM_DAEMON_DIR="$fakebin"
+    # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
     handle_wake() { printf '%s\n' "$1" >> "$attempts"; [ "$1" != 'signal: first' ]; }
     ! handle_durable_wakes fallback "$state"
   ) || fail "a failed wake classification was acknowledged"
@@ -545,6 +546,7 @@ printf 'WAKE_ACK_REQUIRED: retry --ack-through 1 --recovery-generation gen\n' >&
 EOF
   chmod +x "$fakebin/fm-wake-drain.sh"
   (
+    # shellcheck disable=SC2034 # Read by the sourced daemon.
     FM_DAEMON_DIR="$fakebin"
     # shellcheck disable=SC2329 # Invoked indirectly by the function under test.
     _fm_status_read_span() { return 1; }
@@ -849,6 +851,7 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
     [ "$case_name" = paused ] \
       && echo $(( $(date +%s) - 500 )) > "$state/.subsuper-paused-$key"
 
+    # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
     (
       kill() { printf 'kill %s\n' "$*" >> "$action_log"; }
       fm_backend_send_text_submit() { printf 'interrupt %s\n' "$*" >> "$action_log"; }
@@ -1418,6 +1421,7 @@ test_housekeeping_overdue_pause_opens_one_decision_in_away_mode() {
   fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
   printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$key"
   sleep 2
+  # shellcheck source=/dev/null
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
@@ -1510,6 +1514,7 @@ test_housekeeping_overdue_queue_failure_leaves_decision_open() {
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 || fail "fixture: could not record away posture"
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
   sleep 2
+  # shellcheck source=/dev/null
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
   real_escalate_add=$(declare -f escalate_add)
   escalate_add() { return 1; }
@@ -1537,6 +1542,7 @@ test_watcher_overdue_marker_does_not_hide_blocker_from_daemon() {
   printf 'blocked [key=paused-overdue-%s]: paused 90s, wait overdue - decide or release\n' "$task" >> "$statusf"
   fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
   (
+    # shellcheck source=/dev/null
     FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 . "$ROOT/bin/fm-wake-lib.sh"
     if [ "$(uname)" = Darwin ]; then identity=$(/usr/bin/stat -f '%d %i' "$statusf"); else identity=$(stat -c '%d %i' "$statusf"); fi
     printf '%s:%s\n' "$identity" "$size" > "$state/.paused-overdue-$task"
@@ -1559,6 +1565,7 @@ test_overdue_open_decision_without_marker_is_not_repeated() {
   printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
   sleep 2
   (
+    # shellcheck source=/dev/null
     FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 FM_ESCALATE_BATCH_SECS=999999 . "$ROOT/bin/fm-wake-lib.sh"
     housekeeping "$state"
     [ "$(grep -cF "blocked [key=paused-overdue-$task]" "$statusf")" -eq 1 ] || fail "an interrupted emission opened a second decision"
@@ -1582,6 +1589,7 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
         FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away posture"
         printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
         sleep 2
+        # shellcheck source=/dev/null
         . "$ROOT/bin/fm-wake-lib.sh"
         # Prefix assignments on a sourced file last only while it is sourced, so each
         # daemon call carries the fixture environment itself.
@@ -1589,12 +1597,14 @@ test_housekeeping_overdue_queue_failure_resume_discards() {
         fixture() { PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
           FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=$undated FM_ESCALATE_BATCH_SECS=999999 "$@"; }
         original_append=$(declare -f fm_wake_status_append_self_announced)
+        # shellcheck disable=SC2329 # Runtime override called by the sourced daemon.
         escalate_add() { return 1; }
         fixture housekeeping "$state"
         [ -e "$state/.paused-overdue-$task" ] || fail "failed queue lost the overdue marker"
         undated=86400
         printf '%s: worker changed wait\n' "$event" >> "$statusf"
         eval "$original_enqueue"
+        # shellcheck disable=SC2329 # Runtime override called by the sourced daemon.
         fm_wake_status_append_self_announced() { return 2; }
         case "$route" in
           housekeeping) fixture housekeeping "$state" ;;
@@ -1641,6 +1651,7 @@ test_overdue_reconcile_ignores_unrelated_and_repeated_pause() {
       configured-resolve) printf 'working: resumed\n' >> "$statusf" ;;
     esac
     (
+      # shellcheck source=/dev/null
       FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
       if [ "$event" = custom ]; then
         FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_CLASSIFY_PAUSED_VERB=holding reconcile_overdue_pause "$state" "$task"
@@ -1678,9 +1689,11 @@ test_housekeeping_overdue_initial_publication_reconciles_resume() {
       FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-afk-contract.sh" enter --words fixture >/dev/null 2>&1 || fail "fixture: away posture"
       printf '%s\n' "$(( $(date +%s) - 5000 ))" > "$state/.subsuper-paused-$task"
       sleep 2
+      # shellcheck source=/dev/null
       FM_HOME="$dir" FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
       original_append=$(declare -f fm_wake_status_append_self_announced)
       eval "${original_append/fm_wake_status_append_self_announced ()/original_append_impl ()}"
+      # shellcheck disable=SC2329 # Runtime override called by the sourced daemon.
       fm_wake_status_append_self_announced() {
         case "$3" in blocked*)
           [ "$timing" != before ] || printf 'working: resumed\n' >> "$2"
@@ -1713,6 +1726,7 @@ test_housekeeping_quiet_overdue_pause_opens_decision() {
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'fixture words' >/dev/null 2>&1 \
     || fail "fixture: could not record the quiet posture"
   sleep 2
+  # shellcheck source=/dev/null
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
     FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_PAUSE_UNDATED_MAX_SECS=1 \
@@ -1738,6 +1752,7 @@ test_housekeeping_overdue_pause_preserves_prior_actionable_event() {
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$task"
   echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-last-scan"
   sleep 2
+  # shellcheck source=/dev/null
   FM_STATE_OVERRIDE="$state" . "$ROOT/bin/fm-wake-lib.sh"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
@@ -3376,6 +3391,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
     pid=$!
     while [ ! -s "$child_file" ]; do sleep 0.05; done
     child=$(cat "$child_file")
+    # shellcheck disable=SC2034 # Read by the sourced daemon's wedge_alarm_stop_active_notifier.
     WEDGE_ALARM_NOTIFIER_PID=$pid
     wedge_alarm_stop_active_notifier
     if kill -0 "$child" 2>/dev/null; then
@@ -3408,6 +3424,7 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   state="$dir/state"; log="$dir/alert.log"; daemon_log="$dir/daemon.log"
   escalate_add "$state" "needs-decision: pick A"
   chmod u-w "$state"
+  # shellcheck disable=SC2034 # Read by the sourced daemon's wedge alarm.
   WEDGE_ALARM_LAST_EPOCH=0
   LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_MAX_DEFER_SECS=600 \
     FM_WEDGE_ALARM_CHANNEL=osascript FM_SUPERVISOR_BACKEND=herdr \
@@ -3595,6 +3612,7 @@ test_discover_supervisor_hc() {
 # adapter's two-threads error, anything else: that thread id).
 t3_discovery_stub() {
   fm_backend_source t3code || fail "could not source the t3code adapter"
+  # shellcheck disable=SC2329 # Runtime override called by the sourced daemon.
   fm_backend_t3code_thread_for_home() {
     printf '%s\n' "$1" >> "${FM_FAKE_T3_CALLS:?}"
     case "${FM_FAKE_T3_THREAD:-}" in
@@ -3681,6 +3699,7 @@ test_discover_supervisor_t3code_after_env_tmux_and_herdr() {
 test_pane_is_busy_t3code_trusts_native_verdict_without_capture() {
   local dir row
   dir=$(make_supercase primary-t3code-busy)
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_source t3code || fail "could not source the t3code adapter"
     fm_backend_capture() { : > "$dir/capture-called"; }
@@ -3706,6 +3725,7 @@ test_pane_is_busy_t3code_trusts_native_verdict_without_capture() {
 test_pane_is_busy_herdr_native_busy_state() {
   local dir
   dir=$(make_supercase primary-herdr-busy)
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_busy_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected busy_state args: $1 $2"; printf 'busy'; }
     fm_backend_capture() { fail "capture should not be consulted when busy_state is conclusive"; }
@@ -3716,6 +3736,7 @@ test_pane_is_busy_herdr_native_busy_state() {
 }
 
 test_primary_busy_guard_is_harness_scoped() {
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_busy_state() { printf 'unknown'; }
     fm_backend_capture() { printf 'esc interrupt\n'; }
@@ -3739,16 +3760,19 @@ test_pane_is_busy_defaults_to_tmux_when_backend_omitted() {
 }
 
 test_pane_input_pending_herdr_dispatch() {
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_composer_state() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected composer_state args: $1 $2"; printf 'pending'; }
     pane_input_pending "default:w1:p2" herdr || fail "pane_input_pending should report pending from herdr composer_state"
   ) || fail "herdr pane_input_pending (pending case) subshell failed"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_composer_state() { printf 'empty'; }
     if pane_input_pending "default:w1:p2" herdr; then
       fail "pane_input_pending should report not-pending for an empty herdr composer"
     fi
   ) || fail "herdr pane_input_pending (empty case) subshell failed"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_composer_state() { printf 'future-state'; }
     pane_input_pending "default:w1:p2" herdr \
@@ -3762,6 +3786,7 @@ test_inject_msg_herdr_busy_guard_defers() {
   dir=$(make_supercase inject-herdr-busy)
   state="$dir/state"
   afk_enter "$state"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_target_exists() { [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected target_exists args: $1 $2"; return 0; }
     pane_is_busy() { return 0; }
@@ -3779,6 +3804,7 @@ test_inject_msg_herdr_composer_guard_defers() {
   dir=$(make_supercase inject-herdr-pending)
   state="$dir/state"
   afk_enter "$state"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
@@ -3796,6 +3822,7 @@ test_inject_msg_herdr_pane_gone_defers() {
   dir=$(make_supercase inject-herdr-gone)
   state="$dir/state"
   afk_enter "$state"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_target_exists() { return 1; }
     pane_is_busy() { fail "busy guard should not be consulted once the pane-exists check already failed"; }
@@ -3812,6 +3839,7 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
   dir=$(make_supercase inject-herdr-submit)
   state="$dir/state"
   afk_enter "$state"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
@@ -3839,6 +3867,7 @@ test_inject_msg_defers_on_dead_shell_unknown() {
   dir=$(make_supercase inject-dead-shell)
   state="$dir/state"
   afk_enter "$state"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
@@ -3856,6 +3885,7 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   dir=$(make_supercase inject-future-composer-state)
   state="$dir/state"
   afk_enter "$state"
+  # shellcheck disable=SC2329 # Runtime overrides called by the sourced daemon.
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }

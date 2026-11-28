@@ -6,7 +6,7 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=bin/fm-dod-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-dod-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-dod-lib)

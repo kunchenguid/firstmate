@@ -33,7 +33,7 @@ set -u
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 
-# shellcheck source=bin/fm-ff-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -304,8 +304,10 @@ test_sweep_nudge_requires_instruction_change() {
   bump_primary "$w" readme
   base=$(primary_head_commit "$w/main")
 
+  # shellcheck disable=SC2034 # Read by the sourced sync library.
   FM_ROOT="$w/main" FM_HOME="$w/home"
   FF_NUDGE_WINDOWS=""
+  # shellcheck disable=SC2034 # Read by the sourced sync library.
   FF_SEEN_HOMES=""
   sweep_live_secondmate_metas "$w/home/state" "$base" yes >/dev/null
 

@@ -35,13 +35,13 @@ set -u
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-# shellcheck source=bin/fm-busy-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
-# shellcheck source=bin/fm-composer-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
-# shellcheck source=bin/fm-control-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
-# shellcheck source=bin/fm-session-lock-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-session-lock-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
@@ -108,7 +108,7 @@ test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
   ! fm_harness_process_matches ompd '' || fail "session-lock identity must not accept ompd"
   ! fm_harness_process_matches comp '' || fail "session-lock identity must not accept comp"
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-backend.sh"
   fm_backend_source tmux || fail "fm_backend_source tmux failed"
   [ "$(fm_agent_process_classify_name omp)" = agent ] || fail "tmux liveness must classify omp as an agent"

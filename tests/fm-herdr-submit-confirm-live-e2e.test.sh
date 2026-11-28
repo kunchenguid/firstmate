@@ -147,7 +147,7 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 
 # Away-mode digests start with U+2063, which Claude's composer read-back drops.
 # The pre-Enter proof must still accept the rest of the payload.
-# shellcheck source=bin/fm-operational-input.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 i=0
 while [ "$i" -lt 45 ]; do

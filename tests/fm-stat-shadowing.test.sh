@@ -81,7 +81,9 @@ pass "shadowing: fake GNU stat shadows /usr/bin/stat in PATH"
 
 # --- test the fixed helpers under shadowing ----------------------------------
 
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-supervision-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-startup-memory-budget-lib.sh"
 
 TESTFILE="$TMP_ROOT/testfile"
@@ -114,6 +116,7 @@ if [ -z "$RESULT_SIZE" ]; then
   fail "_fm_status_file_size: could not get size via /usr/bin/stat"
 fi
 # Verify the helper itself works by checking that calling it with /usr/bin/stat prefix matches
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
 HELPER_SIZE=$(_fm_status_file_size "$TESTFILE") || true
 if [ -z "$HELPER_SIZE" ] || [ "$HELPER_SIZE" != "$RESULT_SIZE" ]; then
@@ -127,6 +130,7 @@ pass "_fm_status_file_size returns correct byte size under GNU stat shadowing"
 # to the temp root via FM_STATE_OVERRIDE so no artifact escapes into the repo's
 # git-ignored state/ directory.
 export FM_STATE_OVERRIDE="$TMP_ROOT/state"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-watch.sh"
 RESULT_WATCH_MTIME=$(stat_mtime "$TESTFILE") || true
 if [ -z "$RESULT_WATCH_MTIME" ] || [ "$RESULT_WATCH_MTIME" != "$EXPECTED_MTIME" ]; then

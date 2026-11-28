@@ -425,6 +425,7 @@ test_park_serializes_final_check_with_inbox_delivery() {
   w=$(make_world park-inbox-lock "$GH_URL")
   local FM_HOME="$w"
   export FM_HOME
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-task-inbox-lib.sh"
   gh_fixture "$w/gh.1.json"
   lock=$(fm_task_inbox_delivery_lock_path "$w/state" lane)

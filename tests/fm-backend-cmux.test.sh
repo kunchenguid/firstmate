@@ -257,6 +257,7 @@ test_cli_exports_password_only_when_configured() {
 # --- target parsing, key normalization ---------------------------------------
 
 test_parse_target() {
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/backends/cmux.sh"
     fm_backend_cmux_parse_target "11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222" || exit 1
     [ "$FM_BACKEND_CMUX_WORKSPACE" = "11111111-1111-1111-1111-111111111111" ] || { echo "workspace mismatch: $FM_BACKEND_CMUX_WORKSPACE" >&2; exit 1; }
@@ -266,6 +267,7 @@ test_parse_target() {
 }
 
 test_normalize_key() {
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/backends/cmux.sh"
     [ "$(fm_backend_cmux_normalize_key Enter)" = enter ] || { echo "Enter failed" >&2; exit 1; }
     [ "$(fm_backend_cmux_normalize_key Escape)" = escape ] || { echo "Escape failed" >&2; exit 1; }

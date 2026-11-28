@@ -28,7 +28,7 @@ WORKER="$FIXTURE_ROOT/bin/fm-remote-job-worker.sh"
 # ~/.firstmate/remote-job.
 export FM_REMOTE_JOB_STATE_ROOT="$TMP_ROOT/state"
 export FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux
-# shellcheck source=bin/fm-remote-job-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-remote-job-lib.sh"
 STATE_ROOT=$FM_REMOTE_JOB_STATE_ROOT
 LOCK="$STATE_ROOT/worker.lock"

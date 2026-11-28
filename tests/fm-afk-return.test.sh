@@ -625,7 +625,7 @@ test_return_brief_lists_landed_work_awaiting_cleanup() {
   printf 'window=synthetic:fm-axi-mate\nbackend=tmux\nkind=secondmate\npr=https://github.com/example/child/pull/7\n' > "$dir/home/state/axi-mate.meta"
   printf 'done [at=1] [key=merged-childx]: merged childx https://github.com/example/child/pull/7\n' > "$dir/home/state/axi-mate.status"
   (
-    # shellcheck source=bin/fm-pr-lib.sh
+    # shellcheck source=/dev/null
     . "$ROOT/bin/fm-pr-lib.sh"
     fm_pr_poll_merge_mark_notified "$dir/home/state" landed github github.com example/landed 7
     fm_pr_poll_merge_mark_notified "$dir/home/state" axi-mate github github.com example/child 7
