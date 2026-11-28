@@ -56,6 +56,10 @@ The clear is refused before anything is sent when the recorded backend cannot de
 
 For a typed exit, `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
 `exit` also refuses, naming the dialog as `blocked on a prompt`, when the screen shows a recognised dialog that a further Enter would answer, whether the dialog was open before the exit command was typed or the submitting Enter opened it; it sends no Escape and chooses no option, so closing the dialog is left to the operator.
+`relaunch` resolves the Claude background-task exit picker instead of refusing, because a refused relaunch leaves the old session alive and the job's completion notice later wakes it.
+It sends only Escape, which cancels the picker and stops nothing, and never Enter, whose selected row stops the running work.
+Claude reopens the picker on `/exit` only while background work still runs, so relaunch keeps retrying `/exit` with the picker held open between attempts, which also holds the completion notice off the old session.
+When the work outlives `FM_CONTROL_PICKER_WAIT` (300 seconds by default), relaunch refuses, names the listed work, keeps the old agent running with its instructions restored, and leaves the picker open for a later retry.
 A stopped agent whose pane still shows the dialog text is not refused.
 [`fm_composer_blocking_dialog`](../bin/fm-composer-lib.sh) owns the recognised set, which today is only Claude's background-task exit picker; [its verification record](verification/runtime-backends.md#claude-background-task-exit-picker) lists the dialogs that are not covered.
 T3 Code has no composer and its `/mcp` tools offer no session stop, so `exit` refuses there before sending anything ([`t3code-backend.md`](t3code-backend.md#current-lifecycle-and-safety)).
