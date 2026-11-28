@@ -5580,6 +5580,22 @@ test_forgejo_allow_no_pipeline_merges_only_zero_statuses() {
   [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
     || fail "forgejo-no-status-unreadable: a merge was attempted on an unread status"
 
+  # An HTTP error body that tea api printed with exit status 0 has no
+  # combined-status shape, so it is unreadable rather than zero statuses.
+  case_dir=$(make_forgejo_case forgejo-no-status-error-body)
+  printf '{"message":"Internal Server Error","url":"https://forgejo.example/api/swagger"}\n' \
+    > "$case_dir/tea-status.json"
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" --allow-no-pipeline \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "forgejo-no-status-error-body: an error body must not be waived as zero statuses"
+  assert_grep 'the combined commit status is "unreadable", not success' "$case_dir/stderr" \
+    "forgejo-no-status-error-body: the refusal did not name the unreadable status"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-no-status-error-body: a merge was attempted on an error body"
+
   # A push after verification still fails the head-bound merge.
   case_dir=$(make_forgejo_case forgejo-no-status-head-moved)
   write_forgejo_status_json "$case_dir/tea-status.json" total_count=0
