@@ -947,7 +947,7 @@ test_append_wakes_live_announced_watcher() {
 test_append_wakes_handling_successor() {
   local phase=$1 seq_state=${2:-intact} repeat=${3:-fresh}
   local dir home state fakebin predecessor successor generation watcher_pid pair sequence
-  local new_key=inbox:second new_payload='check: captain inbox note second' datebin real_date inherited_row
+  local new_key=inbox:second new_payload='check: captain inbox note second' datebin real_date inherited_row inherited_epoch
   dir=$(make_case "append-handling-$phase-$seq_state-$repeat")
   home="$dir/home"
   state="$dir/state"
@@ -990,10 +990,13 @@ test_append_wakes_handling_successor() {
     datebin="$dir/datebin"
     mkdir -p "$datebin"
     real_date=$(command -v date)
+    # Bash 3.2 does not interpret the ANSI-C tab pattern inside a here-document
+    # expansion. Extract it first so the date stub returns only the epoch.
+    inherited_epoch=${inherited_row%%$'\t'*}
     cat > "$datebin/date" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = +%s ]; then
-  printf '%s\n' "${inherited_row%%$'\t'*}"
+  printf '%s\n' "$inherited_epoch"
 else
   exec "$real_date" "\$@"
 fi
@@ -1568,15 +1571,17 @@ test_arm_refuses_a_disposable_validation_checkout() {
 # Start a real watcher through the real arm for a temporary home and set
 # WATCH_PID from the arm's started line. Both stdout and stderr land in <arm-out>
 # so the watcher's own exit reason, which it logs to stderr, is readable there.
+# These cases assert removal and cleanup, not a startup deadline. Give the
+# fork-heavy startup headroom on loaded hosts and return as soon as it settles.
 WATCH_PID=
 start_owned_watcher() {  # <home> <state> <fakebin> <arm-out>
   local home=$1 state=$2 fakebin=$3 armout=$4 i
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" > "$armout" 2>&1 &
+    FM_ARM_CONFIRM_TIMEOUT=30 "$WATCH_ARM" > "$armout" 2>&1 &
   ARM_PID=$!
   i=0
-  while [ "$i" -lt 100 ]; do
+  while [ "$i" -lt 600 ]; do
     grep -q '^watcher: started pid=' "$armout" 2>/dev/null && break
     is_live_non_zombie "$ARM_PID" || break
     sleep 0.1

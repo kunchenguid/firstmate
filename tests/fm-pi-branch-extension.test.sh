@@ -638,7 +638,9 @@ function dispatch(message, projects, heartbeat, eligible) {
   return offer;
 }
 async function settle(predicate, label) {
-  for (let i = 0; i < 250; i += 1) {
+  // These transitions invoke real shell helpers. Keep polling promptly while
+  // allowing loaded hosts to finish the work; no case here tests this budget.
+  for (let i = 0; i < 3000; i += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
