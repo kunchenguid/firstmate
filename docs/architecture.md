@@ -114,7 +114,8 @@ That bound is load-bearing rather than cosmetic: churn and staleness read the sa
 If two metadata records name the same endpoint, its marker is not attributable churn evidence for either task, so the bare turn-ended wake surfaces without changing or migrating existing marker state.
 A `kind=secondmate` task's status stream doubles as its parent-directed reply channel, so its lines new since the last classification are read before busy evidence counts: a decision, blocker, terminal outcome, `note:`, correlation-marked line, or unknown verb always surfaces, while unmarked routine `working:` and `paused:` progress is absorbed only by the same provably-working proof an ordinary crewmate gets.
 Its bare turn-ended signal is absorbed only by the ordinary authoritative working proof because an active secondmate does not enter the staleness backbone that would resurface deferred pane-churn evidence.
-A crew that declares `paused:` for a known external wait, or carries a verified `captain-held` transfer, is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge, except that a captain-held transfer is not rechecked while the away-posture record exists.
+The idle-pane stale check absorbs a declared `paused:` wait or verified `captain-held` transfer and uses the longer pause cadence for rechecks.
+The away-posture record suppresses those rechecks for a `captain-held` transfer.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint while attended; the pause classification itself is recovered only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, so a worker genuinely waiting on a decision is never silenced.
 Its later sights are still held to that same bounded cadence rather than re-alarming on every pane-hash change, because the throttle is keyed to the declaration and not to the pane an idle parked worker keeps ticking.
@@ -255,6 +256,9 @@ On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record 
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 The doorbell line is a shell no-op for pane backends and is never delivered to an endpoint classified as dead or missing; that record surfaces once for recovery instead of walking the re-ring ladder (`bin/fm-task-inbox-lib.sh` header).
 The [`fm-send.sh` header](../bin/fm-send.sh) owns the local-only direct-submit plane and its pane-specific timing; [T3 native delivery](t3code-backend.md#current-lifecycle-and-safety) owns its request-id retry policy.
+The watcher delivers completions from commands launched as task jobs through this inbox independently of declared-wait rechecks.
+[`fm-task-job-lib.sh`](../bin/fm-task-job-lib.sh) owns completion delivery, hold checks, and process-group cleanup limits.
+[`fm-task-job.sh`](../bin/fm-task-job.sh) owns usage.
 
 Text for a worker to read and commands that drive a worker's process are separate planes.
 `fm-send.sh` is the data plane and always routing-marks a `kind=secondmate` target, which is right for a message and wrong for a lifecycle command, because a marked exit command arrives as chat the agent reasons about instead of executing.

@@ -842,6 +842,28 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+test_ring_ladder_resets_for_a_queued_successor() {
+  local state first second action
+  state="$TMP_ROOT/ladder-successor/state"; mkdir -p "$state"
+  first=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "first steer")
+  second=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "queued steer")
+  age_path "$first"
+  age_path "$second"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$first"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=1 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $first 1" ] || fail "the first steer did not spend its budget: $action"
+  inbox_lib "$state" fm_task_inbox_record_escalated "$state" t1 "$first"
+  mv "$first" "$state/t1.inbox/handled/"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=1 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $second" ] || fail "the queued successor inherited an attempt, spacing, or escalation: $action"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$second"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "the successor did not retain its own retry spacing: $action"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=1 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $second 1" ] || fail "the successor did not receive its own attempt budget: $action"
+  pass "inbox: a queued successor starts a new ladder without an empty-inbox poll"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -1391,6 +1413,7 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
+test_ring_ladder_resets_for_a_queued_successor
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack

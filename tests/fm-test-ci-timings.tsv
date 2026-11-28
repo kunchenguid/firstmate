@@ -7,6 +7,8 @@
 # Split-file weights for fm-watch-triage-busy, fm-captain-hold-teardown, and the
 # reduced watch-triage/captain-hold parents are proportional splits of those
 # parent measurements, pending a refresh from green CI.
+# fm-task-job carries a provisional local macOS maximum of three samples,
+# pending a refresh from green CI.
 path	duration_ms
 tests/fm-afk-contract.test.sh	13161
 tests/fm-afk-inject-e2e.test.sh	41468
@@ -305,6 +307,7 @@ tests/fm-t3-mcp.test.sh	29857
 tests/fm-tangle-guard.test.sh	10929
 tests/fm-task-delivery.test.sh	74108
 tests/fm-task-inbox.test.sh	92900
+tests/fm-task-job.test.sh	184744
 tests/fm-tasks-axi.test.sh	2962
 tests/fm-teardown-endpoint-safety.test.sh	64960
 tests/fm-teardown.test.sh	538585
