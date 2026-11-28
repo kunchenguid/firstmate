@@ -618,6 +618,203 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
   return 0
 }
 
+# The bounded corroboration window read from `no-mistakes runs`. The listing is
+# repo-wide and has neither pagination nor an end-of-list marker, so its
+# silence proves a branch quiet only when it completed below this limit. The
+# branch-run verdict needs that proof only when `axi status` names another
+# branch's active run, so there the limit is a safety setting.
+fm_nm_runs_limit() {
+  local n=${FM_CREW_STATE_RUNS_LIMIT:-200}
+  case "$n" in ''|*[!0-9]*|0) n=200 ;; esac
+  printf '%s' "$n"
+}
+
+# `no-mistakes` answers a repository it holds no registration for with a
+# not-initialized error and no rows at all. A repository with no registration
+# owns no run, so that is an answer, not a failure to answer - the same
+# reasoning the branchless worktree rests on. firstmate supports whole project
+# modes (direct-PR, local-only) that never run `no-mistakes init`.
+fm_nm_says_unregistered() {  # <response-text>...
+  local response line
+  for response in "$@"; do
+    while IFS= read -r line; do
+      case "$line" in
+        "repo not initialized (run 'no-mistakes init' first)"|\
+        "error: repo not initialized (run 'no-mistakes init' first)") return 0 ;;
+      esac
+    done <<< "$response"
+  done
+  return 1
+}
+
+# Bounded `no-mistakes` call in $1 whose stdout and stderr are written into the
+# variables named by $2 and $3 rather than stderr being discarded, so a caller
+# can inspect the CLI's complete response when it explains a failure on either
+# stream. Both variables are assigned in the caller's scope - the call must NOT
+# be wrapped in a command
+# substitution - and the CLI's exit status is returned, or 1 when no scratch
+# file could be opened for the error stream.
+fm_nm_run_capturing_stderr() {  # <dir> <stdout-var> <stderr-var> <timeout_secs> <args...>
+  local dir=$1 outvar=$2 errvar=$3 timeout=$4 err='' rc=0 out=''
+  shift 4
+  printf -v "$outvar" '%s' ''
+  printf -v "$errvar" '%s' ''
+  if command -v mktemp >/dev/null 2>&1; then
+    err=$(mktemp "${TMPDIR:-/tmp}/fm-nm-err.XXXXXX" 2>/dev/null) || err=
+  fi
+  if [ -z "$err" ]; then
+    err="${TMPDIR:-/tmp}/fm-nm-err.$$.${RANDOM}${RANDOM}"
+    ( set -o noclobber; : > "$err" ) 2>/dev/null || return 1
+  fi
+  if out=$(fm_nm_run_bounded "$dir" "$timeout" "$@" 2>"$err"); then rc=0; else rc=$?; fi
+  printf -v "$outvar" '%s' "$out"
+  printf -v "$errvar" '%s' "$(<"$err")"
+  rm -f "$err" 2>/dev/null || :
+  return "$rc"
+}
+
+# shellcheck disable=SC2034 # FM_NM_BRANCH_RUN_* is this function's documented output tuple.
+# `fm_nm_branch_run_verdict` is the one authoritative answer to whether a
+# branch owns a live no-mistakes run. It writes `active`, `quiet`, or `unknown`
+# to FM_NM_BRANCH_RUN_VERDICT, with one diagnostic reason in
+# FM_NM_BRANCH_RUN_REASON when the answer is unknown.
+#
+# THE QUESTION IS ALWAYS "DOES THIS BRANCH HAVE AN ACTIVE RUN?", AND THE BRANCH
+# READ ANSWERS IT. `no-mistakes axi status` reports the repository's ACTIVE run
+# and only falls back to the most recent one when nothing is in flight, so a
+# successful call that places no non-terminal run on this branch is an answer:
+# this branch is quiet, whether the CLI named another branch's run or had
+# nothing to report at all. Only a branch read that could not be made - the CLI
+# failed or timed out, named an active run without a placeable branch identity,
+# or named a live run on this branch whose head cannot be placed against this
+# worktree - leaves the question open, and an open question refuses the caller
+# that needs it proven.
+#
+# The repo-wide `runs` listing is CORROBORATION ONLY. The NEWEST row for this
+# branch is a second way to establish `active` when it is non-terminal (the
+# listing's status column is each run's current status, so it catches a run a
+# stale `axi status` answer missed). Only that newest row is read: the listing
+# is ordered newest first, so an older live row never displaces the newer
+# terminal result that superseded it. A terminal or empty `axi status`
+# answer means nothing is in flight in the repository, so the listing's
+# silence or failure never weakens it. Only when `axi status` names ANOTHER
+# branch's active run does quiet need the listing as well: then a row for this
+# branch, or a listing that completed below its requested limit, is required,
+# and a failed or capped listing without such a row leaves the question open.
+# An unregistered repository and an absent CLI remain explicit no-run cases.
+#
+# The verdict carries no run detail: it answers the safety question and names
+# the active run's id when the branch read placed one. Callers that need run
+# detail read it through their own attribution. A direct active answer skips
+# the optional listing entirely.
+fm_nm_branch_run_verdict() {  # <worktree> <branch> <timeout_secs> [limit]
+  local wt=$1 branch=$2 timeout=$3 limit=${4:-}
+  local status_out='' status_rc status_stderr='' status_body='' direct_status=''
+  local run_branch_raw='' run_branch='' run_head=''
+  local branch_state=unknown branch_reason='' active_id=''
+  local inventory row st rest br sha listing_live='' listing_rows=0 listing_matched=0 other_active=0
+  FM_NM_BRANCH_RUN_VERDICT=unknown
+  FM_NM_BRANCH_RUN_REASON=
+  FM_NM_BRANCH_RUN_ID=
+  case "$limit" in ''|*[!0-9]*|0) limit=$(fm_nm_runs_limit) ;; esac
+  [ -d "$wt" ] || {
+    FM_NM_BRANCH_RUN_REASON="worktree '$wt' is not readable, so whether branch '$branch' has a run in flight could not be read"
+    return 0
+  }
+  [ -n "$branch" ] || {
+    FM_NM_BRANCH_RUN_VERDICT=quiet
+    return 0
+  }
+  command -v no-mistakes >/dev/null 2>&1 || {
+    FM_NM_BRANCH_RUN_VERDICT=quiet
+    return 0
+  }
+  if fm_nm_run_capturing_stderr "$wt" status_out status_stderr "$timeout" axi status; then status_rc=0; else status_rc=$?; fi
+  if [ "$status_rc" = 0 ]; then
+    branch_state=quiet
+    status_body=$(fm_nm_trim "$status_out")
+    if [ -n "$status_body" ]; then
+      direct_status=$(fm_nm_strip_quotes "$(fm_nm_field "$status_out" status)")
+      run_branch_raw=$(fm_nm_trim "$(fm_nm_field "$status_out" branch)")
+      run_branch=$(fm_nm_strip_quotes "$run_branch_raw")
+      run_head=$(fm_nm_strip_quotes "$(fm_nm_field "$status_out" head)")
+      if [ -z "$direct_status" ]; then
+        branch_state=unknown
+        branch_reason="'no-mistakes axi status' returned a non-empty result without a readable run status for branch $branch"
+      elif fm_nm_run_is_active "$status_out"; then
+        case "$run_branch_raw" in
+          \"*\") ;;
+          *\"*) run_branch= ;;
+        esac
+        if [ -z "$run_branch" ] \
+          || ! git check-ref-format --branch "$run_branch" >/dev/null 2>&1; then
+          branch_state=unknown
+          branch_reason="the active run 'no-mistakes axi status' reports has no placeable branch identity, so whether it belongs to branch $branch cannot be proved"
+        elif [ "$run_branch" = "$branch" ]; then
+          if fm_nm_head_matches_worktree "$wt" "$run_head" \
+            || fm_nm_run_is_pipeline_owned_active "$status_out"; then
+            branch_state=active
+            active_id=$(fm_nm_strip_quotes "$(fm_nm_field "$status_out" id)")
+          else
+            branch_state=unknown
+            branch_reason="the run 'no-mistakes axi status' reports on branch $branch (head ${run_head:-unknown}) cannot be placed against this worktree's HEAD"
+          fi
+        else
+          other_active=1
+        fi
+      fi
+    fi
+  elif [ "$status_rc" != 0 ] \
+    && fm_nm_says_unregistered "$status_out" "$status_stderr"; then
+    branch_state=quiet
+  else
+    branch_reason="'no-mistakes axi status' could not answer whether branch $branch has a run in flight"
+  fi
+  if [ "$branch_state" != active ]; then
+    if inventory=$(fm_nm_run_checked "$wt" "$timeout" runs --limit "$limit"); then
+      while IFS= read -r row; do
+        row=$(fm_nm_trim "$row")
+        [ -n "$row" ] || continue
+        listing_rows=$((listing_rows + 1))
+        case "$row" in *" "*) ;; *) continue ;; esac
+        st=${row%% *}
+        rest=$(fm_nm_trim "${row#* }")
+        [ -n "$rest" ] || continue
+        br=${rest%% *}
+        rest=$(fm_nm_trim "${rest#* }")
+        sha=${rest%% *}
+        { [ -n "$br" ] && [ -n "$sha" ]; } || continue
+        [ "$br" = "$branch" ] || continue
+        listing_matched=1
+        case "$st" in
+          completed|failed|cancelled) ;;
+          *) listing_live=$st ;;
+        esac
+        break
+      done <<< "$inventory"
+      if [ "$other_active" = 1 ] \
+        && [ "$listing_matched" = 0 ] \
+        && [ "$listing_rows" -ge "$limit" ]; then
+        branch_state=unknown
+        branch_reason="'no-mistakes axi status' names another branch's active run and the runs listing reached its $limit-row limit without a row for branch $branch, so whether branch $branch has an active run could not be proved"
+      fi
+    elif [ "$other_active" = 1 ]; then
+      branch_state=unknown
+      branch_reason="'no-mistakes axi status' names another branch's active run and the runs listing could not answer whether branch $branch has an active run"
+    fi
+  fi
+  if [ "$branch_state" = active ]; then
+    FM_NM_BRANCH_RUN_VERDICT=active
+    FM_NM_BRANCH_RUN_ID=$active_id
+  elif [ -n "$listing_live" ]; then
+    FM_NM_BRANCH_RUN_VERDICT=active
+  elif [ "$branch_state" = quiet ]; then
+    FM_NM_BRANCH_RUN_VERDICT=quiet
+  else
+    FM_NM_BRANCH_RUN_REASON=$branch_reason
+  fi
+}
+
 # Values of column $3 in table $2 (for example `steps` or `active_steps`) of
 # captured `axi status` TOON $1, one line per row, quotes stripped. The column
 # is found by name in the table's own header, so column order is never
