@@ -688,6 +688,15 @@ IFS= read -r -d '' SHARED_NO_CD_RULE <<'EOF' || true
 EOF
 SHARED_NO_CD_RULE=${SHARED_NO_CD_RULE%$'\n'}
 
+# One shared string keeps the ship and scout process-cleanup rule identical.
+IFS= read -r -d '' SHARED_PROCESS_STOP_RULE <<'EOF' || true
+9. Never use `pkill`, `killall`, pattern-based or process-group kills, or commands that quit or signal GUI apps.
+   Stop a process only by its recorded PID or the confirmed owner PID of a port you bound.
+   Scoped teardown of resources you created or that this brief prescribes is allowed, such as a teardown command this brief names,
+   `tmux -S <your own socket> kill-server`, or `docker compose down` for a stack you started.
+EOF
+SHARED_PROCESS_STOP_RULE=${SHARED_PROCESS_STOP_RULE%$'\n'}
+
 if [ -n "$BASE_BRANCH" ]; then
   SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
 Base branch: $BASE_BRANCH"
@@ -736,6 +745,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_PROCESS_STOP_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -821,6 +831,7 @@ $ASK_USER_BLOCK
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
 $SHARED_NO_CD_RULE
+$SHARED_PROCESS_STOP_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
