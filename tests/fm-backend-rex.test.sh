@@ -157,7 +157,7 @@ test_create_task_uses_confirmed_launcher_session() {
   cap=$(fake_rex "$dir" new captain --window main --cwd /tmp --json)
   capsid=$(printf '%s' "$cap" | jq -r .session_id)
   capbid=$(printf '%s' "$cap" | jq -r '.initial_windows[0].block_ids[0]')
-  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=$capbid" \
+  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_BLOCK=$capbid" \
     'fm_backend_rex_create_task fm-alpha /tmp') || fail "create_task in the launcher session failed"
   read -r sid _ _ <<<"$out"
   assert_equals "$capsid" "$sid" "a Rex-hosted launcher must place the tab in its own session"
@@ -165,22 +165,58 @@ test_create_task_uses_confirmed_launcher_session() {
   assert_equals main "$(state_json "$dir" '.sessions[0].windows[0].label')" "the captain's tab must be untouched"
   assert_grep "--focus=false" "$dir/fake/log" "the tab must not steal focus"
 
-  rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=block:00000000-0000-7000-8000-0000000000ff" \
+  rex_env "$dir" TERM_PROGRAM=rex "REX_BLOCK=block:00000000-0000-7000-8000-0000000000ff" \
     'fm_backend_rex_create_task fm-beta /tmp' 2>/dev/null && fail "a launcher claim the server cannot confirm must be refused"
+  rex_env "$dir" TERM_PROGRAM=rex REX_BLOCK=main \
+    'fm_backend_rex_create_task fm-beta /tmp' 2>/dev/null && fail "a block label must be refused as an id"
+  assert_no_grep 'api call -s main session.view' "$dir/fake/log" "a block label must not be sent as a session selector"
   assert_equals 2 "$(state_json "$dir" '.sessions[0].windows | length')" "a refused claim must open no tab"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "a refused claim must open no per-home session"
 
-  out=$(rex_env "$dir" TERM_PROGRAM=tmux "REX_SESSION=$capsid" "REX_BLOCK=$capbid" \
+  out=$(rex_env "$dir" TERM_PROGRAM=tmux "REX_BLOCK=$capbid" \
     'fm_backend_rex_create_task fm-gamma /tmp') || fail "create_task from tmux nested in Rex failed"
   read -r sid _ _ <<<"$out"
   assert_not_equals "$capsid" "$sid" "tmux nested in a Rex block must use the per-home session"
 
-  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=$capbid" \
+  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_BLOCK=$capbid" \
     'fm_backend_rex_create_task fm-delta /tmp other-home') || fail "other-home create_task failed"
   read -r sid _ _ <<<"$out"
   assert_not_equals "$capsid" "$sid" "a secondmate home must use its own per-home session"
   assert_equals 2 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$capsid\") | .windows[]] | length")" \
     "the captain's session must hold only its own tab and the launcher-home task tab"
   pass "fm_backend_rex_create_task: confirmed launcher session gets the tab focus-safe; unconfirmed claims refuse; nested tmux and other-home use the per-home session"
+}
+
+test_create_secondmate_orders_new_session_after_launcher() {
+  local dir out
+  dir=$(new_case secondmate-order)
+  fake_rex "$dir" new launcher --window launcher-main --cwd /tmp --json >/dev/null
+  fake_rex "$dir" new unrelated --window unrelated-main --cwd /tmp --json >/dev/null
+  rex_env "$dir" TERM_PROGRAM=rex REX_BLOCK=block:00000003-0000-7000-8000-000000000003 \
+    'fm_backend_rex_create_task fm-mate /tmp other-home' >/dev/null || fail "secondmate create_task failed"
+  out=$(state_json "$dir" '[.sessions[].windows[0].label] | join(" ")')
+  assert_equals "launcher-main fm-mate unrelated-main" "$out" "the new secondmate session must follow the launcher"
+  pass "Rex orders a new secondmate session after its resolved launcher session"
+}
+
+test_discover_rex_supervisor() {
+  local dir out
+  dir=$(new_case supervisor)
+  fake_rex "$dir" new primary --window main --cwd /tmp --json >/dev/null
+  out=$(rex_env "$dir" TERM_PROGRAM=rex REX_BLOCK=block:00000003-0000-7000-8000-000000000003 \
+    TMUX_PANE= HERDR_ENV= FM_SUPERVISOR_BACKEND= FM_SUPERVISOR_TARGET= \
+    '. "$0/bin/fm-supervisor-target-lib.sh"; discover_supervisor_backend && printf " " && discover_supervisor_target') \
+    || fail "a Rex-hosted supervisor must resolve from its block"
+  assert_equals "rex 00000001-0000-7000-8000-000000000001:00000003-0000-7000-8000-000000000003" "$out" \
+    "the supervisor target must combine the resolved session and caller block ids"
+
+  if out=$(rex_env "$dir" TERM_PROGRAM=rex REX_BLOCK=block:00000000-0000-7000-8000-0000000000ff \
+    TMUX_PANE= HERDR_ENV= FM_SUPERVISOR_TARGET= \
+    '. "$0/bin/fm-supervisor-target-lib.sh"; discover_supervisor_target' 2>/dev/null); then
+    fail "an unresolvable supervisor block must be refused"
+  fi
+  assert_equals "" "$out" "an unresolvable Rex supervisor block must produce no target"
+  pass "Rex supervisor discovery resolves the block on the server and refuses a missing block"
 }
 
 test_create_task_refusals() {
@@ -636,12 +672,24 @@ test_kill_never_retires_a_foreign_session() {
   cap=$(fake_rex "$dir" new captain --window main --cwd /tmp --json)
   capsid=$(printf '%s' "$cap" | jq -r .session_id)
   capbid=$(printf '%s' "$cap" | jq -r '.initial_windows[0].block_ids[0]')
-  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_SESSION=$capsid" "REX_BLOCK=$capbid" 'fm_backend_rex_create_task fm-alpha /tmp')
+  out=$(rex_env "$dir" TERM_PROGRAM=rex "REX_BLOCK=$capbid" 'fm_backend_rex_create_task fm-alpha /tmp')
   read -r sid _ bid <<<"$out"
   fake_rex "$dir" block close -s "$capsid" "$capbid"
   rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" || fail "kill in a foreign session must succeed"
   assert_equals 1 "$(state_json "$dir" '.sessions | length')" "a session not labeled for this home must never be killed, even empty"
   pass "fm_backend_kill rex: never kills a session this home does not own, even when it is empty"
+}
+
+test_retire_protects_launcher_session() {
+  local dir sid bid
+  dir=$(new_case retire-launcher)
+  fake_rex "$dir" new "$(home_label "$dir")" --window main --cwd /tmp --json >/dev/null
+  sid=session:00000001-0000-7000-8000-000000000001
+  bid=block:00000003-0000-7000-8000-000000000003
+  rex_env "$dir" TERM_PROGRAM=rex "REX_BLOCK=$bid" "fm_backend_rex_retire_session '$sid'"
+  assert_grep "api call -s $bid session.view" "$dir/fake/log" "retirement must resolve the launcher session from its block"
+  assert_no_grep "api call -s $sid session.view" "$dir/fake/log" "the launcher session must be excluded before checking for retirement"
+  pass "Rex retirement excludes the resolved launcher session"
 }
 
 test_kill_refuses_without_proof() {
@@ -1033,6 +1081,8 @@ test_version_check_gates_api_revision
 test_parse_target_restores_prefixes
 test_create_task_per_home_session_create_then_adopt
 test_create_task_uses_confirmed_launcher_session
+test_create_secondmate_orders_new_session_after_launcher
+test_discover_rex_supervisor
 test_create_task_refusals
 test_reclaim_replaces_a_husk_and_refuses_a_live_one
 test_reclaim_fallback_placement_replaces_a_husk
@@ -1045,6 +1095,7 @@ test_current_path_follows_foreground
 test_send_literal_and_keys
 test_kill_closes_and_retires_per_home_session
 test_kill_never_retires_a_foreign_session
+test_retire_protects_launcher_session
 test_kill_refuses_without_proof
 test_teardown_retires_the_secondmate_session
 test_absence_recheck
