@@ -3,10 +3,10 @@
 # Parse the durable parent binding written into a seeded secondmate home.
 #
 # The fm-secondmate-parent.v1 record contains exactly one schema and route.
-# A local route contains exactly one absolute parent_home and no parent_host.
+# A local route contains exactly one absolute parent_home and no parent_host or parent_data.
 # A remote route contains no parent_home; current provisioning includes its SSH
-# alias as diagnostic-only parent_host, while legacy-compatible manifests may
-# omit that field.
+# alias as diagnostic-only parent_host and the parent's absolute parent_data
+# archive root for cross-host artifact preservation. Legacy records may omit them.
 # Unknown fields are reserved for forward-compatible additions.
 # Duplicate schema or route fields, a malformed local binding, an unsupported
 # route or schema, a NUL-bearing record, and a symlinked record fail closed.
@@ -14,12 +14,13 @@
 # marker remains the seed-completion point.
 
 fm_secondmate_parent_record_parse() {
-  local file=$1 line schema='' route='' parent_home='' parent_host=''
-  local schema_count=0 route_count=0 parent_home_count=0 parent_host_count=0
+  local file=$1 line schema='' route='' parent_home='' parent_host='' parent_data=''
+  local schema_count=0 route_count=0 parent_home_count=0 parent_host_count=0 parent_data_count=0
 
   FM_SECONDMATE_PARENT_ROUTE=
   FM_SECONDMATE_PARENT_HOME=
   FM_SECONDMATE_PARENT_HOST=
+  FM_SECONDMATE_PARENT_DATA=
 
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   # bash's read drops NUL bytes, and different bash generations disagree on the
@@ -46,6 +47,10 @@ fm_secondmate_parent_record_parse() {
         parent_host_count=$((parent_host_count + 1))
         parent_host=${line#parent_host=}
         ;;
+      parent_data=*)
+        parent_data_count=$((parent_data_count + 1))
+        parent_data=${line#parent_data=}
+        ;;
     esac
   done < "$file"
 
@@ -56,11 +61,19 @@ fm_secondmate_parent_record_parse() {
     local)
       [ "$parent_home_count" -eq 1 ] || return 1
       [ "$parent_host_count" -eq 0 ] || return 1
+      [ "$parent_data_count" -eq 0 ] || return 1
       case "$parent_home" in /*) ;; *) return 1 ;; esac
       FM_SECONDMATE_PARENT_HOME=$parent_home
       ;;
     remote)
       [ "$parent_home_count" -eq 0 ] || return 1
+      [ "$parent_data_count" -le 1 ] || return 1
+      if [ "$parent_data_count" -eq 1 ]; then
+        case "$parent_data" in /*) ;; *) return 1 ;; esac
+        case "$parent_data" in *$'\r'*|*$'\t'*|*'//'*) return 1 ;; esac
+        case "/$parent_data/" in */../*|*/./*) return 1 ;; esac
+        FM_SECONDMATE_PARENT_DATA=$parent_data
+      fi
       ;;
     *) return 1 ;;
   esac

@@ -213,7 +213,7 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 assert_present "$REMOTE_HOME/.fm-secondmate-parent" \
   "real remote provisioning must write a durable parent record"
 cmp -s "$REMOTE_HOME/.fm-secondmate-parent" <(
-  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote-mac\n'
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote-mac\nparent_data=%s\n' "$PARENT/data"
 ) || fail "real remote provisioning must write the exact durable remote parent record"
 
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \

@@ -5,7 +5,8 @@
 #   fm-remote-home-provision.sh < manifest
 #
 # Manifest schema fm-remote-home-provision.v1 carries a base64 charter, the
-# base64 parent SSH alias, and one base64 project record per line. Each project
+# base64 parent SSH alias and parent data directory, and one base64 project
+# record per line. Each project
 # record's origin is the URL the parent resolved and named, so this host clones
 # from it and re-validates it through bin/fm-project-origin-lib.sh instead of
 # trusting the sender. The remote code root is cloned into a private staging
@@ -28,6 +29,8 @@ MAX_MANIFEST_BYTES=1048576
 
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -106,14 +109,29 @@ CHARTER_B64=$(manifest_value "$TMP/manifest" charter_b64 || true)
 # field) still provisions; the durable parent record below simply omits the
 # host in that case rather than refusing the whole seed.
 PARENT_HOST_B64=$(manifest_value "$TMP/manifest" parent_host_b64 || true)
+PARENT_DATA_B64=$(manifest_value "$TMP/manifest" parent_data_b64 || true)
 COUNT=$(manifest_value "$TMP/manifest" project_count || true)
 base64_decode_to "$ID_B64" "$TMP/id" || die "manifest id is not valid base64"
 base64_decode_to "$CHARTER_B64" "$TMP/charter" || die "manifest charter is not valid base64"
 PARENT_HOST=
+PARENT_DATA=
 if [ -n "$PARENT_HOST_B64" ]; then
   base64_decode_to "$PARENT_HOST_B64" "$TMP/parent-host" || die "manifest parent host is not valid base64"
   PARENT_HOST=$(cat "$TMP/parent-host")
 fi
+if [ -n "$PARENT_DATA_B64" ]; then
+  base64_decode_to "$PARENT_DATA_B64" "$TMP/parent-data" || die "manifest parent data is not valid base64"
+  [ "$(wc -c < "$TMP/parent-data")" -eq "$(LC_ALL=C tr -d '\000\r\n\t' < "$TMP/parent-data" | wc -c)" ] \
+    || die "manifest parent data contains control characters"
+  PARENT_DATA=$(cat "$TMP/parent-data")
+fi
+{
+  printf 'schema=fm-secondmate-parent.v1\n'
+  printf 'route=remote\n'
+  [ -z "$PARENT_HOST" ] || printf 'parent_host=%s\n' "$PARENT_HOST"
+  [ -z "$PARENT_DATA" ] || printf 'parent_data=%s\n' "$PARENT_DATA"
+} > "$TMP/parent.binding"
+fm_secondmate_parent_record_parse "$TMP/parent.binding" || die "manifest carries an invalid parent binding"
 ID=$(cat "$TMP/id")
 safe_id "$ID" || die "manifest carries an unsafe secondmate id"
 case "$COUNT" in ''|*[!0-9]*) die "manifest project count is invalid" ;; esac
@@ -268,11 +286,7 @@ chmod 600 "$FM_HOME/data/charter.md.tmp.$$"
 mv -f -- "$FM_HOME/data/charter.md.tmp.$$" "$FM_HOME/data/charter.md"
 cp "$PROJECT_REG" "$FM_HOME/data/projects.md.tmp.$$"
 mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
-{
-  printf 'schema=fm-secondmate-parent.v1\n'
-  printf 'route=remote\n'
-  [ -z "$PARENT_HOST" ] || printf 'parent_host=%s\n' "$PARENT_HOST"
-} > "$FM_HOME/.fm-secondmate-parent.tmp.$$"
+cp "$TMP/parent.binding" "$FM_HOME/.fm-secondmate-parent.tmp.$$"
 mv -f -- "$FM_HOME/.fm-secondmate-parent.tmp.$$" "$FM_HOME/.fm-secondmate-parent"
 printf '%s\n' "$ID" > "$FM_HOME/.fm-secondmate-home.tmp.$$"
 mv -f -- "$FM_HOME/.fm-secondmate-home.tmp.$$" "$FM_HOME/.fm-secondmate-home"
