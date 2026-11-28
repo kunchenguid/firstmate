@@ -3029,6 +3029,9 @@ signal_crew_provably_working() {  # <file> ...
         ;;
     esac
     case " $seen " in *" $task "*) continue ;; esac
+    if [ -n "$seen" ] && command -v watcher_checkpoint >/dev/null 2>&1; then
+      watcher_checkpoint || return 1
+    fi
     seen="$seen $task"
     crew_is_provably_working "$task" || crew_aborted_run_superseded_by_busy "$task" || return 1
   done

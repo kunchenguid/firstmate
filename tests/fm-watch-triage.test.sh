@@ -774,6 +774,36 @@ test_secondmate_status_routine_absorbed_routed_surfaced_classifier() {
   pass "a secondmate's unmarked routine progress absorbs when provably working; routed, terminal, note, marked, and unknown lines surface"
 }
 
+test_signal_paths_checkpoint_between_workers() {
+  local dir state count_file
+  dir=$(make_case signal-checkpoints); state="$dir/state"; count_file="$dir/checkpoints"
+  : > "$count_file"
+  printf 'window=sb:fm-a\nkind=ship\n' > "$state/a.meta"
+  printf 'window=sb:fm-b\nkind=ship\n' > "$state/b.meta"
+  : > "$state/a.status"; : > "$state/b.status"
+  (
+    . "$ROOT/bin/fm-watch.sh"
+    STATE="$state"; CONFIG="$dir/config"; mkdir -p "$CONFIG"
+    : > "$CONFIG/turnend-churn-absorb"
+    TURNEND_CHURN_ABSORB_SECS=60
+    watcher_checkpoint() { printf 'x\n' >> "$count_file"; }
+    crew_is_provably_working() { return 0; }
+    signal_crew_provably_working "$state/a.status" "$state/b.status" \
+      || fail "the signal classifier rejected provably working workers"
+    : > "$state/a.turn-ended"; : > "$state/b.turn-ended"
+    printf '%s' '00000000000000000000000000000000' > "$state/.hash-$(window_key sb:fm-a)"
+    printf '%s' '11111111111111111111111111111111' > "$state/.hash-$(window_key sb:fm-b)"
+    watcher_capture() { WATCHER_CAPTURE='new pane'; }
+    wedge_episode_end() { return 0; }
+    crew_is_provably_working() { return 1; }
+    signal_turnend_panes_churned "$state/a.turn-ended" "$state/b.turn-ended" \
+      || fail "the churn classifier rejected churning workers"
+  ) || fail "signal checkpoint regression setup failed"
+  [ "$(wc -l < "$count_file" | tr -d ' ')" = 3 ] \
+    || fail "expected checkpoints between workers in each signal phase"
+  pass "signal paths checkpoint between workers"
+}
+
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
 
 test_provably_working_signal_absorbed() {
@@ -3550,6 +3580,7 @@ fm_test_run \
   test_empty_write_prune_from_the_environment_widens_the_probe \
   test_worktree_write_probe_is_wall_clock_bounded \
   test_signal_crew_provably_working_classifier \
+  test_signal_paths_checkpoint_between_workers \
   test_aborted_run_superseded_by_busy_verdict \
   test_secondmate_status_routine_absorbed_routed_surfaced_classifier \
   test_provably_working_signal_absorbed \
