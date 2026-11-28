@@ -221,6 +221,25 @@ test_read_failure_preserves_state_for_retry() {
   pass "a failed presentation read preserves status state for retry"
 }
 
+test_fleet_scan_read_failure_keeps_the_trusted_set() {
+  local dir state reader out expected=$'task8\tx\tneeds-decision\tsomething important'
+  dir=$(make_case fleet-scan-read-failure)
+  state="$dir/state"
+  reader="$dir/fail-reader"
+  printf 'needs-decision [key=x]: something important\n' > "$state/task8.status"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$reader"
+  chmod +x "$reader"
+  out=$(bash -c '. "$1"; scan_open_decisions_incremental "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$state") \
+    || fail "the bootstrap fleet scan failed"
+  [ "$out" = "$expected" ] || fail "the bootstrap fleet scan did not fold the decision: $out"
+  printf 'working: more routine content\n' >> "$state/task8.status"
+  out=$(FM_STATUS_SPAN_READER="$reader" bash -c '. "$1"; scan_open_decisions_incremental "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$state") \
+    || fail "the fleet scan failed instead of keeping the trusted set"
+  [ "$out" = "$expected" ] \
+    || fail "a transient read failure dropped the task from the fleet scan: [$out]"
+  pass "a transient status read failure keeps a task's trusted open set in the fleet scan"
+}
+
 test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
   local dir state fakebin statusfile cursor out probe real_cat status_bytes probe_bytes
   dir=$(make_case cursor-cache-read-failure)
@@ -413,6 +432,7 @@ test_kind_changes_invalidate_folded_decisions
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_preserves_state_for_retry
+test_fleet_scan_read_failure_keeps_the_trusted_set
 test_cursor_cache_read_failure_refolds_without_replaying_unread_status
 test_pre_fix_cursor_refolds_corr_tagged_decision
 test_previous_fold_cache_is_refolded_under_current_semantics
