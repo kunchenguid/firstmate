@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # project's default branch to local_done_head= in state/<task-id>.meta,
-# recorded when the done report was accepted by bin/fm-dod-lib.sh. Missing or
-# malformed heads refuse. Legacy tasks with no head must report readiness again
-# before approval. The recorded ship branch must still point at that exact commit.
+# recorded under bin/fm-dod-lib.sh's readiness contract. Before reading that
+# identity, accept the task's current head-naming done report through that
+# contract, so approval need not wait for another reader in any round.
+# Missing or malformed recorded heads otherwise refuse. Legacy tasks with no
+# head must report readiness again before approval. The recorded ship branch
+# must still point at that exact commit.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
 # rule #1 "never run state-changing git in projects/", and it is narrow: it only
 # runs for mode=local-only tasks, only after the captain approves (or yolo=on
 # auto-approves), and only as a clean fast-forward. A diverged branch needs a
-# rebase and a new task/approval record under bin/fm-dod-lib.sh's head-latching
-# contract before landing. See AGENTS.md prime directives,
-# project management, and task lifecycle.
+# rebase and renewed readiness under bin/fm-dod-lib.sh's head-latching contract
+# before landing. See AGENTS.md prime directives, project management, and task
+# lifecycle.
 # The task's existing per-task control lock serializes the captain-hold check
 # through that fast-forward. A still-held or unreadable row refuses before the
 # merge, so a captain approval must be recorded as an `answer --release` before
@@ -65,6 +68,17 @@ if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   exit 1
 fi
 MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
+if [ "$(fm_dod_meta_value "$META" mode)" = local-only ]; then
+  MERGE_DONE_LINE=$(status_current_line "$STATE/$ID.status" ship)
+  if fm_dod_local_ready_note_head "$(status_line_note "$MERGE_DONE_LINE")" >/dev/null; then
+    MERGE_DONE_REASON=$(FM_HOME="$FM_HOME" fm_dod_accept_ship_done ship local-only \
+      "$(fm_dod_meta_value "$META" worktree)" "$(fm_dod_meta_value "$META" project)" \
+      "$MERGE_DONE_LINE" "$STATE" "$ID" "$META") || {
+      echo "error: task $ID's done report could not be accepted: $MERGE_DONE_REASON" >&2
+      exit 1
+    }
+  fi
+fi
 MERGE_EXPECTED_HEAD=$(fm_dod_local_done_head "$META") || {
   echo "error: missing or malformed local done head for task $ID; report readiness before approval" >&2
   exit 1

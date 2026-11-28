@@ -352,7 +352,11 @@
 #   out as a transient rather than adopted and then refused, so a home that is
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   naming the last path seen, why it was rejected, and the pane's own output
+#   after the typed `treehouse get` (such as a full-pool message), since the
+#   refusal may close the window that holds it. FM_SPAWN_TREEHOUSE_TIMEOUT
+#   (seconds, default 60; zero or invalid values use 60) bounds the wait, for a
+#   pool whose new slots take longer than a minute to create.
 #   The root home acquires every task slot (the pane's `treehouse get` and the
 #   Herdr and t3code durable leases alike) from Treehouse's default pool; a
 #   local secondmate home passes `--root` so its slot comes from a pool outside
@@ -5540,6 +5544,25 @@ spawn_current_path() { # <target>
   hc) fm_backend_hc_current_path "$1" "$W" ;;
   esac
 }
+# spawn_treehouse_get_output <typed-line> <captures>: the non-blank pane lines after the
+# last echo of <typed-line>, joined with " | ", or all non-blank lines when
+# the echo is not in the capture. Empty when no pane output was captured.
+spawn_treehouse_get_output() { # <typed-line> <captures>
+  local screen capture
+  capture=$(fm_backend_capture "$BACKEND" "$WT_TARGET" 120 "$W" 2>/dev/null) || capture=
+  screen="$2"$'\n'"$capture"
+  printf '%s\n' "$screen" | FM_TYPED_LINE=$1 awk '
+    BEGIN { typed = ENVIRON["FM_TYPED_LINE"]; gsub(/[ \t\r]/, "", typed) }
+    {
+      row = $0
+      gsub(/[ \t\r]/, "", row)
+      joined = joined row
+      sub(/[ \t\r]+$/, "")
+    }
+    length(joined) >= length(typed) && substr(joined, length(joined) - length(typed) + 1) == typed { n = 0; next }
+    /[^ \t]/ { out[++n] = $0 }
+    END { for (i = 1; i <= n; i++) if (!printed[out[i]]++) printf "%s%s", (written++ ? " | " : ""), out[i] }'
+}
 spawn_send_literal() { # <target> <text>
   case "$BACKEND" in
   tmux) fm_backend_tmux_send_literal "$1" "$2" ;;
@@ -6135,10 +6158,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     spawn_lease_herdr_slot
   else
     if [ -n "$SPAWN_TREEHOUSE_ROOT" ]; then
-      spawn_send_text_line "$WT_TARGET" "treehouse --root $(shell_quote "$SPAWN_TREEHOUSE_ROOT") get"
+      treehouse_get_line="treehouse --root $(shell_quote "$SPAWN_TREEHOUSE_ROOT") get"
     else
-      spawn_send_text_line "$WT_TARGET" 'treehouse get'
+      treehouse_get_line='treehouse get'
     fi
+    spawn_send_text_line "$WT_TARGET" "$treehouse_get_line"
 
     # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
     # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -6172,10 +6196,15 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # misconfiguration would need machinery this path does not want - so the
     # refusal has to be self-explaining instead: carry the last path seen and the
     # reason it was rejected, and report both at the deadline.
+    # Creating a new pool slot can take minutes on a loaded host, so the window
+    # is FM_SPAWN_TREEHOUSE_TIMEOUT seconds (one poll per second), default 60.
+    treehouse_wait=${FM_SPAWN_TREEHOUSE_TIMEOUT:-}
+    [[ "$treehouse_wait" =~ ^0*[1-9][0-9]*$ ]] || treehouse_wait=60
     candidate=""
     last_seen=""
     last_reason="the pane reported no path"
-    for _ in $(seq 1 60); do
+    treehouse_screen=""
+    for _ in $(seq 1 "$treehouse_wait"); do
       p=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$p" ] || last_seen="$p"
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -6190,10 +6219,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         candidate=""
         [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
       fi
+      treehouse_screen="$treehouse_screen"$'\n'"$(fm_backend_capture "$BACKEND" "$WT_TARGET" 120 "$W" 2>/dev/null || true)"
       sleep 1
     done
     if [ -z "$WT" ]; then
-      echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+      echo "error: treehouse get did not enter an isolated worktree within ${treehouse_wait}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+      # Treehouse explains a full pool or a failed slot only in the pane, which
+      # the refusal may close, so carry its output into the error here.
+      treehouse_tail=$(spawn_treehouse_get_output "$treehouse_get_line" "$treehouse_screen")
+      [ -z "$treehouse_tail" ] || echo "error: pane output after '$treehouse_get_line': $treehouse_tail" >&2
+      echo "hint: if treehouse was still creating a slot, raise FM_SPAWN_TREEHOUSE_TIMEOUT (seconds) and spawn again" >&2
       exit 1
     fi
 
