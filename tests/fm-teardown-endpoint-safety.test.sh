@@ -990,8 +990,9 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
   done
   [ -e "$dir/lock-held" ] || fail "the local child never took the shared project lock"
 
+  # A short bound keeps this a contention refusal: the holder outlives it.
   set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  FM_TEARDOWN_TREEHOUSE_LOCK_WAIT_SECS=1 run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
   kill "$holder" 2>/dev/null || true
@@ -1007,6 +1008,54 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
     "the refusal should name the shared project lock, not some unrelated check"
 
   pass "Treehouse project locking still serializes two homes across the remote-seeded boundary"
+}
+
+test_teardown_waits_for_a_spawn_to_release_the_project_lock() {
+  local dir id=lock-waiter lock holder rc waited=0 started elapsed
+  dir=$(make_case project-lock-wait)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  # A concurrent spawn holds the shared project lock for a short slot
+  # allocation, releases it, and stays alive: the teardown must get through by
+  # waiting for the release, never by reclaiming a dead holder's lock.
+  lock=$(resolve_project_lock "$dir/home" "$dir/project") \
+    || fail "the spawn stand-in could not resolve the shared project lock"
+  FM_HOME="$dir/home" bash -c \
+    '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; sleep 2; fm_lock_release "$2" || exit 1; : > "$4"; exec sleep 30' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/lock-held" "$dir/lock-released" &
+  holder=$!
+  while [ ! -e "$dir/lock-held" ] && [ "$waited" -lt 100 ]; do
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$dir/lock-held" ] || fail "the spawn stand-in never took the shared project lock"
+  [ ! -e "$dir/lock-released" ] || fail "the spawn stand-in released the lock before teardown started"
+
+  started=$SECONDS
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  elapsed=$((SECONDS - started))
+  kill -0 "$holder" 2>/dev/null \
+    || fail "the spawn stand-in exited, so the lock may have been reclaimed rather than released"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  [ "$rc" -eq 0 ] \
+    || fail "teardown refused instead of waiting for a released project lock: $(cat "$dir/stderr")"
+  assert_present "$dir/lock-released" "teardown completed without the spawn stand-in ever releasing the lock"
+  [ "$elapsed" -ge 1 ] \
+    || fail "teardown completed in ${elapsed}s, so it never waited on the held project lock"
+  assert_absent "$dir/home/state/$id.meta" "teardown that waited for the project lock left the task record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "teardown that waited for the project lock did not return its pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a teardown contending with a short slot allocation waits for the project lock and completes"
 }
 
 # The slot-reuse sequence with only ONE discoverable record: the finished task's
@@ -1632,3 +1681,4 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+test_teardown_waits_for_a_spawn_to_release_the_project_lock
