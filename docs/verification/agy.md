@@ -7,7 +7,7 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12), and separated-composer classification on Herdr was verified live on `agy 1.5.19` (2026-11-28) |
 | Verified | 2026-09-10 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
@@ -135,14 +135,17 @@ Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
 agy is included in the session-lock name vocabulary in `bin/fm-session-lock-lib.sh` (`FM_HARNESS_RE` and `FM_HARNESS_NAMES`), recognizing an agy ancestor process as a verified session-lock holder.
 
-## Composer: unknown by design
+## Composer
 
-Byte-level capture of the idle pane shows a bare unstyled `>` between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
-The shared classifier reads that bare `>` as `unknown` under the dead-shell rule, never `empty`.
+Byte-level capture of the idle pane shows a bare `>` (or, in `--dangerously-skip-permissions` Auto mode on `agy 1.5.19`, the single-row muted placeholder `> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)` in truecolor `38;2;131;148;150`) between two full-width `─` rules, with `? for shortcuts` in the status row below.
+Verified live on `agy 1.5.19` (2026-11-28, macOS arm64) inside an isolated Herdr lab session (`fm-lab-agycomp-*` via `bin/fm-herdr-lab.sh`) using `fm_composer_classify_screen` from `bin/fm-composer-lib.sh`:
+- Idle/done pane with Herdr identity (`agy<TAB>idle` / `agy<TAB>done`): `empty`; the same frame without identity capability (`styled=1` only): `unknown`.
+- Unsubmitted typed draft (`> draft message not submitted`) with Herdr identity: `pending`.
+- Working pane (`esc to cancel`, `agy<TAB>working`) with no typed draft: `unknown`.
+The current classifier contract is in the [agy adapter reference](../../.agents/skills/harness-adapters/references/harness/agy.md), with portable coverage in `tests/fm-composer-lib.test.sh`.
 Steering still confirms delivery: the Herdr submit core leads with the native `idle`-to-`working` transition, which agy performs, and the delivery footer regex covers the tmux path.
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
 `tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
-This is the cursor precedent, not a gap to patch in shared code.
 
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 

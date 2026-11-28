@@ -2515,13 +2515,32 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
-_fm_composer_classify_pi_rows() {  # <screen> <styled>
-  local screen=$1 styled=$2 row raw content
+_fm_composer_classify_pi_rows() {  # <screen> <styled> [agent]
+  local screen=$1 styled=$2 agent=${3:-pi} row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
   while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
+    if [ "$agent" = agy ] && [ "$row" -eq $((FM_COMPOSER_SCAN_PI_OPEN + 1)) ]; then
+      if [ "$content" = '>' ]; then
+        content=''
+      elif [ "${content#'>'}" != "$content" ]; then
+        content="${content#'>'}"
+        fm_composer_normalize_trim_var content
+      fi
+      # agy 1.5.19 in --dangerously-skip-permissions (Auto mode) draws a single-row
+      # muted placeholder (`Auto mode: edits & safe commands auto-approved (shift+tab to cycle)`)
+      # in truecolor slate (rgb 131,148,150, above the default ghost-luma ceiling) that
+      # clears on the first typed character. Match only the exact single-row placeholder
+      # so any typed or multiline draft stays `pending`.
+      if [ "$styled" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -eq $((FM_COMPOSER_SCAN_PI_OPEN + 2)) ] \
+        && [ "$content" = 'Auto mode: edits & safe commands auto-approved (shift+tab to cycle)' ]; then
+        case "$raw" in
+          *$'\033[38;2;131;148;150m''Auto mode: edits & safe commands auto-approved (shift+tab to cycle)'*) content='' ;;
+        esac
+      fi
+    fi
     if [ -n "$content" ]; then
       printf 'pending'
       return 0
@@ -2546,18 +2565,21 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   agent=${identity%%$'\t'*}
-  if [ "$agent" = pi ]; then
-    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
-  else
-    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
-  fi
+  case "$agent" in
+    pi|agy)
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      ;;
+    *)
+      _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+      ;;
+  esac
 }
 
-# The pi separated-shape verdict: identity + structure conjunction (herdr's
+# The separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done pi proves an empty composer. A blocked
+# live pi/agy state, while only an idle/done agent proves an empty composer. A blocked
 # pi is parked on an interactive prompt waiting for a human keystroke: its menu
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
@@ -2578,19 +2600,16 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
-  # polytoken is the second verified owner of the separated shape (verified
-  # live, 0.8.19: a full-width separator pair over one blank or pending
-  # content row with a footer below), so its identity passes the same
-  # conjunction: an idle polytoken proves an empty composer, and a working
-  # polytoken keeps the strict unknown - its composer really is empty
-  # mid-turn (Enter queues, verified live), but the unknown keeps the
-  # busy-queue conversion honest through the submit cores.
-  if { [ "$agent" != pi ] && [ "$agent" != polytoken ]; } \
+  # Antigravity and polytoken share this separated-composer verification path.
+  # polytoken's live 0.8.19 shape is a full-width separator pair over one blank
+  # or pending content row with a footer below; its working state remains
+  # unknown so busy-queue conversion stays honest through the submit cores.
+  if { [ "$agent" != pi ] && [ "$agent" != agy ] && [ "$agent" != polytoken ]; } \
     || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+  state=$(_fm_composer_classify_pi_rows "$screen" "$styled" "$agent")
   if [ "$state" = pending ]; then
     printf 'pending'
     return 0
