@@ -484,7 +484,29 @@ NODE
   rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$PROJ_DIR" "$PROJ_DIR" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "--relaunch-copy must still refuse the project primary checkout"
   assert_agy_not_trusted "$store" "$PROJ_DIR" "--relaunch-copy registered the project primary checkout"
-  pass "fm-agy-trust.sh: --relaunch-copy trusts standalone clones, refuses primary checkouts, and --is-trusted probes read-only"
+
+  # --relaunch-copy must refuse an unrelated git repository and any linked
+  # worktree of a different repository.
+  local other_repo other_wt
+  other_repo="$CASE_DIR/unrelated-repo"
+  other_wt="$CASE_DIR/unrelated-wt"
+  mkdir -p "$other_repo"
+  git -C "$other_repo" init -q -b main
+  git -C "$other_repo" config user.email t@example.com
+  git -C "$other_repo" config user.name t
+  printf 'other\n' > "$other_repo/other.txt"
+  git -C "$other_repo" add other.txt && git -C "$other_repo" commit -q -m "unrelated root"
+  git -C "$other_repo" worktree add -q -b other-branch "$other_wt"
+
+  rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$other_repo" "$PROJ_DIR" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--relaunch-copy must refuse an unrelated git repository"
+  assert_agy_not_trusted "$store" "$other_repo" "--relaunch-copy registered an unrelated git repository"
+
+  rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$other_wt" "$PROJ_DIR" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--relaunch-copy must refuse a linked worktree of a different repository"
+  assert_agy_not_trusted "$store" "$other_wt" "--relaunch-copy registered a linked worktree of a different repository"
+
+  pass "fm-agy-trust.sh: --relaunch-copy trusts standalone clones of the project, refuses primary checkouts and unrelated repos, and --is-trusted probes read-only"
 }
 
 # The fake tmux renders an agy-shaped screen that advances through

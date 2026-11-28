@@ -9,8 +9,8 @@
 #        fm-agy-trust.sh --secondmate-home <home> <id>
 #        fm-agy-trust.sh --is-trusted <worktree>
 #   <worktree>  the isolated task worktree this spawn launches into (or, under
-#               --relaunch-copy, either a linked worktree or a standalone clone
-#               whose git dir is distinct from <project>'s common git dir)
+#               --relaunch-copy, either a linked worktree of <project> or a
+#               standalone clone sharing commit history with <project>)
 #   <project>   the primary checkout that worktree belongs to
 #   <home>      the seeded secondmate home a --secondmate launch starts in
 #   <id>        the secondmate's task id, matched against <home>/.fm-secondmate-home
@@ -164,6 +164,26 @@ if [ "$MODE" = worktree ] || [ "$MODE" = relaunch-copy ]; then
   else
     [ "$WT_REAL" != "$PROJ_REAL" ] || refuse "'$WT_REAL' is the project primary checkout, not an isolated relaunch copy"
     [ "$WT_GIT_DIR" != "$PROJ_COMMON" ] || refuse "'$WT_REAL' shares the project primary checkout git directory"
+    if [ "$WT_COMMON" != "$PROJ_COMMON" ]; then
+      # Outside the project's common git dir, accept only a standalone clone
+      # (not a linked worktree of a different project) that proves shared git
+      # lineage with <project> via at least one common root commit.
+      [ "$WT_GIT_DIR" = "$WT_COMMON" ] || refuse "'$WT_REAL' is a linked worktree of a different repository, not a relaunch copy of '$PROJ_REAL'"
+      WT_ROOTS=$(git -C "$WT_REAL" rev-list --max-parents=0 HEAD 2>/dev/null) || WT_ROOTS=
+      PROJ_ROOTS=$(git -C "$PROJ_REAL" rev-list --max-parents=0 HEAD 2>/dev/null) || PROJ_ROOTS=
+      [ -n "$WT_ROOTS" ] && [ -n "$PROJ_ROOTS" ] || refuse "cannot verify shared git history between '$WT_REAL' and project '$PROJ_REAL'"
+      NL=$'\n'
+      SHARED_ROOT=0
+      while IFS= read -r wt_root; do
+        [ -n "$wt_root" ] || continue
+        case "$NL$PROJ_ROOTS$NL" in
+          *"$NL$wt_root$NL"*) SHARED_ROOT=1; break ;;
+        esac
+      done <<EOF
+$WT_ROOTS
+EOF
+      [ "$SHARED_ROOT" -eq 1 ] || refuse "'$WT_REAL' does not share git history with project '$PROJ_REAL'"
+    fi
   fi
 else
   [ -n "$SUB_ID" ] || refuse "no secondmate id was supplied, so '$WT_REAL' cannot be matched against its seed marker"
