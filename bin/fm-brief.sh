@@ -506,6 +506,12 @@ if [ -e "$CONFIG/wait-no-turns" ]; then
 fi
 
 if [ "$KIND" = secondmate ]; then
+CHILD_RESULT_NOTE=
+if [ -e "$CONFIG/reply-child-state" ]; then
+  IFS= read -r -d '' CHILD_RESULT_NOTE <<'EOF' || true
+When this home also has `config/reply-child-state` and the request concerns one of your child tasks, run `bin/fm-secondmate-report.sh --task <child> <verb> <corr_id> <note>` with `--task <child>` before the verb, never after the note: it appends the child's current `bin/fm-crew-state.sh` verdict, and the main firstmate reads the overall result from that verdict, never from your verb, so a reply without it reads unknown.
+EOF
+fi
 SECONDMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
@@ -560,7 +566,7 @@ A request relayed to you by the main firstmate is tagged with a leading \`$FM_FR
 When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
 Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
 Optional helper: \`bin/fm-secondmate-report.sh <verb> <corr_id> <note>\` appends that correlated line to the parent channel itself - do not pass a status path, and do not write a hand path under this home.
-A plain \`echo\` that includes the same \`corr=<id>\` on this parent channel is equally valid; do not depend on the helper being present.
+${CHILD_RESULT_NOTE}A plain \`echo\` that includes the same \`corr=<id>\` on this parent channel is equally valid; do not depend on the helper being present.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.

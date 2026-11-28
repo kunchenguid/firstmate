@@ -840,6 +840,8 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter lost the mechanical helper invocation"
   assert_grep 'do not pass a status path' "$brief" \
     "secondmate charter still tells the mate to pass a hand path to the helper"
+  assert_no_grep '--task <child>' "$brief" \
+    "default charter must not request opt-in child results"
   assert_grep 'For a terse result, a status line is the whole answer.' "$brief" \
     "secondmate charter lost terse result reporting"
   assert_grep 'append a status line that points to that doc' "$brief" \
@@ -854,7 +856,24 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter did not name a landed merge as a reporting trigger"
   assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
-  pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
+  mkdir -p "$home/config"
+  touch "$home/config/wait-no-turns" "$home/config/fleet-ledger" "$home/config/ready-after-green"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" existing-settings --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep '--task <child>' "$home/data/existing-settings/brief.md" \
+    "pre-existing settings must not enable child results"
+  touch "$home/config/reply-child-state"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" child-results --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/child-results/brief.md"
+  # shellcheck disable=SC2016 # Backticks are literal generated brief text.
+  assert_grep 'run `bin/fm-secondmate-report.sh --task <child> <verb> <corr_id> <note>` with `--task <child>` before the verb' "$brief" \
+    "opted-in charter lost the child-report invocation"
+  assert_grep 'reads the overall result from that verdict, never from your verb' "$brief" \
+    "opted-in charter lost the child verdict rule"
+  assert_grep 'When this home also has' "$brief" \
+    "charter must require the mate to opt in separately"
+  pass "fm-brief.sh: marked requests preserve material reporting and make child results opt-in"
 }
 
 test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
