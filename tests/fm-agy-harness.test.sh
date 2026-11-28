@@ -444,7 +444,7 @@ test_agy_trust_refuses_out_of_scope_paths() {
 }
 
 test_agy_trust_relaunch_copy_accepts_standalone_clone_and_is_trusted() {
-  local rec store clone out rc
+  local rec store clone out rc link
   rec=$(make_agy_trust_case relaunch-clone)
   read_agy_trust_case "$rec"
   store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
@@ -467,6 +467,19 @@ test_agy_trust_relaunch_copy_accepts_standalone_clone_and_is_trusted() {
   assert_agy_trusted "$store" "$clone" "--relaunch-copy did not record the standalone clone"
   HOME="$HOME_DIR" "$TRUST" --is-trusted "$clone" >/dev/null 2>&1 \
     || fail "--is-trusted did not confirm the newly registered standalone clone"
+
+  link="$CASE_DIR/clone-link"
+  ln -s "$clone" "$link"
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$link" >/dev/null 2>&1 \
+    && fail "resolved path alone must not trust a symlinked workspace" || true
+  node - "$store" "$link" <<'NODE'
+const fs = require("node:fs");
+fs.writeFileSync(process.argv[2], JSON.stringify({trustedWorkspaces: [process.argv[3]]}));
+NODE
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$link" >/dev/null 2>&1 \
+    || fail "logical path alone must trust a symlinked workspace"
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$clone" >/dev/null 2>&1 \
+    && fail "symlink trust must not imply trust in the resolved path" || true
 
   rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$PROJ_DIR" "$PROJ_DIR" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "--relaunch-copy must still refuse the project primary checkout"

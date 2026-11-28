@@ -14,8 +14,8 @@
 #   <project>   the primary checkout that worktree belongs to
 #   <home>      the seeded secondmate home a --secondmate launch starts in
 #   <id>        the secondmate's task id, matched against <home>/.fm-secondmate-home
-#   --is-trusted read-only probe: exits 0 iff both logical and resolved paths of
-#               <worktree> are already recorded in trustedWorkspaces.
+#   --is-trusted read-only probe: exits 0 iff the logical path of <worktree>
+#               is already recorded in trustedWorkspaces.
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
 # WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
@@ -127,13 +127,12 @@ if [ "$MODE" = is-trusted ]; then
     STORE=$(real_file "$STORE") || exit 1
   fi
   [ -f "$STORE" ] && [ -r "$STORE" ] || exit 1
-  node - "$STORE" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
+  node - "$STORE" "$WT_LOGICAL" <<'NODE'
 const fs = require("node:fs");
-const [store, ...wanted] = process.argv.slice(2);
-const paths = [...new Set(wanted)];
+const [store, wanted] = process.argv.slice(2);
 try {
   const root = JSON.parse(fs.readFileSync(store, "utf8"));
-  process.exit(Array.isArray(root.trustedWorkspaces) && paths.every((p) => root.trustedWorkspaces.includes(p)) ? 0 : 1);
+  process.exit(Array.isArray(root.trustedWorkspaces) && root.trustedWorkspaces.includes(wanted) ? 0 : 1);
 } catch (_) {
   process.exit(1);
 }
