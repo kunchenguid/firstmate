@@ -1561,8 +1561,11 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
 # selected in one pass first (_fm_pending_reply_select_needing_work), so a
 # settled record costs no lock and no fork, and the per-record path below runs,
 # unchanged, only for the records that selection returns.
-fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
+# The optional checkpoint command runs before each selected record, so a caller
+# whose liveness signal must keep advancing (the watcher's beacon) is not held
+# for the sum of every record's remote observation.
+fm_pending_reply_tick() {  # <state-dir> [checkpoint-command]
+  local state=$1 checkpoint=${2:-} dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=() records=() selected=()
   dir=$(fm_pending_reply_dir "$state")
@@ -1583,6 +1586,7 @@ fm_pending_reply_tick() {  # <state-dir>
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
   for rec in ${selected[@]+"${selected[@]}"}; do
+    [ -z "$checkpoint" ] || "$checkpoint"
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)

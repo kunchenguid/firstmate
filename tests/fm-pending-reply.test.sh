@@ -1427,6 +1427,43 @@ test_tick_skips_terminal_and_reuses_target_observation() {
   pass "tick skips terminal records and reuses target observations"
 }
 
+test_tick_checkpoints_once_per_selected_record() {
+  (
+    local home state open1 open2 resolved count_file count
+    home=$(setup_parent tick-checkpoint)
+    state="$home/state"
+    count_file="$home/checkpoints"
+    : > "$count_file"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=10200
+    open1=$(fm_pending_reply_create "$home" "$state" hibit "first open request")
+    open2=$(fm_pending_reply_create "$home" "$state" hibit "second open request")
+    fm_pending_reply_mark_delivered "$state" "$open1"
+    fm_pending_reply_mark_delivered "$state" "$open2"
+    resolved=$(fm_pending_reply_create "$home" "$state" resolved "resolved request")
+    fm_pending_reply_mark_delivered "$state" "$resolved"
+    printf 'done [corr=%s]: complete\n' "$resolved" > "$state/resolved.status"
+    fm_pending_reply_try_resolve "$state" "$resolved" || fail "resolved fixture should resolve"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    # Runtime overrides called indirectly by the pending-reply tick.
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'busy'; }
+    # shellcheck disable=SC2329
+    fm_backend_capture() { fail "native busy observations should not capture"; }
+    # shellcheck disable=SC2329
+    checkpoint() { printf 'x\n' >> "$count_file"; }
+    fm_pending_reply_tick "$state" checkpoint || fail "tick with a checkpoint should succeed"
+    count=$(wc -l < "$count_file" | tr -d ' ')
+    [ "$count" = 2 ] \
+      || fail "the tick should checkpoint once per record it works (two open ones), saw $count"
+    : > "$count_file"
+    fm_pending_reply_tick "$state" || fail "tick without a checkpoint should succeed"
+    [ ! -s "$count_file" ] || fail "a tick given no checkpoint command called one"
+  ) || fail "tick checkpoint regression failed"
+  pass "the tick checkpoints once per record it works, and only when asked"
+}
+
 # Records are never pruned, so a home accumulates thousands of settled ones. The
 # tick selects the records it has work for in one pass and leaves every settled
 # record alone: it must not block on a settled record's per-record lock that a
@@ -2159,6 +2196,7 @@ test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
+test_tick_checkpoints_once_per_selected_record
 test_tick_leaves_settled_records_alone
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate

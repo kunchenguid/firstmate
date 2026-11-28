@@ -30,9 +30,9 @@ Streaming text and the genuine reply that ends a response remain visible.
 
 ### Working boat
 
-While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
+While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place, unless `config/calm-ship` selects the [spaceship variant](#spaceship-variant-configcalm-ship) below.
 No separate Calm status row is added.
-The boat claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one boat rather than two, and turning Firstmate Calm off does not clear the standalone boat.
+Calm's working presentation claims the same Pi working-row widget slot as the standalone Pi Calm extension, so a session that loads both Calms shows one working animation rather than two, and turning Firstmate Calm off does not clear the standalone boat.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 
 The boat looks like this:
@@ -59,6 +59,25 @@ Within one Pi session and Calm extension lifetime, the next working period resum
 Hidden elapsed time does not advance the animation.
 A resize while hidden clamps the frozen boat to the new width without changing its valid travel direction.
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
+
+### Spaceship variant (config/calm-ship)
+
+Calm's Pi working presentation has one selectable variant, chosen by the gitignored `config/calm-ship` file under the effective Firstmate home (the same home and `FM_CONFIG_OVERRIDE` rules `config/calm` uses).
+Anything other than `spaceship` - including an absent file - keeps the boat as the default.
+With `spaceship`, Calm replaces the boat with a saucer banner that is ambient rather than run-scoped: while Calm is active and the file selects the spaceship, the banner is present for the whole session, so Pi's stock working row is replaced for that whole time and the saucer is on screen to glance at while idle.
+While idle the saucer drifts slowly and continuously left to right across the banner in the two-row resting pose, the three-cell `(|)` saucer directly over the three-cell `|^|` hull, one column every ~1.5 seconds, wrapping marquee-style back to the left edge when it crosses the right edge, while the hull row's asymmetric `*`/`.` starfield streams one column every ~1.3 seconds, so the stars visibly move left past the chasing ship instead of just twinkling in place.
+While a run is thinking, the sprite becomes the single-row compact `=( * )` saucer, yellow, facing right, on the banner row: the saucer sweeps right one column every 880ms continuously across the full banner width, wrapping marquee-style back to the left edge when it crosses the right edge so it never parks while thinking, the starfield advances two phases per 220ms tick, and the field renders as warp streaks streaming left past the sprite.
+When the run settles, the sprite relaxes back to the two-row resting pose, the stars return to the idle cadence immediately, and the movement pace eases back into the slow drift over a bounded handful of graduated moves, one column per move and never teleporting, before the marquee sweep continues indefinitely.
+The banner's lifetime is the session's: turning Calm off clears it and restores Pi's stock working row, and a session shutdown clears it so nothing outlives the session that owns it.
+Freeze/resume continuity, resize clamping, and fresh-session reset follow the boat's contract.
+When the terminal is too narrow for a mode's sprite, that mode falls back to a single sprite-free row: the idle banner to the bare starfield below three cells, the thinking row to the bare streak field below the warp saucer's six.
+[`configuration.md`](configuration.md#working-presentation-variant-configcalm-ship) owns the `config/calm-ship` schema and re-read points.
+
+The spaceship claims that same shared Pi working-row widget slot, so the shared-slot rule above applies to whichever presentation `config/calm-ship` selects.
+The two lifetimes differ: the boat appears while an agent run is under way, and the spaceship, when selected, is an ambient presentation present for the session.
+In a home that loads both Firstmate Calm and the standalone Pi Calm extension, the shared working-row slot belongs to whichever extension is active during a run.
+The standalone boat takes the row during an agent run, so a selected spaceship returns at the next session start, or when Calm is turned back on.
+The banner is absent from that run's settle until the next session start or a Calm toggle.
 
 ### What Calm hides on Pi
 
@@ -160,7 +179,8 @@ How Calm handles that shared slot depends on whether Calm was already on when th
 - `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule, which Pi imports through its tracked symlink.
 - `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter.
 - `.pi/extensions/lib/fm-calm-pending-operational-layout.ts` owns the queued-row adapter and its session capability check.
-- `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+- `.pi/extensions/lib/fm-calm-working-ship.ts` owns the default boat's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+- `.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the selectable ambient spaceship banner, its idle drift and settle, and its own warp geometry.
 
 ### Pi regression entry points
 
@@ -206,7 +226,7 @@ Toggling Calm redraws every hooked row already on screen, so rows drawn before t
 
 ### Working sailboat on Claude Code
 
-While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry.
+While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi's default presentation draws, from the same shared sprite geometry.
 The sailboat fills the row inside the transcript margin, under one blank row so its sail never touches the highlighted prompt above it.
 It repaints on the boat's 220ms cadence, with the hull moving every 880ms.
 It reflows on resize, and appears and disappears exactly where the stock row would.
