@@ -3,9 +3,10 @@
 Audience: maintainer verification.
 
 Verified 2026-09-21 and re-verified 2026-09-22 on macOS arm64 with `devin 3000.11.1 (cc4e349ca55e)`.
+Re-checked 2026-10-24 on macOS arm64 with `devin 3000.11.205 (6dea39440ae3)` for the model listing and quota semantics below.
 The [adapter reference](../../.agents/skills/harness-adapters/references/harness/devin.md) owns operating facts; executable owners carry launch and state mechanics.
 This verification covers crewmates and scouts, with tmux as the exercised runtime backend and a Herdr 0.9.0 lab session for the lifecycle checks below.
-Primary, secondmate, ACP, and quota-provider integration are outside this guarantee.
+Primary, secondmate, and ACP integration are outside this guarantee.
 
 ## Refresh commands
 
@@ -38,6 +39,13 @@ ok - devin 3000.11.1 (cc4e349ca55e): idle interrupt sends one press; an open rev
 ok - devin 3000.11.1 (cc4e349ca55e): double Escape cancels, preserves agent, and invalidates busy state
 ok - devin 3000.11.1 (cc4e349ca55e): /quit and native -r session resume
 ```
+
+## 2026-10-24 model listing and quota semantics
+
+`devin --version` printed `devin 3000.11.205 (6dea39440ae3)`.
+`devin models list` marks `swe-2-high`, `swe-2-medium`, and `swe-2-max` Free and prices every other family, including SWE-2 Lightning.
+The same listing prices Claude, GPT, Gemini, and Grok families.
+quota-axi 0.1.67 describes its Devin `included_quota` scope as the daily and weekly included windows, which Free models do not draw on and which priced usage continues past once zeroed.
 
 ## Observed vendor surfaces
 
