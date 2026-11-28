@@ -1152,6 +1152,86 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# Oracle: Herdr's herdr:codex integration reports agent=codex, agent_session.source=herdr:codex and
+# agent_status working|done (docs/verification/supervision.md "Codex on Herdr"). The status is a
+# display-only observation shown only where the canonical state is unknown: current_state stays the
+# unchanged crew-state verdict, any other status or a foreign registration shows nothing, and the
+# secondmate home summary never probes Herdr.
+test_codex_herdr_display_activity() {
+  local home fakebin out view case_name agent source status log want_state want_source process
+  local -a env_prefix
+  home=$(make_home codex-herdr)
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status) [ "${2:-}" = --json ] && printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n' ;;
+  pane)
+    if [ "${2:-}" = process-info ]; then
+      [ "${FM_FAKE_PROCESS:-}" != unreadable ] || exit 1
+      pane=""; args=("$@"); for ((i=0; i<${#args[@]}; i++)); do [ "${args[$i]}" = --pane ] && pane=${args[$((i+1))]:-}; done
+      name=codex; [ "${FM_FAKE_PROCESS:-}" != shell ] || name=zsh
+      printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"%s","argv0":"%s","argv":["%s"]}]}}}\n' "$pane" "${FM_FAKE_SHELL_PID:-$PPID}" "${FM_FAKE_SHELL_PID:-$PPID}" "${FM_FAKE_SHELL_PID:-$PPID}" "$name" "$name" "$name"
+    else
+      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}"
+    fi ;;
+  agent)
+    printf 'agent-get\n' >> "${FM_FAKE_LOG:-/dev/null}"
+    [ "${2:-}" = get ] && printf '{"result":{"agent":{"agent":"%s","agent_session":{"source":"%s"},"agent_status":"%s"}}}\n' \
+      "$FM_FAKE_AGENT" "$FM_FAKE_SOURCE" "$FM_FAKE_STATUS" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/herdr"
+  fm_write_meta "$home/state/cx.meta" "window=default:w1:p2" "worktree=$home/projects" "kind=scout" \
+    "backend=herdr" "harness=codex"
+  while IFS='|' read -r case_name agent source status log want_state want_source process; do
+    printf '%s\n' "$log" > "$home/state/cx.status"
+    rm -f "$home/state/cx.review-park" "$home/herdr.log"
+    if [ "$case_name" = park-record-wins ]; then
+      printf 'pr=https://github.com/o/r/pull/1\nhead=abcdef0123456789\nparked_at=1700000000\n' > "$home/state/cx.review-park"
+    fi
+    env_prefix=(env PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_AGENT="$agent" FM_FAKE_SOURCE="$source" FM_FAKE_STATUS="$status" FM_FAKE_PROCESS="$process" FM_FAKE_SHELL_PID="$$" FM_FAKE_LOG="$home/herdr.log")
+    out=$("${env_prefix[@]}" "$SNAPSHOT" --json)
+    [ ! -s "$home/herdr.log" ] || fail "$case_name: a plain snapshot must never probe Herdr"
+    printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | (has("display_activity") | not)' >/dev/null \
+      || fail "$case_name: a plain snapshot must carry no display activity: $out"
+    out=$("${env_prefix[@]}" "$SNAPSHOT" --json --display-activity)
+    if [ "$case_name" = park-record-wins ]; then
+      printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .current_state.state == "paused" and (has("display_activity") | not)' >/dev/null \
+        || fail "$case_name: a canonical paused state must win over native working: $out"
+      view=$("${env_prefix[@]}" "$VIEW")
+      assert_contains "$view" "| cx | paused / review-park |" "$case_name: view row"
+      continue
+    fi
+    printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | .current_state.state == "unknown" and .current_state.source == "pane"' >/dev/null \
+      || fail "$case_name: current_state must stay the unchanged supervision verdict: $out"
+    if [ -z "$want_state" ]; then
+      printf '%s' "$out" | jq -e '.tasks[] | select(.id == "cx") | (has("display_activity") | not)' >/dev/null \
+        || fail "$case_name: no display activity expected: $out"
+    else
+      printf '%s' "$out" | jq -e --arg s "$want_state" --arg src "$want_source" \
+        '.tasks[] | select(.id == "cx") | (.display_activity | .state == $s and .source == $src)' >/dev/null \
+        || fail "$case_name: wrong display activity: $out"
+    fi
+    view=$("${env_prefix[@]}" "$VIEW")
+    assert_contains "$view" "| cx | ${want_state:-unknown} / ${want_source:-pane} |" "$case_name: view row"
+  done <<'ROWS'
+working|codex|herdr:codex|working||working|herdr-native
+done|codex|herdr:codex|done||idle|herdr-native
+decision-open-while-done|codex|herdr:codex|done|needs-decision [key=scope]: pick A or B|idle|herdr-native
+blocked-status|codex|herdr:codex|blocked||
+idle-status|codex|herdr:codex|idle||
+foreign-agent|pi|herdr:pi|working||
+foreign-source|codex|other|done||
+retained-registration|codex|herdr:codex|working||||shell
+unreadable-process|codex|herdr:codex|done||||unreadable
+park-record-wins|codex|herdr:codex|working||||
+ROWS
+  pass "codex on herdr adds a display-only working/idle field only over an unknown canonical state"
+}
+
 fm_test_run \
   test_empty_fleet_json \
   test_fixture_snapshot_json \
@@ -1170,4 +1250,5 @@ fm_test_run \
   test_scout_reports_include_teardown_reports \
   test_backlog_tasks_axi_forms_and_overrides \
   test_view_renders_snapshot \
+  test_codex_herdr_display_activity \
   test_view_renders_dead_secondmate_agent_status
