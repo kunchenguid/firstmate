@@ -2404,8 +2404,11 @@ Firstmate passes its profile line unless it states a reason to override, such as
 **Task record (data/<id>/dispatch-resolution.json)**
 
 For a brief at `data/<id>/brief.md`, or `<FM_DATA_OVERRIDE>/<id>/brief.md` when that override is set, each run first removes that task's `dispatch-resolution.json`, so a decision never outlives a later run.
-Every outcome that exits 0, including off, then writes one JSON object there: `task` (the `<id>`), `status` (`clear`, `ambiguous`, `escalate`, `error`, or `off`), and `profile`.
+Every outcome that exits 0, including off, then writes one JSON object there: `task` (the `<id>`), `status` (`clear`, `ambiguous`, `escalate`, `error`, or `off`), `profile`, `confidence`, and `suggested`.
 On `clear`, `profile` holds `harness`, `model`, and `effort`, each `null` when the chosen profile leaves it unset; otherwise `profile` is `null`.
+`confidence` is the resolver's answer confidence, kept when a later step fails, and `null` when no valid answer arrived.
+`suggested` has the same shape as `profile` but survives an abstention: it is the one profile the picked rule or default offered, and `null` on `clear` (where `profile` holds it) and when it offered none or several.
+The [fleet ledger](fleet-ledger.md) copies `status`, `confidence`, and `profile` or else `suggested` into `task.dispatched`.
 A usage or configuration error (exit 2) writes no record.
 `fm-spawn.sh` reads this record as the task's decision, as "Per-launch overrides and inherited defaults" describes.
 

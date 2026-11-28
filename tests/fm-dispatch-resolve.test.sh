@@ -1381,11 +1381,20 @@ assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-m
 assert_equals '{"task":"pager-fix","status":"clear","profile":{"harness":"cursor","model":"cursor-grok-4.6-medium","effort":null}}' \
   "$(jq -c '{task, status, profile: (.profile | {harness, model, effort})}' "$TASK_RECORD")" \
   "a clear run records the task, status, and the printed profile with an unset effort as null"
+assert_equals '0.9 null' "$(jq -r '"\(.confidence) \(.suggested)"' "$TASK_RECORD")" \
+  "a clear run records the answer confidence and keeps the chosen profile in profile only"
 reset_log
 write_response "$RESPONSE" rule_4 0.41
 TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
 assert_equals 'ambiguous null' "$(jq -r '"\(.status) \(.profile)"' "$TASK_RECORD")" \
   "a later non-clear run replaces the clear selection, so the manual intake is not bound to it"
+assert_equals '0.41 null' "$(jq -r '"\(.confidence) \(.suggested)"' "$TASK_RECORD")" \
+  "an abstaining run keeps its confidence, and suggests nothing when its rule offered several profiles"
+reset_log
+write_response "$RESPONSE" rule_1 0.41
+TYPESAFE_API_KEY=$KEY run code out err "$TASK_BRIEF" --project pager
+assert_equals 'ambiguous 0.41 claude fable xhigh' "$(jq -r '"\(.status) \(.confidence) \(.suggested.harness) \(.suggested.model) \(.suggested.effort)"' "$TASK_RECORD")" \
+  "an abstaining run keeps the one profile its rule offered"
 reset_log
 run code out err "$TASK_BRIEF" --project pager
 assert_contains "$err" 'dispatch-resolve: off (' "the keyless run is off"
