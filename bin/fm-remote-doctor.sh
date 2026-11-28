@@ -414,6 +414,9 @@ launch_agent_exec_command() { # <resolved-herdr-path>
     "$(launch_agent_shell_quote "$HERDR_SESSION_NAME")"
 }
 
+# ProcessType=Interactive lifts launchd's default resource limits, which
+# coarsen timers for the server and every pane it spawns, so short sleeps and
+# lock timeouts in worker sessions oversleep several times over.
 render_launch_agent() { # <resolved-herdr-path> <resolved-login-shell>
   local herdr_bin=$1 shell=$2 exec_cmd shell_xml
   shell_xml=$(launch_agent_xml_escape "$shell")
@@ -434,6 +437,8 @@ render_launch_agent() { # <resolved-herdr-path> <resolved-login-shell>
 	</array>
 	<key>LimitLoadToSessionType</key>
 	<string>Aqua</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -480,6 +485,7 @@ launch_agent_loaded_contract_matches() { # <resolved-login-shell>
   # semaphore rather than a keepalive property.
   [[ "$loaded" == *'successfulexit=>0'* ]] || return 1
   [[ "$loaded" == *'properties=runatload'* ]] || return 1
+  [[ "$loaded" == *'spawntype=interactive'* ]] || return 1
 }
 
 # --- remote job and tool checks ---------------------------------------------
@@ -534,6 +540,9 @@ check_remote_job_worker() {
         "restore launchctl and a readable account uid, then rerun this command"
     elif fm_remote_job_launchagent_loaded "$FM_ROOT" "${HOME:-}" "$UID_NUM"; then
       record remote-job-worker-loaded "ok: $FM_REMOTE_JOB_LABEL is loaded in gui/$UID_NUM"
+    elif launchctl print "gui/$UID_NUM/$FM_REMOTE_JOB_LABEL" >/dev/null 2>&1; then
+      record remote-job-worker-loaded "fixable: gui/$UID_NUM/$FM_REMOTE_JOB_LABEL does not match the effective Firstmate-owned worker contract" \
+        "rerun this command with --fix to reload the worker with the current launch-agent contract"
     elif check_is_ok gui-session; then
       record remote-job-worker-loaded "fixable: $FM_REMOTE_JOB_LABEL is not loaded in gui/$UID_NUM" \
         "rerun this command with --fix to bootstrap the worker"
@@ -900,7 +909,7 @@ check_launch_agent() { # <resolved-login-shell>
         "$(herdr_blocked_action)"
     else
       record launchagent "fixable: $LAUNCH_AGENT_PLIST does not match the current Firstmate-owned contract" \
-        "rerun this command with --fix to rewrite its label, program arguments, session scope, restart policy, and log paths"
+        "rerun this command with --fix to rewrite its label, program arguments, session scope, process type, restart policy, and log paths"
     fi
     if launch_agent_is_aqua; then
       record launchagent-scope "ok: LimitLoadToSessionType=Aqua"
@@ -1192,7 +1201,16 @@ reload_launch_agent() { # <check-to-report-under>
     return 1
   fi
   authorize_guard_takeover
-  [ "$AUTOMATIC" -eq 1 ] || launchctl bootout "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+  if [ "$AUTOMATIC" -eq 0 ]; then
+    launchctl bootout "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 || true
+    # launchd refuses to bootstrap a label it is still removing, so wait
+    # (bounded; the server can take a while to exit) until the job is gone.
+    if ! wait_for_launch_agent_removed; then
+      fix_report "$report" failed "timed out waiting for launchd to finish removing $LAUNCH_AGENT_LABEL after bootout"
+      revoke_guard_takeover
+      return 1
+    fi
+  fi
   if ! out=$(launchctl bootstrap "gui/$UID_NUM" "$LAUNCH_AGENT_PLIST" 2>&1); then
     fix_report "$report" failed "launchctl bootstrap gui/$UID_NUM refused: ${out:-no diagnostic}"
     rc=1
@@ -1236,6 +1254,15 @@ kickstart_launch_agent() { # <check-to-report-under> <applied-text>
     return 1
   fi
   fix_report "$report" applied "$2"
+}
+
+wait_for_launch_agent_removed() {
+  local i=0
+  while launchctl print "gui/$UID_NUM/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1; do
+    [ "$i" -lt 60 ] || return 1
+    i=$((i + 1))
+    sleep 0.5
+  done
 }
 
 wait_for_herdr_server() {

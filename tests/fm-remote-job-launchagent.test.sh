@@ -112,6 +112,7 @@ case "${1:-}" in
       gui/*/dev.firstmate.remote-job)
         [ -f "$FM_TEST_LOADED" ] || exit 113
         printf 'path = %s\nprogram = %s\n' "$FM_TEST_PLIST" "$FM_TEST_WORKER"
+        printf 'spawn type = %s\n' "$(cat "$FM_TEST_LOADED")"
         if pid=$(tracked_pid); then printf '\tpid = %s\n' "$pid"; fi
         printf 'label = dev.firstmate.remote-job\n'
         ;;
@@ -132,7 +133,7 @@ case "${1:-}" in
     ;;
   bootstrap)
     [ ! -f "$FM_TEST_LOADED" ] && [ ! -f "$FM_TEST_REMOVING" ] || { printf 'Bootstrap failed: 5: Input/output error\n' >&2; exit 5; }
-    : > "$FM_TEST_LOADED"
+    python3 -c 'import plistlib,sys; print("interactive" if plistlib.load(open(sys.argv[1], "rb")).get("ProcessType") == "Interactive" else "daemon (3)")' "${3:-}" > "$FM_TEST_LOADED" || exit 5
     start_worker
     ;;
   kickstart)
@@ -199,6 +200,27 @@ launch_count() { grep -c "^$1 " "$LAUNCH_LOG" 2>/dev/null || true; }
 
 fm_remote_job_prepare_state "$ACCOUNT_HOME" || fail 'could not prepare remote job state'
 fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not write the LaunchAgent'
+# A plist written before ProcessType=Interactive joined the contract is stale.
+fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  || fail 'a freshly written LaunchAgent does not match its own contract'
+strip_process_type() {
+  python3 -c 'import plistlib,sys; p=sys.argv[1]; raw=open(p, "rb").read(); d=plistlib.loads(raw); assert d.pop("ProcessType") == "Interactive"; out=plistlib.dumps(d, sort_keys=False); squash=lambda b: b.translate(None, b" \t\r\n"); assert squash(out) == squash(raw).replace(b"<key>ProcessType</key><string>Interactive</string>", b"", 1); open(p, "wb").write(out)' "$FM_TEST_PLIST" \
+    || fail 'stripping ProcessType=Interactive from the LaunchAgent changed more than that key'
+}
+strip_process_type
+fm_remote_job_launchagent_contract_matches "$REMOTE_ROOT" "$ACCOUNT_HOME" \
+  && fail 'a LaunchAgent without ProcessType was accepted as matching'
+fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not rewrite the LaunchAgent'
+pass 'a LaunchAgent without ProcessType=Interactive is out of contract'
+# launchd keeps the spawn type it loaded until the job is actually reloaded.
+printf 'daemon (3)\n' > "$FM_TEST_LOADED"
+fm_remote_job_launchagent_loaded "$REMOTE_ROOT" "$ACCOUNT_HOME" "$(id -u)" \
+  && fail 'a loaded job with the daemon spawn type was accepted after its plist was rewritten'
+printf 'interactive\n' > "$FM_TEST_LOADED"
+fm_remote_job_launchagent_loaded "$REMOTE_ROOT" "$ACCOUNT_HOME" "$(id -u)" \
+  || fail 'a loaded job with the interactive spawn type was not accepted'
+rm -f "$FM_TEST_LOADED"
+pass 'a loaded job keeps failing its contract until it reloads with the interactive spawn type'
 # Persisted crash leftovers are the public worker state contract. The old
 # process is gone, but its stale code identity and fresh heartbeat remain.
 printf 'stale-code\n' > "$STATE_ROOT/worker.identity"
@@ -348,6 +370,30 @@ REPLACEMENT_PID=$(tracked)
 [ -n "$REPLACEMENT_PID" ] && [ "$(lock_owner)" = "$REPLACEMENT_PID" ] \
   || fail 'the loaded agent did not regain a launchd-tracked lock owner'
 pass 'Darwin replaces a current-code owner that the loaded agent does not track'
+
+# --- a worker still loaded with the daemon spawn type is reloaded -------------
+
+# An upgraded host whose reload never completed keeps the job launchd loaded
+# from the old plist, while its plist, owner, probe, and identity are current.
+strip_process_type
+launchctl bootout "gui/$(id -u)/dev.firstmate.remote-job" || fail 'the stub launchd did not unload the agent'
+launchctl bootstrap "gui/$(id -u)" "$FM_TEST_PLIST" || fail 'the stub launchd did not load the stripped agent'
+fm_remote_job_wait_for_probe "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'the daemon-spawned worker did not become ready'
+DAEMON_PID=$(tracked)
+[ "$(cat "$FM_TEST_LOADED")" = 'daemon (3)' ] && [ "$(lock_owner)" = "$DAEMON_PID" ] \
+  || fail 'the stripped agent did not load as a daemon-spawned lock owner'
+fm_remote_job_write_launchagent "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail 'could not rewrite the LaunchAgent'
+: > "$LAUNCH_LOG"
+ensure_darwin > "$TMP_ROOT/ensure-daemon.out" 2>&1 \
+  || { cat "$TMP_ROOT/ensure-daemon.out"; fail 'Darwin did not recover the daemon-spawned worker'; }
+[ "$(launch_count bootout)" -ge 1 ] && [ "$(launch_count bootstrap)" -ge 1 ] \
+  || { cat "$LAUNCH_LOG"; fail 'ensure accepted a worker loaded with the daemon spawn type'; }
+[ "$(cat "$FM_TEST_LOADED")" = interactive ] || fail 'the reloaded agent did not take the interactive spawn type'
+! kill -0 "$DAEMON_PID" 2>/dev/null || fail 'the daemon-spawned worker remained alive'
+REPLACEMENT_PID=$(tracked)
+[ -n "$REPLACEMENT_PID" ] && [ "$(lock_owner)" = "$REPLACEMENT_PID" ] \
+  || fail 'the interactive reload did not become the launchd-tracked lock owner'
+pass 'Darwin reloads a current worker that launchd still runs with the daemon spawn type'
 
 # A repairing caller killed while holding the repair lock leaves its record.
 plant_dead_repair_lock() {

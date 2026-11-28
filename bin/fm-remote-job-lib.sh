@@ -899,6 +899,9 @@ fm_remote_job_plist_safe_path() {
   case "$1" in *'&'*|*'<'*|*'>'*|*'"'*|*"'"*) return 1 ;; esac
 }
 
+# ProcessType=Interactive keeps launchd's default resource limits from
+# coarsening timers in every job this worker runs; the exact-match contract
+# below treats an older plist without it as stale and rewrites it.
 fm_remote_job_render_launchagent() { # <remote-root> <account-home>
   local root=$1 account_home=$2 worker
   worker="$root/bin/fm-remote-job-worker.sh"
@@ -925,6 +928,8 @@ fm_remote_job_render_launchagent() { # <remote-root> <account-home>
 	</dict>
 	<key>LimitLoadToSessionType</key>
 	<string>Aqua</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -961,6 +966,7 @@ fm_remote_job_launchagent_loaded() { # <remote-root> <account-home> <uid>
   [[ "$compact" == *"$FM_REMOTE_JOB_LABEL"* ]] || return 1
   [[ "$compact" == *"$worker"* ]] || return 1
   [[ "$compact" == *"$FM_REMOTE_JOB_LAUNCH_AGENT_PLIST"* ]] || return 1
+  [[ "$compact" == *'spawntype=interactive'* ]] || return 1
 }
 
 fm_remote_job_worker_pid_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.pid"; }

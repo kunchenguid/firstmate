@@ -122,6 +122,15 @@ case "${1:-}" in
         ;;
       */dev.firstmate.herdr.fm-remote)
         [ -f "$loaded" ] || exit 113
+        # launchd keeps a booted-out job printable until its process exits.
+        if [ -f "$FM_FAKE_STATE/removing-$label" ]; then
+          left=$(cat "$FM_FAKE_STATE/removing-$label")
+          if [ "$left" -le 0 ]; then
+            rm -f "$loaded" "$FM_FAKE_STATE/removing-$label"
+            exit 113
+          fi
+          printf '%s\n' "$((left - 1))" > "$FM_FAKE_STATE/removing-$label"
+        fi
         cat "$loaded"
         ;;
       */dev.firstmate.herdr)
@@ -136,7 +145,13 @@ case "${1:-}" in
   bootout)
     [ ! -f "$FM_FAKE_STATE/bootout-fail" ] || { printf 'Boot-out failed: operation not permitted\n' >&2; exit 6; }
     case "$domain" in
-      */dev.firstmate.herdr.fm-remote) rm -f "$loaded" ;;
+      */dev.firstmate.herdr.fm-remote)
+        if [ -f "$FM_FAKE_STATE/bootout-async" ]; then
+          cp "$FM_FAKE_STATE/bootout-async" "$FM_FAKE_STATE/removing-$label"
+        else
+          rm -f "$loaded"
+        fi
+        ;;
       */dev.firstmate.herdr) rm -f "$FM_FAKE_STATE/interactive-loaded" ;;
       *) rm -f "$loaded" ;;
     esac
@@ -145,6 +160,11 @@ case "${1:-}" in
   bootstrap)
     # launchd refuses a gui/<uid> domain that has no login session.
     [ -f "$FM_FAKE_STATE/gui-session" ] || { printf 'Bootstrap failed: 5: Input/output error\n' >&2; exit 5; }
+    plist=${3:-}
+    label=${plist##*/}
+    label=${label%.plist}
+    # A job launchd is still removing after bootout cannot be bootstrapped.
+    [ ! -f "$FM_FAKE_STATE/removing-$label" ] || { printf 'Bootstrap failed: 5: Input/output error\n' >&2; exit 5; }
     [ ! -f "$loaded" ] || { printf 'Bootstrap failed: service already loaded\n' >&2; exit 5; }
     plist=${3:-}
     label=${plist##*/}
@@ -157,6 +177,7 @@ case "${1:-}" in
 path = $FM_FAKE_JOB_PLIST
 program = $FM_FAKE_JOB_WORKER
 properties = keepalive | runatload | inferred program
+spawn type = interactive
 EOF
         ;;
       *)
@@ -183,6 +204,7 @@ semaphores = {
 	successful exit => 0
 }
 properties = runatload | inferred program
+spawn type = interactive
 EOF
         # A mate launch racing the repair lands its pane in the fresh server.
         [ ! -f "$FM_FAKE_STATE/panes-after-bootstrap" ] || cp "$FM_FAKE_STATE/panes-after-bootstrap" "$FM_FAKE_STATE/panes.json"
@@ -386,8 +408,8 @@ doctor() {
   set -e
 }
 
-write_loaded_contract() { # <herdr-path> [properties] [exec-command]
-  local herdr_bin=$1 properties=${2:-'runatload | inferred program'} exec_cmd
+write_loaded_contract() { # <herdr-path> [properties] [exec-command] [spawn-type]
+  local herdr_bin=$1 properties=${2:-'runatload | inferred program'} exec_cmd spawn_type=${4:-interactive}
   exec_cmd=${3:-"exec '$GUARD' '$herdr_bin' 'fm-remote'"}
   cat > "$CASE_STATE/loaded-$LABEL" <<EOF
 path = $CASE_PLIST
@@ -404,6 +426,7 @@ semaphores = {
 	successful exit => 0
 }
 properties = $properties
+spawn type = $spawn_type
 EOF
 }
 
@@ -433,6 +456,8 @@ assert_herdr_launch_agent_contract() { # <plist> <herdr-bin> [login-shell]
     || fail "ProgramArguments[3] is not exec of the guard with $herdr_bin for session fm-remote: $cmd"
   [ "$(printf '%s' "$json" | jq -r '.LimitLoadToSessionType')" = Aqua ] \
     || fail "LimitLoadToSessionType is not Aqua"
+  [ "$(printf '%s' "$json" | jq -r '.ProcessType')" = Interactive ] \
+    || fail "ProcessType is not Interactive"
   [ "$(printf '%s' "$json" | jq -r '.RunAtLoad')" = true ] \
     || fail "RunAtLoad is not true"
   [ "$(printf '%s' "$json" | jq -r '.KeepAlive.SuccessfulExit')" = false ] \
@@ -528,6 +553,8 @@ assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
   || fail "the worker plist does not carry the Firstmate label"
 [ "$(plist_value "$CASE_JOB_PLIST" LimitLoadToSessionType)" = Aqua ] \
   || fail "the worker plist is not Aqua-scoped"
+[ "$(plist_value "$CASE_JOB_PLIST" ProcessType)" = Interactive ] \
+  || fail "the worker plist does not set ProcessType=Interactive"
 [ "$(plist_first_value "$CASE_JOB_PLIST" ProgramArguments)" = "$ROOT/bin/fm-remote-job-worker.sh" ] \
   || fail "the worker plist does not use the configured code root"
 assert_absent "$CASE_STATE/dscl-count" "the injected login shell still consulted Directory Services"
@@ -550,6 +577,31 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" bootstrap \
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
+
+# A plist written before ProcessType=Interactive joined the contract must not
+# pass as matching, or its worker sessions keep launchd's coarse timers.
+strip_process_type() { # <plist>
+  python3 -c 'import plistlib,sys; p=sys.argv[1]; raw=open(p, "rb").read(); d=plistlib.loads(raw); assert d.pop("ProcessType") == "Interactive"; out=plistlib.dumps(d, sort_keys=False); squash=lambda b: b.translate(None, b" \t\r\n"); assert squash(out) == squash(raw).replace(b"<key>ProcessType</key><string>Interactive</string>", b"", 1); open(p, "wb").write(out)' "$1" \
+    || fail "stripping ProcessType=Interactive from $1 changed more than that key"
+}
+strip_process_type "$CASE_PLIST"
+strip_process_type "$CASE_JOB_PLIST"
+grep -v '^spawn type' "$CASE_STATE/loaded-$JOB_LABEL" > "$CASE_STATE/loaded-$JOB_LABEL.tmp"
+printf 'spawn type = daemon (3)\n' >> "$CASE_STATE/loaded-$JOB_LABEL.tmp"
+mv "$CASE_STATE/loaded-$JOB_LABEL.tmp" "$CASE_STATE/loaded-$JOB_LABEL"
+doctor
+expect_code 1 "$DOCTOR_RC" "launch agents without ProcessType were reported ready"
+assert_contains "$DOCTOR_OUT" 'check launchagent=fixable:' "a Herdr launch agent without ProcessType was accepted as matching"
+assert_contains "$DOCTOR_OUT" 'check remote-job-worker=fixable:' "a remote job worker without ProcessType was accepted as matching"
+assert_contains "$DOCTOR_OUT" "check remote-job-worker-loaded=fixable: gui/$(id -u)/$JOB_LABEL does not match the effective" \
+  "a remote job worker loaded with the daemon spawn type was not reported as an off-contract loaded job"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not repair launch agents missing ProcessType"
+assert_contains "$DOCTOR_OUT" 'fix launchagent=applied:' "--fix did not rewrite the Herdr launch agent missing ProcessType"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
+[ "$(plist_value "$CASE_JOB_PLIST" ProcessType)" = Interactive ] \
+  || fail "--fix did not restore ProcessType=Interactive to the remote job worker"
+pass "launch agents written before ProcessType=Interactive are repaired, not reported ready"
 
 # --- a second code root must not rewrite the shared running service ----------
 
@@ -834,7 +886,9 @@ write_loaded_contract /obsolete/bin/herdr 'keepalive | runatload | inferred prog
 touch "$CASE_STATE/bootout-fail"
 doctor --fix
 expect_code 1 "$DOCTOR_RC" "a stale loaded job passed after its replacement failed"
-assert_contains "$DOCTOR_OUT" 'fix launchagent-loaded=failed: launchctl bootstrap' "the failed replacement was not reported"
+assert_contains "$DOCTOR_OUT" "fix launchagent-loaded=failed: timed out waiting for launchd to finish removing $LABEL after bootout" \
+  "the failed replacement was not reported"
+assert_no_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "--fix bootstrapped over a job that never left launchd"
 assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the repaired disk contract was not confirmed"
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "the stale loaded contract did not remain a readiness gap"
 assert_contains "$DOCTOR_OUT" 'check herdr-server=fixable:' "the stopped server was reported running after a failed reload"
@@ -844,7 +898,40 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "--fix did not replace the stale loaded launch-agent contract"
 assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the replacement loaded contract was not confirmed"
 assert_no_grep '/obsolete/bin/herdr' "$CASE_STATE/loaded-$LABEL" "the stale effective program survived replacement"
+
+# A job loaded before ProcessType=Interactive joined the contract keeps
+# launchd's default daemon spawn type until it is actually reloaded.
+strip_process_type "$CASE_PLIST"
+write_loaded_contract "$CASE_BIN/herdr" 'runatload | inferred program' "exec '$GUARD' '$CASE_BIN/herdr' 'fm-remote'" 'daemon (3)'
+touch "$CASE_STATE/bootout-fail"
+doctor --fix
+expect_code 1 "$DOCTOR_RC" "a loaded daemon spawn type passed after its replacement failed"
+assert_contains "$DOCTOR_OUT" 'check launchagent=ok:' "the rewritten ProcessType=Interactive plist was not confirmed"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=fixable:' "a loaded daemon spawn type did not remain a readiness gap"
+rm -f "$CASE_STATE/bootout-fail"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not replace the loaded daemon spawn type"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the interactive replacement was not confirmed"
+assert_no_grep 'spawn type = daemon' "$CASE_STATE/loaded-$LABEL" "the daemon spawn type survived replacement"
 pass "a failed reload leaves stale effective launch-agent state unready"
+
+# --- --fix waits for launchd to finish removing a booted-out job --------------
+
+new_case Darwin with-herdr gui
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "the bootout-wait fixture could not be initialized"
+strip_process_type "$CASE_PLIST"
+write_loaded_contract "$CASE_BIN/herdr" 'runatload | inferred program' "exec '$GUARD' '$CASE_BIN/herdr' 'fm-remote'" 'daemon (3)'
+printf '3\n' > "$CASE_STATE/bootout-async"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix did not reload a job launchd was still removing after bootout"
+assert_not_contains "$DOCTOR_OUT" 'Input/output error' "--fix bootstrapped before launchd finished removing the old job"
+assert_contains "$DOCTOR_OUT" 'check launchagent-loaded=ok:' "the reloaded job was not confirmed"
+assert_absent "$CASE_STATE/removing-$LABEL" "--fix bootstrapped before the old job left launchd"
+assert_grep 'spawn type = interactive' "$CASE_STATE/loaded-$LABEL" "the reload did not load the interactive spawn type"
+assert_grep "bootstrap gui/$(id -u) $CASE_PLIST" "$CASE_LAUNCHCTL_LOG" "--fix never bootstrapped the rewritten job"
+pass "--fix waits for a booted-out launch agent to leave launchd before bootstrapping"
 
 # --- a launch agent that is not Aqua-scoped is repaired in place -------------
 
