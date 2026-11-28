@@ -449,6 +449,61 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+# Historical turn-ended annotations used to print needs-decision/done rows as
+# unread wake-EVENT lines without advancing the presentation cursor, because
+# only direct .status signals were marked fully_presented and those verbs are
+# not unread-surface. The same five lines then replayed on every later drain.
+test_historical_annotation_advances_cursor_past_needs_decision_and_done() {
+  local dir state out err status offset size i
+  dir=$(make_case hist-cursor-advance)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  status="$state/task-hist.status"
+  prime_cursor "$state" "$status"
+
+  {
+    printf 'needs-decision [key=captain-hold-hist-a-1]: hold A\n'
+    printf 'needs-decision [key=captain-hold-hist-b-1]: hold B\n'
+    printf 'needs-decision [key=captain-hold-hist-c-1]: hold C\n'
+    printf 'done [key=child-outcome-hist-a]: scout done\n'
+    printf 'done [corr=histdone1]: scout DONE narrative\n'
+  } >> "$status"
+
+  i=1
+  while [ "$i" -le 3 ]; do
+    printf 'working [corr=histnew%d]: newer event %d\n' "$i" "$i" >> "$status"
+    rm -f "$state/.seen-task-hist_status"
+    append_wake "$state" signal task-hist.turn-ended "signal: task-hist.turn-ended" \
+      || fail "queueing historical turn-ended wake $i failed"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" \
+      || fail "historical drain $i failed"
+    grep -F "wake annotation: latest wake-EVENT observed at drain, not current state; historical / not necessarily the triggering event: task-hist.status: working [corr=histnew${i}]: newer event ${i}" "$out" >/dev/null \
+      || fail "historical drain $i missed the newer event annotation: $(cat "$out")"
+    if [ "$i" -eq 1 ]; then
+      grep -F 'unread wake-EVENT since last drain, not current state; historical / not necessarily the triggering event: task-hist.status: needs-decision [key=captain-hold-hist-a-1]: hold A' "$out" >/dev/null \
+        || fail "first historical drain dropped sticky hold A: $(cat "$out")"
+    else
+      if grep -F 'wake annotation:' "$out" | grep -F 'hold A' >/dev/null; then
+        fail "historical drain $i replayed sticky hold A after the cursor should have advanced: $(cat "$out")"
+      fi
+      if grep -F 'wake annotation:' "$out" | grep -F 'child-outcome-hist-a' >/dev/null; then
+        fail "historical drain $i replayed sticky scout done after the cursor should have advanced: $(cat "$out")"
+      fi
+    fi
+    offset=$(FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1/bin/fm-lock-lib.sh"
+      . "$1/bin/fm-classify-lib.sh"
+      status_presentation_cursor_offset "$2"
+    ' _ "$ROOT" "$status") || fail "could not read presentation cursor after drain $i"
+    size=$(wc -c < "$status" | tr -d ' ')
+    [ "$offset" = "$size" ] \
+      || fail "after historical drain $i presentation cursor stayed at $offset instead of advancing to $size"
+    i=$((i + 1))
+  done
+  pass "historical turn-ended annotations advance the presentation cursor past needs-decision/done so they do not replay"
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -463,3 +518,4 @@ test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue
+test_historical_annotation_advances_cursor_past_needs_decision_and_done
