@@ -3985,7 +3985,7 @@ test_working_spaceship_modes_and_selection() {
   # Every other node harness in this file already uses this shape.
   output_file="$fixture/node-output"
   (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -4906,7 +4906,7 @@ check(liveTimers === 0 && ui.widgets.size === 0, "the re-read boat cycle did not
 
 // An absent config/calm-ship keeps the boat default too.
 reset();
-writeFileSync(`${process.env.FM_HOME}/config/calm-ship`, "");
+rmSync(`${process.env.FM_HOME}/config/calm-ship`, { force: true });
 await fire("session_start", { reason: "new" });
 check(liveTimers === 0 && ui.widgets.size === 0, "the absent selection left a stale widget");
 await fire("agent_start");
