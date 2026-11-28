@@ -2232,7 +2232,7 @@ A profile on another harness that declares `provider: devin`, such as a Pi lane,
 A Free `swe-2-high`, `swe-2-medium`, or `swe-2-max` line draws on no Devin window, so no row applies to it and it stays eligible but unranked, even when `included_quota` is exhausted.
 A Devin profile with no `model` gets no row either and stays eligible but unranked.
 Devin's `credits` balance is never read as `included_quota` headroom.
-When the chosen candidate is any other Devin profile, including one with no `model`, the resolver escalates instead of clearing, under `shared_quota` too: a priced Devin launch needs the captain's explicit approval and is allowed only when the native Claude or Codex quota is exhausted.
+When the chosen candidate is any other harness `devin` profile, including one with no `model`, the resolver escalates instead of clearing, under `shared_quota` too: a priced Devin launch needs the captain's explicit approval and is allowed only when the native Claude or Codex quota is exhausted.
 This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 
 **Profile quota scope**
