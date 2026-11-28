@@ -40,12 +40,7 @@ It says nothing about whether the resulting brief, project, or delivery mode is 
 It classifies the tool NAME by shape rather than against a fixed list.
 The tracked Claude PreToolUse matcher is `.*`, so every Claude tool name reaches the script and the script is the single owner of classification.
 A stem-enumerating matcher would reintroduce the fail-open-by-enumeration problem this guard exists to solve, because any future tool name outside the matcher would be silently missed before the script could inspect it.
-A tool is delegation-shaped when its normalized lowercase name contains one of these stems:
-
-```text
-agent  subagent  task  workflow  cron  schedul  worktree
-delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
-```
+A tool is delegation-shaped when its normalized lowercase name contains a stem listed in `DELEGATION_STEMS` in `bin/fm-subagent-pretool-check.sh`.
 
 Three exclusions keep the shape test from producing false positives.
 

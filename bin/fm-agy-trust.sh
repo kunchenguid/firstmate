@@ -33,12 +33,13 @@
 # dialog if one renders anyway and never counts a busy turn as ready on a path
 # that was neither pre-registered here nor answered there.
 #
-# THE SCOPE TEST IS THE SAFETY PROPERTY and mirrors bin/fm-claude-trust.sh:
-# <worktree> must be a LINKED git worktree - its own git dir, sharing
-# <project>'s common dir - whose top level is exactly the resolved argument. A
-# primary checkout, a worktree of an unrelated repo, a subdirectory of a
-# worktree, a plain directory, and a home directory are each refused with a
-# non-zero exit, never a warning and never a silent skip. Only the launching
+# THE SCOPE TEST IS THE SAFETY PROPERTY: in ordinary worktree mode, <worktree>
+# must be a linked worktree of <project>, with its own git dir and a matching
+# common dir. Relaunch-copy mode also permits a standalone clone, provided its
+# git dir differs from the project's common dir and its path differs from the
+# project. Both modes require the resolved argument to be the repository top
+# level and refuse the filesystem root and home directory. Secondmate-home mode
+# instead requires a matching seed marker. Only the launching
 # user's own store is written, it must be a regular file this uid owns, every
 # unrelated key and entry is preserved, and the replacement is atomic.
 set -u
