@@ -29,9 +29,16 @@ PAIR=$(rex_test_new_session smoke) || fail "could not create the test's own fm-t
 read -r SMOKE_SID MAIN_BLOCK <<<"$PAIR"
 pass "real rex: created the test's own session $SMOKE_SID"
 
+# shellcheck source=bin/fm-supervisor-target-lib.sh
+. "$ROOT/bin/fm-supervisor-target-lib.sh"
+TARGET=$(TERM_PROGRAM=rex REX_BLOCK="$MAIN_BLOCK" FM_SUPERVISOR_TARGET="" \
+  TMUX_PANE="" HERDR_ENV="" discover_supervisor_target) || fail "could not resolve the Rex supervisor target"
+[ "$TARGET" = "${SMOKE_SID#session:}:${MAIN_BLOCK#block:}" ] || fail "supervisor discovery returned a different endpoint"
+pass "real rex: supervisor target resolves from the launcher block"
+
 # --- placement: a Rex-hosted launcher gets focus-safe tabs in its own session
 
-TRIPLE=$(TERM_PROGRAM=rex REX_SESSION="$SMOKE_SID" REX_BLOCK="$MAIN_BLOCK" fm_backend_rex_create_task fm-test-alpha "$WORK") \
+TRIPLE=$(TERM_PROGRAM=rex REX_BLOCK="$MAIN_BLOCK" fm_backend_rex_create_task fm-test-alpha "$WORK") \
   || fail "create_task from a Rex-hosted launcher failed"
 read -r SID WID BID <<<"$TRIPLE"
 [ "$SID" = "$SMOKE_SID" ] || fail "the task tab must open in the launcher's own session, got $SID"
@@ -45,7 +52,7 @@ SIZE=$(fm_backend_rex_block_call "$T" size)
 SCOPED=$(fm_backend_rex_scoped_name fm-test-alpha)
 [ "$(printf '%s' "$VIEW" | jq -r --arg b "$BID" '.windows[].layers[].blocks[] | select(.block_id == $b) | .label')" = "$SCOPED" ] \
   || fail "the task block must carry the home-scoped label $SCOPED"
-TERM_PROGRAM=rex REX_SESSION="$SMOKE_SID" REX_BLOCK="$MAIN_BLOCK" fm_backend_rex_create_task fm-test-alpha "$WORK" >/dev/null 2>&1 \
+TERM_PROGRAM=rex REX_BLOCK="$MAIN_BLOCK" fm_backend_rex_create_task fm-test-alpha "$WORK" >/dev/null 2>&1 \
   && fail "a duplicate task label in the session must be refused"
 pass "real rex: a Rex-hosted launcher gets a focus-safe 200x50 tab in its own session; duplicates are refused"
 
@@ -123,6 +130,8 @@ rex_test_stop_server
 ! grep -q '^default' "$WORK/calls" \
   || fail "every passive read must disable autostart itself, got:"$'\n'"$(cat "$WORK/calls")"
 pass "real rex: passive reads disable autostart and do not start a stopped server"
+mv "$WORK/server-state" "$WORK/previous-server-state" || fail "could not move the private server state aside"
+mkdir "$WORK/server-state" || fail "could not create an empty state directory for the private Rex server"
 rex_test_start_server || fail "the private Rex server did not recover after restart"
 [ "$(fm_backend_rex_endpoint_absence_recheck "$LIVE" "$ENDPOINT")" = missing ] \
   || fail "a session lost at server stop must be proven missing after the private server recovers"

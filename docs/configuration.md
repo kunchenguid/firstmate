@@ -16,6 +16,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
 | Stopping idle workers while a PR awaits review, and cleanup on merge | [Park on review](#park-on-review) |
+| Disk reclaimed from a finished task's pool slot | [Pool slot reclaim](#pool-slot-reclaim-configreclaim-pool-slots) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
 ## FM_HOME
@@ -732,11 +733,11 @@ It supports `tmux`, `herdr`, and `rex` supervisor panes and `t3code` supervisor 
 Set `FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly.
 For tmux, accepted targets are `%pane-id`, `@window-id`, `session:@window-id`, a bare session, `session:window-name`, `session:index`, `session:index.pane-index`, and the supported `=session:=window` exact-marker forms; the `fm_backend_target_exists` header in `bin/fm-backend.sh` owns this grammar.
 For herdr, the target is `"<session>:<pane-id>"`; for Rex it is `<session-uuid>:<block-uuid>`, with both kind prefixes removed; and for t3code it is the thread id.
-Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then `TERM_PROGRAM=rex` with both `REX_SESSION` and `REX_BLOCK`, then `HC_TERMINAL_ID` with `HC_TERMINAL_SOCKET` (resolving `hc`), then a cwd match over T3's live threads only when T3 Code is explicitly selected, then falls back to `tmux`.
+Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then `TERM_PROGRAM=rex` with `REX_BLOCK`, then `HC_TERMINAL_ID` with `HC_TERMINAL_SOCKET` (resolving `hc`), then a cwd match over T3's live threads only when T3 Code is explicitly selected, then falls back to `tmux`.
 T3 discovery requires explicit `FM_BACKEND=t3code` or `config/backend=t3code` and the `config/t3code-token` credential from the [T3 sign-in](t3code-backend.md#sign-in) under the effective config directory before making a T3 call.
 
 That keeps a nested tmux or Herdr pane on its own transport, matching the runtime backend's innermost-first rule.
-Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the prefix-stripped `REX_SESSION` and `REX_BLOCK` under Rex, then `"${HC_SESSION:-default}:${HC_TERMINAL_ID}"` when both hc terminal markers are present, then the thread id from that T3 cwd match, then the legacy `firstmate:0` tmux fallback with a warning.
+Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the [resolved Rex target](rex-backend.md#away-mode), then `"${HC_SESSION:-default}:${HC_TERMINAL_ID}"` when both hc terminal markers are present, then the thread id from that T3 cwd match, then the legacy `firstmate:0` tmux fallback with a warning.
 
 Selecting or discovering any other supervisor backend, including `hc`, `zellij`, `orca`, `cmux`, or `tern`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
@@ -930,6 +931,17 @@ With the flag absent, no settlement or new closure notification occurs.
 The flag takes effect on the next contribution poll and is not inherited by secondmate homes.
 The observer's existing `bin/fm-contributions.sh arm` command enables polling when it is not already armed.
 The [captain-hold policy](../.agents/skills/captain-hold-lifecycle/SKILL.md#policy) owns when a forge event may settle a question.
+
+## Pool slot reclaim (config/reclaim-pool-slots)
+
+Returning a Treehouse pool slot resets its tracked git state but leaves every git-ignored build artifact behind (`node_modules`, `.next`, `dist`, Electron builds, and the like), so a pool only ever grows across finished tasks.
+The optional local, gitignored `config/reclaim-pool-slots` presence flag opts this home into reclaiming that disk: after a ship or scout task's own worktree slot is successfully returned, `bin/fm-teardown.sh` then runs `treehouse destroy <slot> --yes` on that same slot.
+Destroy is safe by default - it removes only a merged, clean, idle, unleased worktree and otherwise skips it - so teardown adds no extra landed-work check of its own, and a skip or failure only warns rather than failing an otherwise-successful teardown.
+Create an empty file to enable the flag.
+With the flag absent (the default), teardown never destroys a returned slot, exactly as before this feature existed.
+The trade-off once opted in: the next task dispatched into that project starts from a freshly created worktree and reinstalls its dependencies instead of reusing a pre-warmed slot.
+The flag is home-local and not inherited by secondmate homes.
+This never touches a secondmate home's own pool, a slot leased by another task, an Orca or plain-clone worktree, or any pool other than the one the finishing task's own slot came from.
 
 ## Park on review
 

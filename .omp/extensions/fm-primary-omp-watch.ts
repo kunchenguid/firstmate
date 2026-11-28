@@ -54,9 +54,9 @@
 // before_agent_start, so waiting on that event stalls every later close.
 // Consumption is tracked only so a replacement can replay a follow-up omp had
 // not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// consumes at the user message_start carrying the exact wake text, and several
+// wakes omp merged into one message each count; either event finishes the
+// pending record, and a still-unconsumed record rides the replacement handoff.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -584,11 +584,20 @@ export default function (pi: ExtensionAPI) {
     return generationIsLive(owner);
   }
 
-  // omp consumed a main follow-up: an idle main at before_agent_start, a
-  // streaming main at the user message_start that joins the running run.
+  // omp consumed main follow-ups: an idle main at before_agent_start, a
+  // streaming main at the user message_start that joins the running run. omp
+  // can merge several queued follow-ups into one prompt or one text part
+  // (joined by a blank line), so every pending wake whose full content the
+  // text carries is consumed, once per occurrence. Longest content first keeps
+  // a wake from claiming text that belongs to a longer one; each matched
+  // occurrence is cut out so identical wakes need as many occurrences.
   function consumeWake(owner: SessionGeneration, text: string): void {
-    for (const [token, wake] of owner.unconsumedWakes) {
-      if (wake.content !== text) continue;
+    let remaining = text;
+    const byLength = [...owner.unconsumedWakes].sort((a, b) => b[1].content.length - a[1].content.length);
+    for (const [token, wake] of byLength) {
+      const at = remaining.indexOf(wake.content);
+      if (at < 0) continue;
+      remaining = `${remaining.slice(0, at)}\n\n${remaining.slice(at + wake.content.length)}`;
       owner.unconsumedWakes.delete(token);
       wake.pending.delivered = true;
       try {
@@ -597,7 +606,6 @@ export default function (pi: ExtensionAPI) {
         surfaceCleanupFailure(owner, error);
         schedulePendingCleanup(owner);
       }
-      return;
     }
   }
 

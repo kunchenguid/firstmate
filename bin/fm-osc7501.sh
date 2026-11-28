@@ -12,7 +12,7 @@
 #
 #   1. the pane must have a writable controlling terminal
 #   2. the terminal must be KNOWN 7501-aware by its environment
-#      (HC_TERMINAL_ID = herdr-core, REX_BLOCK/REX_SESSION = Rex,
+#      (HC_TERMINAL_ID = herdr-core, REX_BLOCK = Rex,
 #      TERM_PROGRAM=ghostty); unknown terminals silently do nothing.
 #      backend=herdr (old herdr has no protocol support) and backend=t3code
 #      (no task tty) never report
@@ -210,7 +210,7 @@ osc_gate() { # <config> <state>
 # is established by its own marker; unknown terminals never report.
 osc_env_aware() {
   [ -n "${HC_TERMINAL_ID:-}" ] && return 0
-  [ -n "${REX_BLOCK:-}${REX_SESSION:-}" ] && return 0
+  [ -n "${REX_BLOCK:-}" ] && return 0
   [ "${TERM_PROGRAM:-}" = ghostty ] && return 0
   return 1
 }

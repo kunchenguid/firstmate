@@ -32,6 +32,7 @@ export FM_DAEMON_PRIMARY_HARNESS
 # terminal would leak an hc resolution into the tmux/herdr/fallback
 # expectations below. Per-case fixtures set their own HC_* claims.
 unset HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE HC_SESSION HC_SOCKET
+unset REX_BLOCK
 
 # What the pinned claude primary received: each typed line, with every
 # record-backed doorbell followed by the envelope its record holds.
