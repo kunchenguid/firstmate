@@ -13,6 +13,12 @@ composer:
   # already reads; the shipped default `band` and six other shapes are not in
   # its catalogue, and the shape is otherwise a captain-level setting.
   shape: borderless
+statusLine:
+  # Pin the default status line preset so user customizations in ~/.omp/agent/config.yml
+  # (custom leftSegments, custom separators, omitted icons) do not bleed into
+  # headless worker panes and break composer boundary detection in bin/fm-composer-lib.sh.
+  preset: default
+symbolPreset: unicode
 plan:
   # `plan.defaultOnStartup: true` opens every session read-only; a worker that
   # cannot edit files sits on its brief forever.
