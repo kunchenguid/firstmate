@@ -157,6 +157,14 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
   assert_contains "$out" "finish with the bin/fm-branch-report.sh command." "the wake prompt must name the host's report surface"
   assert_contains "$out" "POSTURE: AWAY." "an away wake prompt must carry the posture tail"
   assert_contains "$out" "    merge nothing" "the away tail must carry the record's read-back verbatim"
+  assert_not_contains "$out" "away-standing-dispatch" "an away tail without the opt-in flag must carry no standing-dispatch clause"
+  mkdir -p "$home/config"
+  : > "$home/config/away-standing-dispatch"
+  out=$(printf 'signal: demo.status\n' | FM_HOME="$home" node "$DISPATCH" wake-prompt --report 'the bin/fm-branch-report.sh command' --away --readback-file "$home/readback")
+  assert_contains "$out" "This home enables config/away-standing-dispatch" "an away tail with the opt-in flag must carry the standing-dispatch clause"
+  assert_contains "$out" "\"Never by analogy\" do not forbid it" "the clause must lift the analogy limit for the standing-order dispatch"
+  assert_contains "$out" "    merge nothing" "the flagged tail must still carry the record's read-back verbatim"
+  rm -f "$home/config/away-standing-dispatch"
   pass "dispatch entry: the host reads branch eligibility, the offer rule, and the wake prompt from the Pi branch's own owner"
 }
 

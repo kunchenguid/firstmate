@@ -2535,6 +2535,55 @@ EOF
   pass "a claimed heartbeat row on a non-heartbeat away wake lifts task scoping for the fleet report"
 }
 
+test_away_tail_names_the_standing_dispatch_only_under_the_opt_in_flag() {
+  local flag repo home out status
+  for flag in absent present; do
+    repo="$TMP_ROOT/away-standing-tail-$flag-root"
+    home="$TMP_ROOT/away-standing-tail-$flag-home"
+    mkdir -p "$home/state" "$home/config"
+    [ "$flag" = absent ] || : > "$home/config/away-standing-dispatch"
+    install_pi_branch_extension_fixture "$repo"
+    PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" EXPECT_FLAG="$flag" \
+      DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx }; })()`);
+const { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+
+const entered = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, "enter"], {
+  encoding: "utf8",
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
+});
+if (entered.status !== 0) throw new Error(`fm-afk-contract.sh enter failed: ${entered.stderr}`);
+await fire("session_start", {}, defaultSessionCtx);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n");
+let finishPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const offer = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("the away wake was refused");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "away branch prompt");
+const prompt = globalThis.__fmPrompts[0];
+if (!prompt.includes("POSTURE: AWAY.")) throw new Error(`the away wake lost its tail: ${prompt}`);
+const named = prompt.includes("This home enables config/away-standing-dispatch");
+if (process.env.EXPECT_FLAG === "present" && !named) throw new Error(`the flag is present but the tail does not name the standing dispatch: ${prompt}`);
+if (process.env.EXPECT_FLAG === "absent" && prompt.includes("away-standing-dispatch")) {
+  throw new Error(`the flag is absent but the tail names the standing dispatch: ${prompt}`);
+}
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+await report.execute("r1", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+finishPrompt();
+await offer.settlement;
+process.exit(0);
+EOF
+    status=$?
+    out=$(cat "$TMP_ROOT/node-output")
+    expect_code 0 "$status" "the away tail must match the opt-in flag ($flag): $out"
+  done
+  pass "Pi branch: the away tail names the standing-order dispatch only under config/away-standing-dispatch"
+}
+
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
   local repo home out status
   repo="$TMP_ROOT/predrain-recheck-root"
@@ -6252,6 +6301,7 @@ test_away_record_parks_main_and_presents_after_archive
 test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_away_only_wake_rejects_when_record_is_archived_before_drain
 test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping
+test_away_tail_names_the_standing_dispatch_only_under_the_opt_in_flag
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work

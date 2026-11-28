@@ -115,6 +115,7 @@ import {
   activateEligibleRowsOwner,
   afkPostureRecordPresent,
   awayPostureTailFor,
+  awayStandingDispatchEnabled,
   branchWakePrompt,
   deactivateEligibleRowsOwner,
   FM_BRANCH_DISPATCH_EVENT,
@@ -1545,7 +1546,7 @@ ${context.command}
     } catch {
       readback = "";
     }
-    return awayPostureTailFor(readback);
+    return awayPostureTailFor(readback, awayStandingDispatchEnabled(config));
   }
 
   function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {
