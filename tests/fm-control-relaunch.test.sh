@@ -2446,6 +2446,33 @@ SH
   pass "fm-control relaunch: a vanished watcher scratch file does not fail the child-record checkpoint"
 }
 
+test_concurrent_expected_gen_relaunch_exits_stale() {
+  local dir out rc lock holder i
+  dir=$(new_case lockgen rl19g)
+  add_ship_task "$dir" rl19g claude
+  lock="$dir/home/state/.control-rl19g.lock"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || { kill "$holder" 2>/dev/null; fail "could not stage a held control lock"; }
+  out=$(run_control "$dir" rl19g relaunch --expect-spawn-gen sOLD --note "concurrent"); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 3 "$rc" "a busy control lock with an expected spawn_gen should exit as stale"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a refused concurrent relaunch must not stop the agent"
+  pass "fm-control relaunch: a busy control lock with an expected spawn_gen exits 3"
+}
+
 test_concurrent_relaunch_is_refused() {
   local dir out rc lock holder i
   dir=$(new_case lock rl19)
@@ -3384,6 +3411,7 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_secondmate_checkpoint_ignores_a_vanished_scratch_find_walk
+test_concurrent_expected_gen_relaunch_exits_stale
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
