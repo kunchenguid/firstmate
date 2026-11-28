@@ -15,6 +15,9 @@
 #     or in `.kimi-code/mcp.json`, announces them above the options as
 #     `Start N MCP server(s) automatically` over `Config: <declaring file>`.
 #     tests/captures/kimi-code-2.3.0/README.md owns those captures.
+#   2.1.1 and 0.43.1 (2026-10-07): a declaring directory listed each target
+#     under a `Project MCP targets:` header; tests/fm-kimi-harness.test.sh
+#     replays that prompt through its fake pane.
 # A prompt that announces project servers is never answered: answering it
 # starts those servers, and Kimi's per-folder trust is not a consent decision
 # that covers them.
@@ -79,11 +82,15 @@ kimi_trust_prompt_is_paged() {
 # Kimi 2.3.0 lists what trusting would activate between the directory and the
 # options; project MCP servers appear as `Start N MCP server(s) automatically`
 # over `Config: <declaring file>`. Either line alone carries the verdict, so a
-# capture that wrapped or clipped the other one still refuses.
+# capture that wrapped or clipped the other one still refuses. Earlier
+# releases listed the targets under a `Project MCP targets:` header; the
+# prompt's explanatory sentence mentions project MCP targets even when the
+# directory declares none, and that sentence is not this header.
 kimi_pane_announces_project_mcp_servers() {
   case "$1" in
     *'Start '*' MCP server'*' automatically'*) return 0 ;;
     *'Config: '*'mcp.json'*) return 0 ;;
+    *'Project MCP targets:'*) return 0 ;;
   esac
   return 1
 }
