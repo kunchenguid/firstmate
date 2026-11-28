@@ -2938,8 +2938,8 @@ open_decision_hold_deferred() {  # <until-column> <now-epoch>
 }
 
 # Opt-in durable decision-age backstop. The shared fold owns all transitions;
-# its separate timed view preserves source [at=] and [until=] values without
-# changing drain output. Scan only this home's logs, excluding its outbound
+# its timed view, which the drain's OPEN DECISIONS section also reads, preserves
+# source [at=] and [until=] values. Scan only this home's logs, excluding its outbound
 # parent channel. Queue at most the oldest due key per poll.
 # STATE/.open-decision-reminders stores <task> TAB <key> TAB <opened> TAB
 # <last-reminder> TAB <next-delay>, so watcher restarts preserve per-key

@@ -471,21 +471,38 @@ EOF
 # appended to each task's status log since the LAST drain, not that log's whole
 # lifetime, while still never dropping an old buried decision (see
 # fm-classify-lib.sh's "incremental (cursor-backed) open-decisions fold").
+# Each entry reads `<task> [key=<key>] [until=<date>] <verb>: <note>`, where the
+# `[until=]` field appears only while the fold's newest line for that key
+# carries a valid deferral date.
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
+  local snapshot=${1:-} open task key verb until note line item_bytes=220 global_bytes=4000
+  local output='' used=0 shown=0 omitted=0 bytes deferral
 
+  # Advance the untimed fold first, as every drain always has: fm-wake-lib.sh's
+  # fm_wake_status_append_self_announced accepts a home-written close after a
+  # presented decision only when that cursor already sits at the pre-append
+  # size. The rows below come from the timed view, which carries the deferral.
   if [ -n "$snapshot" ]; then
-    open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
+    scan_open_decisions_snapshot "$STATE" "$snapshot" >/dev/null || return 1
+    open=$(scan_open_decisions_snapshot "$STATE" "$snapshot" timed) || return 1
   else
-    open=$(scan_open_decisions_incremental "$STATE") || return 1
+    scan_open_decisions_incremental "$STATE" >/dev/null || return 1
+    open=$(scan_open_decisions_incremental "$STATE" timed) || return 1
   fi
   [ -n "$open" ] || return 0
 
-  while IFS=$(printf '\t') read -r task key verb note; do
+  # Timed rows carry the fold's emission time, unused here, and its deferral
+  # column, which holds the newest line's [until=] date or `-`/`?` without one.
+  while IFS=$(printf '\t') read -r task key verb _ until note; do
     [ -n "$task" ] || continue
+    # A current deferral is stated beside the key, so a call the captain put
+    # off to a date reads differently from one owed now; it stays listed.
+    deferral=''
+    case "$until" in
+      [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) deferral=" [until=$until]" ;;
+    esac
     # State the folded key on EVERY entry, "default" included. This section's
     # own hint asks the operator to pass that key to fm-send, and the note is
     # unedited worker prose that may itself carry a "[key=...]" token the key
@@ -494,7 +511,7 @@ print_open_decisions_section() {
     # that is NOT the key - so the listing read as naming a key it had not
     # folded, and the advised command then refused. An entry must always carry
     # the token that closes it.
-    line="$task [key=$key] $verb: $note"
+    line="$task [key=$key]$deferral $verb: $note"
     # The shared cut counts the item's own characters; the trailing newline this
     # section's global budget also pays for is this caller's, so the per-item
     # allowance passed down is one short of the cap.

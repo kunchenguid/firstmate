@@ -215,7 +215,42 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+# A captain deferral (`[until=YYYY-MM-DD]`, as fm-captain-hold.sh --until writes
+# it) must reach the drain row, so a deferred call reads differently from one
+# owed now. The date follows the fold's newest-line-wins rule: a later undated
+# republish of the same key clears it, folded incrementally across two drains.
+test_deferral_date_reaches_the_drain_row() {
+  local dir state out
+  dir=$(make_case deferral-date)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=k1] [until=2026-12-11] [at=1794375300]: deferred call\n' > "$state/task-dated.status"
+  printf 'working: continuing\n' >> "$state/task-dated.status"
+  printf 'needs-decision [key=k2]: owed now\n' > "$state/task-undated.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a deferred decision"
+
+  grep -Fx 'task-dated [key=k1] [until=2026-12-11] needs-decision: deferred call' "$out" >/dev/null \
+    || fail "a dated needs-decision did not produce a drain row with the same date: $(cat "$out")"
+  grep -Fx 'task-undated [key=k2] needs-decision: owed now' "$out" >/dev/null \
+    || fail "an undated needs-decision row changed shape: $(cat "$out")"
+  if grep -F 'task-undated' "$out" | grep -F '[until=' >/dev/null; then
+    fail "an undated needs-decision gained an [until=] field: $(cat "$out")"
+  fi
+
+  printf 'needs-decision [key=k1]: deferred call, asked again\n' >> "$state/task-dated.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after an undated republish"
+
+  grep -Fx 'task-dated [key=k1] needs-decision: deferred call, asked again' "$out" >/dev/null \
+    || fail "a later undated republish did not replace the dated row: $(cat "$out")"
+  if grep -F 'task-dated' "$out" | grep -F '[until=' >/dev/null; then
+    fail "a later undated republish did not clear the deferral date: $(cat "$out")"
+  fi
+  pass "a deferral date reaches its drain row and a later undated republish clears it"
+}
+
 test_buried_decision_still_surfaces
+test_deferral_date_reaches_the_drain_row
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it

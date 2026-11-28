@@ -1454,7 +1454,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
   kind=$(_fm_status_kind "$f")
   fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
   cf=$(_fm_open_decisions_cursor_path "$f")
-  # A separate cursor keeps the ordinary presentation view byte-compatible.
+  # A separate cursor keeps the untimed view byte-compatible.
   # Timed rows are <key> TAB <verb> TAB <epoch-or-unknown> TAB
   # <until-date, `-` absent, `?` malformed> TAB <note>. The suffix number
   # retires timed cursors persisted under an older row format or epoch rule.
@@ -1570,14 +1570,16 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [
 # each task's status log through status_open_decisions_incremental instead of
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
 # bounded by new appends rather than total lifetime log size across every task.
-scan_open_decisions_incremental() {  # <state>
-  local state=$1 f task open line exclude
+# An optional `timed` asks for that fold's timed rows instead, each prefixed
+# with "<task>\t" the same way.
+scan_open_decisions_incremental() {  # <state> [timed]
+  local state=$1 timed=${2:-} f task open line exclude
   exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
-    open=$(status_open_decisions_incremental "$f") || continue
+    open=$(status_open_decisions_incremental "$f" '' "$timed") || continue
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -2059,12 +2061,12 @@ EOF
   mv -f "$tmp" "$state/.status-presentation-cursor" || { rm -f "$tmp"; return 1; }
 }
 
-scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
-  local state=$1 snapshot=$2 task endpoint ident f open line
+scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot> [timed]
+  local state=$1 snapshot=$2 timed=${3:-} task endpoint ident f open line
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
-    open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
+    open=$(status_open_decisions_incremental "$f" "$endpoint" "$timed") || return 1
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue

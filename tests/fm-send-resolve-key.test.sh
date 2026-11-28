@@ -465,6 +465,34 @@ test_multiple_keys_close_after_fold_is_self_announced() {
   pass "fm-send --resolve-key: one answer's closes after a drain fold never wake this home"
 }
 
+# The drain renders a captain deferral as `[until=<date>]` on its row. Answering
+# that listed decision is still this home's own bookkeeping, so its close must
+# not wake the home to reread it, exactly like an undated folded decision.
+test_deferred_key_close_after_fold_is_self_announced() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/deferred-fold"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home deferred-fold)
+  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  printf 'needs-decision [key=launch] [until=2026-12-11] [at=1794375300]: ship before the holidays?\n' \
+    > "$home/state/t8.status"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 't8 [key=launch] [until=2026-12-11] needs-decision: ship before the holidays?' >/dev/null \
+    || fail "precondition: the drain should list the deferred decision with its date: $out"
+
+  run_send "$fb" "$home" "$log" t8 --resolve-key launch "ship after the holidays"; rc=$?
+  expect_code 0 "$rc" "an answer resolving a deferred folded key should succeed"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t8.status" \
+    || fail "the close of a deferred decision listed by an OPEN DECISIONS drain was left to re-wake this home"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "an answered deferred key is still open: $out"
+  fi
+  pass "fm-send --resolve-key: closing a deferred decision after a drain fold never wakes this home"
+}
+
 test_local_secondmate_answer_marked_and_closed() {
   local dir fb log home rc got out closing
   dir="$TMP_ROOT/sm"; mkdir -p "$dir"
@@ -1185,6 +1213,7 @@ test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
 test_multiple_keys_close_after_fold_is_self_announced
+test_deferred_key_close_after_fold_is_self_announced
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
