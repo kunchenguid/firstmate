@@ -10,7 +10,7 @@
 #        fm-agy-trust.sh --is-trusted <worktree>
 #   <worktree>  the isolated task worktree this spawn launches into (or, under
 #               --relaunch-copy, either a linked worktree of <project> or a
-#               standalone clone sharing commit history with <project>)
+#               standalone clone sharing a root commit with <project>)
 #   <project>   the primary checkout that worktree belongs to
 #   <home>      the seeded secondmate home a --secondmate launch starts in
 #   <id>        the secondmate's task id, matched against <home>/.fm-secondmate-home
