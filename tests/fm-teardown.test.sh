@@ -4971,6 +4971,33 @@ automatic_skips: "publication skipped: no-mistakes.yaml pr.enabled=false"' \
   pass "a run that lands on passed-with-skips after abort is still recognized as terminal"
 }
 
+# The abort race can also land the run on `handed_off`: `no-mistakes axi handoff`
+# ended a green run with its PR left open for review instead of cancelling it.
+# That is a terminal, finished run, so teardown must conclude cleanly rather
+# than refuse as still-parked.
+test_parked_own_run_concludes_on_handed_off_after_abort() {
+  local case_dir rc head
+  case_dir=$(make_case parked-run-abort-handed-off)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  rc=0
+
+  FM_FAKE_AXI_STATUS="$(parked_axi_status_toon fm/task-x1 "$head")" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+  FM_FAKE_AXI_STATUS_AFTER_ABORT='run:
+  id: "01RUN"
+  outcome: handed_off' \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-abort-handed-off: teardown should still succeed"
+  assert_grep "abort --run 01RUN" "$case_dir/nm-abort.log" \
+    "parked-run-abort-handed-off: the parked run was not aborted"
+  assert_no_grep "REFUSED" "$case_dir/stderr" \
+    "parked-run-abort-handed-off: a handed-off outcome must not be reported as still parked"
+  pass "a run that lands on handed_off after abort is still recognized as terminal"
+}
+
 # The pipeline advanced the parked run past the submitted head in its own
 # repo, so the run head object does not exist in the task copy at all and the
 # strict object-local identity rule cannot bind the run. The daemon's own
@@ -5115,6 +5142,40 @@ EOF
   assert_absent "$case_dir/nm-abort.log" \
     "parked-run-terminal-status-gate: terminal status with a stale gate aborted"
   pass "a terminal status with a stale gate never reaches ledger cleanup"
+}
+
+# A handed-off run is finished, not parked: `no-mistakes axi handoff` ended a
+# green run with its PR left open for review. `handed_off` is a terminal status
+# word, so a stale gate on the same object must never be read as a parked wait
+# and aborted under the worker that would answer it.
+test_handed_off_status_with_gate_never_aborts() {
+  local case_dir rc advanced_short anchor_short handed_off_status
+  case_dir=$(make_case parked-run-handed-off-status-gate)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  anchor_short=$(git -C "$case_dir/wt" rev-parse --short=7 HEAD)
+  advanced_short=$(make_unfetched_pipeline_heads "$case_dir")
+  assert_head_absent_from_worktree "$case_dir/wt" "$advanced_short" "parked-run-handed-off-status-gate"
+  handed_off_status=$(parked_axi_status_toon fm/task-x1 "$advanced_short")
+  handed_off_status=${handed_off_status/status: awaiting_approval/status: handed_off}
+
+  rc=0
+  FM_FAKE_AXI_STATUS="$handed_off_status" \
+  FM_FAKE_NM_RUNS_LIST="$(cat <<EOF
+$(ledger_row running fm/task-x1 "$advanced_short" 2026-09-03 07:55)
+$(ledger_row failed fm/task-x1 "$anchor_short" 2026-09-02 06:36)
+EOF
+)" \
+  FM_FAKE_NM_RUNS_LOG="$case_dir/nm-runs.log" \
+  FM_FAKE_NM_ABORT_LOG="$case_dir/nm-abort.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "parked-run-handed-off-status-gate: teardown should still succeed"
+  assert_absent "$case_dir/nm-runs.log" \
+    "parked-run-handed-off-status-gate: terminal handed_off status queried the ledger fallback"
+  assert_absent "$case_dir/nm-abort.log" \
+    "parked-run-handed-off-status-gate: a handed-off run with a stale gate aborted"
+  pass "a handed_off status with a stale gate is never aborted as a parked run"
 }
 
 # Counterfactual twin of the unfetched defect above: the SAME parked-run shape
@@ -6837,11 +6898,13 @@ test_parked_own_run_is_aborted_before_teardown
 test_parked_run_in_a_resolved_workspace_home_is_aborted
 test_parked_own_run_concludes_on_passed_with_override_after_abort
 test_parked_own_run_concludes_on_passed_with_skips_after_abort
+test_parked_own_run_concludes_on_handed_off_after_abort
 test_parked_run_advanced_past_unfetched_head_is_still_aborted
 test_parked_run_with_mismatched_ledger_head_is_never_aborted
 test_parked_run_with_malformed_ledger_row_is_never_aborted
 test_parked_run_with_impossible_ledger_date_is_never_aborted
 test_terminal_status_with_gate_never_queries_or_aborts_ledger_fallback
+test_handed_off_status_with_gate_never_aborts
 test_parked_run_advanced_head_locally_fetched_is_still_aborted
 test_parked_advanced_run_without_anchor_is_never_aborted
 test_parked_advanced_run_ancestor_anchor_is_never_aborted

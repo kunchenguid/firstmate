@@ -751,6 +751,8 @@ A missed native transition falls through to the composer verdict rather than rep
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for the small bounded reads that remain: peek and watch tails, the rendered busy-footer read, and the shared steering-inbox pending-line read.
 The adapter's own composer reads are exempt because they read the visible viewport instead, which takes no line count (see [Claude composer proof](#claude-composer-proof)).
+A capture of a pane whose tab Herdr has pruned succeeds with empty output: the readiness check proves only that the named session server is running, never that the recorded pane still exists, so the empty read is a success rather than an error.
+The wedge triage that watches such a window treats that empty capture as an episode end rather than wedge evidence, so a pruned pane is never escalated from a successful blank read ([`bin/fm-watch.sh`](../bin/fm-watch.sh) owns the route).
 
 ### Native idle state
 

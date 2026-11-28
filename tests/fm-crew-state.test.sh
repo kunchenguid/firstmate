@@ -712,6 +712,22 @@ outcome: passed
 EOF
 }
 
+# A run whose green CI monitoring ended with its PR left open for human review
+# (`no-mistakes axi handoff`) reports status handed_off and outcome handed-off.
+# Both words are terminal and passing; neither may read as an unknown run.
+run_handed_off() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: handed_off
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: handed-off
+EOF
+}
+
 run_failed() {  # <branch>
   cat <<EOF
 run:
@@ -1668,6 +1684,51 @@ test_terminal_passed_with_open_pr_does_not_claim_merged() {
   assert_not_contains "$out" "merged/closed" "open PR must not get the old merged/closed label"
   assert_not_contains "$out" "PR merged" "open PR must not be reported merged"
   pass "terminal passed run with open PR does not claim merged"
+}
+
+test_handed_off_run_reads_as_passed_with_open_pr() {
+  local scenario failures=0
+  for scenario in outcome status selected coarse; do
+    (
+      reset_fakes
+      local d out
+      d=$(new_case "handed-off-$scenario")
+      make_repo_on_branch "$d/wt" fm/feat-dhand
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/feat-dhand.meta" "window=fm:fm-feat-dhand" \
+        "worktree=$d/wt" "kind=ship" "pr=https://github.com/o/r/pull/1"
+      FM_FAKE_PR_STATE=OPEN
+      FM_FAKE_PR_MERGED=false
+      case "$scenario" in
+        outcome)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)" ;;
+        status)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand | sed '/^outcome:/d')" ;;
+        selected)
+          FM_FAKE_AXI_STATUS="$(run_handed_off fm/feat-dhand)"
+          FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+          FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-dhand,handed_off,$FM_FAKE_RUN_HEAD,\"https://github.com/o/r/pull/1\""
+          ;;
+        coarse)
+          FM_FAKE_AXI_STATUS="$(run_running fm/another)"
+          FM_FAKE_RUNS_LIST="  handed_off  fm/feat-dhand $FM_FAKE_RUN_HEAD  2026-09-26 17:00"
+          ;;
+      esac
+      out=$(run_crew_state "$d" feat-dhand)
+      assert_contains "$out" "state: done" "$scenario: a handed-off run is a passing run: $out"
+      assert_not_contains "$out" "unrecognized run status" "$scenario: handed_off must be a recognized ledger status word"
+      assert_not_contains "$out" "state: unknown" "$scenario: a handed-off run must never read as unknown"
+      if [ "$scenario" = coarse ]; then
+        assert_contains "$out" "run handed off: PR open for review" "$scenario: a handed-off ledger row reports the open PR"
+      else
+        assert_contains "$out" "run passed: PR open" "$scenario: a handed-off run reports its open PR"
+      fi
+      pass "$scenario: a handed-off run reads as passed with its open PR"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures handed-off run regressions"
 }
 
 test_terminal_passed_run_pr_overrides_stale_metadata() {
@@ -4089,6 +4150,37 @@ EOF
   pass "a coarse terminal reading claims no supersession"
 }
 
+# A HANDED_OFF row the ledger proves current for this worktree states a passing
+# terminal outcome for it, so rule 2b answers an older failure with it exactly as
+# it answers a later COMPLETED run: terminal-green, carrying the PR that row left
+# open for human review. Rejecting it as unbindable history instead told the
+# captain that a run which had already delivered its work had an unprovable
+# present.
+test_newer_handed_off_ledger_row_answers_a_failure_green() {
+  reset_fakes
+  local d short out; d=$(new_case newer-handed-off-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2q
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2q.meta" "window=fm:fm-feat-s2q" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-s2q,failed,${FM_FAKE_RUN_HEAD},\"https://github.com/o/r/pull/1111\""
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s2q https://github.com/o/r/pull/1111)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  handed_off fm/feat-s2q ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/2222"
+  out=$(run_crew_state "$d" feat-s2q)
+  assert_contains "$out" "state: done" "the newer handed-off row answers the older failure"
+  assert_not_contains "$out" "state: failed" "the superseded failure is not published"
+  assert_not_contains "$out" "state: unknown" "a row the ledger proves current is never an unprovable present"
+  assert_contains "$out" "run superseded by a newer handed_off run on this branch" \
+    "the verdict names the handed-off row that superseded the failure"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2222" \
+    "the pull request that row left open for review is published"
+  assert_not_contains "$out" "pull/1111" "the superseded run's pull request must not surface"
+  pass "a newer handed-off ledger row answers a failed reading terminal-green"
+}
+
 # Both readers of the `no-mistakes runs` listing must agree on when the ledger is
 # unreadable: a row the strict reader rejects must not still supply newest-row
 # evidence that unbinds the attributed run.
@@ -6314,6 +6406,43 @@ test_competing_live_runs_report_unknown_with_both_ids() {
   pass 'competing live runs report unknown with both run ids'
 }
 
+# Sibling of the competing-live-runs case for the other terminal word this
+# contract made selectable: a stale handed_off overview row is terminal, so a
+# newer live same-branch run has to take the same competing-live-runs,
+# ordering-unverified and newer-live-run-replacement safeguards completed,
+# cancelled and failed take. Without it the superseded handed_off row answers
+# for the branch and the confident reading is a wrong one that cannot error.
+test_stale_handed_off_overview_row_yields_to_the_newer_live_run() {
+  reset_fakes
+  local d old_head new_head out
+  d=$(new_case stale-handed-off-overview-row)
+  make_repo_on_branch "$d/wt" fm/reused-branch
+  old_head=$(git -C "$d/wt" rev-parse HEAD)
+  new_head=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/reused.meta" "window=fm:fm-reused" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating the current run\n' > "$d/state/reused.status"
+  FM_FAKE_AXI_HOME="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01OLD\",fm/reused-branch,handed_off,$old_head,\"https://github.com/o/r/pull/1\"
+  \"01NEW\",fm/reused-branch,running,$new_head,\"\""
+  FM_FAKE_RUN_HEAD=$new_head
+  FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01NEW/')
+branch_sync:
+  state: pipeline_owned"
+  FM_FAKE_AXI_STATUS_RUN_01OLD="$(FM_FAKE_RUN_HEAD=$old_head run_handed_off fm/reused-branch | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN_01NEW="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  running fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
+  handed_off fm/reused-branch ${old_head:0:7} 2026-09-28 12:00"
+  out=$(run_crew_state "$d" reused)
+  assert_contains "$out" 'state: working' 'the live newer run stays authoritative over a stale handed_off row'
+  assert_contains "$out" '01NEW' 'the live run identity is the one reported'
+  assert_not_contains "$out" 'state: done' 'a stale handed_off row never answers for the branch'
+  assert_not_contains "$out" 'PR merged' 'the superseded handed_off reading is not reported as the result'
+  unset FM_FAKE_AXI_STATUS_RUN_01OLD FM_FAKE_AXI_STATUS_RUN_01NEW
+  pass 'a stale handed_off overview row yields to the newer live run'
+}
+
 # Overview order A (historical-first / reversed): AXI can surface a historical
 # row before the active current run when an old run was updated by its stale PR
 # being closed. The current branch status identifies the active run, so
@@ -6798,6 +6927,7 @@ test_terminal_passed_with_skips
 test_terminal_passed_uses_matching_retirement_receipt_without_forge
 test_terminal_passed_no_forge_switch_skips_read_but_keeps_receipt
 test_terminal_passed_with_open_pr_does_not_claim_merged
+test_handed_off_run_reads_as_passed_with_open_pr
 test_terminal_passed_run_pr_overrides_stale_metadata
 test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
@@ -6877,6 +7007,7 @@ test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row
 test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last
 test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own
 test_coarse_terminal_reading_claims_no_supersession
+test_newer_handed_off_ledger_row_answers_a_failure_green
 test_foreign_status_never_hides_coarse_terminal_pr
 test_stale_passed_run_publishes_no_pr_for_active_rerun
 test_cancelled_run_publishes_no_pr_for_active_rerun
@@ -6965,6 +7096,7 @@ test_coarse_live_row_keeps_the_original_supersede_note
 test_coarse_live_rebased_row_is_not_attributed
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
+test_stale_handed_off_overview_row_yields_to_the_newer_live_run
 test_current_active_run_beats_stale_overview_row
 test_current_active_run_beats_stale_failed_overview_row
 test_current_active_run_beats_same_head_stale_failed_overview_row

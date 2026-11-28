@@ -84,6 +84,10 @@
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
 #                          verdict escalates unchanged.
+#                          A capture that renders nothing is not a wedge either:
+#                          the poll ends the episode at the empty-capture route
+#                          and waits for content, so a pruned endpoint is neither
+#                          reported once nor escalated.
 #                          Where config/wedge-evidence-guards lists operator
 #                          guards, a live pane about to escalate whose guard
 #                          answers CRITICAL defers a bounded run of windows
@@ -4620,6 +4624,34 @@ EOF
     fi
     watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     tail40=$WATCHER_CAPTURE
+    # An empty capture is not a wedge. A backend can answer a pruned endpoint
+    # with a successful empty read - herdr's capture proves only that its server
+    # is up, never that the pane still exists - and hashing that constant walks
+    # a window whose pane is already gone up the escalation ladder until it
+    # demands a deep inspection of a closed task. A pane that renders nothing
+    # carries no evidence of a wedge, so end the episode and wait for content.
+    # The episode bookkeeping goes; the report memory does not. .stale-<key> is
+    # the one-shot-per-distinct-hash record every surface decision compares
+    # against, and a read that renders none of that content cannot prove it has
+    # been reported afresh: dropping it here bought a pane that came back
+    # byte-identical a second report of one the captain already had.
+    # .waiting-resurfaced-<key> holds for the same reason - it throttles a
+    # declared wait this read cannot observe ending - and only
+    # clear_stale_hash_tracking, the route a gone subject takes, drops either.
+    if [ -z "${tail40//[[:space:]]/}" ]; then
+      if [ -e "$STATE/.count-$key" ] || [ -e "$STATE/.stale-$key" ] || [ -e "$STATE/.stale-since-$key" ]; then
+        triage_log "absorbed empty pane capture (endpoint renders nothing): $w"
+      fi
+      rm -f "$STATE/.hash-$key" "$STATE/.count-$key"
+      wedge_episode_end "$key"
+      clear_write_tracking "$key"
+      # The capture shows no composer dialog, so a name the away daemon saved
+      # for this task no longer describes the pane. Drop it here too: the
+      # ordinary path below is skipped by this branch's continue, and a stale
+      # name would otherwise be attached to the next stale wake.
+      clear_dialog_suffix "$task"
+      continue
+    fi
     # The matcher is already defined in this shell. It reads the capture this
     # poll already takes, and a miss drops a name the away daemon saved.
     dialog=$(fm_composer_blocking_dialog "$tail40") || dialog=
