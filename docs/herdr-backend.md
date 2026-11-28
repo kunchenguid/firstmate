@@ -787,6 +787,8 @@ If the ANSI capture ever fails, the plain fallback declares itself unstyled.
 The classifier then degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input.
 That safely defers injection and eventually raises the wedge alarm.
 
+Droid's cursorless bordered composer also admits its elapsed footer with an optional context percentage.
+
 ### Away-mode injection
 
 A bare shell prompt is never an empty agent composer.
@@ -939,6 +941,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 [Away-mode supervisor configuration](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target) owns supported backends and detection.
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
+Away-daemon escalation delivery for a Droid primary on Herdr is not yet refreshed on current builds, so `bin/fm-afk-launch.sh` refuses that combination rather than launching unverified; see [`verification/droid-primary.md`](verification/droid-primary.md#away-mode-delivery-under-herdr).
 
 ### Where the daemon runs
 

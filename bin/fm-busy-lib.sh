@@ -38,6 +38,10 @@
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   devin-hook       Devin UserPromptSubmit / Stop / SessionEnd hooks; manual
 #                    cancellation emits no Stop, so control invalidates to unknown.
+#   droid-hook       Droid UserPromptSubmit / Stop / SessionEnd hooks; manual
+#                    cancellation emits no Stop, so control invalidates to unknown
+#                    and classification falls back to droid-regex when unarmed or
+#                    invalidated by fm-interrupt.
 #   commandcode-mod  Command Code per-task mod (run_start opens; run_end, including
 #                    an Escape interrupt, and session end close)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
@@ -60,7 +64,7 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, droid-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
@@ -87,7 +91,7 @@
 #   5. no record at all: a native busy verdict from herdr, rex, or tern is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
+#      Grok/Droid/Rovo/AGY temporary regex fallbacks classify a grok, droid, rovo, or agy
 #      task from its rendered tail, then unknown missing
 #   6. malformed, stale, or untrusted records -> unknown, never a fallback
 #
@@ -107,9 +111,9 @@
 # a real busy verdict once any hook has posted, and it defers to whatever
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
-# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the only
-# harnesses whose rendered text is their SOLE classification, because none of
-# their structured lifecycles was credited-live-verified
+# Apart from the launch-prompt backstop above, Grok, Droid, Rovo, and AGY are the only
+# rendered-text busy fallbacks that survive the redesign, because none of their
+# structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
 # hook surface at all, see references/harness/agy.md); each is scoped to
@@ -324,7 +328,7 @@ fm_busy_current_gen() {  # <state-dir> <id>
 # The firstmate-owned sources are appended for every converted adapter.
 # Grok and muse deliberately trust nothing: neither has a semantic WRITER, so
 # neither is armed, and both read their live source on demand in the classifier
-# (grok's rendered tail, muse's session log) rather than through a stored
+# (Grok's rendered tail, muse's session log) rather than through a stored
 # record. Listing a source here without a writer that can clear it would seed a
 # busy record nothing could ever settle.
 fm_busy_sources_for_harness() {  # <harness>
@@ -338,6 +342,7 @@ fm_busy_sources_for_harness() {  # <harness>
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
     devin) adapter=devin-hook ;;
+    droid) adapter=droid-hook ;;
     cortex) adapter=cortex-hook ;;
     hermes) adapter=hermes-hook ;;
     commandcode) adapter=commandcode-mod ;;
@@ -984,6 +989,17 @@ fm_busy_grok_tail_busy() {
     | grep -qiE "${FM_BUSY_REGEX:-${FM_DELIVERY_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
 }
 
+# Rendered-tail fallback for unarmed Droid launches or turns invalidated by
+# fm-interrupt; scoped so another adapter can never inherit this fallback.
+fm_busy_droid_tail_busy() {
+  if [ -z "${FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT:-}" ]; then
+    # shellcheck source=bin/fm-composer-lib.sh
+    . "${BASH_SOURCE[0]%/*}/fm-composer-lib.sh"
+  fi
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qiE "${FM_BUSY_REGEX:-$FM_DELIVERY_DROID_BUSY_REGEX_DEFAULT}"
+}
+
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Rovo's verified animated busy line
 # matches (the "Rovo is thinking..." text rendered while a turn is running,
@@ -1015,7 +1031,7 @@ fm_busy_agy_tail_busy() {
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
 #
 # Each function consumes a captured pane tail on stdin (the caller's whole
-# tail40, NOT reduced to the last 12 non-blank lines the way the Grok/Rovo/AGY
+# tail40, NOT reduced to the last 12 non-blank lines the way the Grok/Droid/Rovo/AGY
 # busy footers above are): a bordered dialog box renders many short lines of
 # pure border/padding (`│  ...  │`) that are NOT whitespace-only, so a 12-line
 # non-blank reduction was verified live to push the box's own heading text
@@ -1025,7 +1041,6 @@ fm_busy_agy_tail_busy() {
 # the footer fallbacks - a screen taller than the capture can still scroll a
 # signature out, so absence never proves the pane is NOT parked, only that
 # this check cannot confirm it.
-
 # fm_busy_claude_launch_prompt_tail: Claude's workspace-trust dialog
 # ("Quick safety check: Is this a project you created or one you trust?",
 # re-verified live on Claude Code 2.1.278, docs/verification/runtime-backends.md
@@ -1181,16 +1196,20 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     out=${out#* }
     r_source=${out%% *}
     if fm_busy_source_trusted "$harness" "$r_source"; then
-      if [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
+      if [ "$harness" = droid ] && [ "$r_state" = unknown ] && [ "$r_source" = fm-interrupt ]; then
+        :
+      elif [ "$r_state" = busy ] && [ "$r_source" = fm-spawn ] && [ -n "$tail40" ] \
         && printf '%s' "$tail40" | fm_busy_launch_prompt_parked "$harness"; then
         printf 'unknown launch-prompt'
+        return 0
       else
         printf '%s %s' "$r_state" "$r_source"
+        return 0
       fi
     else
       printf 'unknown source-mismatch'
+      return 0
     fi
-    return 0
   fi
   case "$out" in
     malformed|gen-mismatch)
@@ -1247,6 +1266,25 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'busy grok-regex'
       else
         printf 'idle grok-regex'
+      fi
+      return 0
+      ;;
+    droid)
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      if printf '%s' "$tail40" | fm_busy_droid_tail_busy; then
+        printf 'busy droid-regex'
+      else
+        printf 'idle droid-regex'
       fi
       return 0
       ;;
@@ -1317,7 +1355,7 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
 # consumer resolves backend, target, and harness the same way instead of
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
 # optional pre-captured plain output reused by the contract's rendered-text
-# checks: the Grok/Rovo/AGY busy fallbacks and the launch-prompt backstop.
+# checks: the Grok/Droid/Rovo/AGY busy fallbacks and the launch-prompt backstop.
 fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }

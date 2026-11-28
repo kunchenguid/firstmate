@@ -193,6 +193,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-profile-lib.sh
+. "$SCRIPT_DIR/fm-profile-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-polytoken-lib.sh
@@ -331,8 +333,8 @@ fi
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 case "$NEW_EFFORT" in
-  ''|default|low|medium|high|xhigh|max|ultra) ;;
-  *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
+  ''|default|low|medium|high|xhigh|max|ultra|dynamic) ;;
+  *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra, dynamic" ;;
 esac
 
 # --- exact task-id resolution ----------------------------------------------
@@ -598,9 +600,9 @@ deliver_interrupt() {
     printf '%s' "$cancel"
     return 0
   fi
-  # Devin does not emit Stop for cancellation. Capture this incarnation before
-  # keys, then invalidate its state conservatively rather than claiming idle.
-  if [ "$HARNESS" = devin ]; then
+  # Devin and Droid do not emit Stop for cancellation. Capture this incarnation
+  # before keys, then invalidate its state conservatively rather than claiming idle.
+  if [ "$HARNESS" = devin ] || [ "$HARNESS" = droid ]; then
     devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
   fi
   # T3 Code has no keys: its native interrupt confirms the run's end itself.
@@ -616,7 +618,7 @@ deliver_interrupt() {
     cancel=not-running
   else
     cancel=$(interrupt_cancel_claim)
-    if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
+    if { [ "$HARNESS" = devin ] || [ "$HARNESS" = droid ]; } && [ -n "$devin_gen" ]; then
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
         --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
     fi
@@ -629,14 +631,14 @@ verify_interrupt_running() {
   local proof after
   fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
-  proof=endpoint
+  proof='endpoint'
   if fm_control_backend_state_verified "$BACKEND"; then
     # An interrupt cancels a turn; it must never have stopped the agent. This
     # is the postcondition that separates a landed interrupt from an accident.
     after=$(agent_state)
     [ "$after" = alive ] \
       || die "task $ID's agent is '$after' after its interrupt key; an interrupt must leave the agent running"
-    proof=agent-alive
+    proof='agent-alive'
   fi
   printf '%s' "$proof"
 }
@@ -1013,13 +1015,10 @@ resolve_relaunch_profile() {
     if ! CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID"); then
       die "the configured secondmate effort pin for $ID cannot be read; fix config/secondmate-harness rather than relaunching onto an unresolved effort"
     fi
-    case "$CONFIG_EFFORT" in
-      ''|low|medium|high|xhigh|max|ultra) ;;
-      *)
-        echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2
-        CONFIG_EFFORT=
-        ;;
-    esac
+    if [ -n "$CONFIG_EFFORT" ] && ! fm_profile_effort_valid "$CONFIG_EFFORT"; then
+      echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of $FM_PROFILE_EFFORT_VALUES; ignoring" >&2
+      CONFIG_EFFORT=
+    fi
   fi
   if [ "$HARNESS_SET" = 1 ]; then
     fm_control_harness_supported "$NEW_HARNESS" \
@@ -1058,6 +1057,11 @@ resolve_relaunch_profile() {
     TARGET_EFFORT=$PRIOR_EFFORT
   else
     TARGET_EFFORT=default
+  fi
+  # Validate Droid selection before stopping the current incarnation. The
+  # launch owner repeats this check, including on fresh and remote launches.
+  if [ "$TARGET_HARNESS" = droid ]; then
+    bash "$SCRIPT_DIR/fm-droid-model.sh" resolve "$TARGET_MODEL" >/dev/null || return 1
   fi
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1

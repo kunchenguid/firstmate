@@ -373,12 +373,12 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # screen must read differently depending only on whether the pane's foreground
 # process is genuinely Cursor, and the cursor-anchored source must be asserted
 # blind so the case cannot go quietly vacuous.
-
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
 ln -s "$STANDIN_BIN" "$LAB/bin/cursor-agent"
 ln -s "$STANDIN_BIN" "$LAB/bin/notcursor"
+ln -s "$STANDIN_BIN" "$LAB/bin/droid"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the
@@ -517,6 +517,7 @@ commandcode_screen() {  # <composer-row-kind idle|typed>
     printf '%s[39m\342\235\257 half typed captain text%s[7m %s[0m\n' "$e" "$e" "$e"
   fi
   printf '%s[38;2;138;148;168m%s\n%s[39m  ? for shortcuts\n\n\n' "$e" "$rule" "$e"
+
 }
 open_commandcode_pane() {  # <window> <binary> <idle|typed>
   local window=$1 binary=$2 kind=$3 i=0
@@ -524,6 +525,7 @@ open_commandcode_pane() {  # <window> <binary> <idle|typed>
   while [ "$i" -lt 100 ]; do
     case "$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION:$window" 2>/dev/null)" in
       *'? for shortcuts'*) return 0 ;;
+
     esac
     sleep 0.1
     i=$((i + 1))

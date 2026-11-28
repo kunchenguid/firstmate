@@ -97,7 +97,7 @@ case "\${1:-}" in
     esac
     exit 0
     ;;
-  capture-pane) printf '❯\n'; exit 0 ;;
+  capture-pane) printf '⛬  Ready\n❯\n'; exit 0 ;;
   send-keys) [ ! -f "\$fail_send" ] || exit 1; exit 0 ;;
   kill-window) rm -f -- "\$state"; exit 0 ;;
   list-panes) printf 'codex\n'; exit 0 ;;
@@ -105,6 +105,14 @@ esac
 exit 0
 SH
 chmod +x "$REMOTE_ROOT/bin/tmux"
+# The remote entrypoint restores the real account HOME. Keep native Droid trust
+# in a private HOME while exercising the real trust helper.
+mkdir -p "$TMP_ROOT/droid-user-home"
+cat > "$REMOTE_ROOT/bin/fm-droid-trust.sh" <<SH
+#!/usr/bin/env bash
+HOME='$TMP_ROOT/droid-user-home' exec bash '$ROOT/bin/fm-droid-trust.sh' "\$@"
+SH
+chmod +x "$REMOTE_ROOT/bin/fm-droid-trust.sh"
 install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
   "$TMP_ROOT/herdr-send-fail" "$TMP_ROOT/herdr.sock"
 git -C "$REMOTE_ROOT" init -q -b main
@@ -884,7 +892,20 @@ pass "mixed local and remote routes validate without migration"
 
 # Launch on the remote home's own configured backend. Parent metadata records
 # host placement separately from that backend and arms the reply source.
+# Droid remote secondmates are refused locally, before any remote call, until
+# live SSH recovery is verified.
 printf 'pi\n' > "$PARENT/config/crew-harness"
+ssh_calls_before_droid=$(cat "$SSH_COUNT" 2>/dev/null || echo 0)
+if remote_droid_out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness droid 2>&1); then
+  fail "remote spawn accepted unverified Droid remote secondmate"
+fi
+assert_contains "$remote_droid_out" 'unverified remote secondmate harness: droid' \
+  "remote Droid secondmate refusal did not name the unverified boundary"
+assert_equals "$ssh_calls_before_droid" "$(cat "$SSH_COUNT" 2>/dev/null || echo 0)" \
+  "remote Droid secondmate refusal reached the remote host before refusing"
+assert_absent "$PARENT/state/ios.meta" "refused remote Droid secondmate published launch metadata"
+pass "remote Droid secondmate spawn is refused locally before any remote side effect"
+
 launches_before_inherit=0
 [ ! -f "$HERDR_LOG" ] || launches_before_inherit=$(grep -c '^tab create' "$HERDR_LOG" || true)
 if FM_FAKE_SSH_MODE=inherit-partial remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
@@ -915,6 +936,20 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness codex --effort impossible \
+  > "$TMP_ROOT/remote-invalid-parent.out" 2>&1; then
+  fail "parent remote dispatch accepted an invalid explicit effort"
+fi
+assert_grep 'effort must be one of low, medium, high, xhigh, max, ultra, dynamic' \
+  "$TMP_ROOT/remote-invalid-parent.out" "parent remote dispatch did not enforce the shared effort vocabulary"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - impossible herdr \
+  > "$TMP_ROOT/remote-invalid-host.out" 2>&1; then
+  fail "host-local remote control accepted an invalid effort"
+fi
+assert_grep 'invalid remote secondmate effort: impossible' "$TMP_ROOT/remote-invalid-host.out" \
+  "host-local remote control did not reject an invalid effort"
+pass "remote dispatch and host control reject efforts outside the shared vocabulary"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
@@ -1025,6 +1060,7 @@ while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
   spawn_inherit_wait=$((spawn_inherit_wait + 1))
   [ "$spawn_inherit_wait" -le "$(( ${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-900} * 50 ))" ] || fail "remote spawn never reached its blocked inheritance write"
+
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
@@ -1040,7 +1076,7 @@ sleep 0.2
 kill -0 "$spawn_config_push" 2>/dev/null \
   || fail "config push bypassed the active remote spawn inheritance transaction"
 touch "$TMP_ROOT/inherit.release"
-wait "$spawn_concurrent" || fail "serialized remote spawn failed"
+wait "$spawn_concurrent" || fail "serialized remote spawn failed"$'\n'"$(cat "$TMP_ROOT/spawn-concurrent.out")"
 wait "$spawn_config_push" || fail "config push failed after serialized remote spawn"$'\n'"$(cat "$TMP_ROOT/spawn-concurrent-push.out")"
 [ "$(tail -1 "$REMOTE_HOME/data/captain-shared.md")" = 'current post-spawn preference' ] \
   || fail "stale spawn inheritance overwrote later config convergence"
@@ -1136,6 +1172,7 @@ while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
   # Match the earlier spawn/inheritance wait: a loaded portable runner can
   # spend several seconds in the remote entrypoint before reaching this write.
   [ "$inherit_wait" -le "$(( ${FM_SECONDMATE_CONVERGENCE_TIMEOUT:-900} * 50 ))" ] || fail "first inheritance transaction never reached its blocked write"
+
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
@@ -1280,7 +1317,6 @@ cp "$TMP_ROOT/ios-before-relaunch.meta" "$RELAUNCH_ROUTE_META"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
   || fail "a refused remote restart must leave the running agent untouched"
 pass "the remote restart verb delegates to the host-local control plane and refuses before stopping anything"
-
 
 rm -f "$TMP_ROOT/doctor.repaired"
 : > "$DOCTOR_LOG"

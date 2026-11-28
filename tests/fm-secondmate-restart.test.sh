@@ -677,6 +677,23 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   pass "native Ultra survives local restart and the remote restart transport"
 }
 
+test_remote_droid_dynamic_restart_keeps_profile() {
+  local dir out rc relaunch_line
+  dir=$(new_case dynamic-remote)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'droid custom-model dynamic\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "remote Droid dynamic restart failed: $out"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 droid custom-model dynamic" ] \
+    || fail "remote restart dropped Droid dynamic effort: $relaunch_line"
+  pass "Droid dynamic effort survives the remote secondmate update restart"
+}
+
 # --- T9: an unrelated concurrent reply cannot release the persist gate -------
 test_concurrent_reply_cannot_release_persist_gate() {
   local dir out rc state corr rec
@@ -996,6 +1013,7 @@ test_unknown_mate_is_accounted_for
 test_refused_restart_falls_back_without_claiming_a_reload
 test_local_restart_uses_the_home_pin_and_reports_what_ran
 test_native_ultra_restart_keeps_local_and_remote_profiles
+test_remote_droid_dynamic_restart_keeps_profile
 test_remote_mate_restarts_over_the_transport_hop
 test_remote_restart_lands_on_the_per_mate_pin
 test_remote_restart_uses_the_default_for_an_unpinned_mate

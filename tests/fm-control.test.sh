@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp devin commandcode cortex"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp devin commandcode cortex droid"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -50,7 +50,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     pi-signed) printf '/quit\tEscape\t1\t\n' ;;
     omp) printf '/quit\tEscape\t1\t\n' ;;
     devin) printf '/quit\tEscape\t2\t\n' ;;
-    commandcode|cortex) printf '/quit\tEscape\t1\t\n' ;;
+    commandcode|cortex|droid) printf '/quit\tEscape\t1\t\n' ;;
     grok) printf '/exit\tC-c\t1\t\n' ;;
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
@@ -146,6 +146,13 @@ case "${1:-}" in
           picker) [ -n "${FM_FAKE_DEVIN_PICKER_STUCK:-}" ] || printf idle > "$D/devin" ;;
         esac
       fi
+      if [ "$payload" = Escape ] && [ -f "$D/droid" ]; then
+        case "$(cat "$D/droid")" in
+          running) printf cancelled > "$D/droid" ;;
+          primed) printf picker > "$D/droid" ;;
+          picker) printf idle > "$D/droid" ;;
+        esac
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -195,7 +202,19 @@ case "${1:-}" in
         exit 0
       fi
     fi
-    if [ -f "$D/devin" ]; then devin_screen "$(cat "$D/devin")"; elif [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
+    if [ -f "$D/devin" ]; then
+      devin_screen "$(cat "$D/devin")"
+    elif [ -f "$D/droid" ]; then
+      case "$(cat "$D/droid")" in
+        running) printf ' ⠸ Thinking...\n> \n' ;;
+        picker) printf 'Select a user message to rewind before\n↑↓ to navigate · Enter to select · Esc/Q to close\n' ;;
+        *) printf ' done\n> \n' ;;
+      esac
+    elif [ -f "$D/pane" ]; then
+      cat "$D/pane"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
     exit 0 ;;
   list-windows)
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
@@ -489,6 +508,30 @@ test_devin_stuck_picker_refuses_and_exit_types_nothing() {
   pass "fm-control Devin: an open revert picker refuses every typed command"
 }
 
+test_droid_interrupt_dismisses_rewind_picker_and_invalidates_busy() {
+  local dir out gen
+  dir=$(new_case droid-busy)
+  add_task "$dir" t1 droid
+  alive_as "$dir" droid
+  printf running > "$dir/fake/droid"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 --state busy --source droid-hook --event prompt)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 interrupt) || fail "Droid interrupt failed: $out"
+  assert_contains "$out" 'cancel=unconfirmed' 'Droid cancellation must not claim semantic confirmation'
+  assert_grep 'state=unknown source=fm-interrupt' "$dir/home/state/t1.busy-state" 'cancelled Droid turn stayed busy'
+
+  dir=$(new_case droid-picker)
+  add_task "$dir" t1 droid
+  alive_as "$dir" droid
+  printf primed > "$dir/fake/droid"
+  out=$(run_control "$dir" t1 interrupt) || fail "Droid interrupt that opened the Rewind picker should close it: $out"
+  assert_contains "$out" 'cancel=unconfirmed revert-picker=dismissed' 'the dismissed Droid Rewind picker should be reported'
+  [ "$(cat "$dir/fake/droid")" = idle ] || fail "Droid Rewind picker was left open: $(cat "$dir/fake/droid")"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed into the Droid Rewind picker, got: $(literals "$dir")"
+  ! grep -qx Enter "$dir/fake/keys" || fail "Enter rewinds in the Droid picker and must never be sent"
+  pass "fm-control Droid interrupt: invalidates hook busy state and dismisses an accidentally opened Rewind picker"
+}
+
 # A recorded harness can carry a raw launch command's basename, so the tables
 # are reached through one prefix rule rather than an exact string match.
 test_harness_family_resolution() {
@@ -496,7 +539,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed omp:omp devin:devin; do
+      pi-signed:pi-signed omp:omp devin:devin droid:droid; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -611,7 +654,7 @@ test_harness_kind_capability() {
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
   fm_control_harness_supports_kind commandcode secondmate \
     && fail "commandcode has no primary supervision protocol and must not claim a secondmate"
-  for harness in claude codex opencode pi pi-signed grok kimi omp; do
+  for harness in claude codex opencode pi pi-signed grok kimi omp droid; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
   done
@@ -1332,6 +1375,7 @@ test_devin_idle_interrupt_sends_one_press
 test_devin_exit_after_turn_ended_types_quit_once
 test_devin_interrupt_dismisses_revert_picker
 test_devin_stuck_picker_refuses_and_exit_types_nothing
+test_droid_interrupt_dismisses_rewind_picker_and_invalidates_busy
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused
 test_harness_family_resolution

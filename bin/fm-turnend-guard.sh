@@ -10,7 +10,7 @@
 # fleet-touching command itself, can sit blind for hours.
 # This script is push-based: verified harness turn-end hooks invoke it every time
 # the primary is about to end a turn.
-# Claude and codex can block directly by preserving exit status 2 and stderr.
+# Claude, Codex, and Droid can block directly by preserving exit status 2 and stderr.
 # OpenCode and pi adapters use the same predicate and force one bounded
 # follow-up because their turn-end events are passive. Grok delegates native
 # blocking when its running Stop payload advertises that capability, with one
@@ -129,8 +129,7 @@ allow_exit() {
 # second Stop writer could land after this one and flip the verdict.
 # shellcheck disable=SC2329 # Invoked by the EXIT trap below.
 record_parent_stop_state() {
-  local status=$? pointer="$FM_ROOT/.fm-busy-stop" key value writer='' state='' id='' gen='' verdict=idle event=stop
-  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  local status=$? pointer="$FM_ROOT/.fm-busy-stop" key value writer='' state='' id='' gen='' source=claude-hook verdict=idle event=stop
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 0
   while IFS='=' read -r key value; do
     case "$key" in
@@ -138,14 +137,19 @@ record_parent_stop_state() {
       state) state=$value ;;
       id) id=$value ;;
       gen) gen=$value ;;
+      source) source=$value ;;
     esac
   done < "$pointer"
+  if [ "$source" = claude-hook ] && [ "$CLAUDE_MODE" -ne 1 ]; then
+    return 0
+  fi
+  [ "$source" = claude-hook ] || [ "$source" = droid-hook ] || return 0
   [ -n "$state" ] && [ -n "$id" ] && [ -n "$gen" ] && [ -x "$writer" ] || return 0
   if [ "$status" -eq 2 ]; then
     verdict=busy
     event=stop-blocked
   fi
-  "$writer" apply "$state" "$id" "$verdict" --gen "$gen" --source claude-hook --event "$event" >/dev/null 2>&1 || true
+  "$writer" apply "$state" "$id" "$verdict" --gen "$gen" --source "$source" --event "$event" >/dev/null 2>&1 || true
 }
 trap record_parent_stop_state EXIT
 

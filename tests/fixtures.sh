@@ -14,7 +14,6 @@
 # FM_TEST_NO_MISTAKES_VERSION is the single default version for the shared fake
 # no-mistakes banner. Override a single case with FM_FAKE_NO_MISTAKES_VERSION
 # rather than editing a stub body.
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -31,7 +30,6 @@ export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 
 export FM_TEST_GH_AXI_VERSION=0.1.29
 
 # --- fake no-mistakes -------------------------------------------------------
-
 # fm_test_fake_no_mistakes <fakebin>
 # Drops a no-mistakes stub that answers --version with
 # FM_TEST_NO_MISTAKES_FAKE_VERSION (or FM_FAKE_NO_MISTAKES_VERSION when set)
@@ -67,7 +65,6 @@ SH
 }
 
 # --- fake gh / gh-axi -------------------------------------------------------
-
 # fm_test_fake_gh <fakebin>
 # Authenticates (`gh auth status` exits 0) and otherwise exits 0.
 fm_test_fake_gh() {
@@ -90,7 +87,6 @@ fm_test_fake_gh_axi() {
 }
 
 # --- fake tmux / ssh / sleep ------------------------------------------------
-
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
@@ -100,6 +96,7 @@ fm_test_fake_gh_axi() {
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. A staged OpenCode 2
 # launch simulates its busy-state plugin per FM_FAKE_OPENCODE_TURN (see below),
 # and FM_FAKE_ENTER_LOG records each bare Enter key.
+# FM_FAKE_PANE_CAPTURE supplies visible pane output (empty by default).
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -167,6 +164,7 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    if [ -n "${FM_FAKE_PANE_CAPTURE:-}" ]; then printf '%s' "$FM_FAKE_PANE_CAPTURE"; exit 0; fi
     if ! fake_opencode_composer_drawn; then
       :
     elif [ -f "$(fake_opencode_plugin).fake-pending" ]; then
@@ -184,6 +182,7 @@ case "${1:-}" in
     exit 0
     ;;
   new-window)
+    [ ! -e "$(dirname "$0")/fail-new-window" ] || exit 1
     name=
     previous=
     for arg in "$@"; do
@@ -199,6 +198,9 @@ case "${1:-}" in
     ;;
   has-session|new-session|set-window-option) exit 0 ;;
   send-keys)
+    if [ -e "$(dirname "$0")/fail-gotmp-send" ]; then
+      case "$*" in *GOTMPDIR*) exit 1 ;; esac
+    fi
     prev=
     for a in "$@"; do
       if [ "$prev" = "-l" ]; then
@@ -369,7 +371,6 @@ SH
 }
 
 # --- spawn-world ------------------------------------------------------------
-
 # fm_test_spawn_home <home> [harness]
 # Minimal firstmate home layout plus watcher-liveness beat. Optional harness
 # pin is written to config/crew-harness.
@@ -443,7 +444,6 @@ fm_test_run_spawn() {
 }
 
 # --- send-world stubs -------------------------------------------------------
-
 # make_stubs <dir>
 # Send-world fakebin: send tmux + no-op sleep. Echoes the fakebin path.
 # Suites that need recording sleep, herdr, or ssh add those on top of this

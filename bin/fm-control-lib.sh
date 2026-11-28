@@ -43,7 +43,6 @@
 # its durable instruction. The relaunch-time exception is
 # fm_control_relaunch_resume_flag below: a reference the endpoint's runtime
 # bound as its status authority is returned to a replacement with that adapter.
-
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {
   cat <<'EOF'
@@ -64,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin commandcode polytoken cortex kiro hermes droid
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -96,6 +95,7 @@ fm_control_harness_family() {  # <recorded-harness>
     cortex) printf 'cortex' ;;
     hermes) printf 'hermes' ;;
     kiro) printf 'kiro' ;;
+    droid) printf 'droid' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -110,7 +110,7 @@ fm_control_harness_family() {  # <recorded-harness>
 }
 
 # Which task kinds an adapter is verified to run. muse, gemini, rovo, devin,
-# commandcode, polytoken, cortex, and kiro are crewmate/scout adapters only: none has a primary
+# commandcode, polytoken, cortex, kiro, and hermes are crewmate/scout adapters only: none has a primary
 # supervision protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
@@ -121,6 +121,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   case "$harness" in
     hermes) case "$kind" in ship|scout) ;; *) return 1 ;; esac ;;
     muse|gemini|rovo|devin|commandcode|polytoken|cortex|kiro) [ "$kind" != secondmate ] || return 1 ;;
+
   esac
   return 0
 }
@@ -137,7 +138,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 fm_control_interrupt_transport() {  # <harness>
   case "${1-}" in
     polytoken) printf 'rest' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes) printf 'key' ;;
+    droid|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|hermes) printf 'key' ;;
     *) return 1 ;;
   esac
 }
@@ -158,7 +159,7 @@ fm_control_interrupt_transport() {  # <harness>
 # composer does nothing (verified live, cortex 1.1.104).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'Escape' ;;
+    droid|claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
@@ -171,7 +172,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode|devin|hermes) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) printf '1' ;;
+    droid|claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -190,7 +191,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_arm_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'esc again to interrupt' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|hermes) ;;
+    droid|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|commandcode|cortex|kiro|hermes) ;;
     *) return 1 ;;
   esac
 }
@@ -205,7 +206,7 @@ fm_control_interrupt_arm_signal() {  # <harness>
 fm_control_interrupt_press_gap() {  # <harness>
   case "${1-}" in
     devin|commandcode) printf '0.5' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes) printf '0.2' ;;
+    droid|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|cortex|kiro|hermes) printf '0.2' ;;
     *) return 1 ;;
   esac
 }
@@ -224,6 +225,10 @@ fm_control_interrupt_hazard_signal() {  # <harness>
   case "${1-}" in
     devin) printf '%s' 'Revert to step:|↵ revert' ;;
     commandcode) printf '%s' 'Select a checkpoint to restore your session|Press Enter to select · Esc to cancel' ;;
+    # Droid opens its Rewind message/file-restore modal on repeated Escapes on
+    # an idle session (verified in Droid 1.21.1); one Escape closes either screen
+    # without rewinding or deleting files.
+    droid) printf '%s' 'Select a user message to rewind before|Enter to select · Esc/Q to close|This rewind point has [0-9]+ file change\(s\) that can be undone:' ;;
     # polytoken's interrupt rides the REST API, never keys, so no key can open
     # a hazard surface on its path; the /quit exit opens only the slash palette,
     # where Enter accepts the preselected /quit row (verified live).
@@ -252,7 +257,7 @@ fm_control_interrupt_hazard_signal() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) ;;
+    droid|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) ;;
     *) return 1 ;;
   esac
 }
@@ -270,7 +275,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # kiro's stop hook fires on normal completion but, like claude's, not on a
     # manual Escape, and its `Cancelled ...` row is likewise rendered rather than
     # recorded, so fm-control preserves the adapter-owned busy record instead.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'none' ;;
+    droid|claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin|commandcode|cortex|kiro|hermes) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -291,7 +296,8 @@ fm_control_exit_command() {  # <harness> [opencode-major]
       esac
       ;;
     claude|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro|hermes) printf '/quit' ;;
+    droid|codex|pi|pi-signed|omp|gemini|agy|devin|commandcode|polytoken|cortex|kiro|hermes) printf '/quit' ;;
+
     *) return 1 ;;
   esac
 }
@@ -551,6 +557,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id> [ki
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    droid)
+      printf '%s\n' "$state/$id.droid-settings.json" "$state/$id.meta".droid-model.*
+      [ "$kind" != secondmate ] || printf '%s\n' "$wt/.fm-busy-stop"
+      ;;
     # gemini's busy-state and turn-end hooks live in a firstmate-owned
     # settings file the launch reaches through GEMINI_CLI_SYSTEM_SETTINGS_PATH,
     # so retiring that one file retires the whole incarnation's wiring. Nothing

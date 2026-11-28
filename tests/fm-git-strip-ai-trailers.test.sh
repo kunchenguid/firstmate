@@ -519,7 +519,26 @@ test_push_guard_install_runs_the_guard_before_chaining() {
   pass "install --push-guard writes a read-only pre-push that runs the guard before chaining"
 }
 
+test_droid_trailer_does_not_reach_the_commit_object() {
+  local repo hooks body
+  repo="$TMP_ROOT/droid-object"
+  make_repo "$repo"
+  hooks="$TMP_ROOT/hooks-droid"
+  "$STRIP" install "$hooks" "$repo" || fail "install should succeed on a real git repo"
+  printf 'note\n' >>"$repo/README.md"
+  git -C "$repo" add README.md
+  with_hooks_env "$hooks" git -C "$repo" commit -q \
+    --trailer 'Co-authored-by: factory-droid[bot] <138933559+factory-droid[bot]@users.noreply.github.com>' \
+    --trailer 'Co-authored-by: Pat Doe <pat@factory.ai>' \
+    -m 'fix: strip droid co-author trailer'
+  body=$(git -C "$repo" log -1 --format=%B)
+  assert_not_contains "$body" "factory-droid[bot]" "Droid bot trailer reached the commit object"
+  assert_contains "$body" "Co-authored-by: Pat Doe <pat@factory.ai>" "a human at factory.ai was stripped"
+  pass "a factory-droid[bot] trailer is stripped while keeping a human co-author at factory.ai"
+}
+
 test_cursor_trailer_does_not_reach_the_commit_object
+test_droid_trailer_does_not_reach_the_commit_object
 test_commandcode_trailer_is_stripped
 test_human_coauthor_is_kept
 test_human_at_a_vendor_domain_is_kept
