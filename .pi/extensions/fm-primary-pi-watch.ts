@@ -6,8 +6,10 @@
 // session activation. Only the active live generation may start, stop, rearm, or
 // clear the arm child. Replacement shutdown publishes a generation-bound handoff
 // phase but retains its established child until the next owning session_start (or
-// fresh factory bind) publishes a distinct active generation and commits the
-// tracked replacement arm without a model turn. A replacement handoff carries
+// a fresh factory bind while no live generation is active) publishes a distinct
+// active generation and commits the tracked replacement arm without a model turn.
+// The process-wide active owner and which session may own it are defined on
+// ReplacementCoordinator.active / expectedSessionFile. A replacement handoff carries
 // actionable closes that were still pending delivery; its durable state lives at
 // state/extensions/pi-primary-watch/session-replacement-actionable.json.
 // Terminal quit leaves the final generation stopped so late callbacks cannot rearm.
@@ -187,7 +189,6 @@ const repairOnlyHint = "call fm_watch_arm_pi again only after a later notificati
 const shuttingDownMessage = "watcher: not armed - Pi session is shutting down";
 
 let nextHandoffId = 0;
-let activeGeneration: SessionGeneration | null = null;
 let replacementHandoff: PendingActionableClose[] | null = null;
 type ReplacementActionableReceiver = (pending: PendingActionableClose) => void;
 type ActionableDeliveryClaim = {
@@ -200,6 +201,12 @@ type ReplacementCoordinator = {
   nextTokenId: number;
   nextGenerationId: number;
   deliveries: Map<string, ActionableDeliveryClaim>;
+  // One active owner per process, shared by every module copy that Pi imports (for example after /reload).
+  active: SessionGeneration | null;
+  // Session file the latest replacement targets, or the session that last received interactive input. Another
+  // session's session_start never owns supervision; only interactive input, which Pi delivers solely to the session
+  // the user sees, reclaims it. Until that session's first interactive input, wakes can still reach the other session.
+  expectedSessionFile: string | null;
 };
 type ReplacementCoordinatorGlobal = typeof globalThis & {
   __firstmatePiWatchReplacements?: Map<string, ReplacementCoordinator>;
@@ -215,6 +222,8 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
     nextTokenId: 0,
     nextGenerationId: 0,
     deliveries: new Map(),
+    active: null,
+    expectedSessionFile: null,
   };
   replacementCoordinators.set(handoff, created);
   return created;
@@ -586,12 +595,17 @@ function createGeneration(): SessionGeneration {
   };
 }
 
+function sessionFileOf(ctx: unknown): string {
+  const manager = (ctx as { sessionManager?: { getSessionFile?: () => string | undefined } } | undefined)?.sessionManager;
+  return manager?.getSessionFile?.() ?? "";
+}
+
 function activateGeneration(generation: SessionGeneration): void {
-  activeGeneration = generation;
+  replacementCoordinator.active = generation;
 }
 
 function generationIsLive(generation: SessionGeneration): boolean {
-  return activeGeneration === generation && !generation.stopping;
+  return replacementCoordinator.active === generation && !generation.stopping;
 }
 
 function relinquishGeneration(generation: SessionGeneration): void {
@@ -658,15 +672,38 @@ async function stopSessionGeneration(generation: SessionGeneration, replacement:
   }
 }
 
+function displaceActiveGeneration(successor: SessionGeneration): void {
+  const displaced = replacementCoordinator.active;
+  if (displaced && displaced !== successor && !displaced.stopping) {
+    void stopSessionGeneration(displaced, true).catch((error) => {
+      relinquishGeneration(displaced);
+      const observed = displaced.child ? armPendingActionable.get(displaced.child) : undefined;
+      if (observed && !displaced.pendingActionables.some((item) => item.token === observed.token)) {
+        displaced.pendingActionables.push(observed);
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      for (const pending of displaced.pendingActionables) {
+        if (pending.delivered || replacementCoordinator.pending.some((item) => item.token === pending.token)) continue;
+        const failed = {
+          ...pending,
+          message: `${pending.message}\n\nwatcher: FAILED - Pi extension could not hand off a displaced-session actionable wake\n${detail}`,
+        };
+        if (replacementCoordinator.receiver) replacementCoordinator.receiver(failed);
+        else replacementCoordinator.pending.push(failed);
+      }
+    });
+  }
+}
+
 const cleanupOnProcessExit = () => {
   for (const generation of retiringGenerations) stopGeneration(generation);
-  if (activeGeneration) stopGeneration(activeGeneration);
+  if (replacementCoordinator.active) stopGeneration(replacementCoordinator.active);
 };
 process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
-  activateGeneration(generation);
+  if (!replacementCoordinator.active || replacementCoordinator.active.stopping) activateGeneration(generation);
 
   let calmPresentation: CalmPresentationState = {
     active: false,
@@ -1355,14 +1392,37 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(event.message.content));
   });
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (_event, ctx) => {
+    const expected = replacementCoordinator.expectedSessionFile;
+    const sessionFile = sessionFileOf(ctx);
+    if (expected && sessionFile && sessionFile !== expected) {
+      // A newer replacement already superseded this session, so it never takes ownership.
+      relinquishGeneration(generation);
+      if (replacementCoordinator.active === generation) replacementCoordinator.active = null;
+      return;
+    }
     if (generation.stopping) generation = createGeneration();
+    displaceActiveGeneration(generation);
     activateGeneration(generation);
     if (lockOwnership() !== "owned") return;
     activateOwnedWatch(generation);
   });
-  pi.on?.("session_shutdown", async (event) => {
+  pi.on?.("input", (event, ctx) => {
+    if (event.source !== "interactive" || generationIsLive(generation)) return;
+    if (generation.stopping) generation = createGeneration();
+    replacementCoordinator.expectedSessionFile = sessionFileOf(ctx) || null;
+    displaceActiveGeneration(generation);
+    activateGeneration(generation);
+    if (lockOwnership() === "owned") activateOwnedWatch(generation);
+  });
+  pi.on?.("session_shutdown", async (event, ctx) => {
     const replacement = event.reason === "reload" || event.reason === "new" || event.reason === "resume" || event.reason === "fork";
+    if (replacement) {
+      replacementCoordinator.expectedSessionFile =
+        (event as { targetSessionFile?: string }).targetSessionFile ||
+        (event.reason === "reload" ? sessionFileOf(ctx) : "") ||
+        null;
+    }
     if (replacementCoordinator.receiver === receiveReplacementActionable) replacementCoordinator.receiver = null;
     await stopSessionGeneration(generation, replacement);
   });
@@ -1422,6 +1482,7 @@ export default function (pi: ExtensionAPI) {
   // Pi loads project extensions before the first model turn can run the locked
   // session-start command. Publish this generation while the lock is absent so
   // that command can distinguish a loaded extension from a missing one; a
-  // foreign live lock still suppresses publication.
-  publishGenerationOwner(generation, "active");
+  // foreign live lock still suppresses publication. A late factory bind that
+  // did not take supervision leaves the live owner's marker untouched.
+  if (generationIsLive(generation)) publishGenerationOwner(generation, "active");
 }
