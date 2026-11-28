@@ -78,6 +78,14 @@
 #   (ah) hung fetch                                               -> bounded, REFUSE
 #   (ai) commits held only by the no-mistakes gate                -> REFUSE, gate not fetched
 #   (aj) file saved during the refresh, work landed                -> REFUSE, file intact
+#
+# A refused latest merge attempt (bin/fm-merge-attempt-lib.sh) needs landed proof:
+#   (ak) local-only, branch on a fork, latest attempt refused     -> REFUSE, names it
+#   (al) same, then merged into local main                         -> ALLOW
+#   (am) same as (ak) with --force                                 -> ALLOW
+#   (an) no-mistakes, branch on origin, latest attempt refused     -> REFUSE
+#   (ao) same, content then landed on origin main                  -> ALLOW
+#   (ap) same as (an) but a later attempt recorded merged          -> ALLOW
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -912,6 +920,154 @@ test_local_only_merged_to_local_main_allows() {
   expect_code 0 "$rc" "merged-main: teardown should succeed when work is merged into local main"
   ! grep -q REFUSED "$case_dir/stderr" || fail "merged-main: teardown printed a REFUSED line"
   pass "local-only worktree with work merged into local main is torn down (no regression)"
+}
+
+record_merge_attempt() {  # <case-dir> <record value>
+  printf 'last_merge_attempt=%s\n' "$2" >> "$1/state/task-x1.meta"
+}
+
+test_refused_merge_attempt_local_only_refuses_until_landed() {
+  local case_dir rc wt_head
+  case_dir=$(make_case refused-merge-local)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "finished fix"
+  add_fork_with_pushed_branch "$case_dir"
+  record_merge_attempt "$case_dir" 'refused 1790000000 fm-merge-local exit=1'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "refused-merge-local: teardown should refuse after a refused merge"
+  grep -F 'latest merge attempt for task task-x1 was refused (recorded: 1790000000 fm-merge-local exit=1)' \
+    "$case_dir/stderr" >/dev/null || fail "refused-merge-local: refusal did not name the recorded attempt: $(cat "$case_dir/stderr")"
+  [ -f "$case_dir/state/task-x1.meta" ] || fail "refused-merge-local: refusal removed the task record"
+
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "refused-merge-local: work on local main should supersede the refusal: $(cat "$case_dir/stderr")"
+  pass "a refused local-only merge blocks cleanup until the work is on local main"
+}
+
+add_git_default_log_lock_failure() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+if [ "${1:-}" = -C ] && [ "${3:-}" = log ] && [ "${6:-}" = --not ]; then
+  case "${7:-}" in
+    --exclude=*|--remotes) ;;
+    *)
+      lock=$("$real" -C "$2" rev-parse --git-path index.lock 2>/dev/null || true)
+      case "$lock" in
+        /*|'') ;;
+        *) lock="$2/$lock" ;;
+      esac
+      if [ -n "$lock" ] && [ -e "$lock" ]; then
+        echo "fatal: Unable to create '$lock': File exists." >&2
+        exit 128
+      fi
+      ;;
+  esac
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+test_refused_merge_attempt_lock_retries_instead_of_refusing() {
+  local case_dir rc lock wt_head
+  case_dir=$(make_case refused-merge-lock)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "finished fix"
+  add_fork_with_pushed_branch "$case_dir"
+  record_merge_attempt "$case_dir" 'refused 1790000000 fm-merge-local exit=1'
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/main "$wt_head"
+
+  add_lock_aware_treehouse "$case_dir"
+  add_lsof_no_holder "$case_dir"
+  add_git_default_log_lock_failure "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/wt")
+  mkdir -p "$(dirname "$lock")"
+  : > "$lock"
+  touch -t 200001010000 "$lock"
+
+  set +e
+  FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "refused-merge-lock: a stale lock should be cleared and the landed work allowed: $(cat "$case_dir/stderr")"
+  assert_not_contains "$(cat "$case_dir/stderr")" "latest merge attempt for task task-x1 was refused" \
+    "refused-merge-lock: a git lock was reported as an unlanded refused merge"
+  assert_grep "removed provably-stale git lock" "$case_dir/stderr" \
+    "refused-merge-lock: teardown did not take the lock retry path"
+  pass "a git lock during the refused-merge check retries instead of refusing"
+}
+
+test_refused_merge_attempt_force_still_discards() {
+  local case_dir rc
+  case_dir=$(make_case refused-merge-force)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "finished fix"
+  add_fork_with_pushed_branch "$case_dir"
+  record_merge_attempt "$case_dir" 'refused 1790000000 fm-merge-local exit=1'
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "refused-merge-force: --force should still discard: $(cat "$case_dir/stderr")"
+  pass "--force still overrides a refused merge attempt"
+}
+
+test_refused_merge_attempt_pr_refuses_until_superseded() {
+  local case_dir rc
+  case_dir=$(make_case refused-merge-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "finished fix"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  record_merge_attempt "$case_dir" 'refused 1790000000 fm-pr-merge exit=1'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "refused-merge-pr: a pushed branch alone should not supersede a refused merge"
+  grep -F 'was refused (recorded: 1790000000 fm-pr-merge exit=1)' "$case_dir/stderr" >/dev/null \
+    || fail "refused-merge-pr: refusal did not name the recorded attempt: $(cat "$case_dir/stderr")"
+
+  land_on_origin_main "$case_dir" feature.txt hello
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "refused-merge-pr: content on origin main should supersede the refusal: $(cat "$case_dir/stderr")"
+  pass "a refused PR merge blocks cleanup of a pushed branch until its content lands"
+}
+
+test_later_merged_attempt_supersedes_a_refusal() {
+  local case_dir rc
+  case_dir=$(make_case refused-then-merged)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "finished fix"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  record_merge_attempt "$case_dir" 'refused 1790000000 fm-pr-merge exit=1'
+  record_merge_attempt "$case_dir" 'merged 1790000100 fm-pr-merge'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "refused-then-merged: a later merged attempt should supersede: $(cat "$case_dir/stderr")"
+  pass "a later merged attempt supersedes an earlier refusal"
 }
 
 # A merge-time cleanup request belongs to the detached cleanup that runs this
@@ -6731,6 +6887,11 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_refused_merge_attempt_local_only_refuses_until_landed
+test_refused_merge_attempt_lock_retries_instead_of_refusing
+test_refused_merge_attempt_force_still_discards
+test_refused_merge_attempt_pr_refuses_until_superseded
+test_later_merged_attempt_supersedes_a_refusal
 test_teardown_leaves_the_merge_cleanup_request_to_its_cleanup
 test_landed_on_other_origin_branch_with_stale_refs_allows
 test_refresh_failure_does_not_read_as_landed

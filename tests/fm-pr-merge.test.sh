@@ -827,6 +827,8 @@ test_verified_merge_records_pr_and_head() {
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
   assert_logged_gh_merge "$case_dir" 9 example/repo --squash
+  grep -Eq '^last_merge_attempt=merged [0-9]+ fm-pr-merge$' "$case_dir/state/task-x1.meta" \
+    || fail "records-before-merge: the confirmed merge was not recorded as the latest attempt"
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
 }
 
@@ -860,6 +862,24 @@ test_merge_failure_propagates_after_recording() {
   mkdir -p "$case_dir/wt"
   add_gh_mocks_merge_fails "$case_dir"
   : > "$case_dir/gh-axi.log"
+  # A `date +%s` stand-in probes the task control lock the moment the attempt
+  # record takes its timestamp: teardown try-acquires that lock first, so the
+  # refusal must land while this run still holds it.
+  cat > "$case_dir/fakebin/date" <<SH
+#!/usr/bin/env bash
+PATH=\${PATH#"$case_dir/fakebin:"}
+if [ "\$#" -eq 1 ] && [ "\$1" = +%s ]; then
+  . "$ROOT/bin/fm-wake-lib.sh"
+  if fm_lock_try_acquire "$case_dir/state/.control-task-x1.lock"; then
+    fm_lock_release "$case_dir/state/.control-task-x1.lock"
+    echo free >> "$case_dir/control-lock-probe"
+  else
+    echo held >> "$case_dir/control-lock-probe"
+  fi
+fi
+exec date "\$@"
+SH
+  chmod +x "$case_dir/fakebin/date"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
@@ -870,6 +890,10 @@ test_merge_failure_propagates_after_recording() {
   expect_code 1 "$rc" "merge-fails: fm-pr-merge should propagate the gh-axi merge failure"
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
+  grep -Eq '^last_merge_attempt=refused [0-9]+ fm-pr-merge exit=1$' "$case_dir/state/task-x1.meta" \
+    || fail "merge-fails: the refused merge was not recorded as the latest attempt"
+  [ "$(tail -n 1 "$case_dir/control-lock-probe" 2>/dev/null)" = held ] \
+    || fail "merge-fails: the refusal was recorded after the task control lock was released"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 
@@ -1694,6 +1718,8 @@ test_github_queued_outcome_is_verified() {
     "github-verified-queued: the forge CLI's unverified merged report leaked through"
   assert_grep 'pr=https://github.com/example/repo/pull/53' "$case_dir/state/task-x1.meta" \
     "github-verified-queued: the queued PR was not recorded for teardown"
+  grep -Eq '^last_merge_attempt=queued [0-9]+ fm-pr-merge$' "$case_dir/state/task-x1.meta" \
+    || fail "github-verified-queued: the queued attempt was not recorded as queued"
   pass "fm-pr-merge accepts and accurately reports a GitHub merge-queue entry"
 }
 

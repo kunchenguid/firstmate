@@ -152,6 +152,61 @@ SH
   pass 'approval and branch changes during the hold read refuse without moving main'
 }
 
+# Every attempt after the task record is read leaves exactly one record of its
+# outcome for teardown (bin/fm-merge-attempt-lib.sh), even when a pipe hides
+# the exit status from the caller.
+test_attempt_outcome_is_recorded() {
+  make_case attempt-outcome
+  record_done || fail 'attempt fixture done was not accepted'
+  git -C "$PROJ" commit -q --allow-empty -m diverged
+  BASE=$(git -C "$PROJ" rev-parse HEAD)
+  land 2>&1 | tail -n 1 >/dev/null
+  grep -Eq '^last_merge_attempt=refused [0-9]+ fm-merge-local exit=1$' "$META" \
+    || fail 'a refused landing was not recorded'
+  git -C "$PROJ" reset -q --hard "$X^"
+  land >/dev/null || fail 'the approved head did not land after the default was restored'
+  [ "$(grep -c '^last_merge_attempt=' "$META")" = 1 ] || fail 'attempt records accumulated'
+  grep -Eq '^last_merge_attempt=merged [0-9]+ fm-merge-local$' "$META" \
+    || fail 'a successful landing did not replace the refusal'
+  pass 'each landing attempt records its outcome, replacing the previous one'
+}
+
+# The refused attempt's record lands while this run still holds the task's
+# control lock, so a teardown (which try-acquires that lock first) can never
+# read the task record before the refusal is in it. A `date +%s` stand-in
+# probes the lock the moment the record takes its timestamp.
+test_refusal_is_recorded_before_control_lock_release() {
+  local probe_dir log
+  make_case attempt-under-lock
+  record_done || fail 'attempt-under-lock fixture done was not accepted'
+  git -C "$PROJ" commit -q --allow-empty -m diverged
+  BASE=$(git -C "$PROJ" rev-parse HEAD)
+  probe_dir="$CASE/probe-bin"
+  log="$CASE/probe.log"
+  mkdir -p "$probe_dir"
+  cat > "$probe_dir/date" <<SH
+#!/usr/bin/env bash
+PATH=\${PATH#"$probe_dir:"}
+if [ "\$#" -eq 1 ] && [ "\$1" = +%s ]; then
+  . "$ROOT/bin/fm-wake-lib.sh"
+  if fm_lock_try_acquire "$HOME_DIR/state/.control-local-task.lock"; then
+    fm_lock_release "$HOME_DIR/state/.control-local-task.lock"
+    echo free >> "$log"
+  else
+    echo held >> "$log"
+  fi
+fi
+exec date "\$@"
+SH
+  chmod +x "$probe_dir/date"
+  PATH="$probe_dir:$PATH" assert_refused
+  grep -Eq '^last_merge_attempt=refused [0-9]+ fm-merge-local exit=1$' "$META" \
+    || fail 'the refused landing was not recorded'
+  [ "$(tail -n 1 "$log" 2>/dev/null)" = held ] \
+    || fail 'the refusal was recorded after the control lock was released'
+  pass 'a refused landing is recorded before the task control lock is released'
+}
+
 test_snapshot_cannot_pin_a_replacement_task() {
   local captured
   make_case stale-snapshot
@@ -311,4 +366,5 @@ SH
 fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
-  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks
+  test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks \
+  test_attempt_outcome_is_recorded test_refusal_is_recorded_before_control_lock_release
