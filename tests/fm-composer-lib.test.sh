@@ -825,7 +825,7 @@ test_matrix_pi_separated_needs_identity() {
 test_matrix_agy_separated_needs_identity() {
   local screen auto_screen typed agy_idle agy_working
   screen=$'transcript\n────────────────────────\n>\n────────────────────────\n ? for shortcuts'
-  auto_screen=$'transcript\n────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────\n ? for shortcuts'
+  auto_screen=$'transcript\n────────────────────────\n> '"${ESC}[38;2;131;148;150m"$'Auto mode: edits & safe commands auto-approved (shift+tab to cycle)'"${ESC}[0m"$'\n────────────────────────\n ? for shortcuts'
   agy_idle=$(printf 'agy\tidle'); agy_working=$(printf 'agy\tworking')
   assert_screen "agy idle with identity" empty "$CAPS_STYLED" "$screen" '' "$agy_idle"
   assert_screen "agy auto-mode placeholder idle with identity" empty "$CAPS_STYLED" "$auto_screen" '' "$agy_idle"
@@ -833,6 +833,9 @@ test_matrix_agy_separated_needs_identity() {
   assert_screen "agy auto-mode placeholder on zellij" unknown "$CAPS_STYLED_NOID" "$auto_screen"
   assert_screen "working agy defers" unknown "$CAPS_STYLED" "$screen" '' "$agy_working"
   assert_screen "working agy auto-mode placeholder defers" unknown "$CAPS_STYLED" "$auto_screen" '' "$agy_working"
+  typed=$'transcript\n────────────────────────\n> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)\n────────────────────────\n ? for shortcuts'
+  assert_screen "agy typed placeholder text with identity" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
+  assert_screen "working agy typed placeholder text" pending "$CAPS_STYLED" "$typed" '' "$agy_working"
   typed=$'transcript\n────────────────────────\n> fix the bug\n────────────────────────\n ? for shortcuts'
   assert_screen "agy typed with identity" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
   typed=$'transcript\n────────────────────────\n>\n> quoted line\n────────────────────────\n ? for shortcuts'

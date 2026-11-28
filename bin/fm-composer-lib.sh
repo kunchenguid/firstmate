@@ -2534,9 +2534,11 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled> [agent]
       # in truecolor slate (rgb 131,148,150, above the default ghost-luma ceiling) that
       # clears on the first typed character. Match only the exact single-row placeholder
       # so any typed or multiline draft stays `pending`.
-      if [ "$FM_COMPOSER_SCAN_PI_CLOSE" -eq $((FM_COMPOSER_SCAN_PI_OPEN + 2)) ] \
+      if [ "$styled" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -eq $((FM_COMPOSER_SCAN_PI_OPEN + 2)) ] \
         && [ "$content" = 'Auto mode: edits & safe commands auto-approved (shift+tab to cycle)' ]; then
-        content=''
+        case "$raw" in
+          *$'\033[38;2;131;148;150m''Auto mode: edits & safe commands auto-approved (shift+tab to cycle)'*) content='' ;;
+        esac
       fi
     fi
     if [ -n "$content" ]; then
