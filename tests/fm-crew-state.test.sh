@@ -6977,4 +6977,182 @@ test_live_ledger_row_after_selection_reports_unknown
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
 
+# A ULID run id created at <epoch-seconds>: no-mistakes run ids are ULIDs, whose
+# leading ten characters encode the creation time in milliseconds.
+ulid_at() {  # <epoch-seconds> -> run id
+  local ms=$(($1 * 1000)) alphabet=0123456789ABCDEFGHJKMNPQRSTVWXYZ time='' i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    time="${alphabet:$((ms % 32)):1}$time"
+    ms=$((ms / 32))
+  done
+  printf '%sABCDEFGHJKMNPQRS' "$time"
+}
+
+# The ledger's creation column, in the same local time the real CLI prints.
+ledger_minute() {  # <epoch-seconds>
+  date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$1" '+%Y-%m-%d %H:%M'
+}
+
+# One selected-route case: the branch's only run is <run-id>, finished passed at
+# the worktree's own head, exactly the shape an earlier task leaves behind.
+make_incarnation_case() {  # <name> <run-id> <meta-line>...
+  local name=$1 run_id=$2 d short
+  shift 2
+  reset_fakes
+  d=$(new_case "$name")
+  make_repo_on_branch "$d/wt" fm/refresh
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/refresh.meta" "window=fm:fm-refresh" "worktree=$d/wt" "kind=ship" "harness=claude" "$@"
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  FM_FAKE_AXI_STATUS="$(run_passed_with_override fm/refresh | sed "s/01RUN/$run_id/")"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"$run_id\",fm/refresh,completed,$short,\"https://github.com/o/r/pull/1\""
+  FM_FAKE_PR_STATE=OPEN
+  FM_FAKE_PR_MERGED=false
+}
+
+test_refresh_task_does_not_inherit_an_earlier_run() {
+  local now d out gen
+  now=$(date +%s)
+  make_incarnation_case refresh-busy "$(ulid_at $((now - 3600)))" "task_started=$now"
+  d=$TMP_ROOT/refresh-busy
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" refresh)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" refresh busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" refresh)
+  assert_not_contains "$out" 'state: done' "an earlier task's finished run must not read as this task's result: $out"
+  assert_contains "$out" 'state: working' 'the refresh worker is still working'
+  assert_contains "$out" 'source: pane' 'current pane evidence answers instead of the earlier run'
+  assert_contains "$out" 'predates this task' 'the ignored run is named with its reason'
+  pass 'a refresh task does not inherit an earlier task run on the same branch and head'
+}
+
+test_refresh_task_status_log_answers_over_an_earlier_run() {
+  local now d out
+  now=$(date +%s)
+  make_incarnation_case refresh-idle "$(ulid_at $((now - 3600)))" "task_started=$now"
+  d=$TMP_ROOT/refresh-idle
+  arm_idle_record "$d/state" refresh >/dev/null
+  printf 'working [at=%s]: resolving merge conflicts\n' "$now" > "$d/state/refresh.status"
+  out=$(run_crew_state "$d" refresh)
+  assert_contains "$out" 'state: working' "the worker's own status answers: $out"
+  assert_contains "$out" 'source: status-log' 'no run of this incarnation exists yet'
+  assert_contains "$out" 'resolving merge conflicts' 'the current work detail is preserved'
+  pass "a refresh task's status log answers over an earlier task run"
+}
+
+test_run_created_after_task_start_is_attributed() {
+  local now d out
+  now=$(date +%s)
+  make_incarnation_case own-run "$(ulid_at $((now + 60)))" "task_started=$now"
+  d=$TMP_ROOT/own-run
+  out=$(run_crew_state "$d" refresh)
+  assert_contains "$out" 'state: done' "this task's own finished run answers: $out"
+  assert_contains "$out" 'source: run-step' 'the own run keeps run-step attribution'
+  pass "a run created after the task started is this task's run"
+}
+
+test_relaunch_keeps_the_task_incarnation() {
+  local now d out
+  now=$(date +%s)
+  # task_started survives a relaunch; spawn_gen is the relaunch's own token.
+  make_incarnation_case relaunched "$(ulid_at $((now - 600)))" \
+    "task_started=$((now - 3600))" "spawn_gen=s$now.1.1"
+  d=$TMP_ROOT/relaunched
+  out=$(run_crew_state "$d" refresh)
+  assert_contains "$out" 'source: run-step' "a run from before a relaunch is still this task's run: $out"
+  pass 'a relaunched task keeps runs from its earlier incarnation'
+}
+
+test_spawn_generation_bounds_a_task_without_a_start_record() {
+  local now d out
+  now=$(date +%s)
+  make_incarnation_case spawn-gen-bound "$(ulid_at $((now - 3600)))" "spawn_gen=s$now.1.1"
+  d=$TMP_ROOT/spawn-gen-bound
+  out=$(run_crew_state "$d" refresh)
+  assert_not_contains "$out" 'source: run-step' "the spawn generation bounds an older record: $out"
+  assert_contains "$out" 'predates this task' 'the ignored run is named'
+  pass 'the spawn generation bounds attribution when no start record exists'
+}
+
+test_unreadable_run_creation_time_is_not_attributed_to_a_bounded_task() {
+  local now d out
+  now=$(date +%s)
+  make_incarnation_case opaque-id 01RUN "task_started=$now"
+  d=$TMP_ROOT/opaque-id
+  out=$(run_crew_state "$d" refresh)
+  assert_not_contains "$out" 'source: run-step' "an unprovable creation time cannot claim this task's result: $out"
+  pass 'a run whose creation time is unreadable is not attributed to a bounded task'
+}
+
+test_legacy_route_does_not_inherit_an_earlier_run() {
+  local now d out
+  now=$(date +%s)
+  make_incarnation_case legacy-refresh "$(ulid_at $((now - 3600)))" "task_started=$now"
+  d=$TMP_ROOT/legacy-refresh
+  # No overview table: the CLI answers the bare current-branch record.
+  FM_FAKE_AXI_HOME=
+  FM_FAKE_RUNS_LIST="  completed fm/refresh $(git -C "$d/wt" rev-parse --short=8 HEAD) $(ledger_minute $((now - 3600))) https://github.com/o/r/pull/1"
+  out=$(run_crew_state "$d" refresh)
+  assert_not_contains "$out" 'source: run-step' "the legacy record route must not inherit the earlier run: $out"
+  assert_contains "$out" 'predates this task' 'the ignored run is named'
+  pass 'the legacy route does not inherit an earlier task run'
+}
+
+test_coarse_ledger_does_not_inherit_an_earlier_run() {
+  local now d out short
+  now=$(date +%s)
+  make_incarnation_case coarse-refresh 01OTHER "task_started=$now"
+  d=$TMP_ROOT/coarse-refresh
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  FM_FAKE_AXI_HOME=
+  FM_FAKE_AXI_STATUS="$(run_running fm/another)"
+  FM_FAKE_RUNS_LIST="  completed fm/refresh $short $(ledger_minute $((now - 3600))) https://github.com/o/r/pull/1"
+  out=$(run_crew_state "$d" refresh)
+  assert_not_contains "$out" 'source: run-step' "an earlier ledger row must not answer for this task: $out"
+  FM_FAKE_RUNS_LIST="  completed fm/refresh $short $(ledger_minute "$now") https://github.com/o/r/pull/1"
+  out=$(run_crew_state "$d" refresh)
+  assert_not_contains "$out" 'source: run-step' "a row from the task's start minute cannot prove it is this task's: $out"
+  FM_FAKE_RUNS_LIST="  completed fm/refresh $short $(ledger_minute $((now + 120))) https://github.com/o/r/pull/1"
+  out=$(run_crew_state "$d" refresh)
+  assert_contains "$out" 'source: run-step' "a ledger row from this task still answers: $out"
+  pass 'the coarse ledger does not inherit an earlier task run'
+}
+
+# The start-minute bound applies to the answering row only: the head-anchor row
+# proves code identity, so it still anchors from the task's start minute.
+test_coarse_ledger_anchor_row_in_start_minute_still_anchors() {
+  local now d out
+  now=$(date +%s)
+  reset_fakes
+  d=$(new_case coarse-anchor-minute)
+  make_repo_on_branch "$d/wt" fm/feat-anchor-minute
+  mint_unfetched_fix_head "$d/wt" >/dev/null
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/anchor-minute.meta" "window=fm:fm-anchor-minute" "worktree=$d/wt" "kind=ship" "task_started=$now"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-anchor-minute $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  $(ledger_minute $((now + 120)))
+  failed     fm/feat-anchor-minute $(git -C "$d/wt" rev-parse --short=7 HEAD)  $(ledger_minute "$now")
+EOF
+)"
+  out=$(run_crew_state "$d" anchor-minute)
+  assert_contains "$out" 'source: run-step' "an anchor row in the start minute still anchors the continuation: $out"
+  assert_contains "$out" 'state: working' 'the anchored continuation reads working'
+  pass 'a head-anchor row in the task start minute still anchors the continuation'
+}
+
+
+test_refresh_task_does_not_inherit_an_earlier_run
+test_refresh_task_status_log_answers_over_an_earlier_run
+test_run_created_after_task_start_is_attributed
+test_relaunch_keeps_the_task_incarnation
+test_spawn_generation_bounds_a_task_without_a_start_record
+test_unreadable_run_creation_time_is_not_attributed_to_a_bounded_task
+test_legacy_route_does_not_inherit_an_earlier_run
+test_coarse_ledger_does_not_inherit_an_earlier_run
+test_coarse_ledger_anchor_row_in_start_minute_still_anchors
+
 echo "all fm-crew-state tests passed"

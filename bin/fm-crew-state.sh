@@ -282,6 +282,7 @@ SEP=' · '
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -z "${EMIT_NOTE:-}" ] || line="$line${SEP}$EMIT_NOTE"
   printf '%s\n' "$line"
   exit 0
 }
@@ -307,6 +308,19 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+# The task incarnation's start epoch (bin/fm-spawn.sh records task_started= on a
+# fresh spawn and carries it across relaunches). A record without it falls back
+# to its spawn_gen= epoch; neither leaves attribution unbounded.
+TASK_START=$(meta_value task_started)
+case "$TASK_START" in
+  ''|*[!0-9]*)
+    TASK_START=$(meta_value spawn_gen)
+    TASK_START=${TASK_START#s}
+    TASK_START=${TASK_START%%.*}
+    case "$TASK_START" in ''|*[!0-9]*) TASK_START='' ;; esac
+    ;;
+esac
+
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
@@ -1096,6 +1110,17 @@ NM_DAEMON_ANSWER=""
 RUN_DEAD_DAEMON=""
 COARSE_STATUS=""
 SELECTED_RUN_ID=""
+# The id of this branch's newest run when it is not this task incarnation's own
+# (fm_nm_run_in_incarnation in bin/fm-nm-run-lib.sh). It is named on whichever
+# current-evidence line answers instead, so the ignored record stays visible.
+RUN_BEFORE_TASK=""
+note_unattributed_run() {  # <run-id>
+  if fm_nm_run_created_epoch "$1" >/dev/null; then
+    EMIT_NOTE="run $1 predates this task: not attributed"
+  else
+    EMIT_NOTE="run $1 creation time unreadable: not attributed"
+  fi
+}
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -1182,45 +1207,58 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
               ;;
           esac
         fi
-        if [ -n "$selected_detail" ]; then
-          RUN_OUT=$selected_detail
+        if ! fm_nm_run_in_incarnation "$selected_id" "$TASK_START"; then
+          RUN_BEFORE_TASK=$selected_id
+          note_unattributed_run "$selected_id"
+          run_choice=earlier
         else
-          RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
-            || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
-        fi
-        if [ "$(strip_quotes "$(nm_field id)")" != "$selected_id" ] \
-          || [ "$(strip_quotes "$(nm_field branch)")" != "$CREW_BRANCH" ]; then
-          emit unknown run-step "selected run unavailable or mismatched; run ids: $candidate_ids"
-        fi
-        case "$(strip_quotes "$(nm_field status)")" in
-          pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled) ;;
-          *) emit unknown run-step "selected run status unverified; run ids: $candidate_ids" ;;
-        esac
-        if fm_nm_run_is_active "$RUN_OUT"; then current_class=live; else current_class=terminal; fi
-        if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
-          emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
-        fi
-        if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
-          || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; then
-          HAVE_RUN=1
-        elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
-          if fm_nm_run_is_active "$RUN_OUT" \
-            && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
-            # The anchor PROVED code identity; only liveness can still fail, so
-            # a dead daemon is reported as such rather than as an identity
-            # failure, and a parked run keeps its gate and findings.
-            HAVE_RUN=1
-            if ! fm_nm_run_is_parked "$RUN_OUT" && nm_daemon_answered_down; then
-              RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
-            fi
+          if [ -n "$selected_detail" ]; then
+            RUN_OUT=$selected_detail
           else
-            emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
+            RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
+              || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
           fi
+          if [ "$(strip_quotes "$(nm_field id)")" != "$selected_id" ] \
+            || [ "$(strip_quotes "$(nm_field branch)")" != "$CREW_BRANCH" ]; then
+            emit unknown run-step "selected run unavailable or mismatched; run ids: $candidate_ids"
+          fi
+          case "$(strip_quotes "$(nm_field status)")" in
+            pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled) ;;
+            *) emit unknown run-step "selected run status unverified; run ids: $candidate_ids" ;;
+          esac
+          if fm_nm_run_is_active "$RUN_OUT"; then current_class=live; else current_class=terminal; fi
+          if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
+            emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
+          fi
+          if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
+            || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; then
+            HAVE_RUN=1
+          elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
+            if fm_nm_run_is_active "$RUN_OUT" \
+              && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")" "$TASK_START")" = running ]; then
+              # The anchor PROVED code identity; only liveness can still fail, so
+              # a dead daemon is reported as such rather than as an identity
+              # failure, and a parked run keeps its gate and findings.
+              HAVE_RUN=1
+              if ! fm_nm_run_is_parked "$RUN_OUT" && nm_daemon_answered_down; then
+                RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
+              fi
+            else
+              emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
+            fi
+          fi
+          SELECTED_RUN_ID=$selected_id
         fi
-        SELECTED_RUN_ID=$selected_id
         ;;
     esac
-    if [ "$run_choice" != status-absent ] && [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
+    if [ "$run_choice" != status-absent ] && [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ] && [ -z "$RUN_BEFORE_TASK" ]; then
+      run_branch=$(strip_quotes "$(nm_field branch)")
+      if [ "$run_branch" = "$CREW_BRANCH" ] && ! fm_nm_run_in_incarnation "$(strip_quotes "$(nm_field id)")" "$TASK_START"; then
+        RUN_BEFORE_TASK=$(strip_quotes "$(nm_field id)")
+        note_unattributed_run "$RUN_BEFORE_TASK"
+      fi
+    fi
+    if [ "$run_choice" != status-absent ] && [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ] && [ -z "$RUN_BEFORE_TASK" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
       # Head equality, the pipeline-owned parked-run exemption, or executing
       # regardless of head: a live run on this branch is current even after a
@@ -1238,7 +1276,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # A live replacement also needs an id-addressed status read: a bare
         # "running" row cannot tell working from waiting at a gate.
         runs_list_once
-        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
+        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST" "" "$TASK_START")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
             emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
@@ -1261,7 +1299,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
         runs_list_once
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST" "" "$TASK_START")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
@@ -1432,7 +1470,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       NEWEST_SHA=${NEWEST_REST%%|*}
       NEWEST_PR=${NEWEST_REST#*|}
       NEWEST_ROW_AGREES=0
-      LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
+      LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST" "" "$TASK_START")
       if [ "$RUN_SOURCE" = full ] && [ -n "$RUN_ID" ] \
         && [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ] \
         && [ "$NEWEST_STATUS" = "$ATTRIBUTED_LEDGER_STATUS" ] \
