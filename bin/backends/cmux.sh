@@ -515,9 +515,9 @@ fm_backend_cmux_send_text_line() {  # <target> <text> [expected-label]
 # fm_backend_cmux_capture: bounded plain-text surface capture. `--scrollback`
 # is this adapter's explicit opt-in to history, so the result can include
 # lines that have scrolled out of view - it is not a viewport read, and no
-# viewport-only primitive is offered for cmux (see FM_BACKEND_VISIBLE_CAPTURE in
-# bin/fm-backend.sh). Finding #3's viewport-height cap was observed on
-# read-screen calls; whether a call WITHOUT --scrollback is strictly bounded to
+# viewport-only primitive is offered for cmux (see the visible-capture answer in
+# bin/fm-backend.sh's fm_backend_capability). Finding #3's viewport-height cap
+# was observed on read-screen calls; whether a call WITHOUT --scrollback is strictly bounded to
 # the viewport is plausible but has not been live-verified. No herdr-style
 # small-N empty-result bug was found (finding #3); "fetch generous, trim
 # locally" is kept for parity with herdr and so a small caller bound never

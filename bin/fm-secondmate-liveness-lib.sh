@@ -201,13 +201,10 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
             return 0
           fi
           remote_backend=$(printf '%s\n' "$route_out" | sed -n 's/^backend=//p' | tail -1)
-          case "$remote_backend" in
-            herdr | rex) ;;
-            *)
-              FM_SM_LIVE_REASON="alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
-              return 0
-              ;;
-          esac
+          if ! fm_backend_capable "$remote_backend" remote-secondmate; then
+            FM_SM_LIVE_REASON="alive remote endpoint is recorded on backend '${remote_backend:-missing}'; migrate or retire it explicitly"
+            return 0
+          fi
           if [ "$remote_backend" != "$expected_remote_backend" ]; then
             FM_SM_LIVE_REASON="alive remote endpoint runs on backend '$remote_backend', but this home recorded '$expected_remote_backend'; migrate or retire it explicitly"
             return 0

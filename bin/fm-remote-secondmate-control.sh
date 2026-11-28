@@ -262,7 +262,8 @@ cmd_launch() {
   # GUI login session, and a persistent `rex server start` server is a
   # detached daemon no SSH session owns. bin/fm-remote-doctor.sh is the
   # readiness owner for whichever backend the parent selected.
-  case "$selected_backend" in herdr|rex) ;; *) die "a remote secondmate runs only on the herdr or rex backend, not '$selected_backend'" ;; esac
+  fm_backend_capable "$selected_backend" remote-secondmate \
+    || die "a remote secondmate runs only on the herdr or rex backend, not '$selected_backend'"
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
