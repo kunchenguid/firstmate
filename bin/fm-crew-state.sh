@@ -108,9 +108,14 @@
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed/passed-with-override/passed-with-skips -> done,
-#      failed -> failed, cancelled -> unknown (no verdict unless the green
-#      delivery safeguard below applies). A cancelled outcome takes precedence
-#      over an interrupted step's failed status or outstanding gate findings;
+#      handed-off (green CI monitoring ended for human review) -> done,
+#      failed -> failed, cancelled and ci-monitor-interrupted -> unknown (no
+#      verdict unless the green delivery safeguard below applies). The run
+#      status words checks_passed, handed_off, and ci_monitor_interrupted read
+#      as their outcome words, and the coarse ledger reads checks_passed and
+#      handed_off as done and ci_monitor_interrupted as unknown (PR open).
+#      A cancelled outcome takes precedence over an interrupted step's failed
+#      status or outstanding gate findings;
 #      it does not rewrite historical events or backlog records.
 #      passed-with-override is a passing outcome
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
@@ -125,9 +130,10 @@
 #      green, so a green PR is never silently read as still-validating. A ci log
 #      whose last marker reports no CI checks reads working (no-checks), and the
 #      crew's own checks-green report is not promoted over it. And a
-#      terminal failed or cancelled run whose only unfinished step is the ci
-#      monitor, after every substantive step completed (an explicitly skipped
-#      rebase is allowed) and the ci log's last marker reads checks green,
+#      terminal failed, cancelled, or ci-monitor-interrupted run whose only
+#      unfinished step is the ci monitor, after every substantive step
+#      completed (an explicitly skipped rebase is allowed) and the ci log's
+#      last marker reads checks green,
 #      also reads done only when the bounded forge read confirms the PR is
 #      open (held-for-merge) or merged. Closed, missing, unreadable, or skipped
 #      forge evidence leaves the original failed or unknown classification.
@@ -148,11 +154,12 @@
 #      cannot be bound here is reported as unknown - history, but no proof of
 #      the present. A FAILED reading is additionally answered from a newer
 #      record where one states a terminal outcome for this worktree: a later
-#      COMPLETED run the ledger proves is current, or the ledger's own FAILED
-#      verdict; a later CANCELLED row carries no verdict, so it leaves the
-#      failure unprovable (unknown) like any other unbindable row. A DONE
-#      reading claims no such verdict, because unknown is already the whole
-#      answer a contradicted success may publish.
+#      COMPLETED, CHECKS_PASSED, or HANDED_OFF run the ledger proves is
+#      current, or the ledger's own FAILED verdict; a later CANCELLED row
+#      carries no verdict, so it leaves the failure unprovable (unknown) like
+#      any other unbindable row. A DONE reading claims no such verdict,
+#      because unknown is already the whole answer a contradicted success may
+#      publish.
 #      Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
 #      truth when its observable status, head, or PR differs. Nothing else does,
@@ -860,10 +867,11 @@ nm_run_activity_is_recent() {
   ! printf '%s\n' "$rows" | grep -q 'quiet'
 }
 
-# 0 when a terminal failed or cancelled run ended at the ci monitor and the
-# ci log's last recognized marker reads checks green. Requires the exact
-# shape, all on positive evidence: a steps[] table where every step completed
-# except `ci` failed/cancelled and an optional skipped rebase (any other
+# 0 when a terminal failed, cancelled, or ci_monitor_interrupted run ended at
+# the ci monitor and the ci log's last recognized marker reads checks green.
+# Requires the exact shape, all on positive evidence: a steps[] table where
+# every step completed except `ci` failed/cancelled (skipped for
+# ci_monitor_interrupted) and an optional skipped rebase (any other
 # non-completed step disqualifies), plus nm_ci_checks_state=green (a genuinely red
 # check, or an unreadable ci log, cannot prove delivery). This is the
 # orphaned-CI-monitor gap (2026-09-05 jr-voice): a run held for a captain
@@ -883,7 +891,10 @@ nm_failed_run_is_green_held_ci() {
     case "$status" in
       completed) continue ;;
       skipped)
-        [ "$step" = rebase ] || return 1
+        [ "$step" = rebase ] && continue
+        # no-mistakes marks the ci step skipped when a daemon restart interrupts its monitor.
+        [ "$step" = ci ] && [ "$(strip_quotes "$(nm_field status)")" = ci_monitor_interrupted ] || return 1
+        saw_ci_failed=1
         continue
         ;;
       failed|cancelled)
@@ -1144,7 +1155,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         selected_detail=
         if [ -n "$reported_id" ] && [ "$reported_branch" = "$CREW_BRANCH" ] \
           && [ "$reported_id" != "$selected_id" ] \
-          && { [ "$selected_status" = completed ] || [ "$selected_status" = cancelled ] || [ "$selected_status" = failed ]; } \
+          && [ "$(fm_nm_run_status_class "$selected_status")" = terminal ] \
           && fm_nm_run_is_active "$RUN_OUT"; then
           case ",$candidate_ids," in
             *,"$reported_id",*|*,\ "$reported_id",*)
@@ -1193,7 +1204,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           emit unknown run-step "selected run unavailable or mismatched; run ids: $candidate_ids"
         fi
         case "$(strip_quotes "$(nm_field status)")" in
-          pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled) ;;
+          pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled|checks_passed|handed_off|ci_monitor_interrupted) ;;
           *) emit unknown run-step "selected run status unverified; run ids: $candidate_ids" ;;
         esac
         if fm_nm_run_is_active "$RUN_OUT"; then current_class=live; else current_class=terminal; fi
@@ -1299,6 +1310,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     case "$COARSE_STATUS" in
       running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      checks_passed|handed_off) RUN_STATE="done"; RUN_DETAIL="run $COARSE_STATUS: PR open" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
         # and no ci log, so the orphaned-monitor shape cannot be recognized
@@ -1311,6 +1323,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;
       cancelled) RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict" ;;
+      ci_monitor_interrupted) RUN_STATE=unknown; RUN_DETAIL="run ci_monitor_interrupted: PR open, no green-checks evidence" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -1337,6 +1350,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
         passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        handed-off) RUN_STATE="done"; RUN_DETAIL="checks green: PR handed off for human review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1344,6 +1358,10 @@ if [ "$HAVE_RUN" = 1 ]; then
         cancelled)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
+          fi ;;
+        ci-monitor-interrupted)
+          if nm_reclassify_failed_run_as_held_green; then :; else
+            RUN_STATE=unknown; RUN_DETAIL="run ci_monitor_interrupted: PR open, no green-checks evidence"
           fi ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
@@ -1370,6 +1388,8 @@ if [ "$HAVE_RUN" = 1 ]; then
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        checks_passed)  RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        handed_off)     RUN_STATE="done"; RUN_DETAIL="checks green: PR handed off for human review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1377,6 +1397,10 @@ if [ "$HAVE_RUN" = 1 ]; then
         cancelled)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
+          fi ;;
+        ci_monitor_interrupted)
+          if nm_reclassify_failed_run_as_held_green; then :; else
+            RUN_STATE=unknown; RUN_DETAIL="run ci_monitor_interrupted: PR open, no green-checks evidence"
           fi ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
@@ -1446,7 +1470,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       if [ "$RUN_SOURCE" = coarse ]; then
         case "$LEDGER_STATUS" in
-          completed|failed|cancelled) TERMINAL_PR=$NEWEST_PR ;;
+          completed|failed|cancelled|checks_passed|handed_off|ci_monitor_interrupted) TERMINAL_PR=$NEWEST_PR ;;
         esac
       elif [ "$NEWEST_ROW_AGREES" = 1 ] || [ -z "$NEWEST_STATUS" ]; then
         TERMINAL_PR=$RUN_PR
@@ -1512,8 +1536,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     && [ "$RUN_SOURCE" != coarse ]; then
     if [ "$RUN_STATE" = "failed" ]; then
       case "$LEDGER_STATUS" in
-        completed)
-          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
+        completed|checks_passed|handed_off)
+          SUPERSEDED_DETAIL="run superseded by a newer $LEDGER_STATUS run on this branch (earlier $READING_DETAIL)"
           [ -z "$SELECTED_RUN_ID" ] \
             || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
           TERMINAL_PR=$NEWEST_PR

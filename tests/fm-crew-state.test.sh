@@ -2046,6 +2046,85 @@ checks failed: 1 of 2 checks red" ;;
   [ "$failures" -eq 0 ] || fail "$failures cancellation verdict regressions"
 }
 
+# no-mistakes' other terminal statuses (RunStatus.Terminal(): checks_passed,
+# handed_off, ci_monitor_interrupted) read through the selected-run route and
+# the coarse ledger, never as an unrecognized status; an undefined word still does.
+test_newer_terminal_run_statuses() {
+  local variant scenario failures=0
+  for variant in checks-passed handed-off interrupted-green interrupted-no-ci-log \
+    checks-passed-no-outcome handed-off-no-outcome interrupted-green-no-outcome \
+    interrupted-no-ci-log-no-outcome \
+    coarse-checks-passed coarse-handed-off coarse-interrupted undefined; do
+    (
+      reset_fakes
+      local d out status detail
+      scenario=${variant%-no-outcome}
+      d=$(new_case "terminal-status-$variant")
+      make_repo_on_branch "$d/wt" fm/terminal
+      make_fakebin "$d" >/dev/null
+      fm_write_meta "$d/state/terminal.meta" "window=fm:fm-terminal" "worktree=$d/wt" "kind=ship"
+      FM_FAKE_PR_STATE=OPEN
+      FM_FAKE_PR_MERGED=false
+      FM_FAKE_PR_STATE_AXI=open
+      case "$scenario" in
+        checks-passed|handed-off|undefined)
+          status=${scenario//-/_}
+          [ "$scenario" = undefined ] && status=quarantined
+          detail="$(run_passed_with_pr fm/terminal https://github.com/o/r/pull/203)"
+          detail=${detail/status: completed/status: $status}
+          detail=${detail/outcome: passed/outcome: ${status//_/-}} ;;
+        interrupted-*)
+          status=ci_monitor_interrupted
+          detail="$(run_failed_ci_orphan fm/terminal)"
+          detail=${detail/status: failed/status: $status}
+          detail=${detail/outcome: failed/outcome: ci-monitor-interrupted}
+          detail=${detail/ci,failed/ci,skipped}
+          [ "$scenario" = interrupted-green ] \
+            && FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed" ;;
+      esac
+      case "$scenario" in
+        coarse-*)
+          status=${scenario#coarse-}
+          [ "$status" = interrupted ] && status=ci-monitor-interrupted
+          status=${status//-/_}
+          FM_FAKE_AXI_STATUS="$(run_running fm/another)"
+          FM_FAKE_RUNS_LIST="  $status  fm/terminal $FM_FAKE_RUN_HEAD  2026-11-13 17:00" ;;
+        *)
+          FM_FAKE_AXI_STATUS=$detail
+          FM_FAKE_AXI_STATUS_RUN=$detail
+          FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  01RUN,fm/terminal,$status,$FM_FAKE_RUN_HEAD,\"https://github.com/o/r/pull/203\"" ;;
+      esac
+      [ "$variant" = "$scenario" ] \
+        || FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$detail" | sed '/^outcome:/d')
+      out=$(FM_HOME="$d" run_crew_state "$d" terminal)
+      case "$scenario" in
+        undefined)
+          assert_contains "$out" "state: unknown" "an undefined status has no verdict: $out"
+          assert_contains "$out" "unrecognized run status" "an undefined status stays unrecognized" ;;
+        interrupted-no-ci-log|coarse-interrupted)
+          assert_contains "$out" "state: unknown" "$scenario: no green evidence, no verdict: $out"
+          assert_contains "$out" "ci_monitor_interrupted: PR open, no green-checks evidence" "$scenario: detail names the status and the open PR"
+          assert_not_contains "$out" "runs list status" "$scenario: not the generic ledger fallback"
+          assert_not_contains "$out" "unrecognized" "$scenario: a defined status is recognized" ;;
+        *)
+          assert_contains "$out" "state: done" "$scenario: finished green: $out"
+          assert_not_contains "$out" "unrecognized" "$scenario: a defined status is recognized"
+          assert_not_contains "$out" "PR merged" "$scenario: the run never observed a merge" ;;
+      esac
+      case "$scenario" in
+        checks-passed) assert_contains "$out" "checks green: PR ready for review" "checks_passed reads like the checks-passed outcome" ;;
+        handed-off) assert_contains "$out" "handed off" "handed_off keeps the handoff visible" ;;
+        interrupted-green) assert_contains "$out" "held for merge" "the green-delivery safeguard applies" ;;
+      esac
+      assert_not_contains "$out" "state: failed" "$scenario is never a pipeline failure"
+      pass "$variant: terminal run status reads as its meaning"
+    ) || failures=$((failures + 1))
+  done
+  [ "$failures" -eq 0 ] || fail "$failures newer terminal status regressions"
+}
+
 # The real inventory consumer must not confuse a cancellation with a failed
 # child contradicting an In flight row. Unknown remains explicitly partial.
 test_cancelled_fleet_inventory_is_unverified_not_contradictory() {
@@ -4021,6 +4100,30 @@ runs[1]{id,branch,status,head,pr}:
   pass "a precedence verdict reads as one sentence with the run id last"
 }
 
+# checks_passed is a successful terminal run (no-mistakes RunStatus), so a
+# newer checks_passed ledger row answers an older selected failure the same way
+# a newer completed row does, instead of leaving it unbindable.
+test_newer_checks_passed_row_supersedes_selected_failure() {
+  reset_fakes
+  local d short out; d=$(new_case precedence-checks-passed)
+  make_repo_on_branch "$d/wt" fm/feat-s2p
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2p.meta" "window=fm:fm-feat-s2p" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  01RUN,fm/feat-s2p,failed,${FM_FAKE_RUN_HEAD},\"\""
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2p)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  checks_passed  fm/feat-s2p ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/5"
+  out=$(run_crew_state "$d" feat-s2p)
+  assert_contains "$out" "state: done" "a newer checks_passed row supersedes the earlier failure"
+  assert_contains "$out" "run superseded by a newer checks_passed run" "the detail names the newer successful run"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/5" "the newer run's pull request is published"
+  assert_not_contains "$out" "cannot be bound" "a successful newer row is not unbindable"
+  pass "a newer checks_passed ledger row supersedes a selected failure"
+}
+
 # A verdict taken from the ledger row must not be labelled with the attributed
 # run's identity. This arm fires only when the newest row is NOT provably the
 # attributed run - here it carries a different pull request at the same head -
@@ -4061,6 +4164,7 @@ EOF
   assert_not_contains "$out" "state: failed" "the earlier failure must not override cancellation"
   assert_not_contains "$out" "pr=" "cancellation publishes neither run's terminal pull request"
   pass "a newer cancelled ledger row leaves an earlier failure unprovable"
+
 }
 
 # A record cannot supersede itself. On the coarse path the emitted reading is
@@ -6751,7 +6855,8 @@ for cancellation_test in test_captured_cancelled_review_has_no_verdict \
   test_terminal_green_delivery_disposition \
   test_cancelled_without_delivery_has_no_verdict \
   test_cancelled_fleet_inventory_is_unverified_not_contradictory \
-  test_cancelled_delivery_and_skipped_rebase; do
+  test_cancelled_delivery_and_skipped_rebase \
+  test_newer_terminal_run_statuses; do
   ("$cancellation_test") || cancellation_failures=$((cancellation_failures + 1))
 done
 [ "$cancellation_failures" -eq 0 ] || fail "$cancellation_failures cancellation test groups failed"
@@ -6875,6 +6980,7 @@ test_unbindable_later_terminal_run_reports_unknown
 test_same_head_terminal_rerun_publishes_newest_pr
 test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row
 test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last
+test_newer_checks_passed_row_supersedes_selected_failure
 test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own
 test_coarse_terminal_reading_claims_no_supersession
 test_foreign_status_never_hides_coarse_terminal_pr
