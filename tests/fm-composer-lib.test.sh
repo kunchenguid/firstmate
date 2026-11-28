@@ -681,6 +681,14 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   assert_screen "idle omp with a 1M context cell" empty "$CAPS_STYLED" $'transcript line\n\n❯\n ◔ claude-opus-4 · ◫ 7%/1M'
   _fm_composer_row_is_omp_status 'deploy · eta 50%/3m' \
     && fail "a draft line with a lowercase minutes cell must not be mistaken for omp status furniture"
+  # A wrapped draft whose continuation row merely contains `%/1M` is typed
+  # input, not the 1M footer: the whole draft must read back, or a backend
+  # proving its payload before Enter refuses to submit it.
+  _fm_composer_row_is_omp_status 'usage · 7%/1M' \
+    && fail "a draft line carrying '%/1M' must not be mistaken for omp status furniture"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" $'transcript line\n\n❯ please document\nusage · 7%/1M')
+  [ "$out" = 'please document usage · 7%/1M' ] \
+    || fail "a wrapped draft ending in '%/1M' should extract whole, got '$out'"
   assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
   assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
   assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
