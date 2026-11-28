@@ -2771,7 +2771,8 @@ pause_overdue_reconcile() {  # <task> <status-file> -> 0 unchanged, 1 cleared or
   IFS=: read -r marker_identity offset < "$marker" || [ -n "$offset" ] || { rm -f "$marker"; return 1; }
   actual=$(_fm_status_file_size "$statusf") || return 0
   case "$offset:$actual" in *[!0-9:]*) rm -f "$marker"; return 1 ;; esac
-  if [ "$identity" != "$marker_identity" ] || [ "$actual" -lt "$offset" ]; then
+  # Compare inode only; _fm_status_ident_same owns why the device is dropped.
+  if [ "${identity#* }" != "${marker_identity#* }" ] || [ "$actual" -lt "$offset" ]; then
     rm -f "$marker"
     return 1
   fi
