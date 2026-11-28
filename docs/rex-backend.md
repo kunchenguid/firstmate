@@ -43,6 +43,10 @@ Rex's hierarchy is server > session > window (a tab) > block (a pane), and each 
 When Firstmate runs directly inside Rex, it asks the server for the session that holds `REX_BLOCK` and opens task tabs there.
 Firstmate refuses the launch if the block ID is invalid or the server cannot resolve it.
 Otherwise, and always for a secondmate's own home, the tab opens in one session per home labeled with the home tag (`firstmate-<hash>` or `2ndmate-<id>-<hash>`), adopted when exactly one session carries that label, created once when none does, and refused when several do.
+Firstmate records that session's id in `state/.home-rex-session` when it creates or adopts it.
+Later spawns use the recorded session while it is live, whatever its label, because Rex's startup hook can lead a worker to rename it.
+A recorded session that is gone counts as no session, so the next spawn creates one and records the new id.
+A home with no record yet, such as one that predates the record, falls back to the label lookup once and records the session it finds or creates.
 Firstmate places a new local secondmate session immediately after the resolved launcher session.
 It moves a respawned secondmate tab in an adopted session to the first position ahead of its crews.
 Both ordering steps are best-effort: a failure warns without failing the launch.
@@ -110,9 +114,10 @@ Task tabs in a second Rex session stay on polling, because one reader covers one
 
 Cleanup closes only the task's block, which closes its tab, and then proves it gone: only an exact not-found after the close counts, so a close that failed or left the block alive keeps the task's records.
 An already-gone block counts as closed.
-A per-home session left with no tabs is then killed, but only the exact recorded session carrying this home's label, never the launcher session, and never when its view cannot be read.
+A per-home session left with no tabs is then killed, but only the exact session recorded in `state/.home-rex-session`, never the launcher session, and never when its view cannot be read.
+A home with no record falls back to the session carrying its label.
 An omitted `windows` field is treated as an empty session for both retirement and adoption, so a crewless secondmate can relaunch into its emptied session.
-When main retires a local secondmate, it checks and retires that secondmate's session using the secondmate home's identity; sessions with tabs or renamed labels are preserved.
+When main retires a local secondmate, it checks and retires that secondmate's session using the secondmate home's identity; sessions with tabs are preserved, and an empty recorded session is retired whatever its label. A label mismatch preserves a session only when the home has no record.
 Spawning, reclaiming, and that retirement share one home-wide lock (`state/.rex-session.lock`), so a new tab can never land in a session between its empty check and its kill.
 
 `bin/fm-control.sh` `exit` and `relaunch` work on Rex; [`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the recorded-server absence proof, stopped-server recovery, reclaim placement, and reclaim-only shell-husk cleanup.
