@@ -7,6 +7,8 @@
 # Split-file weights for fm-watch-triage-busy, fm-captain-hold-teardown, and the
 # reduced watch-triage/captain-hold parents are proportional splits of those
 # parent measurements, pending a refresh from green CI.
+# fm-mail-check carries its measured sample plus the budget timeouts its
+# new .env budget cases wait out, pending a refresh from green CI.
 path	duration_ms
 tests/fm-afk-contract.test.sh	13161
 tests/fm-afk-inject-e2e.test.sh	41468
@@ -171,7 +173,7 @@ tests/fm-live-gate.test.sh	16481
 tests/fm-live-lab-isolation.test.sh	3657
 tests/fm-live-lab-up-mate.test.sh	18011
 tests/fm-live-lab.test.sh	84559
-tests/fm-mail-check.test.sh	8476
+tests/fm-mail-check.test.sh	24500
 tests/fm-mail.test.sh	11369
 tests/fm-merge-local.test.sh	9152
 tests/fm-muse-harness.test.sh	57793

@@ -1443,10 +1443,12 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-lane-capacity-integration.test.sh"
       ;;
     bin/fm-env-lib.sh)
-      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
-      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY).
+      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token),
+      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY), and
+      # bin/fm-mail-check.sh (FM_MAIL_CHECK_BUDGET).
       printf '%s\n' pr-forge
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-mail-check.test.sh"
       ;;
     .pi/extensions/fm-primary-read-repetition.ts|.pi/extensions/lib/fm-primary-read-repetition-policy.ts|tests/fixtures/fm-read-repetition-sdk.mjs|tests/fixtures/fm-read-repetition-live.mjs)
       printf '%s\n' __script__:fm-read-repetition.test.sh

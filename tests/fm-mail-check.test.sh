@@ -137,7 +137,7 @@ test_arm_refuses_without_the_mail_plane() {
   home="$TMP_ROOT/plane/home"
   mkdir -p "$tmpbin" "$home/state"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-env-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   out=$(FM_HOME="$home" "$tmpbin/fm-mail-check.sh" arm 2>&1) || rc=$?
@@ -229,6 +229,96 @@ test_slow_poll_times_out_and_is_reported() {
   pass "fm-mail-check: a slow poll times out into a one-line report"
 }
 
+# The effective budget is only observable by waiting one out, so each sub-case
+# uses the smallest value that still distinguishes the source it proves: 5 is
+# the floor of the valid range, and the watcher bound cuts the last one below it.
+test_budget_is_read_from_home_env() {
+  local home out
+  home=$(make_home budget-env)
+  write_env "$home"
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=5' >> "$home/.env"
+  enter_mailbox "$home" 'sleep 10'
+  out="$home/out.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "within the 5s budget" "the home .env budget applies when the environment is silent"
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=6' >> "$home/.env"
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$CHECK" FM_MAIL_CHECK_BUDGET=5
+  assert_contains "$(cat "$out")" "within the 5s budget" "the environment budget wins over the .env"
+  # This sub-case proves the clamp alone: with the bound at 5 the default 15 and
+  # the .env's 6 both cut to the same 2, so it cannot speak for the .env path,
+  # which the two sub-cases above prove on their own.
+  out="$home/out3.txt"
+  run_check "$home" "$out" "$CHECK" FM_CHECK_TIMEOUT=5
+  assert_contains "$(cat "$out")" "within the 2s budget" "the budget is cut to fit the watcher bound"
+
+  # A zero-padded spelling is the same whole number, so it is accepted rather
+  # than labelled a bad value. A fast poll keeps this sub-case free of waiting.
+  home=$(make_home budget-padded)
+  write_env "$home"
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=025' >> "$home/.env"
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t20005\\n"
+printf "7\\t2026-09-05T00:00:00Z\\tcarol@example.com\\tHey\\n"'
+  out="$home/out4.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: new mail: woke for 7" "a zero-padded budget inside the range still polls"
+  assert_not_contains "$(cat "$out")" "FM_MAIL_CHECK_BUDGET" "a zero-padded budget inside the range is not called a bad value"
+  pass "fm-mail-check: the budget honors the home .env with env-wins, the watcher bound, and padded spellings"
+}
+
+test_rejected_budget_reports_and_keeps_polling() {
+  local home out padding
+  home=$(make_home budget-bad)
+  write_env "$home"
+  # The value this incident invites an operator to leave behind: in range, but
+  # annotated, so the .env read hands the check a string it cannot use. A
+  # refusal here would stop received mail from ever surfacing again, because
+  # the watcher discards the check's stderr and only wakes on its stdout.
+  printf '%s\n' 'FM_MAIL_CHECK_BUDGET=25 # slow Gmail' >> "$home/.env"
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t20004\\n"
+printf "42\\t2026-09-05T00:00:00Z\\talice@example.com\\tHello\\n"'
+  out="$home/out.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "FM_MAIL_CHECK_BUDGET=25 # slow Gmail is not a whole number from 5 to 25" "a rejected budget names its value on the check's own stdout line"
+  assert_contains "$(cat "$out")" "polling on the 15s budget" "a rejected budget falls back to the default budget"
+  assert_contains "$(cat "$out")" "new mail: woke for 42" "the poll still runs under a rejected budget"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "a rejected budget still reports exactly one line: $(cat "$out")"
+  assert_contains "$(cat "$home/state/.wake-queue" 2>/dev/null)" "mail from alice@example.com" "the poll under a rejected budget still queues the durable mail wake"
+
+  # An out-of-range environment value is the same condition on the other input.
+  enter_mailbox "$home" \
+    'printf "uidvalidity\\t20004\\n"
+printf "43\\t2026-09-05T00:01:00Z\\tbob@example.com\\tHi\\n"'
+  out="$home/out2.txt"
+  run_check "$home" "$out" "$CHECK" FM_MAIL_CHECK_BUDGET=30
+  assert_contains "$(cat "$out")" "FM_MAIL_CHECK_BUDGET=30 is not a whole number from 5 to 25" "an out-of-range environment budget is named too"
+  assert_contains "$(cat "$out")" "new mail: woke for 43" "the poll still runs under an out-of-range environment budget"
+
+  # A long annotated value must not cost the poll its own finding: the line cap
+  # cuts the configuration complaint that trails it instead.
+  padding=$(printf '%*s' 200 '')
+  home=$(make_home budget-bad-long)
+  write_env "$home"
+  printf '%s\n' "FM_MAIL_CHECK_BUDGET=25 # ${padding// /x}" >> "$home/.env"
+  enter_mailbox "$home" \
+    'printf "fm-mail poll error: connection refused\\n" >&2
+exit 1'
+  out="$home/out.txt"
+  run_check "$home" "$out" "$CHECK"
+  assert_contains "$(cat "$out")" "mail: fm-mail poll error: connection refused" "the poll's own finding survives a long rejected budget"
+  assert_contains "$(cat "$out")" " [truncated]" "the capped line cuts the trailing configuration complaint"
+  [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "a long rejected budget still reports exactly one line: $(cat "$out")"
+
+  # Arming and disarming never use the budget, so they must stay available on a
+  # home whose budget cannot be parsed.
+  out=$(FM_HOME="$home" "$CHECK" arm 2>&1) || fail "arm must stay usable with a rejected budget: $out"
+  out=$(FM_HOME="$home" FM_MAIL_CHECK_BUDGET=30 "$CHECK" disarm 2>&1) || fail "disarm must stay usable with a rejected budget: $out"
+  assert_absent "$home/state/mail.check.sh" "disarm removes the shim on a home with a rejected budget"
+  pass "fm-mail-check: a rejected budget reports one line and keeps polling on the default"
+}
+
 test_repeated_failure_that_queued_new_mail_still_wakes() {
   # A poll can append durable mail wakes and then fail with the same cause as
   # the last check. Difference-record silence would leave those wakes queued
@@ -239,7 +329,7 @@ test_repeated_failure_that_queued_new_mail_still_wakes() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-env-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   printf '%s\n' '#!/usr/bin/env bash' 'echo "fm-mail: woke for 42"' 'echo "fm-mail: connection refused" >&2' 'exit 1' > "$tmpbin/fm-mail.sh"
@@ -266,7 +356,7 @@ test_large_poll_output_is_drained() {
   tmpbin="$TMP_ROOT/large-poll/bin"
   mkdir -p "$tmpbin"
   cp "$CHECK" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-env-lib.sh; do
     ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   cat > "$tmpbin/fm-mail.sh" <<'SH'
@@ -317,7 +407,7 @@ test_repeated_timeout_still_wakes() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-env-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   printf '%s\n' '#!/usr/bin/env bash' 'exit 124' > "$tmpbin/fm-mail.sh"
@@ -394,7 +484,7 @@ test_repeated_status2_stays_queued_still_wakes() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-env-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   cat > "$tmpbin/fm-mail.sh" <<EOF
@@ -447,7 +537,7 @@ test_missing_mail_plane_is_reported() {
   mkdir -p "$tmpbin" "$home/state"
   check_bin="$tmpbin/fm-mail-check.sh"
   cp "$ROOT/bin/fm-mail-check.sh" "$tmpbin/"
-  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh fm-env-lib.sh; do
     [ -e "$tmpbin/$lib" ] || ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
   done
   out="$home/out.txt"
@@ -465,6 +555,8 @@ test_successful_poll_with_new_mail_emits_one_wake_line
 test_failure_is_reported_once_until_it_changes
 test_unconfigured_home_is_reported_once
 test_slow_poll_times_out_and_is_reported
+test_budget_is_read_from_home_env
+test_rejected_budget_reports_and_keeps_polling
 test_fail_closed_poll_after_wake_reports_the_failure
 test_repeated_status4_fail_closed_still_wakes
 test_repeated_status2_stays_queued_still_wakes

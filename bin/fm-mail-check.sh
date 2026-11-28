@@ -38,10 +38,14 @@
 # The poll must finish inside the watcher's per-check bound
 # (FM_CHECK_TIMEOUT, default 30, read from this check's own environment
 # because the watcher runs it as a direct child). The internal budget
-# FM_MAIL_CHECK_BUDGET (default 15, valid 5..25) is cut down to whatever fits
-# inside that bound before the poll starts. A poll that does not finish is a
-# real condition, so the budget is enforced rather than assumed: a timed-out
-# poll reports one line naming the budget instead of leaving the check silent.
+# FM_MAIL_CHECK_BUDGET (default 15, valid 5..25) is read from the environment,
+# else from <FM_HOME>/.env because the watcher shim does not load the .env, and
+# is cut down to whatever fits inside that bound before the poll starts. A poll
+# that does not finish is a real condition, so the budget is enforced rather
+# than assumed: a timed-out poll reports one line naming the budget instead of
+# leaving the check silent. A budget that is not a whole 5..25 cannot stop the
+# poll either: the default is used and the rejected value joins this check's one
+# line, so a mistyped budget is a wake rather than a mail plane that went quiet.
 set -u
 export LC_ALL=C
 
@@ -65,6 +69,8 @@ MAX_LINE=240
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-env-lib.sh
+. "$SCRIPT_DIR/fm-env-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -98,17 +104,29 @@ case "$CHECK_TIMEOUT" in
   ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;;
 esac
 
-BUDGET_SECS=${FM_MAIL_CHECK_BUDGET:-15}
+# The watcher runs this check through state/mail.check.sh without the home's
+# .env, so the budget is filled from $FM_HOME/.env when the environment does not
+# set it (env wins, the same fmx_env_get convention fm-mail.sh uses).
+BUDGET_RAW=${FM_MAIL_CHECK_BUDGET:-}
+[ -n "$BUDGET_RAW" ] || BUDGET_RAW=$(fmx_env_get FM_MAIL_CHECK_BUDGET "$FM_HOME/.env")
+BUDGET_SECS=${BUDGET_RAW:-15}
+# A padded spelling is the number it names, so leading zeros go before the
+# value is judged by it.
 case "$BUDGET_SECS" in
-  ''|*[!0-9]*|0)
-    printf 'fm-mail-check: FM_MAIL_CHECK_BUDGET must be a whole number from 5 to 25\n' >&2
-    exit 2
-    ;;
+  0?*) BUDGET_SECS=${BUDGET_SECS#"${BUDGET_SECS%%[!0]*}"} ;;
 esac
-if [ "$BUDGET_SECS" -lt 5 ] || [ "$BUDGET_SECS" -gt 25 ]; then
-  printf 'fm-mail-check: FM_MAIL_CHECK_BUDGET must be a whole number from 5 to 25\n' >&2
-  exit 2
-fi
+# Fall back rather than refuse. A refusal exits before the poll with a stderr
+# diagnostic the watcher discards, so one mistyped value would stop received
+# mail from ever surfacing again, and would also refuse `arm` and `disarm` on
+# that home. The rejected value is carried into the check's own line instead.
+# Three or more digits cannot be a valid budget, so the arithmetic comparisons
+# below never see a number too large for them.
+BUDGET_BAD=
+case "$BUDGET_SECS" in
+  ''|*[!0-9]*|0|???*) BUDGET_BAD=1 ;;
+  *) if [ "$BUDGET_SECS" -lt 5 ] || [ "$BUDGET_SECS" -gt 25 ]; then BUDGET_BAD=1; fi ;;
+esac
+[ -z "$BUDGET_BAD" ] || BUDGET_SECS=15
 
 # fm_run_timed counts a whole second before it alarms, so the budget has to fit
 # inside the watcher's own bound with the alarm and kill margins left over.
@@ -117,6 +135,9 @@ BUDGET_MAX=$((CHECK_TIMEOUT - 3))
 if [ "$BUDGET_SECS" -gt "$BUDGET_MAX" ]; then
   BUDGET_SECS=$BUDGET_MAX
 fi
+
+BUDGET_NOTE=
+[ -z "$BUDGET_BAD" ] || BUDGET_NOTE="FM_MAIL_CHECK_BUDGET=$BUDGET_RAW is not a whole number from 5 to 25; polling on the ${BUDGET_SECS}s budget"
 
 # One poll summary, built only from the poll's own combined output. The
 # poll's own "fm-mail: ..." diagnostics name the missing setup value, the
@@ -221,6 +242,16 @@ action_check() {
       line=$(printf '%s\n' "$out" | grep '^fm-mail: woke for ' | tail -n 1 | sed 's/^fm-mail: /new mail: /')
     else
       line=
+    fi
+  fi
+  # A rejected budget is a real condition of this poll, so it travels on the
+  # same line the record dedupes rather than on the stderr the watcher drops.
+  # It trails the poll's own finding, which the line cap must never cut for it.
+  if [ -n "$BUDGET_NOTE" ]; then
+    if [ -n "$line" ]; then
+      line="$line; $BUDGET_NOTE"
+    else
+      line=$BUDGET_NOTE
     fi
   fi
   record_read
