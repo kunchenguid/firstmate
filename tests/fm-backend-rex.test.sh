@@ -652,6 +652,75 @@ test_push_reader_failures_fall_back() {
   pass "fm_backend_wait_transition rex: a reader that cannot start or ends early falls back to polling"
 }
 
+# --- the recorded per-home session --------------------------------------------
+
+relabel_session() {  # <dir> <session-id> <label>
+  local tmp="$1/fake/state.json.tmp"
+  jq --arg s "$2" --arg l "$3" '(.sessions[] | select(.session_id == $s) | .label) = $l' "$1/fake/state.json" >"$tmp" \
+    && mv "$tmp" "$1/fake/state.json"
+}
+
+record_file() {  # <dir>
+  printf '%s/home/state/.home-rex-session' "$1"
+}
+
+test_relabeled_home_session_is_reused() {
+  local dir out sid
+  dir=$(new_case relabeled-reuse)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ <<<"$out"
+  assert_equals "$sid" "$(cat "$(record_file "$dir")")" "creating the per-home session must record its id"
+  relabel_session "$dir" "$sid" renamed-by-a-worker
+  rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp' >/dev/null || fail "a spawn after a relabel must succeed"
+  assert_equals 1 "$(grep -c '^rex new ' "$dir/fake/log")" "a relabeled per-home session must be reused, not replaced"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "no second session may exist"
+  assert_equals 2 "$(state_json "$dir" '.sessions[0].windows | length')" "the second task must open in the relabeled session"
+  pass "fm_backend_rex_create_task: a recorded per-home session is reused after a worker relabels it"
+}
+
+test_dead_recorded_session_is_replaced_once() {
+  local dir out sid sid2
+  dir=$(new_case recorded-dead)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ <<<"$out"
+  fake_rex "$dir" kill "$sid"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-beta /tmp') || fail "a spawn after the session died must succeed"
+  read -r sid2 _ <<<"$out"
+  assert_equals 2 "$(grep -c '^rex new ' "$dir/fake/log")" "a dead recorded session must lead to exactly one new session"
+  [ "$sid" != "$sid2" ] || fail "the replacement must be a new session"
+  assert_equals "$sid2" "$(cat "$(record_file "$dir")")" "the record must follow the new session"
+  pass "fm_backend_rex_create_task: a dead recorded session is replaced once and the record updated"
+}
+
+test_unrecorded_labeled_session_is_adopted_and_recorded() {
+  local dir label sid
+  dir=$(new_case adopt-record)
+  label=$(home_label "$dir")
+  sid=$(fake_rex "$dir" new "$label" --window x --cwd /tmp --json | jq -r .session_id)
+  [ ! -e "$(record_file "$dir")" ] || fail "a case without a record must start without one"
+  rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp' >/dev/null || fail "adopting the labeled session must succeed"
+  assert_equals 1 "$(grep -c '^rex new ' "$dir/fake/log")" "the labeled session must be adopted, not duplicated"
+  assert_equals "$sid" "$(cat "$(record_file "$dir")")" "adopting the labeled session must record its id"
+  pass "fm_backend_rex_create_task: a home with no record adopts its one labeled session and records it"
+}
+
+test_retire_uses_the_recorded_session() {
+  local dir out sid bid other
+  dir=$(new_case retire-recorded)
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  other=$(fake_rex "$dir" new "$(home_label "$dir")" --window x --cwd /tmp --json | jq -r .session_id)
+  fake_rex "$dir" block close -s "$other" "$(state_json "$dir" ".sessions[] | select(.session_id == \"$other\") | .windows[0].blocks[0].block_id")"
+  relabel_session "$dir" "$sid" renamed-by-a-worker
+  rex_env "$dir" "fm_backend_kill rex '${sid#session:}:${bid#block:}'" || fail "kill must succeed"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$sid\")] | length")" \
+    "the emptied recorded session must be retired although it was relabeled"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$other\")] | length")" \
+    "an empty session carrying the home label that is not the recorded one must survive"
+  [ ! -e "$(record_file "$dir")" ] || fail "retiring the recorded session must clear the record"
+  rex_env "$dir" "fm_backend_rex_retire_session '$other'"
+  assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$other\")] | length")" \
+    "a home with no record keeps today's label-based retirement"
+  pass "fm_backend_rex_retire_session: retires the recorded session by id, whatever its label, and refuses any other"
+}
+
 # --- cleanup and absence proof ----------------------------------------------
 
 test_kill_closes_and_retires_per_home_session() {
@@ -1085,6 +1154,10 @@ test_create_task_uses_confirmed_launcher_session
 test_create_secondmate_orders_new_session_after_launcher
 test_discover_rex_supervisor
 test_create_task_refusals
+test_relabeled_home_session_is_reused
+test_dead_recorded_session_is_replaced_once
+test_unrecorded_labeled_session_is_adopted_and_recorded
+test_retire_uses_the_recorded_session
 test_reclaim_replaces_a_husk_and_refuses_a_live_one
 test_reclaim_fallback_placement_replaces_a_husk
 test_capture_and_derived_viewport
