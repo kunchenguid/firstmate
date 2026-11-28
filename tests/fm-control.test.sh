@@ -405,7 +405,7 @@ devin_as() {  # <case-dir> <screen>
 
 # Seconds between the first two named keys sent.
 first_key_gap() {  # <case-dir>
-  awk 'NR == 1 { a = $1 } NR == 2 { printf "%.3f", $1 - a; exit }' "$1/fake/key-times"
+  LC_ALL=C awk 'NR == 1 { a = $1 } NR == 2 { printf "%.3f", $1 - a; exit }' "$1/fake/key-times"
 }
 
 test_devin_interrupt_invalidates_busy() {
@@ -419,7 +419,7 @@ test_devin_interrupt_invalidates_busy() {
   assert_grep 'state=unknown source=fm-interrupt' "$dir/home/state/t1.busy-state" 'cancelled Devin turn stayed busy'
   [ "$(cat "$dir/fake/devin")" = cancelled ] || fail "the second press should have cancelled the armed turn"
   gap=$(first_key_gap "$dir")
-  awk -v g="$gap" 'BEGIN{exit !(g >= 0.5)}' \
+  LC_ALL=C awk -v g="$gap" 'BEGIN{exit !(g >= 0.5)}' \
     || fail "Devin's second Escape came ${gap}s after the first; under 0.5s a turn ending between them pairs into the revert picker"
   pass "fm-control Devin interrupt: second press only after the armed hint, then busy invalidated without fabricating idle"
 }
