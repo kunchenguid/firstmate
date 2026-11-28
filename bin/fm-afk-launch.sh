@@ -15,6 +15,16 @@
 # (bin/fm-afk-contract.sh owns the record schema; the words are the whole
 # mandate and no script parses them). The record is the posture in every
 # harness.
+# The away entry needs the fleet lock: a read-only session cannot carry out the
+# away words, so `enter` refuses while another live session holds the lock and
+# names that holder (pid, process start time, process age, read live from the
+# process). Stopping the holder is never automatic; the refusal only names it.
+# The quiet path is settled BEFORE that check, and a quiet entry never takes it:
+# quiet mode is presentation only and holds nothing, so a read-only session may
+# still enter it. Where attended supervision already does what quiet mode asks
+# (the host's ordinary session on a ready hosted home, or Pi's in-process
+# branch), that entry writes no record and spawns nothing; where it is
+# unavailable, quiet mode enters through the quiet daemon, which does start one.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
@@ -167,8 +177,12 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 # The supervision host's home gate and attended readiness check.
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
-
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+# The fleet lock's away-entry check belongs to the record writer
+# (bin/fm-afk-contract.sh), whose header owns that authoritative-verdict
+# mechanism. Keeping it there covers every writer of the record, not only this
+# launcher.
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -386,6 +400,10 @@ fm_afk_launch_enter() {
         return 3 ;;
     esac
   fi
+  # The quiet path above is settled first on purpose: the header owns that
+  # ordering and both quiet entries. The fleet-lock check belongs to away-mode
+  # record writes, so a standing away record keeps away mode even for a
+  # quiet-mode caller, and that write is refused too.
   "$FM_AFK_CONTRACT_CMD" enter "$@" || return
   fm_afk_launch_host_engine_note
 }
