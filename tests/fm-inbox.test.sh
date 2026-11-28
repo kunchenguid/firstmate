@@ -58,6 +58,72 @@ count_wakes() {
   fi
 }
 
+# --- emptiness checks stay linear on long multibyte bodies -------------------
+# A `${body//[[:space:]]/}` emptiness check is quadratic under stock macOS bash
+# 3.2 in a UTF-8 locale (a 12000-character body took minutes). These run through
+# /bin/bash with a UTF-8 locale so that shell is the one under test where it
+# exists; elsewhere they are still plain correctness checks. The time budget is
+# generous: the linear check takes about a second, the quadratic one minutes.
+
+run_inbox_utf8() {
+  local home=$1
+  shift
+  LC_ALL=en_US.UTF-8 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" /bin/bash "$INBOX_BIN" "$@"
+}
+
+test_long_utf8_note_and_reply_are_accepted_quickly() {
+  local home long_body start elapsed queued long_id
+  home=$(make_home long-body)
+  long_body=$(python3 -c 'print(("café note line with text. " * 2000)[:50000])')
+
+  start=$SECONDS
+  queued=$(run_inbox_utf8 "$home" note "$long_body") || fail "a 50 KB UTF-8 note should be queued"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -le 30 ] || fail "queueing a 50 KB note took ${elapsed}s, expected well under 30s"
+  assert_equals "1" "$(count_notes "$home")" "the long note is queued"
+  long_id=${queued#queued }
+  long_id=${long_id%%$'\n'*}
+
+  start=$SECONDS
+  run_inbox_utf8 "$home" reply "$long_id" "$long_body" >/dev/null || fail "a 50 KB UTF-8 reply should be recorded"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -le 30 ] || fail "recording a 50 KB reply took ${elapsed}s, expected well under 30s"
+  pass "a long UTF-8 note and reply are accepted quickly"
+}
+
+test_all_whitespace_note_and_reply_are_refused() {
+  local home queued note_id ws_note_out ws_note_code ws_reply_out ws_reply_code
+  home=$(make_home whitespace-body)
+  queued=$(run_inbox_utf8 "$home" note "a real note") || fail "a plain note should be queued"
+  note_id=${queued#queued }
+  note_id=${note_id%%$'\n'*}
+
+  set +e
+  ws_note_out=$(run_inbox_utf8 "$home" note $' \t\n ' 2>&1)
+  ws_note_code=$?
+  ws_reply_out=$(run_inbox_utf8 "$home" reply "$note_id" $' \t\n ' 2>&1)
+  ws_reply_code=$?
+  set -e
+  expect_code 1 "$ws_note_code" "an all-whitespace note is still refused"
+  expect_code 1 "$ws_reply_code" "an all-whitespace reply is still refused"
+  assert_contains "$ws_note_out" "refusing to queue an empty note" "the note refusal keeps its message"
+  assert_contains "$ws_reply_out" "refusing to record an empty reply" "the reply refusal keeps its message"
+  assert_equals "1" "$(count_notes "$home")" "the refused note writes nothing"
+  pass "all-whitespace notes and replies are still refused"
+}
+
+# CI's stock macOS Bash lane sets FM_TEST_STOCK_BASH=1 to run just the bash-3.2
+# emptiness-check regressions. The rest of this file is not a 3.2 snapshot
+# suite. Adding another stock-bash case means adding it to this list, not to
+# ci.yml.
+if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
+  fm_test_run \
+    test_long_utf8_note_and_reply_are_accepted_quickly \
+    test_all_whitespace_note_and_reply_are_refused
+  exit 0
+fi
+
 # --- human note path is unchanged without the new flags ---------------------
 
 home=$(make_home human)
@@ -544,3 +610,6 @@ run_inbox "$home" drain --ack "$did" >/dev/null || fail "drain --ack failed"
 assert_absent "$home/state/inbox/$did.note" "acked note leaves pending"
 assert_present "$home/state/inbox/handled/$did.note" "acked note is in handled"
 pass "drain --ack still moves the note to handled"
+
+test_long_utf8_note_and_reply_are_accepted_quickly
+test_all_whitespace_note_and_reply_are_refused
