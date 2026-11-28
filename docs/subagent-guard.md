@@ -40,12 +40,7 @@ It says nothing about whether the resulting brief, project, or delivery mode is 
 It classifies the tool NAME by shape rather than against a fixed list.
 The tracked Claude PreToolUse matcher is `.*`, so every Claude tool name reaches the script and the script is the single owner of classification.
 A stem-enumerating matcher would reintroduce the fail-open-by-enumeration problem this guard exists to solve, because any future tool name outside the matcher would be silently missed before the script could inspect it.
-A tool is delegation-shaped when its normalized lowercase name contains one of these stems:
-
-```text
-agent  subagent  task  workflow  cron  schedul  worktree
-delegate  spawn  dispatch  handoff  remote  sendmessage  monitor
-```
+A tool is delegation-shaped when its normalized lowercase name contains a stem listed in `DELEGATION_STEMS` in `bin/fm-subagent-pretool-check.sh`, the authoritative classification owner.
 
 Three exclusions keep the shape test from producing false positives.
 
@@ -191,7 +186,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 
 ### Antigravity, verified and wired
 
-Antigravity CLI exposes multi-agent and task delegation tools, including `invoke_subagent` and `define_subagent`.
+Antigravity CLI exposes multi-agent and task delegation tools, including `invoke_subagent`, `define_subagent`, and `swarm`.
 In `.agents/hooks.json`, a PreToolUse hook matching `.*` invokes `bin/fm-subagent-pretool-check.sh --agy`.
 In primary and secondmate homes, delegation creation is denied with `{"decision":"deny","reason":"[subagent-dispatch] ..."}` while observation tools `manage_subagents` and `manage_task` remain permitted.
 Linked crewmate worktrees and foreign checkouts stand down cleanly.
@@ -363,7 +358,7 @@ The live consequence is confirmed by the shipped-guard result above: Claude hono
 ## Automated validation
 
 `tests/fm-subagent-pretool-check.test.sh` owns the acceptance matrix and is registered in the `pure-contract-unit` family in `bin/fm-test-run.sh`.
-It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of twelve hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
+It covers the tracked Claude settings boundary that forbids a `permissions` key; the match-all Claude hook registration; denial of every work-creating delegation tool by shape; denial of hypothetical future tool names that appear on no list; the observe-or-stop, plan-only, and MCP exclusions; the exactness of the plan-only exclusion against six near-miss names a substring or shorter-stem widening would release; the scout-present and scout-absent message variants; the escape hatch including its fail-closed values; inertness in a linked task worktree and in a non-firstmate repo; in-scope enforcement for a marked secondmate home; both stdin transports; the empty-stdout requirement; fail-open transport behavior; and the preserved `Bash` seatbelts and `Stop` guard.
 
 Run:
 
