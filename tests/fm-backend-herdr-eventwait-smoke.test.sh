@@ -132,5 +132,60 @@ grep -q "$TARGET" "$STATE/.wake-queue" || fail "the stale record must name the t
 grep -q 'herdr: agent blocked' "$STATE/.wake-queue" || fail "the stale payload must name the herdr-blocked cause"
 pass "real herdr: the watcher fast-path enqueues a stale wake naming the task window from the live blocked transition"
 
+# --- a gone pane does not take the live panes off the push path -------------
+# Real herdr rejects the WHOLE events.subscribe with pane_not_found when one
+# subscribed pane no longer exists, so a stale task record used to turn every
+# live pane's push wake off. One gone pane plus one pane driven to blocked must
+# still return the blocked record, and the cause must be named.
+IDS2=$(fm_backend_herdr_create_task "$CONTAINER" "fm-evwait2" /tmp "") || fail "create_task (gone pane) failed"
+read -r _ GONE_PANE <<EOF
+$IDS2
+EOF
+IDS3=$(fm_backend_herdr_create_task "$CONTAINER" "fm-evwait3" /tmp "") || fail "create_task (live pane) failed"
+read -r _ LIVE_PANE <<EOF
+$IDS3
+EOF
+[ -n "$GONE_PANE" ] && [ -n "$LIVE_PANE" ] || fail "create_task did not return pane ids for the gone/live panes"
+for p in "$GONE_PANE" "$LIVE_PANE"; do
+  fm_herdr_lab_cli "$SESSION" pane report-agent "$p" --source fm-evwait-test --agent claude --state idle >/dev/null 2>&1 \
+    || fail "could not register pane $p's agent as idle"
+done
+fm_herdr_lab_cli "$SESSION" pane close "$GONE_PANE" >/dev/null 2>&1 || fail "could not close the pane that must read as gone"
+[ "$(fm_backend_herdr_pane_presence_state "$SESSION" "$GONE_PANE")" = dead ] || fail "setup: the closed pane must read dead"
+
+export FM_BACKEND_EVENTS_DIAG_FILE="$SCRATCH/diag"; : > "$FM_BACKEND_EVENTS_DIAG_FILE"
+OUT2="$SCRATCH/out2"; RCF2="$SCRATCH/rc2"; : > "$OUT2"; : > "$RCF2"
+( fm_backend_herdr_wait_transition "$SESSION" 8 "$STATE" "$SESSION:$GONE_PANE" "$SESSION:$LIVE_PANE" > "$OUT2"; echo $? > "$RCF2" ) &
+WPID2=$!
+sleep 1
+fm_herdr_lab_cli "$SESSION" pane report-agent "$LIVE_PANE" --source fm-evwait-test --agent claude --state blocked >/dev/null 2>&1 \
+  || fail "could not drive the live pane to blocked"
+wait "$WPID2"
+[ "$(cat "$RCF2")" = 0 ] || fail "one gone pane must not fail the subscription; expected rc 0, got '$(cat "$RCF2")' diag='$(cat "$FM_BACKEND_EVENTS_DIAG_FILE")'"
+[ "$(fm_transition_pane_id "$(cat "$OUT2")")" = "$LIVE_PANE" ] || fail "the returned record must be the live pane's, got '$(cat "$OUT2")'"
+case "$(cat "$FM_BACKEND_EVENTS_DIAG_FILE")" in
+  *"$SESSION:$GONE_PANE"*pane_not_found*|*pane_not_found*"$SESSION:$GONE_PANE"*) : ;;
+  *) fail "the cause line must name the gone pane and herdr's error, got '$(cat "$FM_BACKEND_EVENTS_DIAG_FILE")'" ;;
+esac
+pass "real herdr ($HERDR_VERSION): a gone pane is dropped and named, and the live pane's blocked edge still returns"
+
+# --- Cursor's native blocked is not a wake -----------------------------------
+# herdr reads a Cursor pane blocked in every state, so the push path must not
+# escalate it (the poll loop stays the backstop for such a worker).
+IDS4=$(fm_backend_herdr_create_task "$CONTAINER" "fm-evwait4" /tmp "") || fail "create_task (cursor pane) failed"
+read -r _ CURSOR_PANE <<EOF
+$IDS4
+EOF
+[ -n "$CURSOR_PANE" ] || fail "create_task did not return a cursor pane id"
+if fm_herdr_lab_cli "$SESSION" pane report-agent "$CURSOR_PANE" --source fm-evwait-test --agent cursor --state blocked >/dev/null 2>&1; then
+  : > "$FM_BACKEND_EVENTS_DIAG_FILE"
+  CURSOR_OUT=$(fm_backend_herdr_wait_transition "$SESSION" 2 "$STATE" "$SESSION:$CURSOR_PANE"); CURSOR_RC=$?
+  [ "$CURSOR_RC" = 1 ] || fail "a Cursor pane reading blocked must not escalate; expected a clean timeout (rc 1), got rc=$CURSOR_RC out='$CURSOR_OUT'"
+  pass "real herdr ($HERDR_VERSION): a Cursor pane reading blocked raises no push wake"
+else
+  echo "skip: this herdr build does not accept a cursor agent report; the Cursor gate is covered by tests/fm-backend-herdr.test.sh"
+fi
+
+unset FM_BACKEND_EVENTS_DIAG_FILE
 cleanup_all
 trap - EXIT
