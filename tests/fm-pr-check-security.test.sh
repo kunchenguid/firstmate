@@ -1174,6 +1174,55 @@ test_scan_reads_the_ready_line_past_supervisor_annotations() {
   pass "the scan reads the ready line past supervisor annotations, on each ready shape"
 }
 
+# A worker may declare its review wait right after reporting ready. A paused
+# line naming only the ready PR keeps that report, while one naming another PR,
+# or a later working line, still withdraws it.
+test_scan_reads_the_ready_line_past_a_wait_on_the_same_pr() {
+  local dir state id
+  dir=$(make_case scan-paused-same-pr)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-same
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/7 checks green' \
+    'paused [at=2]: waiting for review on PR https://github.com/o/r/pull/7 until 2026-12-01T00:00Z' \
+    'paused [at=93]: still waiting on https://github.com/o/r/pull/7 until 2026-12-02T00:00Z' > "$state/task-same.status"
+  write_task_meta "$dir" task-other
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/8 checks green' \
+    'paused [at=3]: waiting for review on https://github.com/o/r/pull/9 until 2026-12-01T00:00Z' > "$state/task-other.status"
+  write_task_meta "$dir" task-both
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/10 checks green' \
+    'paused [at=3]: https://github.com/o/r/pull/10 waits on https://github.com/o/r/pull/11 until 2026-12-01T00:00Z' > "$state/task-both.status"
+  write_task_meta "$dir" task-punct
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/13 checks green' \
+    'paused [at=3]: run starting for https://github.com/o/r/pull/13, waiting on drive call' \
+    'paused [at=4]: waiting for review (https://github.com/o/r/pull/13#issuecomment-1) on "https://github.com/o/r/pull/13".' > "$state/task-punct.status"
+  write_task_meta "$dir" task-other-punct
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/14 checks green' \
+    'paused [at=3]: https://github.com/o/r/pull/14 waits on https://github.com/o/r/pull/15, until 2026-12-01T00:00Z' > "$state/task-other-punct.status"
+  write_task_meta "$dir" task-working
+  printf '%s\n' \
+    'done [at=2]: PR https://github.com/o/r/pull/12 checks green' \
+    'paused [at=3]: waiting for review on https://github.com/o/r/pull/12 until 2026-12-01T00:00Z' \
+    'working [at=4]: fixing review notes on https://github.com/o/r/pull/12' > "$state/task-working.status"
+
+  run_check_entry "$dir" scan > "$dir/stdout" 2> "$dir/stderr" || fail "the scan failed: $(cat "$dir/stderr")"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-same.meta" \
+    || fail "a wait on the same PR withdrew the ready line: $(cat "$dir/stdout")"
+  fm_pr_poll_artifacts_valid "$state" task-same "$POLL" || fail "the PR behind a wait on it armed no merge poll"
+  grep -qxF 'pr=https://github.com/o/r/pull/13' "$state/task-punct.meta" \
+    || fail "a wait naming the same PR beside punctuation withdrew the ready line: $(cat "$dir/stdout")"
+  fm_pr_poll_artifacts_valid "$state" task-punct "$POLL" || fail "the PR behind a punctuated wait on it armed no merge poll"
+  for id in task-other task-other-punct task-both task-working; do
+    ! grep -q '^pr=' "$state/$id.meta" || fail "$id registered a PR a later line withdrew"
+    [ ! -e "$state/$id.check.sh" ] || fail "$id armed a poll a later line withdrew"
+  done
+  pass "the scan reads the ready line past a wait on the same PR, and only that wait"
+}
+
 # A lane that closes one PR and opens a replacement moves its watch: the log
 # named the old PR and the newest ready line names another.
 test_scan_replaces_a_recorded_pr_named_by_an_older_line() {
@@ -5710,6 +5759,7 @@ test_scan_does_not_rearm_a_retired_merged_poll
 test_scan_arms_a_replacement_pr_despite_an_old_merge_marker
 test_scan_ignores_non_canonical_done_lines
 test_scan_reads_the_ready_line_past_supervisor_annotations
+test_scan_reads_the_ready_line_past_a_wait_on_the_same_pr
 test_scan_replaces_a_recorded_pr_named_by_an_older_line
 test_scan_failed_replacement_restores_previous_watch
 test_scan_keeps_a_recorded_pr_the_log_never_named

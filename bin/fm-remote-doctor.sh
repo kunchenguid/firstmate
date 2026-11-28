@@ -45,7 +45,7 @@
 #   path=<the child PATH this command inherited>
 #   entrypoint=yes|no
 #   platform=darwin|linux|<uname -s>|unknown
-#   required <tool>=<path>|MISSING
+#   required <tool>=<path>|MISSING|OUTDATED (incompatible)
 #   optional <tool>=<path>|absent
 #   fix <check>=applied: <what changed>       (--fix only)
 #   fix <check>=failed: <why the repair did not land>   (--fix only)
@@ -574,7 +574,7 @@ report_required_tools() {
     resolved=$(command -v "$tool" 2>/dev/null || true)
     if [ -n "$resolved" ] && [ -x "$resolved" ]; then
       if [ "$tool" = tasks-axi ] && ! fm_tasks_axi_compatible; then
-        printf 'required tasks-axi=MISSING (incompatible)\n'
+        printf 'required tasks-axi=OUTDATED (incompatible)\n'
         MISSING+=(tasks-axi)
       else
         printf 'required %s=%s\n' "$tool" "$resolved"
@@ -632,7 +632,7 @@ report_required_tools_from_worker() {
     case "$seen" in *" $name "*) valid=0; continue ;; esac
     seen="$seen$name "
     count=$((count + 1))
-    case "$value" in MISSING*) MISSING+=("$name") ;; '') valid=0 ;; esac
+    case "$value" in MISSING*|OUTDATED*) MISSING+=("$name") ;; '') valid=0 ;; esac
   done < "$probe_stdout"
   [ "$count" -eq "$expected" ] || valid=0
   [ ! -s "$probe_stderr" ] || valid=0

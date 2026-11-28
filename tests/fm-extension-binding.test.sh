@@ -441,7 +441,8 @@ run_extension_section_lane() {
 
 # The coordinator stops any section lane, including the aggregate run's, that
 # outlives this bound, so no wait inside a section can usefully run longer.
-EXTENSION_SECTION_LANE_MAX_SECONDS=34
+# lifecycle-flow alone takes about 46s on macOS, so leave room for full-suite load.
+EXTENSION_SECTION_LANE_MAX_SECONDS=120
 
 run_extension_section_lanes() {
   local section result_file section_rc timeout_seconds deadline deadline_epoch index remaining launched total maximum_sections

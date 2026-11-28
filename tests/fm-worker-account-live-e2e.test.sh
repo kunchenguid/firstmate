@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# Default-on live guard for the worker account pin's sign-in check
-# (bin/fm-worker-account-lib.sh) against every installed runner it supports.
+# Default-on live guard for the worker account pin's and declared account
+# list's sign-in check (bin/fm-worker-account-lib.sh) against every installed
+# runner it supports.
 #
 # The check's verdict comes from vendor output - the exit status of
-# `claude auth status`, the JSON of `pi auth check`, and the table of
-# `pi --list-models` - so a fake can only restate the assumption written into
-# it. This guard asks the REAL installed runners about synthetic account roots
-# that need no login and no network: a Claude root whose settings name an
-# apiKeyHelper, a Pi root holding a stored API key, and Pi roots whose only
-# provider comes from an extension. Each refusal first proves the divergence
+# `claude auth status` and `codex login status`, the JSON of `pi auth check`,
+# and the table of `pi --list-models` - so a fake can only restate the
+# assumption written into it. This guard asks the REAL installed runners about
+# synthetic account roots that need no login and no network: a Claude root
+# whose settings name an apiKeyHelper, a Codex home holding an API key stored
+# by `codex login --with-api-key`, a Pi root holding a stored API key, and Pi
+# roots whose only provider comes from an extension. Each refusal first proves the divergence
 # it depends on: the same runner, with a credential variable left in its
 # environment, answers signed in, so the refusal is the check's own cleared
 # environment at work rather than a root the runner could never accept.
 #
 # It submits no prompt and spends no tokens, so the shared live gate runs it by
 # default wherever a runner is installed. Run it after every Claude or Pi
-# upgrade and before trusting the "Worker account pin sign-in check" entry in
+# upgrade (Codex too) and before trusting the "Worker account pin sign-in check" entry in
 # docs/verification/runtime-backends.md.
 set -u
 
@@ -30,7 +32,7 @@ TMP_ROOT=$(fm_test_tmproot fm-worker-account-live)
 # settings out of every answer.
 export HOME="$TMP_ROOT/home"
 mkdir -p "$HOME"
-unset CLAUDE_CONFIG_DIR PI_CODING_AGENT_DIR ANTHROPIC_API_KEY OPENAI_API_KEY FM_LIVE_EXT_KEY
+unset CLAUDE_CONFIG_DIR PI_CODING_AGENT_DIR ANTHROPIC_API_KEY OPENAI_API_KEY FM_LIVE_EXT_KEY CODEX_HOME CODEX_API_KEY CODEX_ACCESS_TOKEN
 CHECKED=
 
 claude_live_cases() {
@@ -51,6 +53,31 @@ claude_live_cases() {
     fail "claude $version: the pin check refused a root whose apiKeyHelper signs it in"
   pass "claude $version: the pin check accepts a signed-in root and refuses an empty one despite an ambient API key"
   CHECKED="$CHECKED claude"
+}
+
+# Codex's login status reads only the selected CODEX_HOME, so the guard pins
+# that fact: an ambient CODEX_API_KEY must not sign in an empty home, and two
+# homes must answer independently.
+codex_live_cases() {
+  local version empty stored
+  version=$(codex --version 2>/dev/null | head -1)
+  empty="$TMP_ROOT/codex-empty"
+  stored="$TMP_ROOT/codex-stored"
+  mkdir -p "$empty" "$stored"
+  printf 'sk-fm-live-synthetic' | env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="$stored" \
+    codex login --with-api-key >/dev/null 2>&1 ||
+    fail "$version: codex login --with-api-key could not store a synthetic key in a fresh home"
+  if env -i HOME="$HOME" PATH="$PATH" CODEX_HOME="$empty" CODEX_API_KEY=sk-fm-live-synthetic \
+    codex login status >/dev/null 2>&1 </dev/null; then
+    printf 'note: %s now reports an ambient CODEX_API_KEY as signed in, so the cleared environment is load-bearing\n' "$version"
+  fi
+  if CODEX_API_KEY=sk-fm-live-synthetic fm_worker_account_check codex "$empty" "$empty" codex 2>/dev/null; then
+    fail "$version: the account check accepted an empty CODEX_HOME because a credential variable in the caller answered for it"
+  fi
+  fm_worker_account_check codex "$stored" "$stored" codex ||
+    fail "$version: the account check refused a CODEX_HOME holding a stored login"
+  pass "$version: the account check accepts a signed-in CODEX_HOME and refuses an empty one despite an ambient API key"
+  CHECKED="$CHECKED codex"
 }
 
 # write_ext_provider <root> <api-key-expression>
@@ -111,22 +138,23 @@ pi_live_cases() {
   CHECKED="$CHECKED $exe"
 }
 
-for runner in claude pi pi-signed; do
+for runner in claude codex pi pi-signed; do
   if ! command -v "$runner" >/dev/null 2>&1; then
     printf 'skip-runner: %s is not installed, so its pin check was not exercised\n' "$runner"
     continue
   fi
   case "$runner" in
     claude) claude_live_cases ;;
+    codex) codex_live_cases ;;
     *) pi_live_cases "$runner" ;;
   esac
 done
 
 if [ -z "$CHECKED" ]; then
   if [ "${FM_WORKER_ACCOUNT_LIVE_E2E:-${FM_LIVE:-}}" = 1 ]; then
-    fail "the worker account live guard was requested but no supported runner (claude, pi, pi-signed) is installed"
+    fail "the worker account live guard was requested but no supported runner (claude, codex, pi, pi-signed) is installed"
   fi
-  echo "skip: live: no supported runner (claude, pi, pi-signed) installed"
+  echo "skip: live: no supported runner (claude, codex, pi, pi-signed) installed"
   exit 0
 fi
 echo "# worker account live guard checked:$CHECKED"

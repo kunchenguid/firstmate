@@ -1,7 +1,7 @@
 ---
 name: quota-array-dispatch
 description: >-
-  Load when a crew-dispatch rule or default resolves to more than one profile candidate, or a Claude ship or scout is dispatched from a home that declares config/claude-accounts.
+  Load when a crew-dispatch rule or default resolves to more than one profile candidate, or a Claude or Codex ship or scout is dispatched from a home that declares config/claude-accounts or config/codex-accounts.
 user-invocable: false
 metadata:
   internal: true
@@ -41,16 +41,16 @@ Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-tas
 The opt-in [typed resolver](../../../docs/configuration.md#typed-dispatch-resolution-env-fm_dispatch_provider-fm_dispatch_model) has its own documented gates.
 It never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
 
-## Claude account list
+## Declared account lists
 
-When the home declares `config/claude-accounts`, each Claude candidate is one candidate per declared account, and the spawn needs the chosen account as `--account <entry>`.
-Measure them with `bin/fm-claude-account-quota.sh [--model <model>]` instead of the default TOON's single `claude` row, which reads only the ambient account; its header owns the per-account read and output.
+When the home declares `config/claude-accounts` or `config/codex-accounts`, each candidate on that runner is one candidate per declared account, and the spawn needs the chosen account as `--account <entry>`.
+Measure them with `bin/fm-claude-account-quota.sh [--model <model>]` or `bin/fm-codex-account-quota.sh [--model <model>]` instead of the default TOON's single `claude` or `codex` row, which reads only the ambient account; `bin/fm-account-quota-lib.sh` owns the per-account read and output.
 It prints data only, never a choice: each account's applicable scopes and any uncertainty it could not measure.
 Apply the three gates below to each account's rows, taking a projected runway's time from the row's own `usableRunwaySeconds`, rank the eligible ones by their limiting scope's `spendPriority` exactly as for profiles, and pass the chosen entry as `--account <entry>`.
 A genuine tie or no rankable account is the same terminal case as below: decide in the open from the rows or ask the captain, never by file order.
 Account for every declared account in the rationale, including unmeasured ones.
-A typed-resolver `clear` profile for Claude still needs this step's `--account`.
-The account is chosen once, at intake: a relaunch keeps the recorded one, and only an explicit `--account` relaunch moves a task ([`docs/configuration.md`](../../../docs/configuration.md#several-claude-accounts-configclaude-accounts) owns the contract).
+A typed-resolver `clear` profile for a runner with a declared list still needs this step's `--account`.
+The account is chosen once, at intake: a relaunch keeps the recorded one, and only an explicit `--account` relaunch moves a task ([`docs/configuration.md`](../../../docs/configuration.md#several-claude-accounts-configclaude-accounts) owns the contract and its [Codex specifics](../../../docs/configuration.md#several-codex-accounts-configcodex-accounts)).
 
 ## Read the default TOON
 

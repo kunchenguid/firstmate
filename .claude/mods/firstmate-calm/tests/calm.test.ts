@@ -17,6 +17,7 @@ import {
   toolUse,
   userMessage,
   world,
+// @ts-ignore TS5097: Node loads this module by its .ts path; see docs/calm-mode-feasibility.md
 } from "./support.ts";
 
 const sessionStart = { cwd: "/work", surface: "terminal" as const, isInteractive: true };

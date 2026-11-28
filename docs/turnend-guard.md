@@ -38,7 +38,7 @@ The guard acts at that boundary when both of these hold:
 - Work, a process-event source, a registered custom check, or Relay polling needs supervision.
 - No identity-matched watcher has a fresh beacon.
 
-The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches every cycle, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
+The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches at cycle start and at bounded step boundaries, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
 When the guard acts, the harness integration must do one of two things:
 
 - Block the turn end.
@@ -207,8 +207,14 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 
 ### Guard grace and the poll cadence
 
-`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle, immediately before its terminal wait (`event_wait_or_sleep`) as well as at the top of the next cycle.
-A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between touches.
+`bin/fm-watch.sh` touches `state/.last-watcher-beat` at the top of every cycle.
+It touches again at step boundaries through `watcher_checkpoint`: between the items of each per-item step, after the process-event reconcile, and before the terminal wait (`event_wait_or_sleep`).
+The per-item steps are the pane check of each window, each registered state check, each remote secondmate probe, and each pending-reply record.
+A checkpoint touches at most once per `FM_WATCHER_CHECKPOINT_SECS` (default 30), so a cycle shorter than that touches the beacon once, at its top.
+The beacon therefore ages with the longest single step the watcher is inside, plus that interval and the poll wait, and not with the whole cycle.
+A cycle grows with the fleet (workers, registered process-event sources, remote secondmates), so a busy home can legitimately spend longer than the grace in one cycle while every step still returns.
+A watcher stuck inside one step reaches no checkpoint, so its beacon still goes stale, the guard still reports it, and the re-arm still evicts it past `FM_WATCHER_STALL_BOUND`.
+A step with no bound of its own, such as an SSH call to an unreachable host, can still outlast the grace; `bin/fm-on.sh` bounds its own connection setup.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.

@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
+| Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [several Claude accounts](#several-claude-accounts-configclaude-accounts), [several Codex accounts](#several-codex-accounts-configcodex-accounts), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Isolating a worker's files, credentials, and network | [Worker sandbox](#worker-sandbox-configsandbox) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), [startup memory budget](#startup-memory-budget-configstartup-memory-budget), and [stow guard](#stow-guard-configstow-guard) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Codex native Stop park](#codex-native-stop-park-configcodex-stop-park), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
@@ -181,6 +181,24 @@ The Pi extension reloads this preference on every Pi `session_start`, including 
 The Claude Code mod reloads it on every `session.start`, including same-process session replacement.
 It also loads the preference lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
+
+### Working-presentation variant (config/calm-ship)
+
+The optional gitignored `config/calm-ship` file selects Calm's animated working-presentation variant, resolved from the same effective Firstmate home and `FM_CONFIG_OVERRIDE` rules as `config/calm`.
+Only the Pi Calm extension reads this file; the Claude Code Calm mod keeps its sailboat working row regardless of it.
+The file's contents are trimmed of surrounding whitespace, so `spaceship` with or without surrounding whitespace or newlines selects the spaceship; an absent, unreadable, or unrecognized value keeps the default boat.
+The extension reads this file at load and re-reads it on every `session_start`, so a mid-session change takes effect at the next session rather than mid-run.
+[`calm.md`](calm.md#spaceship-variant-configcalm-ship) owns what each presentation renders and how long it stays on screen.
+This file is local to each Firstmate home and is not part of secondmate inherited configuration.
+
+## Pi bash timeout cap
+
+Pi and Pi-signed sessions loading [the primary extension](../.pi/extensions/fm-primary-turnend-guard.ts) can opt in by setting `FM_PI_BASH_TIMEOUT_MAX_MS` in their launch environment.
+The value must be a decimal integer from `1` through `2147483647` milliseconds (Pi's native timer maximum), without leading zeros.
+It is converted to seconds for Pi's Bash tool (`5000` becomes `5` seconds), supplying a missing timeout and capping an explicit larger numeric timeout.
+Explicit numeric timeouts at or below the cap are preserved.
+Unset or invalid values leave Bash calls unchanged.
+The cap applies to secondmates loading the same extension, but does not affect workers that do not load it.
 
 ## Pi repeated-read containment
 
@@ -431,7 +449,10 @@ Removing it stops further retries and leaves the current watcher for the ordinar
 
 Create the empty, home-local `config/codex-stop-park` file to let a Codex primary wait for watcher wakes outside the model between turns.
 The feature is off when the file is absent, and every Codex session then keeps the bounded foreground checkpoint protocol.
-With the file present, only an interactive native Codex session on the verified CLI version that holds this home's session lock parks; every other session keeps the foreground checkpoint.
+The park requires a native interactive Codex session registered through the project SessionStart hook and holding this home's session lock.
+The running Codex executable must report a canonical `codex-cli major.minor.patch` release at or above `0.163.0`, without leading zeroes, prerelease suffixes, or build metadata.
+A version below the minimum, malformed output, or a failed version probe leaves the session on the foreground checkpoint.
+[Runtime verification](verification/runtime-backends.md#native-codex-supervision-park) lists the releases exercised live.
 The supervision protocol is chosen when the session starts, so create or remove the file before starting the Codex session.
 The file is local to each home and is not inherited by secondmate homes.
 [The Codex protocol](supervision-protocols/codex.md) owns the parked operating protocol, and `bin/fm-codex-stop-park.sh` owns version selection, registration, and failure fallback.
@@ -845,8 +866,33 @@ Only author-actionable states, conflicts, and failing checks print; the maintain
 Reads are driven by the GitHub notifications feed: each pass makes one conditional read of it, which GitHub answers with an uncounted 304 while nothing changed, and reads only the owned PRs with new notification activity, PRs not yet read, and PRs whose last read did not settle.
 Every owned PR is still read when the feed is unavailable or returns a full page of notifications newer than the saved position, and at least every 15 minutes as the fallback sweep, because some conditions, such as a base branch moving into conflict or a check from another app failing, raise no notification.
 GitLab merge requests are not monitored yet.
+Forgejo pull requests are not monitored.
 When no reported check is marked required, a failing reported check still counts, matching `bin/fm-pr-state.sh` for unprotected stacked bases.
 When a required check has reported, optional failures do not notify.
+That limit holds until `config/pr-health-any-failure` exists.
+An empty `config/pr-health-any-failure` also reports a failing check that is not required.
+The first pass records the check.
+A later pass prints it only when the same commit still fails.
+`config/pr-health-label-gated` is read only while that file exists.
+Each line is a check name, or a check name, a tab, and a label.
+A listed check is recorded with the other maintainer-gated CI and is not printed as a failure.
+The named label on the PR releases that check.
+`Full suite` then a tab then `full-ci` is the line for this repository.
+An empty `config/pr-health-approved-green` reports a non-draft PR whose review decision is `APPROVED` and whose every reported check on the latest commit has passed.
+No reported check, a check that is still running, maintainer-gated CI, or a listed label-gated failure is not that report.
+The report does not merge, park, or land the PR.
+An empty `config/pr-health-final` reports a merged or closed PR once and names the account in quotes.
+It then never reads that PR again.
+The line prints only for a PR the monitor read while it was open with `config/pr-health-final` present.
+A check without that file forgets which PRs were seen open.
+A PR that became merged or closed before that, or that the monitor first read already merged or closed, is marked final without a report.
+An empty `config/pr-health-stale-review` reports `CHANGES_REQUESTED` as waiting on the reviewer when every change-requesting review's commit is not the latest commit.
+The commit is `review.commit.oid`.
+Timestamps are not used.
+Reviewer names are quoted.
+Review text is not printed.
+With none of these files, the monitor's lines stay the conflict, required-check, and author-action lines above.
+The four files take effect on the next check and are home-local, the same way as `config/pr-health-monitor`.
 A conflict and an author action each wake once per latest commit, and a missing approval is recorded once per latest commit.
 A failing check wakes once per latest commit and check name, so a check that newly fails at an already reported commit wakes once more while an already reported check never repeats.
 A maintainer-gated suite is recorded once per latest commit and workflow name.
@@ -899,6 +945,8 @@ The optional local, gitignored `config/pr-register-scan` presence flag opts this
 With the flag present, the watcher's check sweep runs `bin/fm-pr-check.sh scan` before the merge polls.
 The scan reads a ship task's PR only from a ready report: the task's newest crew-declared status line must be a `done:` line that is exactly `PR <url>`, `PR <url> checks green`, or `PR <url> published for review`, so prose around the URL and any later crew line report nothing.
 Later `resolved:` and `captain-held:` lines are supervisor bookkeeping and do not withdraw a ready report.
+A later `paused:` line that names only that same PR declares the review wait and does not withdraw it either, while a `paused:` line naming no PR or another PR still does.
+Punctuation around a PR URL in the `paused:` line, such as a trailing comma or period or enclosing brackets or quotes, and a `#fragment` after it are ignored when the scan reads that URL.
 It records that PR through the ordinary registration path when the task has no `pr=`, or has that same `pr=` but no published merge poll.
 When the status log named the recorded `pr=` and the ready report names a different PR, that PR replaces the recorded one, so a lane that closes a PR and opens another moves its merge poll.
 The flag also covers the PR a secondmate home's parent-channel report carries for a child's ready report (`bin/fm-inactive-reconcile.sh`): with it present, that report applies the same ready-report spellings, accepts any recognized forge URL, and lets the same replacement override the recorded `pr=`, while with it absent a recorded `pr=` always stands and only a GitHub-shaped `PR <url>` or `PR <url> checks green` line fills in a missing one.
@@ -1103,6 +1151,16 @@ The bound is required rather than cosmetic because churn and pane staleness read
 
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
+
+## Aborted-run turn-end absorb (config/turnend-abort-absorb)
+
+The optional local, gitignored `config/turnend-abort-absorb` presence flag opts this home into a default-off further form of positive work evidence for a bare turn-end.
+After a worker deliberately aborts a no-mistakes run and keeps working, current state keeps reading the aborted run until a fresh run starts, so every routine turn-end of that worker surfaces.
+With the flag present, a turn-end is absorbed when the task's current-state read is a run-step failed or unknown verdict naming a run that is terminal in the no-mistakes run store with an explicit abort record, and the busy-state verdict is exactly `busy <source>` and its busy-state record has a timestamp newer than that run's last update.
+The abort record is a `cancelled` status with the error `cancelled: aborted by user`, or a `failed` status with the error `step <name>: aborted by user` optionally followed by `: <reason>`, read from structured run-store fields and never from status-line prose.
+A run that failed for any other reason still surfaces, and with the flag absent behavior is unchanged.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+`bin/fm-classify-lib.sh`'s `crew_aborted_run_superseded_by_busy` owns the exact evidence and its refusal cases.
 
 ## Parked-gate wait deferral (config/wedge-defer-parked-gate)
 
@@ -1506,7 +1564,7 @@ Enabled primary-session turn-end guard integrations are tracked as repo-level ho
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
 
-Claude uses [hook-owned tokenless re-arm cycles](watcher-continuity.md#claude-stop-hook), Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints unless the home opts in to its [native Stop park](#codex-native-stop-park-configcodex-stop-park), Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
+Claude uses [hook-owned tokenless re-arm cycles](watcher-continuity.md#claude-stop-hook), Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex selects its mode under the [native Stop park policy](#codex-native-stop-park-configcodex-stop-park), Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
 
 ### Choose the worker harness
 
@@ -1803,8 +1861,30 @@ A task with no recorded account, or one whose account is no longer declared, ref
 
 The list covers Claude ships and scouts only.
 A local secondmate's own agent never draws from it: under a list it needs its own [per-secondmate account pin](#per-secondmate-account-pins), and `--account` refuses for every secondmate, local or remote.
-Other runners ignore the list, and `--account` refuses for them.
+Other runners ignore the list, and `--account` refuses for them unless their own list exists, such as [`config/codex-accounts`](#several-codex-accounts-configcodex-accounts).
 Like the single pin, the list is not inherited into secondmate homes.
+
+### Several Codex accounts (config/codex-accounts)
+
+A Codex login lives in the directory `CODEX_HOME` names, `~/.codex` by default.
+A home with more than one ChatGPT plan can let each Codex ship and scout launch on whichever declared Codex home has quota to spare.
+Create `config/codex-accounts` with one account per line, each `ordinary` (the default `~/.codex`, launched with `CODEX_HOME` unset) or the absolute path of an existing Codex home:
+
+```text
+ordinary
+/home/me/.codex-second
+```
+
+Sign each one in once with `CODEX_HOME=<path> codex login`.
+A Codex home holds that account's whole Codex configuration, not only its login, so give a second home the `config.toml` settings its workers need; Codex asks once per home to trust a repository.
+
+The list follows the [Claude account list](#several-claude-accounts-configclaude-accounts) contract with these Codex specifics:
+
+- File format, opt-in behavior, the required `--account <entry>` on every Codex ship or scout spawn, the refusals, the `account=` record, and relaunch reuse are the same; without the list every Codex launch is unchanged and `--account` refuses.
+- [`bin/fm-codex-account-quota.sh`](../bin/fm-codex-account-quota.sh) measures each entry by running `quota-axi --provider codex --profile-only` under that entry's `CODEX_HOME`, and the [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) procedure chooses the entry at intake.
+- The sign-in check is `codex login status`, run with the same stripped environment, and a signed-out entry refuses.
+- The launch sets `CODEX_HOME` to the chosen entry, or unsets it for `ordinary`, and unsets `CODEX_API_KEY` and `CODEX_ACCESS_TOKEN`, which Codex would otherwise spend instead of the stored login; `OPENAI_API_KEY` is not a Codex login and stays.
+- Codex has no single-account pin, so a Codex secondmate's own agent ignores the list and launches as it would without it, while `--account` still refuses for every secondmate.
 
 ### Per-secondmate account pins
 
@@ -3481,13 +3561,13 @@ Making any of them a precondition is what leaves a provably dead runner owning i
 - Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
 - If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.
 - If restoration or rearming also fails, teardown returns a distinct status and reports the retained registration backup path for manual recovery instead of hiding the retired waits.
-- The sweep retires local registrations and machine-wide claims whose recorded state-root identity matches that home's resolved state root through the same identity-checked, generation-bound retirement path, and leaves foreign-home claims untouched.
+- The sweep retires local registrations and machine-wide claims whose recorded state-root identity matches that home's own `state/` directory, never an inherited `FM_STATE_OVERRIDE`, through the same identity-checked, generation-bound retirement path, and leaves foreign-home claims untouched.
 - Teardown refuses with the home, lease, routing evidence, registrations, claims, and runners retained when identity is uncertain, ownership is unreadable or unreleased, or relevant state exists without a sweep-capable child script.
 
 **Recover from unsupported manual deletion**
 
 Raw manual deletion of a Firstmate home is unsupported because it can orphan a blocking child.
-To recover, restore that home's tracked `bin/fm-procevent.sh`, run `FM_HOME=<home> <home>/bin/fm-procevent.sh sweep-home`, then rerun the supported teardown.
+To recover, restore that home's tracked `bin/fm-procevent.sh`, run `FM_HOME=<home> FM_STATE_OVERRIDE=<home>/state <home>/bin/fm-procevent.sh sweep-home`, then rerun the supported teardown.
 
 The owning-home lease below bounds how long such an orphan can run, but it is a backstop, not a substitute for the supported path.
 
@@ -3771,6 +3851,7 @@ FM_WATCH_CYCLE_LOG_KEEP_LINES=1000   # newest complete lifecycle rows considered
 FM_WATCH_EXTENSION_LOG_KEEP_LINES=0   # opt-in Pi extension diagnostic log (state/.watch-extension.log); unset, empty, non-numeric, zero, or negative disables logging, a positive value keeps that many newest rows; logging never changes supervision behavior
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence"); seconds before a fresh arm refuses a live holder's stale beacon (attached arms: FM_WATCHER_STALL_BOUND)
 FM_WATCHER_STALL_BOUND=       # live-holder stall bound; default and arm/re-arm behavior: docs/turnend-guard.md "Guard grace and the poll cadence"
+FM_WATCHER_CHECKPOINT_SECS=30   # minimum seconds between the watcher's mid-cycle beacon touches; a cycle shorter than this touches the beacon once, at its top (docs/turnend-guard.md "Guard grace and the poll cadence")
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_WATCHER_CLEANUP_LOCK_BOUND=   # optional watcher EXIT marker-lock wait; default and validation: docs/watcher-continuity.md
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present

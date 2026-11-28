@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for the opt-in per-home worker account pin
-# (config/claude-account, config/pi-account; bin/fm-worker-account-lib.sh).
+# (config/claude-account, config/pi-account) and the declared account lists
+# (config/claude-accounts, config/codex-accounts; bin/fm-worker-account-lib.sh).
 #
 # Each case drives the real fm-spawn.sh through the shared fake tmux, which
 # records the launch command, then runs that command in a synthetic pane whose
@@ -16,7 +17,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-worker-account)
-unset LAVISH_AXI_HOST ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN PI_CODING_AGENT_DIR OPENAI_API_KEY
+unset LAVISH_AXI_HOST ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN PI_CODING_AGENT_DIR OPENAI_API_KEY CODEX_HOME CODEX_API_KEY CODEX_ACCESS_TOKEN
 
 # make_account_fakes <fakebin> <case-dir>
 # The fakes cannot read test variables during a sign-in check, which runs with
@@ -69,7 +70,21 @@ esac
   printf 'ARGS=%s\n' "\$*"
 } > '$dir/pi-worker'
 SH
-  chmod +x "$fakebin/claude" "$fakebin/pi"
+  cat > "$fakebin/codex" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = login ] && [ "\${2:-}" = status ]; then
+  printf '%s\n' "\${CODEX_HOME-unset}" >> '$dir/codex-checks'
+  [ -f "\${CODEX_HOME:-\$HOME/.codex}/auth.json" ]
+  exit
+fi
+{
+  printf 'CODEX_HOME=%s\n' "\${CODEX_HOME-unset}"
+  printf 'CODEX_API_KEY=%s\n' "\${CODEX_API_KEY-unset}"
+  printf 'CODEX_ACCESS_TOKEN=%s\n' "\${CODEX_ACCESS_TOKEN-unset}"
+  printf 'OPENAI_API_KEY=%s\n' "\${OPENAI_API_KEY-unset}"
+} > '$dir/codex-worker'
+SH
+  chmod +x "$fakebin/claude" "$fakebin/pi" "$fakebin/codex"
   cp "$fakebin/pi" "$fakebin/pi-signed"
 }
 
@@ -93,6 +108,12 @@ signed_in_claude_root() {
   printf '{}\n' > "$1/.credentials.json"
 }
 
+# signed_in_codex_home <dir>: a Codex home holding a stored login.
+signed_in_codex_home() {
+  mkdir -p "$1"
+  printf '{}\n' > "$1/auth.json"
+}
+
 # spawn_ship <id> [fm-spawn args...]: a ship spawn from HOME_DIR whose invoking
 # process carries an ambient signed-in Claude root and an ambient API key.
 spawn_ship() {
@@ -113,6 +134,7 @@ run_pane() {
     CLAUDE_CONFIG_DIR="$CASE/ambient-claude" ANTHROPIC_API_KEY=ambient-pane-key \
     CLAUDE_CODE_OAUTH_TOKEN=ambient-pane-token CLAUDE_CODE_USE_BEDROCK=1 \
     PI_CODING_AGENT_DIR="$CASE/ambient-pi" OPENAI_API_KEY=ambient-pane-openai \
+    CODEX_HOME="$CASE/ambient-codex" CODEX_API_KEY=ambient-pane-codex-key CODEX_ACCESS_TOKEN=ambient-pane-codex-token \
     bash -c "$(cat "$CASE/launch.log")" || fail "the recorded launch failed in the synthetic pane"
 }
 
@@ -576,8 +598,8 @@ test_account_list_refusals() {
   expect_code 1 "$rc" "a signed-out ordinary entry must refuse"
   assert_refused_before_launch "$id-ordinary" "$out" "pins Claude workers to the ordinary account, which is not signed in"
   out=$(spawn_ship "$id-codex" --harness codex --account "$CASE/first"); rc=$?
-  expect_code 1 "$rc" "--account on another runner must refuse"
-  assert_refused_before_launch "$id-codex" "$out" "applies to Claude workers only, not codex"
+  expect_code 1 "$rc" "--account for Codex must refuse without config/codex-accounts"
+  assert_refused_before_launch "$id-codex" "$out" "needs config/codex-accounts, which this home does not declare"
   out=$(spawn_ship "$id-raw" --account "$CASE/first" --harness "CLAUDE_CONFIG_DIR=$CASE/second claude --print raw"); rc=$?
   expect_code 1 "$rc" "a raw command overriding the chosen account must refuse"
   assert_refused_before_launch "$id-raw" "$out" "the raw launch command sets CLAUDE_CONFIG_DIR"
@@ -630,6 +652,111 @@ test_account_list_secondmate_needs_its_own_pin() {
   pass "a list never chooses a secondmate's account: it needs its own pin and refuses --account"
 }
 
+# declare_codex_accounts <entry>...: the home's config/codex-accounts list.
+declare_codex_accounts() {
+  printf '%s\n' "$@" > "$HOME_DIR/config/codex-accounts"
+}
+
+test_no_codex_account_list_keeps_today() {
+  local out rc id=codex-list-off
+  new_case codex-list-off codex
+  signed_in_codex_home "$CASE/work"
+  out=$(spawn_ship "$id"); rc=$?
+  expect_code 0 "$rc" "a Codex spawn in a home without a list should succeed: $out"
+  assert_not_contains "$out" "account=" "a home without a list must not report an account"
+  assert_no_grep "account=" "$HOME_DIR/state/$id.meta" "a home without a list must not record an account"
+  assert_absent "$CASE/codex-checks" "a home without a list must not run a sign-in check"
+  assert_not_contains "$(cat "$CASE/launch.log")" "CODEX_HOME" "a home without a list must not touch CODEX_HOME"
+  run_pane
+  assert_grep "CODEX_HOME=$CASE/ambient-codex" "$CASE/codex-worker" "a home without a list must keep the pane's own Codex home"
+  assert_grep "CODEX_API_KEY=ambient-pane-codex-key" "$CASE/codex-worker" "a home without a list must leave the pane's credentials alone"
+  pass "without config/codex-accounts a Codex launch and its record are unchanged"
+}
+
+test_codex_account_list_launches_the_named_entry() {
+  local out rc id=codex-list
+  new_case codex-list codex
+  signed_in_codex_home "$CASE/first"
+  signed_in_codex_home "$CASE/second"
+  declare_codex_accounts "$CASE/first" "$CASE/second"
+  out=$(spawn_ship "$id" --account "$CASE/second"); rc=$?
+  expect_code 0 "$rc" "a Codex spawn naming a declared, signed-in account should succeed: $out"
+  assert_contains "$out" "account=$CASE/second" "the spawn line should name the chosen account"
+  assert_grep "account=$CASE/second" "$HOME_DIR/state/$id.meta" "the task record should carry the chosen account"
+  [ "$(cat "$CASE/codex-checks")" = "$CASE/second" ] \
+    || fail "the sign-in check should ask about the chosen account only: $(cat "$CASE/codex-checks")"
+  run_pane
+  assert_grep "CODEX_HOME=$CASE/second" "$CASE/codex-worker" "the worker should run under the chosen Codex home"
+  assert_grep "CODEX_API_KEY=unset" "$CASE/codex-worker" "an ambient Codex API key must not outrank the chosen account"
+  assert_grep "CODEX_ACCESS_TOKEN=unset" "$CASE/codex-worker" "an ambient Codex access token must not outrank the chosen account"
+  assert_grep "OPENAI_API_KEY=ambient-pane-openai" "$CASE/codex-worker" "OPENAI_API_KEY is not a Codex login and stays"
+
+  signed_in_codex_home "$HOME_DIR/user-home/.codex"
+  declare_codex_accounts ordinary "$CASE/first"
+  : > "$CASE/codex-checks"
+  out=$(spawn_ship "$id-ordinary" --account ordinary); rc=$?
+  expect_code 0 "$rc" "the ordinary Codex entry should launch: $out"
+  assert_contains "$out" "account=ordinary" "the spawn line should name the ordinary account"
+  [ "$(cat "$CASE/codex-checks")" = unset ] \
+    || fail "the ordinary check must run with CODEX_HOME unset: $(cat "$CASE/codex-checks")"
+  run_pane
+  assert_grep "CODEX_HOME=unset" "$CASE/codex-worker" "the ordinary account must unset the pane's CODEX_HOME"
+  pass "a declared Codex account named with --account is checked, launched on its CODEX_HOME, and recorded"
+}
+
+test_codex_account_list_refusals() {
+  local out rc id=codex-list-bad
+  new_case codex-list-refusals codex
+  signed_in_codex_home "$CASE/first"
+  mkdir -p "$CASE/signed-out"
+  signed_in_codex_home "$CASE/ambient-codex"
+  declare_codex_accounts "$CASE/first" "$CASE/signed-out"
+  out=$(spawn_ship "$id-none"); rc=$?
+  expect_code 1 "$rc" "a Codex spawn without --account must refuse under a list"
+  assert_refused_before_launch "$id-none" "$out" "config/codex-accounts declares 2 Codex accounts, so a Codex ship or scout launch must name one with --account"
+  out=$(spawn_ship "$id-other" --account "$CASE/elsewhere"); rc=$?
+  expect_code 1 "$rc" "an undeclared Codex account must refuse"
+  assert_refused_before_launch "$id-other" "$out" "account '$CASE/elsewhere' is not declared in config/codex-accounts"
+  out=$(spawn_ship "$id-newline" --account "$CASE/elsewhere"$'\n'"$CASE/first"); rc=$?
+  expect_code 1 "$rc" "a Codex account holding a newline must refuse"
+  assert_refused_before_launch "$id-newline" "$out" "--account must name one config/codex-accounts entry exactly, with no control characters"
+  out=$(CODEX_API_KEY=invoker-key spawn_ship "$id-out" --account "$CASE/signed-out"); rc=$?
+  expect_code 1 "$rc" "a signed-out declared Codex account must refuse even with an ambient key"
+  assert_refused_before_launch "$id-out" "$out" "config/codex-accounts pins Codex workers to $CASE/signed-out, which is not signed in"
+  out=$(spawn_ship "$id-raw" --account "$CASE/first" --harness "CODEX_HOME=$CASE/ambient-codex codex"); rc=$?
+  expect_code 1 "$rc" "a raw command overriding the chosen Codex home must refuse"
+  assert_refused_before_launch "$id-raw" "$out" "the raw launch command sets CODEX_HOME"
+  out=$(spawn_ship "$id-claude" --harness claude --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "a Codex list must not answer a Claude --account"
+  assert_refused_before_launch "$id-claude" "$out" "needs config/claude-accounts, which this home does not declare"
+  printf 'relative\n' > "$HOME_DIR/config/codex-accounts"
+  out=$(spawn_ship "$id-bad" --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "a malformed Codex list must refuse"
+  assert_refused_before_launch "$id-bad" "$out" "config/codex-accounts must hold one account per line"
+  assert_no_grep "$CASE/elsewhere" "$CASE/codex-checks" "an undeclared account must never be sign-in checked"
+  assert_absent "$CASE/codex-worker" "no refused launch may start Codex"
+  pass "a Codex list refuses a missing, undeclared, newline, signed-out, raw-override, or malformed choice"
+}
+
+test_codex_account_list_leaves_secondmates_alone() {
+  local out rc id=codex-list-sm
+  new_case codex-list-secondmate codex
+  signed_in_codex_home "$CASE/first"
+  declare_codex_accounts "$CASE/first"
+  out=$(spawn_account_secondmate "$id" --account "$CASE/first"); rc=$?
+  expect_code 1 "$rc" "--account on a Codex secondmate must refuse"
+  assert_refused_before_launch "$id" "$out" "--account applies to ships and scouts"
+  out=$(spawn_account_secondmate "$id"); rc=$?
+  expect_code 0 "$rc" "a Codex secondmate should launch unchanged under a list: $out"
+  assert_not_contains "$out" "account=" "a Codex secondmate never launches on a declared account"
+  assert_absent "$CASE/codex-checks" "a Codex secondmate must not be sign-in checked against the list"
+  printf 'relative\n' > "$HOME_DIR/config/codex-accounts"
+  out=$(spawn_account_secondmate "$id-bad"); rc=$?
+  expect_code 0 "$rc" "a malformed Codex list must not block a Codex secondmate: $out"
+  assert_not_contains "$out" "account=" "a Codex secondmate under a malformed list launches unchanged"
+  pass "a Codex list never chooses a secondmate's account and refuses --account for one"
+}
+
 test_secondmate_account_override
 test_secondmate_account_refusals
 test_remote_secondmate_account_override_refuses_locally
@@ -651,5 +778,9 @@ test_no_account_list_keeps_today_and_refuses_account
 test_account_list_launches_the_named_entry
 test_account_list_refusals
 test_account_list_secondmate_needs_its_own_pin
+test_no_codex_account_list_keeps_today
+test_codex_account_list_launches_the_named_entry
+test_codex_account_list_refusals
+test_codex_account_list_leaves_secondmates_alone
 
 echo "# all fm-worker-account tests passed"

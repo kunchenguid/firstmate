@@ -330,7 +330,7 @@ family_for_basename() {
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-codex-stop-park.test.sh|\
     fm-watch-inbox-meta.test.sh|fm-watch-open-decisions.test.sh|\
-    fm-watch-triage.test.sh|fm-watch-triage-pause.test.sh|\
+    fm-watch-triage.test.sh|fm-watch-beacon-progress.test.sh|fm-watch-triage-pause.test.sh|\
     fm-watch-triage-wedge-defer.test.sh|fm-watch-triage-busy.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-watch-wedge-cap.test.sh|\
     fm-watch-wedge-cap-unconfigured-parity.test.sh)
@@ -462,7 +462,7 @@ family_for_basename() {
     fm-busy-state.test.sh|fm-capacity.test.sh|fm-capacity-auto.test.sh|fm-lane-vitals.test.sh|\
     fm-sandbox-relay.test.sh|\
     fm-classify-corr-token.test.sh|\
-    fm-claude-account-quota.test.sh|\
+    fm-claude-account-quota.test.sh|fm-codex-account-quota.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
@@ -1412,6 +1412,7 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       printf '%s\n' "__script__:fm-claude-account-quota.test.sh"
+      printf '%s\n' "__script__:fm-codex-account-quota.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
@@ -1421,6 +1422,13 @@ families_for_changed_path() {
       ;;
     bin/fm-claude-account-quota.sh)
       printf '%s\n' "__script__:fm-claude-account-quota.test.sh"
+      ;;
+    bin/fm-codex-account-quota.sh)
+      printf '%s\n' "__script__:fm-codex-account-quota.test.sh"
+      ;;
+    bin/fm-account-quota-lib.sh)
+      printf '%s\n' "__script__:fm-claude-account-quota.test.sh"
+      printf '%s\n' "__script__:fm-codex-account-quota.test.sh"
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
@@ -1485,10 +1493,12 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     .claude/mods/firstmate-calm/*|.pi/extensions/lib/fm-calm-working-ship.ts|\
-    .pi/extensions/lib/fm-calm-working-ship-sprite.ts)
-      # The Claude Code Calm mod and the sprite core it shares with the Pi Calm
-      # extension: the portable Node checks, the Pi suites that draw the shared
-      # sprite, the Pi typecheck, and the Claude-dependent guards.
+    .pi/extensions/lib/fm-calm-working-ship-sprite.ts|\
+    .pi/extensions/lib/fm-calm-working-spaceship.ts)
+      # The Claude Code Calm mod, the sprite core it shares with the Pi Calm
+      # extension, and the Pi-only spaceship variant: the portable Node checks, the
+      # Pi suites that draw the shared sprite and the banner, the Pi typecheck, and
+      # the Claude-dependent guards.
       printf '%s\n' __script__:fm-calm-claude-mod.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh

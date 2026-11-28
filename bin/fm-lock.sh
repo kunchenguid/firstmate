@@ -84,6 +84,8 @@ me=$(fm_session_lock_anchor_pid) || {
     # ancestry" would describe the wrong problem and send the reader hunting a
     # process tree that can never contain the answer.
     echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh; CLAUDE_PID is taken only together with CLAUDE_CODE_SESSION_ID); operate read-only until resolved" >&2
+  elif fm_harness_ancestry_under_omp_worker; then
+    echo "error: cannot locate harness process in ancestry: this command runs under an omp daemon worker (a bash call with \`name\`), whose ancestry belongs to whichever omp started that shared worker; rerun it as an ordinary bash call without \`name\`" >&2
   else
     echo "error: cannot locate harness process in ancestry" >&2
   fi

@@ -312,7 +312,7 @@ test_due_unsafe_inputs_are_reported_but_absent_optional_memory_is_not() {
 }
 
 test_over_long_finding_set_is_capped_with_the_shared_marker() {
-  local rec root home deep seg out reported
+  local rec root home deep seg out reported path_max
   rec=$(make_world capped)
   root=${rec%%|*}
   home=${rec#*|}
@@ -321,7 +321,9 @@ test_over_long_finding_set_is_capped_with_the_shared_marker() {
     seg="${seg}memory"
   done
   deep="$home/data"
-  while [ "${#deep}" -lt 1200 ]; do
+  # Stay inside the host's PATH_MAX (1024 on macOS) for "$deep/learnings.md".
+  path_max=$(getconf PATH_MAX "$home" 2>/dev/null) || path_max=1024
+  while [ "${#deep}" -lt 1200 ] && [ $((${#deep} + ${#seg} + 15)) -lt "$path_max" ]; do
     deep="$deep/$seg"
   done
   mkdir -p "$deep"

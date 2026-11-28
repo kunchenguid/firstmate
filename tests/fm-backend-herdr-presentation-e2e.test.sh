@@ -238,6 +238,20 @@ if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
   # post-create abort cleanup without consuming a real pool slot.
   exit 0
 fi
+allocation_args=("$@")
+if [ "${1:-}" = --root ]; then allocation_args=("${@:3}"); fi
+if [ "${allocation_args[0]:-}" = get ] && [ "${allocation_args[1]:-}" = --lease ]; then
+  case "${ALLOCATION_HANDSHAKE_ROLE:-}" in
+    hold)
+      printf 'held\n' > "$ALLOCATION_EVENTS"
+      IFS= read -r -t 120 released < "$ALLOCATION_RELEASE" || exit 1
+      [ "$released" = release ] || exit 1
+      ;;
+    observe)
+      printf 'resumed\n' > "$ALLOCATION_EVENTS"
+      ;;
+  esac
+fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
 # one pool slot before reaching the Herdr session lock exercised below.
@@ -307,9 +321,11 @@ RECORDED_WORKTREES=""
 LOCK_CONTENTION_OWNER_PID=
 LOCK_REFUSE_HOLDER_PID=
 LOCK_WAIT_HOLDER_PID=
+ALLOCATION_HOLDER_PID=
+ALLOCATION_RESUME_PID=
 cleanup_all() {
   local wt pid
-  for pid in "$LOCK_CONTENTION_OWNER_PID" "$LOCK_REFUSE_HOLDER_PID" "$LOCK_WAIT_HOLDER_PID"; do
+  for pid in "$LOCK_CONTENTION_OWNER_PID" "$LOCK_REFUSE_HOLDER_PID" "$LOCK_WAIT_HOLDER_PID" "$ALLOCATION_HOLDER_PID" "$ALLOCATION_RESUME_PID"; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -1325,8 +1341,48 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/
   || fail "could not stop the isolated session for cross-home restart"
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for cross-home restart"
-spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/cross-restart-resume.out" 2> "$TMP_ROOT/cross-restart-resume.err" \
+ALLOCATION_EVENTS="$TMP_ROOT/allocation-events"
+ALLOCATION_RELEASE="$TMP_ROOT/allocation-release"
+export ALLOCATION_EVENTS ALLOCATION_RELEASE
+mkfifo "$ALLOCATION_EVENTS" "$ALLOCATION_RELEASE" || fail "could not create allocation handshake"
+exec 8<> "$ALLOCATION_EVENTS"
+exec 9<> "$ALLOCATION_RELEASE"
+ALLOCATION_ID=allocation-held-primary
+write_ship_brief "$HOME_DIR" "$ALLOCATION_ID" 'Projected allocation concurrency fixture.'
+ALLOCATION_HANDSHAKE_ROLE=hold SPAWN_DEADLINE_SECONDS=120 \
+  spawn_task "$ALLOCATION_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/allocation-held.out" 2> "$TMP_ROOT/allocation-held.err" &
+ALLOCATION_HOLDER_PID=$!
+IFS= read -r -t 120 ALLOCATION_EVENT <&8 && [ "$ALLOCATION_EVENT" = held ] \
+  || fail "projected spawn did not reach its held lease: $(cat "$TMP_ROOT/allocation-held.err")"
+[ "$(grep '^version=' "$HOME_DIR/state/$ALLOCATION_ID.herdr-presentation")" = version=2 ] \
+  || fail "held allocation fixture did not complete an exact projected binding"
+(
+  ALLOCATION_HANDSHAKE_ROLE=observe SPAWN_DEADLINE_SECONDS=120 \
+    spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/cross-restart-resume.out" 2> "$TMP_ROOT/cross-restart-resume.err"
+  status=$?
+  printf 'exited\n' > "$ALLOCATION_EVENTS"
+  exit "$status"
+) &
+ALLOCATION_RESUME_PID=$!
+ALLOCATION_EVENT=
+IFS= read -r -t 120 ALLOCATION_EVENT <&8 || ALLOCATION_EVENT=timeout
+printf 'release\n' >&9
+if wait "$ALLOCATION_HOLDER_PID"; then ALLOCATION_STATUS=0; else ALLOCATION_STATUS=$?; fi
+ALLOCATION_HOLDER_PID=
+if wait "$ALLOCATION_RESUME_PID"; then RESUME_STATUS=0; else RESUME_STATUS=$?; fi
+ALLOCATION_RESUME_PID=
+exec 8>&-
+exec 9>&-
+[ "$ALLOCATION_EVENT" = resumed ] \
+  || fail "default exact resume did not reach allocation while sibling lease was held: $(cat "$TMP_ROOT/cross-restart-resume.err")"
+[ "$ALLOCATION_STATUS" -eq 0 ] \
+  || fail "held projected spawn failed: $(cat "$TMP_ROOT/allocation-held.err")"
+[ "$RESUME_STATUS" -eq 0 ] \
   || fail "cross-home same-identity reclaim failed: $(cat "$TMP_ROOT/cross-restart-resume.err")"
+remember_meta_worktree "$HOME_DIR/state/$ALLOCATION_ID.meta" >/dev/null
+teardown_task "$ALLOCATION_ID" "$HOME_DIR" > "$TMP_ROOT/allocation-teardown.out" 2> "$TMP_ROOT/allocation-teardown.err" \
+  || fail "held projected spawn teardown failed: $(cat "$TMP_ROOT/allocation-teardown.err")"
+pass "real Herdr lab: default exact resume proceeds while a sibling projected spawn is allocating its copy"
 CROSS_NEW_WT=$(remember_meta_worktree "$CROSS_RESTART_META")
 CROSS_NEW_WSID=$(grep '^herdr_workspace_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
 CROSS_NEW_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
@@ -1364,9 +1420,9 @@ PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/
 PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
   || fail "could not reprovision the isolated session for concurrent recovery"
 CONCURRENT_RECOVERY_FOCUS=$(focus_snapshot)
-spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
+spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" --herdr-resume-lock-wait > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" &
 PRIMARY_WAVE_PID=$!
-spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
+spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" --herdr-resume-lock-wait > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
 if wait "$PRIMARY_WAVE_PID"; then PRIMARY_WAVE_STATUS=0; else PRIMARY_WAVE_STATUS=$?; fi
 if wait "$BRAVO_WAVE_PID"; then BRAVO_WAVE_STATUS=0; else BRAVO_WAVE_STATUS=$?; fi
