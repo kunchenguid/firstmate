@@ -213,6 +213,18 @@ ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 # The beacon age at which the watcher's own re-arm evicts a live holder; an
 # attached arm follows a slow holder up to it (attach_and_wait).
 STALL_BOUND=$(fm_watcher_stall_bound)
+# After this arm has confirmed its own child, a live child whose beacon is
+# stale past this bound is a wedge and is reaped here. A healthy cycle may
+# wait a full POLL between beats, so the default is the poll-derived grace
+# (fm_poll_derived_grace in bin/fm-wake-lib.sh; docs/turnend-guard.md "Guard
+# grace and the poll cadence"), not the honesty-gate's 300s floor. Explicit
+# FM_WATCHER_STALE_GRACE or FM_GUARD_GRACE still wins. 0 keeps the watchdog
+# off: that means "beacons are never fresh", not "kill the child at once".
+OWNED_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}}
+case "$OWNED_STALE_GRACE" in
+  ''|*[!0-9]*) OWNED_STALE_GRACE=$(fm_poll_derived_grace) ;;
+  *) OWNED_STALE_GRACE=$((10#$OWNED_STALE_GRACE)) ;;
+esac
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
@@ -734,6 +746,17 @@ fi
 # stays our child for its whole life: we wait on it, so killing this arm (the
 # harness-tracked task) tears the watcher down too, and the watcher's eventual
 # wake exit propagates out so the harness re-notifies firstmate.
+# The child is launched with stdin closed; it then detaches any remaining
+# inherited stdio pipes onto state/.watch-runtime.log (bin/fm-watch.sh header),
+# so a dead reader in this arm's restart chain cannot wedge the watcher's
+# heartbeat. After this arm has confirmed its own child, a live child whose
+# beacon is stale past OWNED_STALE_GRACE is reaped and replaced here: that is
+# a wedge, not a slow cycle. A healthy cycle may wait a full POLL between
+# beats, so that bound is the poll-derived grace unless FM_WATCHER_STALE_GRACE
+# or FM_GUARD_GRACE is set. The replacement must pass the same honesty gate
+# before this arm continues; it never reports started/attached/healthy off the
+# stale beacon. OWNED_STALE_GRACE 0 still means "beacons are never fresh", not
+# "kill the child at once", so the watchdog is off in that fixture.
 child=
 child_out=
 cleanup_child() {
@@ -761,6 +784,7 @@ term_child_at_safe_point() {
   # and would add a ps fork per iteration on a host that is already loaded.
   while fm_pid_alive "$child"; do
     if [ ! -d "$STATE" ]; then
+      kill -CONT "$child" 2>/dev/null || true
       kill -TERM "$child" 2>/dev/null || true
       break
     fi
@@ -768,6 +792,7 @@ term_child_at_safe_point() {
       && [ -s "$WATCH_LOCK/fm-home" ] \
       && [ -s "$WATCH_LOCK/watcher-path" ] \
       && [ -s "$WATCH_LOCK/pid-identity" ]; then
+      kill -CONT "$child" 2>/dev/null || true
       kill -TERM "$child" 2>/dev/null || true
       break
     fi
@@ -792,6 +817,104 @@ trap 'handle_arm_signal HUP 129' HUP
 trap 'handle_arm_signal TERM 143' TERM
 trap 'handle_arm_signal INT 130' INT
 
+start_watch_child() {
+  if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
+    FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" </dev/null >"$child_out" &
+  else
+    "$WATCH" </dev/null >"$child_out" &
+  fi
+  child=$!
+  cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
+  child_done=0
+}
+
+# Confirm a replacement forked after an owned-child wedge. Silent on success:
+# the harness already has this arm's started line. Failure is the same typed
+# line as a cold start that never proved a fresh beacon. A 0 return means the
+# replacement is live; any other return means the cycle is over and
+# OWNED_CHILD_CYCLE_RC holds the arm's exit status (a delivered wake is 0).
+OWNED_CHILD_CYCLE_RC=
+confirm_replacement_child() {
+  local deadline rc
+  deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+  while :; do
+    if healthy_watcher && [ "$HEALTHY_PID" = "$child" ]; then
+      cycle_refresh_lock_before
+      return 0
+    fi
+    if ! fm_pid_alive "$child"; then
+      wait "$child" 2>/dev/null
+      rc=$?
+      owned_child_finished "$rc"
+      OWNED_CHILD_CYCLE_RC=$?
+      return 1
+    fi
+    if arm_ground_gone; then
+      term_child_at_safe_point
+      cleanup_child
+      fail_arm_ground_gone
+      OWNED_CHILD_CYCLE_RC=1
+      return 1
+    fi
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 0.2
+  done
+  term_child_at_safe_point
+  rc=$?
+  print_watch_output "$child_out"
+  cleanup_child
+  cycle_log_append "$rc" "$(cycle_signal_name "$rc")" wedge-respawn-timeout none
+  echo "watcher: FAILED - no live watcher with a fresh beacon"
+  OWNED_CHILD_CYCLE_RC=1
+  return 1
+}
+
+restart_wedged_owned_child() {
+  local rc
+  OWNED_CHILD_CYCLE_RC=
+  term_child_at_safe_point
+  rc=$?
+  if watch_output_has_wake "$child_out" || cycle_delivered_reason; then
+    owned_child_finished "$rc"
+    OWNED_CHILD_CYCLE_RC=$?
+    return 1
+  fi
+  cycle_log_append "$rc" "$(cycle_signal_name "$rc")" owned-child-wedged none
+  rm -f "$child_out" 2>/dev/null || true
+  child=
+  child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
+    echo "watcher: FAILED - no live watcher with a fresh beacon"
+    OWNED_CHILD_CYCLE_RC=1
+    return 1
+  }
+  start_watch_child
+  confirm_replacement_child
+}
+
+# After this arm has confirmed its own child, stay with it until it exits.
+# Header: owned-child stale-beacon reap/respawn.
+supervise_owned_child() {
+  local age rc
+  while :; do
+    while fm_pid_alive "$child"; do
+      if [ "$OWNED_STALE_GRACE" -gt 0 ]; then
+        age=$(fm_path_age "$BEAT")
+        if [ "$age" -ge "$OWNED_STALE_GRACE" ]; then
+          if ! restart_wedged_owned_child; then
+            return "${OWNED_CHILD_CYCLE_RC:-1}"
+          fi
+          continue 2
+        fi
+      fi
+      sleep "$ATTACH_POLL"
+    done
+    wait "$child" 2>/dev/null
+    rc=$?
+    owned_child_finished "$rc"
+    return $?
+  done
+}
+
 child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
@@ -799,14 +922,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 # date(1) exposes whole seconds. Keep the configured confirmation budget from
 # collapsing when startup begins just before the next second boundary.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
-if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
-  FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
-else
-  "$WATCH" >"$child_out" &
-fi
-child=$!
-cycle_begin "$child" started "$(fm_pid_identity "$child" 2>/dev/null || true)"
-child_done=0
+start_watch_child
 
 owned_child_finished() {
   local rc=$1 signal reason_type status
@@ -894,9 +1010,7 @@ while :; do
       else
         echo "watcher: started pid=$child (beacon fresh)"
       fi
-      wait "$child"
-      rc=$?
-      owned_child_finished "$rc"
+      supervise_owned_child
       exit $?
     fi
     # Another watcher won the singleton; our child stood down.

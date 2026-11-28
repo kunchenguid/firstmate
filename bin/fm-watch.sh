@@ -218,6 +218,16 @@
 # and exits 1, so a watcher whose temporary home or disposable checkout was
 # deleted stops itself instead of running on as an orphan. That check is scoped
 # to this process alone and never signals another watcher.
+# Inherited stdio never stays attached to a pipe whose reader can die and wedge
+# a write, or whose writer can stay silent and wedge a read: at runtime start
+# stdin becomes /dev/null, and a pipe stdout or stderr is appended to the
+# size-capped state/.watch-runtime.log. Capping that log rewrites the existing
+# inode so those redirected descriptors keep writing the visible file.
+# Heartbeat remains state/.last-watcher-beat;
+# the actionable reason still goes to stdout when that is already a file (the
+# arm's capture) and to the delivery ledger in every case. bin/fm-watch-arm.sh
+# owns the matching child launch (stdin closed) and the owned-child stale-beacon
+# reap/respawn.
 set -u
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -3707,6 +3717,50 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# Detach from any inherited stdio pipe before the lock claim or poll loop.
+# Heartbeat and the delivery ledger are files; stdout stays as-is when it is
+# already a regular file (bin/fm-watch-arm.sh's capture). A pipe stdout would
+# otherwise block wake()'s echo in pipe_write, and an inherited stdin pipe
+# whose writer never closes blocks any accidental read in pipe_read.
+WATCH_RUNTIME_LOG="$STATE/.watch-runtime.log"
+WATCH_RUNTIME_LOG_MAX_BYTES=${FM_WATCH_RUNTIME_LOG_MAX_BYTES:-262144}
+WATCH_RUNTIME_LOG_KEEP_LINES=${FM_WATCH_RUNTIME_LOG_KEEP_LINES:-1000}
+case "$WATCH_RUNTIME_LOG_MAX_BYTES" in ''|*[!0-9]*|0) WATCH_RUNTIME_LOG_MAX_BYTES=262144 ;; esac
+case "$WATCH_RUNTIME_LOG_KEEP_LINES" in ''|*[!0-9]*|0) WATCH_RUNTIME_LOG_KEEP_LINES=1000 ;; esac
+
+watch_runtime_log_trim() {
+  local size tmp
+  [ -f "$WATCH_RUNTIME_LOG" ] || return 0
+  size=$(wc -c < "$WATCH_RUNTIME_LOG" 2>/dev/null | tr -d '[:space:]')
+  case "$size" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$size" -ge "$WATCH_RUNTIME_LOG_MAX_BYTES" ] || return 0
+  tmp="$WATCH_RUNTIME_LOG.trim.$$"
+  # Rewrite the existing inode (copytruncate) so any stdout/stderr already
+  # redirected onto this path keep writing the visible log. Replacing the
+  # file would leave those fds on the unlinked original.
+  tail -n "$WATCH_RUNTIME_LOG_KEEP_LINES" "$WATCH_RUNTIME_LOG" 2>/dev/null \
+    | tail -c "$WATCH_RUNTIME_LOG_MAX_BYTES" > "$tmp" 2>/dev/null \
+    && cat "$tmp" > "$WATCH_RUNTIME_LOG"
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+watch_isolate_stdio() {
+  exec </dev/null
+  if [ -p /dev/fd/1 ] || [ -p /dev/stdout ]; then
+    exec >>"$WATCH_RUNTIME_LOG"
+  fi
+  if [ -p /dev/fd/2 ] || [ -p /dev/stderr ]; then
+    exec 2>>"$WATCH_RUNTIME_LOG"
+  fi
+}
+
+# Trim first so isolate opens the capped file; copytruncate above also keeps
+# later trims safe if this watcher already redirected onto the log.
+watch_runtime_log_trim
+watch_isolate_stdio
+
 # FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS is validated here, at arm time, and an
 # unusable value refuses to arm. This is deliberately NOT symmetry with the
 # tunables above, which this watcher only defaults and never validates. The
@@ -4111,6 +4165,7 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+  watch_runtime_log_trim
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
