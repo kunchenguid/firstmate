@@ -225,13 +225,15 @@ phase_recovery() {
 }
 
 phase_teardown() {
-  local teardown_out corr rec leftover leftover_rec other_corr
+  local teardown_out corr rec request_path leftover leftover_rec other_corr
   corr=$(FM_HOME="$HOME_DIR" bash -c '
     . "$1"
     fm_pending_reply_create "$2" "$2/state" design "New routed work is in your backlog."
   ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR") \
     || fail "could not seed receiver wake retirement state"
   rec="$HOME_DIR/state/pending-replies/$corr"
+  request_path="$HOME_DIR/state/pending-replies/.$corr.request"
+  [ -f "$request_path" ] || fail "full pending-reply request sidecar was not created"
   leftover=$(FM_HOME="$HOME_DIR" bash -c '
     . "$1"
     fm_pending_reply_create "$2" "$2/state" design "Earlier routed ask that already resolved."
@@ -320,6 +322,7 @@ phase_teardown() {
   assert_absent "$HOME_DIR/state/.backlog-handoff-design.wake-pending" \
     "teardown left receiver wake state that could poison a replacement route"
   assert_absent "$rec" "teardown left the retired receiver wake correlation"
+  assert_absent "$request_path" "teardown left the retired receiver request sidecar"
   assert_absent "$HOME_DIR/state/.secondmate-relaunch-design" \
     "teardown left the relaunch ledger a same-id replacement would inherit"
   assert_absent "$HOME_DIR/state/.secondmate-relaunch-bound-design" \
