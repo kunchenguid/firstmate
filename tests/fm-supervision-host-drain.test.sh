@@ -164,6 +164,33 @@ test_dispatch_entry_scopes_rows_and_renders_the_away_tail() {
 # --- host loop ----------------------------------------------------------------
 
 
+test_idle_drain_skips_harness_detection() {
+  local home drained
+  home="$TMP_ROOT/idle-drain"
+  mkdir -p "$home/state" "$home/config"
+
+  # Observe the real detector starting without replacing it or timing the drain.
+  cat > "$home/probe-env" <<'SH'
+case "${0##*/}" in
+  fm-harness.sh) printf 'probe\n' >> "$FM_HOME/probes" ;;
+esac
+SH
+
+  drained=$(FM_HOME="$home" FM_TEST_HARNESS='' FM_SUPERVISION_MODEL='' BASH_ENV="$home/probe-env" \
+    "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh") || fail "idle drain failed: $drained"
+  [ -z "$drained" ] || fail "idle drain produced output: $drained"
+  [ ! -s "$home/probes" ] || fail "idle drain started harness detection $(awk 'END { print NR }' "$home/probes") time(s)"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append --task demo --verdict captain --summary 'outcome ready' >/dev/null \
+    || fail "fixture: could not record a captain outcome"
+  drained=$(FM_HOME="$home" FM_TEST_HARNESS='' FM_SUPERVISION_MODEL='' BASH_ENV="$home/probe-env" \
+    "$FAKE_CLAUDE" -c '"$0" 2>&1' "$ROOT/bin/fm-wake-drain.sh") || fail "drain with an outcome failed: $drained"
+  [ -s "$home/probes" ] || fail "drain with an outcome did not start harness detection"
+  assert_contains "$drained" 'demo: outcome ready' "drain did not present the outcome"
+  pass "drain skips harness detection when idle and detects the harness to present an outcome"
+}
+
+
 # BRANCH OUTCOMES belongs to a home that runs the host off Pi: on a Claude
 # primary that is the default and an `off` file opts out, while another
 # primary still needs the file; wherever the home does not run the host the
@@ -589,6 +616,7 @@ fm_test_run \
   test_report_surface_enforces_actor_turn_and_scope \
   test_report_after_the_return_is_queued_for_main \
   test_dispatch_entry_scopes_rows_and_renders_the_away_tail \
+  test_idle_drain_skips_harness_detection \
   test_branch_outcomes_only_on_a_host_home_off_pi \
   test_branch_outcomes_put_captain_first_and_collapse_routine_overflow \
   test_branch_outcomes_collapse_repeated_captain_outcomes_per_task \
