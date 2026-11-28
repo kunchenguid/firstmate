@@ -122,7 +122,17 @@ test_agy_claims_no_inherited_launcher_marker() {
   local fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-agent")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:-bash}"; exit 0 ;;
+  *"args="*) printf '%s\n' "${FAKE_PS_ARGS:-bash}"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(AGENT=1 PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -431,6 +441,37 @@ test_agy_trust_refuses_out_of_scope_paths() {
   after=$(cat "$store")
   [ "$before" = "$after" ] || fail "an unparseable store was rewritten"
   pass "fm-agy-trust.sh: refuses every out-of-scope path and never rewrites a broken store"
+}
+
+test_agy_trust_relaunch_copy_accepts_standalone_clone_and_is_trusted() {
+  local rec store clone out rc
+  rec=$(make_agy_trust_case relaunch-clone)
+  read_agy_trust_case "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  mkdir -p "$(dirname "$store")"
+  printf '%s\n' '{"trustedWorkspaces":[]}' > "$store"
+  clone="$CASE_DIR/standalone-clone"
+  git clone -q "$PROJ_DIR" "$clone"
+
+  # Fresh worktree mode must keep refusing a standalone clone.
+  rc=0; out=$(run_agy_trust "$HOME_DIR" "$clone" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "ordinary worktree mode must refuse a standalone clone"
+
+  # --is-trusted returns 1 before registration.
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$clone" >/dev/null 2>&1 \
+    && fail "--is-trusted reported an unregistered clone as trusted" || true
+
+  # --relaunch-copy registers the standalone clone, while still refusing the primary checkout.
+  out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$clone" "$PROJ_DIR" 2>&1) \
+    || fail "--relaunch-copy must trust a standalone clone: $out"
+  assert_agy_trusted "$store" "$clone" "--relaunch-copy did not record the standalone clone"
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$clone" >/dev/null 2>&1 \
+    || fail "--is-trusted did not confirm the newly registered standalone clone"
+
+  rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$PROJ_DIR" "$PROJ_DIR" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--relaunch-copy must still refuse the project primary checkout"
+  assert_agy_not_trusted "$store" "$PROJ_DIR" "--relaunch-copy registered the project primary checkout"
+  pass "fm-agy-trust.sh: --relaunch-copy trusts standalone clones, refuses primary checkouts, and --is-trusted probes read-only"
 }
 
 # The fake tmux renders an agy-shaped screen that advances through
@@ -936,6 +977,7 @@ test_agy_zero_model_timeout_is_clamped_to_the_default_bound
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
+test_agy_trust_relaunch_copy_accepts_standalone_clone_and_is_trusted
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
 test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered

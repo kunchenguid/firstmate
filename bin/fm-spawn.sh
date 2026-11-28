@@ -6274,10 +6274,14 @@ claude*)
 agy)
   if [ "$KIND" = secondmate ]; then
     spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+  elif [ "$RELAUNCH" -eq 1 ]; then
+    spawn_trust_args=(--relaunch-copy "$WT" "$PROJ_ABS")
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
   if "$FM_ROOT/bin/fm-agy-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+    AGY_TRUST_PREREGISTERED=1
+  elif [ "$RELAUNCH" -eq 1 ] && "$FM_ROOT/bin/fm-agy-trust.sh" --is-trusted "$WT" >/dev/null 2>&1; then
     AGY_TRUST_PREREGISTERED=1
   else
     echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
