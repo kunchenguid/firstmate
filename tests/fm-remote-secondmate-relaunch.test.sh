@@ -189,4 +189,22 @@ fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
 
+# --- grok is refused as a primary relaunch, allowed as failover ---------------
+reset_meta
+OUT=$(run_relaunch ios grok default default); RC=$?
+expect_code 1 "$RC" "a grok relaunch without FM_GROK_FAILOVER should be refused"$'
+'"$OUT"
+assert_contains "$OUT" "refusing grok harness except as failover" \
+  "the wrapper should explain that grok is failover-only"
+assert_grep 'harness=pi' "$HOME_DIR/state/ios.meta" \
+  "a refused grok relaunch must leave the parent record untouched"
+
+reset_meta
+OUT=$(FM_GROK_FAILOVER=1 run_relaunch ios grok default default); RC=$?
+expect_code 0 "$RC" "a grok relaunch with FM_GROK_FAILOVER=1 should reach the host"$'
+'"$OUT"
+assert_grep 'harness=grok' "$HOME_DIR/state/ios.meta" \
+  "failover grok should be recorded once the host confirms it"
+pass "grok harness is refused except as failover"
+
 echo "ALL TESTS PASSED"

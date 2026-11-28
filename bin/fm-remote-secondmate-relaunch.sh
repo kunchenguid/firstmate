@@ -46,6 +46,17 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
+# Grok CLI is failover-only. A primary relaunch onto harness=grok can send
+# work to a quota-empty seat (doctor-20261112). Allow only when the caller
+# opts in with FM_GROK_FAILOVER=1.
+case "$HARNESS" in
+  grok)
+    if [ "${FM_GROK_FAILOVER:-0}" != 1 ]; then
+      die "refusing grok harness except as failover (set FM_GROK_FAILOVER=1 to override)"
+    fi
+    ;;
+esac
+
 RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
   relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
   rc=$?
