@@ -323,6 +323,49 @@ SH
   pass "session-lock: spaced live argv retains auggie ancestry, liveness, reclaim protection, and inspection"
 }
 
+# Oracle: a process's relative script belongs to its launch directory, even
+# when a child checks its lock from elsewhere. Unknown cwd cannot prove death.
+test_auggie_relative_script_uses_holder_directory() {
+  local dir
+  command -v node >/dev/null 2>&1 || fail "auggie relative-path tests require node"
+  dir="$TMP_ROOT/auggie-relative"
+  mkdir -p "$dir/node_modules/@augmentcode/auggie" "$dir/node_modules/.bin" "$dir/checker" "$dir/state"
+  ln -s ../@augmentcode/auggie/cli.cjs "$dir/node_modules/.bin/auggie"
+  cat > "$dir/node_modules/@augmentcode/auggie/cli.cjs" <<'JS'
+const {spawnSync} = require('node:child_process');
+const result = spawnSync('bash', ['-c', `
+  set -eu
+  . "$1"
+  pid=$2
+  state=$3
+  printf '%s\n' "$pid" > "$state/.lock"
+  fm_harness_pid_alive "$pid" || exit 11
+  fm_session_lock_pid_blocks_reclaim "$pid" || exit 12
+  [ "$(fm_harness_ancestry_pid)" = "$pid" ] || exit 13
+  fm_session_lock_inspect "$state"
+  [ "$FM_LOCK_INSPECT_STATE" = held ] || exit 14
+  [ "$FM_LOCK_INSPECT_LIVE_HARNESS" = true ] || exit 15
+`, 'probe', process.argv[2], String(process.pid), process.argv[3]], {
+  cwd: process.argv[4], stdio: 'inherit'
+});
+process.exit(result.status ?? 1);
+JS
+  if [ -r "/proc/$$/cmdline" ]; then
+    (cd "$dir" && env -u CLAUDE_PID -u CLAUDE_CODE_SESSION_ID \
+      node ./node_modules/.bin/auggie "$LIB" "$dir/state" "$dir/checker") \
+      || fail "auggie: relative script lost lock identity from another directory"
+  fi
+  bash -c '
+    set -eu
+    . "$1"
+    fm_proc_info() { FM_PROC_COMM=node; FM_PROC_ARGS="node ./node_modules/.bin/auggie"; }
+    kill() { return 0; }
+    fm_session_lock_pid_blocks_reclaim 2147483647
+    if fm_harness_pid_alive 2147483647; then exit 16; fi
+  ' probe "$LIB" || fail "auggie: unresolved relative script lost live-holder protection"
+  pass "session-lock: relative Auggie scripts use holder cwd and protect unresolved live holders"
+}
+
 # Oracle: Node's CLI assigns --require's operand to a preload, not the main
 # script. Query actual live Node argv through both the native and ps fallback
 # interfaces, with a preload path containing spaces so the ps fallback must
@@ -1988,6 +2031,7 @@ test_bun_run_omp_is_identified_on_both_platforms
 test_ordinary_paths_are_never_harness_processes
 test_auggie_node_bundle_is_identified_by_its_package_script
 test_auggie_live_argv_preserves_script_spaces
+test_auggie_relative_script_uses_holder_directory
 test_auggie_node_options_preserve_script_identity
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live

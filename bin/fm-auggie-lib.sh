@@ -166,15 +166,30 @@ fm_auggie_script_arg() {  # <args> [pid]
 #
 # Rejected: a bare interpreter with no script, an interpreter running anything
 # else, and any name or path that merely contains the auggie fragment.
+# Return 2 for an unresolved relative script: identity is unknown, so a live
+# lock holder must remain protected from reclaim.
 fm_auggie_process_matches() {  # <comm> <args> [pid]
-  local comm=$1 args=${2:-} pid=${3:-} base script
+  local comm=$1 args=${2:-} pid=${3:-} base script cwd
   [ -n "$comm" ] || return 1
   base=${comm##*/}
   base=${base#-}
   case "$base" in
     auggie) return 0 ;;
     node|node-*|node[0-9]*|MainThread)
-      script=$(fm_auggie_script_arg "$args" "$pid") || return 1
+      # Both argv readers must interpret relative paths in the process cwd.
+      cwd=$(CDPATH='' cd -- "/proc/$pid/cwd" 2>/dev/null && pwd -P) || cwd=
+      script=$(
+        [ -z "$cwd" ] || cd -- "$cwd" || exit 1
+        fm_auggie_script_arg "$args" "$pid"
+      ) || return 1
+      case "$script" in
+        /*) ;;
+        *)
+          [ -n "$cwd" ] || return 2
+          script="$cwd/$script"
+          [ -e "$script" ] || return 2
+          ;;
+      esac
       fm_auggie_path_is_auggie "$script"
       return $?
       ;;

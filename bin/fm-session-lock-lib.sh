@@ -173,9 +173,8 @@ fm_harness_process_matches() {  # <comm> <args> [pid]
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   fm_omp_process_matches "$comm" "$args" && return 0
-  # Auggie: same reason as Cursor, from its script argument's package path.
-  fm_auggie_process_matches "$comm" "$args" "$pid" && return 0
-  return 1
+  # Auggie: preserve its unknown-identity status for live-holder protection.
+  fm_auggie_process_matches "$comm" "$args" "$pid"
 }
 
 # --- Windows process-boundary bridge -----------------------------------------
@@ -816,7 +815,12 @@ fm_session_lock_pid_blocks_reclaim() {
     dead) return 1 ;;
     unreadable) return 0 ;;
     unknown) return 1 ;;
-    readable) fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$pid" ;;
+    readable)
+      local rc=0
+      fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" "$pid" || rc=$?
+      # An unresolved relative Auggie script is unknown, not a gone holder.
+      [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]
+      ;;
   esac
 }
 
