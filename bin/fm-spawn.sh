@@ -5600,13 +5600,21 @@ spawn_lease_herdr_slot() {
 # Enter the exact copy recorded for this task immediately before trust setup and
 # launch. Herdr restores a pane's shell cwd from its durable tab layout, so a
 # treehouse subshell's foreground cwd is not enough to keep a later pane restart
-# out of the primary checkout. The same explicit cd gives every backend one
-# launch boundary and makes a dropped or ignored cwd change a refusal.
+# out of the primary checkout. The explicit cd is that launch boundary, and the
+# pre-launch path read makes a dropped or ignored cwd change a refusal. Herdr
+# skips the cd when its pane shell already reports the recorded worktree,
+# because `pane run` returns before its submit and a needless write is one more
+# line the launch literal could fuse onto.
 spawn_enter_recorded_worktree() {
+  local seen
   [ "$KIND" = secondmate ] && return 0
   # T3 starts the agent in the leased worktree its thread launch bound;
   # there is no shell endpoint to receive a cd command.
   [ "$BACKEND" = t3code ] && return 0
+  if [ "$BACKEND" = herdr ]; then
+    seen=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$seen" ] || [ "$(real_path_or_raw "$seen")" != "$(real_path_or_raw "$WT")" ] || return 0
+  fi
   spawn_send_text_line "$WT_TARGET" "cd -- $(shell_quote "$WT")" || {
     echo "error: task $ID's endpoint could not be moved into its recorded worktree '$WT'; refusing to launch outside the copy holding its work" >&2
     exit 1
@@ -7950,16 +7958,38 @@ if [ "$BACKEND" = t3code ]; then
     }
   fi
 else
+# The pre-launch environment statements reach the pane shell so the agent, its
+# children, and later commands in that shell all inherit them. Every pane
+# backend but Herdr types each one as its own line before the launch command.
+#
+# Herdr cannot: `pane run` returns once its text is typed, before the submit
+# that text carried has been executed, so the next line typed into that pane
+# fuses onto it. A ship spawn that typed its exports and then the launch line
+# landed as `export COMPACT_ADVISER_DISABLE=1. '/tmp/fm-<id>/launch.s<n>.sh'`,
+# which zsh rejects with `export: not valid in this context`, so the agent never
+# started and the worker was dead on deck. Herdr therefore carries the same
+# statements at the head of the staged launch command (`spawn_prelaunch_export`
+# below plus the staging site): the exports and the launch are one text write,
+# and the sourcing shell still executes the statements in the pane's own shell
+# before the launch runs.
+SPAWN_PRELAUNCH_EXPORT_TEXT=
+spawn_prelaunch_export() { # <statement>
+  if [ "$BACKEND" = herdr ]; then
+    SPAWN_PRELAUNCH_EXPORT_TEXT="${SPAWN_PRELAUNCH_EXPORT_TEXT:+$SPAWN_PRELAUNCH_EXPORT_TEXT; }$1"
+    return 0
+  fi
+  spawn_send_text_line "$T" "$1"
+}
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# the env is set when the agent starts.
+spawn_prelaunch_export "export GOTMPDIR=$TASK_TMP/gotmp"
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
-spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+spawn_prelaunch_export "export COMPACT_ADVISER_DISABLE=1"
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
-  spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
+  spawn_prelaunch_export "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
 fi
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
@@ -7967,13 +7997,16 @@ fi
 # The id reached a validated bare-slug charset above, so it carries no shell
 # syntax of its own.
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  spawn_prelaunch_export "export FM_TASK_ID=$ID"
 fi
-# Send through the exact pane channel that already ships GOTMPDIR, so every pane
-# backend and harness - ship, scout, and secondmate - gets it before launch. Skipped
-# entirely when trace context is off.
+# Send through the exact pre-launch channel that already ships GOTMPDIR, so every
+# pane backend and harness - ship, scout, and secondmate - gets it before launch.
+# Skipped entirely when trace context is off. On Herdr the statement joins the
+# staged launch, so the carrier is recorded first and a failed record still
+# unsets it inside the launch below; a launch write that never lands refuses the
+# spawn, so a delivered carrier is always a recorded one.
 if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+  if spawn_prelaunch_export "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
     if ! spawn_record_traceparent; then
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
@@ -8053,6 +8086,13 @@ if [ "$BACKEND" = t3code ]; then
   T3CODE_LEASED=0
   T3CODE_HOME_ENV=0
 else
+  if [ -n "$SPAWN_PRELAUNCH_EXPORT_TEXT" ]; then
+    # Herdr only (see the pre-launch site above): the exports lead the staged
+    # command, so the sourcing shell applies them before the launch runs and the
+    # pane receives exactly one text write for the whole pre-launch.
+    LAUNCH="$SPAWN_PRELAUNCH_EXPORT_TEXT"$'\n'"$LAUNCH"
+    SPAWN_PRELAUNCH_EXPORT_TEXT=
+  fi
   if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
     if [ -L "$LAUNCH_DIR" ] || [ ! -d "$LAUNCH_DIR" ] || [ ! -O "$LAUNCH_DIR" ] ||
       [ -n "$(find "$LAUNCH_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||

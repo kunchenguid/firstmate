@@ -417,6 +417,7 @@ family_for_basename() {
     fm-spawn-secondmate-pool.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
+    fm-spawn-herdr-prelaunch-fusion.test.sh|\
     fm-project-capacity.test.sh|fm-lane-capacity-integration.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch

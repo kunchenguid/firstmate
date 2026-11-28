@@ -148,15 +148,20 @@ freeze_parent_session() {
   )
 }
 
-# What the remote pane actually received, read back from the remote tmux log.
-remote_injected_traceparent() {
-  sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' "$HERDR_LOG" | tail -1
-}
+# What the remote pane actually received, read back from the fake host's verbatim
+# log. The launch command is the one unsubmitted literal `pane send-text`; Herdr
+# types no pre-launch export as its own line, because `pane run` returns before
+# its submit is executed and the next typed line fuses onto it. The exports and
+# the launch are one text write (the staged launch file's head), so every read
+# below comes from that file's content.
 remote_staged_launch() {
   local staged
   staged=$(sed -n "s/^pane send-text [^ ]* \\. '\([^']*\)' --session [^ ]*\$/\1/p" "$HERDR_LOG" | tail -1)
   [ -n "$staged" ] && [ -f "$staged" ] || return 1
   cat "$staged"
+}
+remote_injected_traceparent() {
+  remote_staged_launch | sed -n 's/.*export TRACEPARENT=\([0-9a-f-]*\).*/\1/p' | tail -1
 }
 remote_launch_snapshot() {
   remote_staged_launch | grep -o 'FM_TRACE_CONTEXT=[a-z]*' | tail -1 | cut -d= -f2
@@ -179,12 +184,14 @@ assert_present "$PARENT/state/ios.meta" "default-off remote spawn published no p
   || fail "default-off remote spawn must not record a traceparent= line"
 ! grep -q 'export TRACEPARENT=' "$HERDR_LOG" \
   || fail "default-off remote spawn must not export a carrier into the remote pane"
+! remote_staged_launch | grep -q 'export TRACEPARENT=' \
+  || fail "default-off remote spawn must not carry a carrier in the staged launch"
 ! grep -q '^traceparent=' "$REMOTE_HOME/state/parent-route/ios.meta" \
   || fail "default-off remote spawn must not record a carrier on the remote host"
 [ "$(remote_launch_snapshot)" = off ] \
   || fail "default-off remote spawn must deliver FM_TRACE_CONTEXT=off (got '$(remote_launch_snapshot)')"
 assert_absent "$REMOTE_HOME/config/trace-context" "default-off remote spawn inherited an enablement flag"
-grep -q 'export GOTMPDIR=' "$HERDR_LOG" || fail "the remote spawn should still run (GOTMPDIR is always exported)"
+remote_staged_launch | grep -q 'export GOTMPDIR=' || fail "the remote spawn should still run (GOTMPDIR is always exported)"
 pass "disabled: a remote-routed second mate records and receives no carrier and stays enabled-off end to end"
 
 # --- enabled: one carrier is recorded by the parent and received remotely ----
@@ -210,15 +217,16 @@ fm_trace_context_valid "$INJECTED_TP" \
   || fail "an enabled remote spawn must deliver FM_TRACE_CONTEXT=on (got '$(remote_launch_snapshot)')"
 assert_present "$REMOTE_HOME/config/trace-context" \
   "an enabled remote launch did not inherit the enablement flag into the remote home"
-GOTMP_LINE=$(grep -n 'export GOTMPDIR=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-TP_LINE=$(grep -n 'export TRACEPARENT=' "$HERDR_LOG" | tail -1 | cut -d: -f1)
-LAUNCH_LINE=$(grep -n "^pane send-text [^ ]* \\. '.*' --session " "$HERDR_LOG" | tail -1 | cut -d: -f1)
-[ -n "$GOTMP_LINE" ] && [ -n "$TP_LINE" ] && [ -n "$LAUNCH_LINE" ] \
-  || fail "remote pane log missing GOTMPDIR/TRACEPARENT/launch lines"
-[ "$TP_LINE" -gt "$GOTMP_LINE" ] \
-  || fail "the remote TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$GOTMP_LINE tp=$TP_LINE)"
-[ "$TP_LINE" -lt "$LAUNCH_LINE" ] \
-  || fail "the remote TRACEPARENT export must be sent before the launch command (tp=$TP_LINE launch=$LAUNCH_LINE)"
+REMOTE_LAUNCH=$(remote_staged_launch) || fail "the remote pane received no launch command"
+GOTMP_POS=$(printf '%s' "$REMOTE_LAUNCH" | grep -ob 'export GOTMPDIR=' | head -1 | cut -d: -f1)
+TP_POS=$(printf '%s' "$REMOTE_LAUNCH" | grep -ob 'export TRACEPARENT=' | head -1 | cut -d: -f1)
+LAUNCH_POS=$(printf '%s' "$REMOTE_LAUNCH" | grep -ob 'fm-osc7501.sh' | head -1 | cut -d: -f1)
+[ -n "$GOTMP_POS" ] && [ -n "$TP_POS" ] && [ -n "$LAUNCH_POS" ] \
+  || fail "the remote launch content is missing its GOTMPDIR/TRACEPARENT pre-launch exports or the launch command"
+[ "$TP_POS" -gt "$GOTMP_POS" ] \
+  || fail "the remote TRACEPARENT export must ride the GOTMPDIR pre-launch site (gotmp=$GOTMP_POS tp=$TP_POS)"
+[ "$TP_POS" -lt "$LAUNCH_POS" ] \
+  || fail "the remote TRACEPARENT export must precede the launch command (tp=$TP_POS launch=$LAUNCH_POS)"
 pass "enabled: a remote-routed second mate receives one carrier in its pane, identical to the parent's recorded identity, before launch"
 
 # --- relaunch stability on the remote path ----------------------------------

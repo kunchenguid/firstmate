@@ -675,6 +675,10 @@ Explicit named-session routing and unrelated launch environment remain intact.
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane.
 Ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
+`pane run` returns once its text is typed, before the submit that text carries has been executed, so a write sent straight after one fuses onto it.
+[`bin/fm-spawn.sh`](../bin/fm-spawn.sh) therefore types no pre-launch shell export as its own line on this backend: the export statements ride the staged launch command's first line, so the exports and the launch are one text write and the sourcing shell still applies them in the pane's own shell before the launch runs.
+The only pre-launch `pane run` left is the `cd` into the recorded worktree, which a relaunch whose pane shell already sits there does not emit at all.
+`tests/fm-spawn-herdr-prelaunch-fusion.test.sh` pins both cases: a ship and scout fresh spawn and a relaunch each reach the pane as one launch literal, with the exports on its first line.
 Enter, Escape, and Ctrl-C are supported.
 
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter, so a completion popup cannot consume it.
