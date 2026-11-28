@@ -39,6 +39,17 @@
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A standalone remote home may instead advance
 # its checked-out default branch under the same guard.
+# A jj colocated home (.jj/ plus a usable jj on PATH) is advanced through jj
+# itself, never raw git: the colocated export leaves git HEAD detached on the
+# working-copy commit, so the git guards below cannot even read a jj home.
+# ff_target routes a jj home to ff_target_jj, which moves the default bookmark
+# (main/master) to the base and leaves the working-copy commit an empty child
+# of it - jj's clean state - under the same never-force/merge/stash guards and
+# the same status vocabulary. A diverged jj home is skipped and reported rather
+# than reconciled, with no new durable reconciliation record: the content-
+# equivalent divergence proof is git-index-specific and deliberately not
+# extended to jj. A jj home that does converge (current or updated) clears a
+# pending record left by an earlier git-backed era, exactly like the git route.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -225,14 +236,16 @@ fetch_once() {
   return 1
 }
 
+# The watched instruction surface: the files a running agent actually reads or
+# runs - its instructions (AGENTS.md, which CLAUDE.md imports via @AGENTS.md),
+# its agent-loaded skills (.agents/skills/), and its tooling (bin/). Public
+# skills/ is installer-facing and intentionally not part of this surface.
+WATCHED_INSTR_PATHS=(AGENTS.md bin .agents/skills)
+
 # Which watched instruction paths changed between HEAD and BASE (comma list).
-# These are the files a running agent actually reads or runs: its instructions
-# (AGENTS.md, which CLAUDE.md imports via @AGENTS.md), its agent-loaded skills
-# (.agents/skills/), and its tooling (bin/). Public skills/ is installer-facing
-# and intentionally not part of this watched instruction surface.
 changed_instr() {
   local dir=$1 base=$2 p out=""
-  for p in AGENTS.md bin .agents/skills; do
+  for p in "${WATCHED_INSTR_PATHS[@]}"; do
     if ! git -C "$dir" diff --quiet HEAD "$base" -- "$p" 2>/dev/null; then
       out="$out${out:+, }$p"
     fi
@@ -365,6 +378,144 @@ live_secondmate_meta_records() {
   done
 }
 
+# The default bookmark of a jj home: main or master, whichever local bookmark
+# exists. Mirrors default_branch's main/master fallback without reading git refs,
+# since a jj home's own view of its bookmarks is jj's, not the colocated export's.
+jj_default_branch() {
+  local dir=$1 b
+  for b in main master; do
+    if [ -n "$(jj -R "$dir" log -r "$b" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+      echo "$b"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Which watched instruction paths changed between two jj revisions (comma list),
+# the jj equivalent of changed_instr. Diff direction is irrelevant to "changed",
+# and so is a diff that cannot run at all: changed_instr treats a nonzero
+# `git diff --quiet` - differences OR failure - as changed, so a path whose jj
+# diff fails over-approximates to changed rather than silently reading as
+# unchanged and hiding a real instruction move behind `reread-firstmate: no`.
+# jj resolves fileset paths against the process cwd, not the -R repo, so the
+# diff runs from inside the repo (in a command-substitution subshell, which
+# never moves the caller's cwd) while the non-path revsets stay -R-relative.
+jj_changed_instr() {
+  local dir=$1 from=$2 to=$3 p out="" diff_out
+  for p in "${WATCHED_INSTR_PATHS[@]}"; do
+    if diff_out=$(cd "$dir" && jj diff --from "$from" --to "$to" --git -- "$p" 2>/dev/null); then
+      [ -z "$diff_out" ] || out="$out${out:+, }$p"
+    else
+      out="$out${out:+, }$p"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Fast-forward one jj colocated home to a base, mirroring ff_target's git path.
+# The advance moves the default bookmark (main/master) to the base and leaves the
+# working-copy commit an empty child of it, which is jj's clean state. Divergence
+# is always skipped here: the content-equivalent reconciliation is
+# git-index-specific and out of scope for jj homes. A convergence that leaves the
+# home on the base (current or updated) is still a success, so it clears a durable
+# secondmate reconciliation record left by an earlier git-backed era exactly as
+# the git route does, through the same secondmate_id/reconciliation_state contract.
+ff_target_jj() {
+  local dir=$1 label=$2 base_mode=$3
+  local secondmate_id=${4:-} reconciliation_state=${5:-}
+  local default base cur_rev base_rev before after instr
+  FF_STATUS="skipped"
+  FF_INSTR=""
+
+  default=$(jj_default_branch "$dir") || {
+    echo "$label: skipped: cannot determine default branch"
+    return 0
+  }
+
+  if [ "$base_mode" = origin ]; then
+    if ! jj -R "$dir" git remote list 2>/dev/null | grep -q '^origin[[:space:]]'; then
+      echo "$label: skipped: no origin remote"
+      return 0
+    fi
+    if ! jj -R "$dir" git fetch --remote origin --quiet 2>/dev/null; then
+      echo "$label: skipped: fetch failed"
+      return 0
+    fi
+    base="$default@origin"
+  else
+    base="$base_mode"
+  fi
+
+  if [ -z "$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+    echo "$label: skipped: $base does not exist"
+    return 0
+  fi
+
+  cur_rev=$(jj -R "$dir" log -r "$default" --no-graph -T 'commit_id' 2>/dev/null) || true
+  if [ -z "$cur_rev" ]; then
+    echo "$label: skipped: cannot determine current commit"
+    return 0
+  fi
+  base_rev=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id' 2>/dev/null) || true
+
+  if [ -n "$(jj -R "$dir" log -r '@' --no-graph -T 'description' 2>/dev/null)" ]; then
+    echo "$label: skipped: described working copy commit"
+    return 0
+  fi
+
+  # A jj working copy with any content change is a non-empty commit; unlanded
+  # work is exactly that, so skip it rather than squash or discard it.
+  if [ "$(jj -R "$dir" log -r '@' --no-graph -T 'empty' 2>/dev/null)" != true ]; then
+    echo "$label: skipped: dirty working tree"
+    return 0
+  fi
+
+  # Fast-forward only: the default bookmark must be an ancestor of the base.
+  if [ -z "$(jj -R "$dir" log -r "$default & ::$base" --no-graph -T 'commit_id' 2>/dev/null)" ]; then
+    echo "$label: skipped: diverged from $base"
+    return 0
+  fi
+
+  if [ -n "$(jj -R "$dir" log -r "::@ & ~::$base" --no-graph -T 'if(empty, "", "e") ++ if(description, "d", "")' 2>/dev/null)" ]; then
+    echo "$label: skipped: working copy parked outside $base"
+    return 0
+  fi
+
+  if [ "$cur_rev" = "$base_rev" ]; then
+    if [ -n "$(jj -R "$dir" log -r "@ & $base" --no-graph -T 'commit_id' 2>/dev/null)" ] \
+      || { [ -z "$(jj -R "$dir" log -r "parents(@) & ~$base" --no-graph -T 'commit_id' 2>/dev/null)" ] \
+        && [ -n "$(jj -R "$dir" log -r "parents(@) & $base" --no-graph -T 'commit_id' 2>/dev/null)" ]; }; then
+      FF_STATUS="current"
+      [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
+      echo "$label: already current"
+      return 0
+    fi
+  fi
+
+  instr=$(jj_changed_instr "$dir" "@" "$base")
+  before=$(jj -R "$dir" log -r '@' --no-graph -T 'commit_id.short(7)' 2>/dev/null)
+  if [ "$cur_rev" != "$base_rev" ] \
+    && ! jj -R "$dir" bookmark set "$default" -r "$base" >/dev/null 2>&1; then
+    echo "$label: skipped: could not advance $default to $base"
+    return 0
+  fi
+  if ! jj -R "$dir" new "$base" >/dev/null 2>&1; then
+    echo "$label: skipped: could not move working copy to $base"
+    return 0
+  fi
+  after=$(jj -R "$dir" log -r "$base" --no-graph -T 'commit_id.short(7)' 2>/dev/null)
+  FF_STATUS="updated"
+  FF_INSTR="$instr"
+  [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
+  if [ -n "$instr" ]; then
+    echo "$label: updated $before..$after (instructions changed: $instr)"
+  else
+    echo "$label: updated $before..$after"
+  fi
+  return 0
+}
+
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped
@@ -399,6 +550,14 @@ ff_target() {
 
   if [ ! -d "$dir" ]; then
     echo "$label: skipped: not a directory"
+    return 0
+  fi
+  if [ -d "$dir/.jj" ]; then
+    if ! command -v jj >/dev/null 2>&1; then
+      echo "$label: skipped: jj-managed home but jj is not on PATH"
+      return 0
+    fi
+    ff_target_jj "$dir" "$label" "$base_mode" "$secondmate_id" "$reconciliation_state"
     return 0
   fi
   if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
