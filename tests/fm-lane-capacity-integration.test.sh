@@ -3,8 +3,8 @@
 # firstmate paths: bin/fm-spawn.sh admitting and deferring real spawns on the
 # verdict of bin/fm-capacity.sh (admit-spawns), the real bin/fm-watch.sh publish
 # cycle feeding the next spawn with damped growth, idle-lane reclaim judged from
-# real worker processes, and the fixed-cap path compared byte for byte against
-# a baseline revision.
+# real worker processes, and the fixed-cap path compared against a baseline
+# revision byte for byte apart from the report's added load5 figure.
 #
 # Deterministic cases inject their memory reading through the probe seams the
 # unit suites use, so they pass on any host whatever its free memory: on macOS
@@ -418,7 +418,7 @@ test_idle_reclaim_from_real_workers() {
   pass "a real idle worker is ranked finished -> cleanup with its age, a busy one is not, and neither is stopped (${out:-reclaim line})"
 }
 
-# --- E: the fixed-cap path is byte-identical to the baseline ------------------
+# --- E: the fixed-cap path matches the baseline apart from load5 figures -----
 
 BASELINE_REF_DEFAULT=5c935cfbaf8a649ccc3656c1cdabd23fe1fcc0b9
 
@@ -431,7 +431,9 @@ baseline_bin() {  # -> a directory holding the baseline revision's bin/
   printf '%s\t%s\n' "$dir/bin" "$ref"
 }
 
-# Darwin-shaped fake probes, so both revisions read exactly the same host.
+# Darwin-shaped fake probes, so both revisions read exactly the same host. The
+# 1- and 5-minute loads match, so the baseline's load1 cpu hold and the
+# current load5 one see the same number.
 static_probes() {  # <dir> -> fakebin
   local fakebin
   fakebin=$(fm_fakebin "$1")
@@ -439,7 +441,7 @@ static_probes() {  # <dir> -> fakebin
   cat > "$fakebin/sysctl" <<'SH'
 #!/usr/bin/env bash
 case "$2" in
-  vm.loadavg) echo "{ 6.50 5.00 4.00 }" ;;
+  vm.loadavg) echo "{ 6.50 6.50 4.00 }" ;;
   kern.memorystatus_level) echo 41 ;;
   hw.logicalcpu) echo 18 ;;
   hw.memsize) echo 51539607552 ;;
@@ -453,6 +455,13 @@ SH
   printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/ioreg"
   chmod +x "$fakebin"/*
   printf '%s\n' "$fakebin"
+}
+
+# Drop the report's added load5= field and summary figure, the only output the
+# baseline lacks.
+drop_load5_figures() {
+  sed -E -e 's/ load5=[^ ]*//' \
+    -e 's/^Host: load ([^ ]*) \(1 min\), [^ ]* \(5 min\) on /Host: load \1 on /'
 }
 
 test_fixed_cap_output_matches_the_baseline() {
@@ -477,12 +486,12 @@ test_fixed_cap_output_matches_the_baseline() {
       a=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$base/fm-capacity.sh" "$@" 2>&1; echo "exit=$?")
       b=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$CAPACITY" "$@" 2>&1; echo "exit=$?")
       a=$(printf '%s\n' "$a" | sed -E 's/"generated_epoch": ?[0-9]+/"generated_epoch":0/')
-      b=$(printf '%s\n' "$b" | sed -E 's/"generated_epoch": ?[0-9]+/"generated_epoch":0/')
+      b=$(printf '%s\n' "$b" | sed -E 's/"generated_epoch": ?[0-9]+/"generated_epoch":0/' | drop_load5_figures)
       [ "$a" = "$b" ] || fail "fixed-cap $mode output differs from $ref: $(diff <(printf '%s\n' "$a") <(printf '%s\n' "$b") | head -20)"
     done
   done
   assert_contains "$b" "exit=75" "the breached fixed cap must still refuse admission"
-  pass "fixed caps with room and over their floors print byte-identical report, document, and admission output to ${ref:0:12}"
+  pass "fixed caps with room and over their floors print report, document, and admission output identical to ${ref:0:12} apart from the load5 figures"
 }
 
 # --- F: live load on this host (opt-in) ---------------------------------------
