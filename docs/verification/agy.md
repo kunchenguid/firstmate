@@ -56,7 +56,8 @@ Antigravity CLI requires permission to read, edit, and execute files here.
   No, exit
 ```
 `agy --help` (1.2.0) lists no trust flag or pre-registration command, but agy honours a `trustedWorkspaces` entry written to `~/.gemini/antigravity-cli/settings.json` ahead of launch.
-Verified under a throwaway `HOME` holding a copy of `~/.gemini` (the real settings file was never written): a folder appended to that array by hand launched `--prompt-interactive` straight into its turn and rendered the reply with no dialog, while an unregistered sibling folder launched the same way parked on the dialog.
+The agy 1.2.0 trust probe copied `~/.gemini` into a throwaway `HOME` and left the original settings untouched.
+A folder appended to that copy's `trustedWorkspaces` array by hand launched `--prompt-interactive` straight into its turn and rendered the reply, while an unregistered sibling folder parked on the dialog.
 agy compares the pane's logical working directory, not its resolved path: a symlinked cwd whose real path alone was registered still parked on the dialog, so `bin/fm-agy-trust.sh` records both the logical path and its resolved form when they differ.
 `bin/fm-spawn.sh` runs that helper before launch at the same point it pre-registers claude trust; the helper applies the same structural scope test (a linked worktree of the spawning project, never a primary checkout, a subdirectory, a plain directory, or the home directory), preserves every other key in the store, and writes atomically with a fingerprint check.
 A failed registration is a stderr warning rather than a refusal, because agy's dialog preselects the safe answer and the gate below can answer it.
@@ -81,9 +82,11 @@ gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
 ...
 ```
 
-`agy --help` documents `--effort` as `low|medium|high` and `--model` as the model for the session.
+In agy 1.2.0, `agy --help` documented `--effort` as `low|medium|high` and `--model` as the model for the session.
 The bare `gemini-3.8-flash` id from this home's previous config is not listed; only the suffixed `-high`, `-medium`, and `-low` variants are.
 `bin/fm-spawn.sh`'s `agy_model_validate` refuses a requested id a reachable `agy models` listing omits, and launches unvalidated with a stderr notice when the listing is unreachable.
+The [adapter's effort rule](../../.agents/skills/harness-adapters/references/harness/agy.md#operating-facts) governs current launches.
+[`tests/fm-agy-harness.test.sh`](../../tests/fm-agy-harness.test.sh) checks the emitted flags for a model with catalog siblings, a model without siblings, and an unreachable catalog.
 The listing is a remote fetch (`Fetching available models...`), so the probe runs with stdin detached under the shared hard bound from `bin/fm-timeout-lib.sh` (15 seconds by default, `FM_AGY_MODELS_TIMEOUT`; a non-positive or non-numeric value clamps back to that default); a stalled fetch or a sign-in prompt is cut off and falls through to the unvalidated launch instead of blocking the spawn before any pane exists.
 Print mode (`agy -p "Reply with exactly: AGY_PRINT_PROBE_OK" --model gemini-3.8-flash-low`) returned the exact reply with exit 0 in about 8 seconds, proving the credential path without a pane.
 
@@ -167,12 +170,19 @@ Session lock verification recognizes `agy` process ancestry via `bin/fm-session-
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
+Live verification on `agy 1.5.15` remains inconclusive.
 
 ## Refreshing this record
 
-Run the portable suite and the live guard after any agy upgrade, because the process name, marker set, trust dialog text, and rendered busy/interrupt text are all vendor-controlled surfaces that the spawn gate and the busy fallback match verbatim:
+Run the portable suite and the opt-in live guards after an agy upgrade to recheck spawn arguments, rendered worker signals, and primary and secondmate hooks.
 
 ```
 bin/fm-test-run.sh tests/fm-agy-harness.test.sh
 FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+FM_AGY_PRIMARY_LIVE=1 bin/fm-test-run.sh tests/fm-agy-primary-live-e2e.test.sh
 ```
+
+On macOS, both live guards link the login keychain into a throwaway `HOME` when the keychain file exists.
+They copy only `colorScheme` from the operator's agy settings and keep workspace trust in the temporary settings store.
+On a failed assertion after an agy invocation, the primary guard reports the invocation's exit status and redacted output tail.
+The signals guard reports a redacted pane tail when available before closing the lab pane.

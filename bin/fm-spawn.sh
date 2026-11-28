@@ -2790,8 +2790,11 @@ omp_model_validate() { # <omp-bin> <model> [<profile>]
 # sign-in prompt can never block the spawn before any pane exists. An
 # unreachable listing establishes nothing (harness-adapters
 # model-and-effort.md) and launches unvalidated with a notice.
-agy_model_validate() {  # <agy-bin> <model>
+# A validated ID supplies effort only when the same listing contains a
+# distinct ID with the same stem and a different recognized effort suffix.
+agy_model_validate() {  # <agy-bin> <model> -> optional effort source
   local bin=$1 model=$2 listing rc=0 bound=${FM_AGY_MODELS_TIMEOUT:-15}
+  local ids id stem effort_variant='^(.+)-(low|medium|high|xhigh|max)$'
   case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
   [ -n "$model" ] && [ "$model" != default ] || return 0
   listing=$(fm_run_timed "$bound" "$bin" models 2>/dev/null < /dev/null) || rc=$?
@@ -2803,11 +2806,21 @@ agy_model_validate() {  # <agy-bin> <model>
     fi
     return 0
   fi
-  if printf '%s\n' "$listing" | awk '{print $1}' | grep -qxF -- "$model"; then
-    return 0
+  ids=$(printf '%s\n' "$listing" | awk '{print $1}')
+  if ! grep -qxF -- "$model" <<< "$ids"; then
+    echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
+    return 1
   fi
-  echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
-  return 1
+  if [[ "$model" =~ $effort_variant ]]; then
+    stem=${BASH_REMATCH[1]}
+    while IFS= read -r id; do
+      if [ "$id" != "$model" ] && [[ "$id" =~ $effort_variant ]] && [ "${BASH_REMATCH[1]}" = "$stem" ]; then
+        printf '%s\n' model-id
+        break
+      fi
+    done <<< "$ids"
+  fi
+  return 0
 }
 
 # kiro pre-launch model validation. `kiro-cli chat --agent-engine v2
@@ -3022,8 +3035,9 @@ launch_template() {
   # command (verified: a multi-line brief submitted itself with no extra Enter,
   # agy 1.2.0). --model takes the bare catalog id from `agy models`
   # (gemini-3.8-flash-high, never the unlisted bare gemini-3.8-flash).
-  # --effort takes low|medium|high. --dangerously-skip-permissions
-  # auto-approves every tool call, which an unattended crewmate needs.
+  # See agy_model_validate for when the model ID supplies effort.
+  # --dangerously-skip-permissions auto-approves every tool call, which an
+  # unattended crewmate needs.
   # Every task worktree is a fresh path, so agy would show a folder-trust
   # dialog ("Do you trust the contents of this project?") and no launch flag
   # suppresses it (agy 1.2.0 --help lists none). Left unanswered, the turn
@@ -3519,8 +3533,9 @@ OMP_PROFILE_PIN=$(fm_omp_profile_select "$HARNESS" "$CONFIG" "$OMP_PROFILE_MATE"
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" "$OMP_PROFILE_PIN" || exit 1
 fi
+AGY_EFFORT_SOURCE=
 if [ "$HARNESS" = agy ]; then
-  agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+  AGY_EFFORT_SOURCE=$(agy_model_validate "$AGY_BIN" "$MODEL") || exit 1
 fi
 # polytoken's model validation composes firstmate's model and effort axes into
 # the launch model reference (bin/fm-polytoken-lib.sh owns the reasoning): the
@@ -3821,8 +3836,9 @@ effort_flag_for_harness() {
     esac
     ;;
   agy)
-    # agy 1.2.0 --effort accepts exactly low|medium|high, so xhigh and max are
-    # omitted rather than passed as known-bad values (record-and-omit).
+    # A catalog-confirmed variant supplies effort. Otherwise keep the
+    # existing low|medium|high pass-through and record-only xhigh/max.
+    [ -z "$AGY_EFFORT_SOURCE" ] || return 0
     case "$effort" in
     low | medium | high) printf -- '--effort %s ' "$(shell_quote "$effort")" ;;
     esac

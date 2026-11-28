@@ -1,6 +1,6 @@
 # Antigravity CLI
 
-Antigravity's `agy` TUI, verified end to end with agy 1.2.0+ on Linux through the Herdr backend.
+Antigravity's `agy` TUI was verified end to end with agy 1.2.0 on Linux through the Herdr backend.
 Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
@@ -9,7 +9,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 | Fact | Value |
 |---|---|
 | Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
-| Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
+| Launch | `agy --prompt-interactive "<brief>" --model <id> --dangerously-skip-permissions`, with the resolved absolute binary and the effort flag where applicable. The brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
 | Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
@@ -20,7 +20,7 @@ Verified as a full Firstmate harness (Primary, Secondmate, and Crewmate/Scout).
 | Marker | None; a live TUI carries no `AGY_*` or `ANTIGRAVITY_*` variable. |
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
-| Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
+| Effort | Firstmate omits `--effort` when `agy models` lists the selected ID and another ID that differs only in its trailing effort suffix (`-low`, `-medium`, `-high`, `-xhigh`, or `-max`). The model ID then sets the launch effort. Otherwise, Firstmate passes `--effort` for `low`, `medium`, and `high`. Task metadata records the requested effort in either case. |
 | Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
 
 ## Trust, and where the decision persists
