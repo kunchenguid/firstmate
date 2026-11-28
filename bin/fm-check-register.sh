@@ -2,6 +2,8 @@
 # Bind an intentional custom watcher check to its current bytes.
 # Usage: fm-check-register.sh <id>
 # Retire with fm-check-unregister.sh <id>; do not hand-compose an rm.
+# The watcher stops a registered check after FM_CHECK_TIMEOUT seconds (default
+# 30); keep it fast, and see docs/configuration.md for the variable.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,6 +15,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+
+case "${1:-}" in
+  -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
+esac
 
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid custom check registration" >&2
