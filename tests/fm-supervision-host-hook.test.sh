@@ -598,6 +598,148 @@ test_pass_through_successor_survives_the_hook_process_group_teardown() {
 }
 
 
+# A long main turn after a main-only pass-through: a registered check prints
+# on every sweep at a 2-second check interval. Without
+# config/supervision-midturn-sweep the one-shot successor closes on the first
+# sweep and no cycle runs until the next turn end. With it, each closed cycle
+# is replaced, so the check keeps its cadence, every result lands in the wake
+# queue, one arm runs at a time, nothing reaches main mid-turn, and the next
+# turn end takes over exactly one cycle. The pass-through is either the one
+# before the engine turn or a close that turns main-only at its turn. Opting
+# the home out of the host mid-turn (host-off) stops the sweep owner, so no
+# cycle replaces the one it leaves.
+assert_midturn_sweep() {  # <on|off|host-off> <pass-through|at-turn>
+  local mode=$1 path=$2 home rows arms i successor label="midturn $1 $2"
+  home=$(make_primary_home "midturn-sweep-$mode-$path")
+  [ "$mode" = off ] || : > "$home/config/supervision-midturn-sweep"
+  [ "$path" = pass-through ] || turn_main_only_at_second_offer "$home" quiet
+  : > "$home/hook.own-group"
+  FM_CHECK_INTERVAL=2 start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "$label: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  if [ "$path" = pass-through ]; then
+    append_status "$home" 'which export format?' needs-decision
+  else
+    append_status "$home" 'step one'
+  fi
+  wait_until_deadline 60 hook_exited "$home" || fail "$label: the close never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
+  [ "$path" = pass-through ] || [ "$(cat "$home/offer-count" 2>/dev/null)" -ge 2 ] \
+    || fail "$label: fixture: the close was not accepted before it turned main-only"
+  assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "$label: fixture: the close was not a main-only pass-through"
+  assert_rewoke_main "$home" "$label"
+  kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
+  rm -f "$home/hook.rc"
+  # Main's turn now runs long: no drain, acknowledgement, or Stop follows.
+  wait_until 150 watcher_live "$home" || fail "$label: the pass-through left no successor watcher"
+  successor=$(cat "$home/state/.watch.lock/pid")
+  printf '#!/usr/bin/env bash\necho probe due\n' > "$home/state/probe.check.sh"
+  chmod 700 "$home/state/probe.check.sh"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-check-register.sh" probe >/dev/null \
+    || fail "$label: the check could not be registered"
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" \
+    || fail "$label: the successor did not close on the printing check"
+  if [ "$mode" = off ]; then
+    sleep 8
+    watcher_live "$home" && fail "$label: the absent flag changed the default one-shot successor"
+    rows=$(grep -c 'probe' "$home/state/.wake-queue" 2>/dev/null || true)
+    [ "${rows:-0}" -eq 1 ] || fail "$label: expected one queued check result before the turn end, got ${rows:-0}"
+    [ ! -e "$home/state/.supervision-handoff-owner" ] || fail "$label: the absent flag started a detached owner"
+    stop_home_processes "$home"
+    pass "host+hook: without the mid-turn sweep flag a long turn after a $path keeps the one-shot successor"
+    return
+  fi
+  i=0
+  while [ "$i" -lt 300 ]; do
+    arms=$(home_arms "$home" | grep -c . || true)
+    [ "${arms:-0}" -le 1 ] || fail "$label: $arms arms ran at once:"$'\n'"$(home_arms "$home")"
+    rows=$(grep -c 'probe' "$home/state/.wake-queue" 2>/dev/null || true)
+    [ "${rows:-0}" -ge 3 ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "${rows:-0}" -ge 3 ] || fail "$label: the check did not keep its cadence during the long turn (${rows:-0} queued results):"$'\n'"$(cat "$home/state/.watch-cycle-exits.log" 2>/dev/null)"
+  ! hook_exited "$home" || fail "$label: a sweep result reached main mid-turn: $(cat "$home/hook.err")"
+  [ ! -e "$home/state/.supervision-handoff-pending" ] || fail "$label: the sweep queued a hand-back receipt"
+  [ ! -e "$home/state/.supervision-handoff.log" ] || fail "$label: the sweep attempted a delivery"
+  if [ "$mode" = host-off ]; then
+    : > "$home/config/supervision-host-off"
+    wait_until 100 bash -c '[ ! -e "$1" ]' _ "$home/state/.supervision-handoff-owner" \
+      || fail "$label: the sweep owner outlived the host opt-out"
+    wait_until 250 bash -c '! kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null' _ "$home/state/.watch.lock/pid" \
+      || fail "$label: the cycle the owner left did not close on the printing check"
+    sleep 8
+    watcher_live "$home" && fail "$label: a cycle replaced the one the stopped owner left"
+    stop_home_processes "$home"
+    pass "host+hook: opting the home out of the host mid-turn stops the mid-turn sweep owner"
+    return
+  fi
+  wait_until 150 watcher_live "$home" || fail "$label: the sweep left supervision down"
+  rm -f "$home/state/probe.check.sh"
+  turn_end "$home"
+  wait_until 250 host_owns_the_only_cycle "$home" \
+    || fail "$label: the next park did not take over exactly one cycle:"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  [ ! -e "$home/state/.supervision-handoff-owner" ] || fail "$label: the next park left the sweep owner running"
+  stop_home_processes "$home"
+  pass "host+hook: with the mid-turn sweep flag a long turn after a $path keeps checks running and the next park takes over one cycle"
+}
+
+# Main acknowledges the hand-back after the owner's arm closed and before the
+# owner noticed: the owner is held stopped across that gap, so the window is
+# deterministic. The owner must still start and verify one replacement, then
+# leave it running.
+test_acknowledgement_between_arms_leaves_a_verified_replacement() {
+  local home owner arm watcher state
+  home=$(make_primary_home ack-between-arms)
+  : > "$home/config/supervision-handoff-ack"
+  : > "$home/hook.own-group"
+  printf 'project=demo\nwindow=fm-other\nharness=claude\n' > "$home/state/other.meta"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "ack between arms: no initial watcher"
+  append_status "$home" 'which export format?' needs-decision
+  wait_until_deadline 60 hook_exited "$home" || fail "ack between arms: no hand-back"
+  assert_rewoke_main "$home" "ack between arms"
+  kill -TERM -- "-$(cat "$home/hook.pgid")" 2>/dev/null || true
+  wait_until 150 watcher_live "$home" || fail "ack between arms: the hand-back left no watcher"
+  wait_until 150 bash -c '[ -s "$1/state/.supervision-handoff-owner" ] && kill -0 "$(cut -f1 "$1/state/.supervision-host-left")"' _ "$home" \
+    || fail "ack between arms: the owner recorded no live arm"
+  owner=$(cut -f1 "$home/state/.supervision-handoff-owner")
+  arm=$(cut -f1 "$home/state/.supervision-host-left")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  kill -STOP "$owner"
+  printf 'working [at=%s]: another event\n' "$(date +%s)" >> "$home/state/other.status"
+  wait_until 250 bash -c '! kill -0 "$1" 2>/dev/null' _ "$watcher" || { kill -CONT "$owner"; fail "ack between arms: the arm's watcher did not close"; }
+  # The stopped owner cannot reap its arm: wait for it to be a zombie or gone.
+  wait_until 150 bash -c 'state=$(ps -o stat= -p "$1" 2>/dev/null); [ -z "$state" ] || [ "${state#Z}" != "$state" ]' _ "$arm" \
+    || { kill -CONT "$owner"; fail "ack between arms: the arm did not exit"; }
+  main_drain "$home" >/dev/null
+  # shellcheck disable=SC2086 # The drain's printed arguments.
+  FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@"' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
+    || { kill -CONT "$owner"; fail "ack between arms: main could not acknowledge"; }
+  [ ! -e "$home/state/.supervision-handoff-pending" ] || { kill -CONT "$owner"; fail "ack between arms: acknowledgement did not confirm ownership"; }
+  kill -CONT "$owner"
+  wait_until 150 bash -c '! kill -0 "$1" 2>/dev/null' _ "$owner" || fail "ack between arms: the owner did not stop after the acknowledgement"
+  watcher_live "$home" || fail "ack between arms: the owner stopped without a live watcher"
+  state=$(cut -f1 "$home/state/.supervision-host-left")
+  if [ "$state" = "$arm" ] || ! kill -0 "$state" 2>/dev/null; then
+    fail "ack between arms: no recorded replacement arm is running"
+  fi
+  [ "$(home_arms "$home" | grep -c .)" -eq 1 ] || fail "ack between arms: expected one arm:"$'\n'"$(home_arms "$home")"
+  stop_home_processes "$home"
+  pass "host+hook: an acknowledgement between arms still leaves one verified replacement running"
+}
+
+test_midturn_sweep_flag_off_keeps_the_one_shot_successor() { assert_midturn_sweep off pass-through; }
+
+test_midturn_sweep_flag_keeps_checks_running_during_a_long_turn() { assert_midturn_sweep on pass-through; }
+
+test_midturn_sweep_flag_off_keeps_the_one_shot_successor_at_the_turn() { assert_midturn_sweep off at-turn; }
+
+test_midturn_sweep_flag_keeps_checks_running_after_a_close_turns_main_only() { assert_midturn_sweep on at-turn; }
+
+test_midturn_sweep_owner_stops_when_the_host_is_turned_off() { assert_midturn_sweep host-off pass-through; }
+
+
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   local home left_watcher left_arm
   home=$(make_primary_home hook-takeover)
@@ -710,6 +852,12 @@ fm_test_run \
   test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails \
   test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end \
   test_pass_through_successor_survives_the_hook_process_group_teardown \
+  test_acknowledgement_between_arms_leaves_a_verified_replacement \
+  test_midturn_sweep_flag_off_keeps_the_one_shot_successor \
+  test_midturn_sweep_flag_keeps_checks_running_during_a_long_turn \
+  test_midturn_sweep_flag_off_keeps_the_one_shot_successor_at_the_turn \
+  test_midturn_sweep_flag_keeps_checks_running_after_a_close_turns_main_only \
+  test_midturn_sweep_owner_stops_when_the_host_is_turned_off \
   test_next_park_takes_over_the_cycle_a_pass_through_left_for_main \
   test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park \
   test_unrecorded_successor_is_stopped_rather_than_left_for_main
