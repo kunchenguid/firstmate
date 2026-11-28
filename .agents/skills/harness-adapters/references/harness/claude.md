@@ -83,6 +83,16 @@ Two vendor settings are opt-in per home, never part of the shared contract:
 
 Put either in user settings or the untracked `.claude/settings.local.json`, never the tracked project `.claude/settings.json`, which would impose one home's choice on every home and worker copy.
 
+## Nested project memory
+
+Claude Code loads project instructions below the session root lazily ([runtime backend verification](../../../../../docs/verification/runtime-backends.md#claude-nested-project-memory) owns the measurement on 2.1.323).
+A Read, or a Bash command it parses as a single-file read (`cat`, `head`, `tail`, `sed -n`, `grep <pattern> <file>`), of a file inside the session root adds, once per file, every `CLAUDE.md` between the root and that file with its `@` imports, those directories' `.claude/rules/*.md` that have no `paths:` or whose `paths:` match the file, and user rules whose `paths:` match.
+They arrive as `<system-reminder>` instruction text, not as tool output.
+A directory listing, a multi-file `cat`, `wc`, `git show`, a directory holding only `AGENTS.md`, and a file outside the session root load nothing.
+`claudeMdExcludes` drops a matching file and everything it imports; Claude Code merges it across user, project, local, and `--settings` sources and matches it with picomatch, dot files included, against absolute paths, resolving no relative path, `~`, or variable.
+A home's `projects/` sits inside its session root, so `../../../../../bin/fm-spawn.sh` writes the patterns `../../../../../bin/fm-claude-project-memory-lib.sh` prints into a Claude secondmate's `--settings` file, and [`docs/configuration.md`](../../../../../docs/configuration.md#claude-and-cloned-projects-instructions) owns the primary's snippet.
+Crewmates get no exclusion, because their project's instructions are written for them.
+
 ## Primary integration
 
 [`../../../../../docs/verification/supervision.md`](../../../../../docs/verification/supervision.md#turn-end-guard) records the current primary and Stop auto-arm live evidence.
