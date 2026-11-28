@@ -432,6 +432,40 @@ test_supported_backend_endpoint_records_validate() {
   pass "cleanup identity: valid tmux, Herdr, Zellij, Orca, cmux, Paseo, Rex, and tern records validate, inconsistent Rex records refuse, and every empty backend target refuses"
 }
 
+# Retirement is not permission for ordinary control callers to adopt the old
+# path, nor an escape hatch for malformed active records.
+test_retired_worktree_endpoint_validation() {
+  local dir id=retired-task scenario meta out
+  dir=$(make_case retired-validation)
+  meta="$dir/home/state/$id.meta"
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-backend.sh"
+  fm_write_meta "$meta" "window=firstmate:fm-$id" "project=$dir/project" \
+    "kind=ship" "worktree_outdated=$dir/worktree" 'worktree_reassigned_to=new-task'
+  fm_backend_validate_task_endpoint "$meta" "$id" --allow-retired-worktree \
+    || fail 'teardown rejected a retired endpoint identity'
+  if fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1; then
+    fail 'ordinary endpoint validation accepted a historical worktree'
+  fi
+  cp "$meta" "$dir/retired.meta"
+  for scenario in empty-active duplicate-history missing-successor self-successor secondmate remote orca; do
+    cp "$dir/retired.meta" "$meta"
+    case "$scenario" in
+      empty-active) printf 'worktree=\n' >> "$meta" ;;
+      duplicate-history) printf 'worktree_outdated=%s\n' "$dir/worktree" >> "$meta" ;;
+      missing-successor) sed '/^worktree_reassigned_to=/d' "$meta" > "$dir/tmp"; mv "$dir/tmp" "$meta" ;;
+      self-successor) sed "s/new-task/$id/" "$meta" > "$dir/tmp"; mv "$dir/tmp" "$meta" ;;
+      secondmate) printf 'kind=secondmate\n' >> "$meta" ;;
+      remote) printf 'remote_host=some-host\n' >> "$meta" ;;
+      orca) printf 'backend=orca\n' >> "$meta" ;;
+    esac
+    if out=$(fm_backend_validate_task_endpoint "$meta" "$id" --allow-retired-worktree 2>&1); then
+      fail "retired endpoint validation accepted $scenario: $out"
+    fi
+  done
+  pass 'retired endpoint validation is cleanup-only and refuses malformed or ineligible retirement records'
+}
+
 test_orca_composite_worktree_id_validates() {
   local dir id real
   dir=$(make_case orca-composite-worktree-id)
@@ -1609,6 +1643,7 @@ test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
 test_metadata_lock_serializes_destructive_cleanup
 test_supported_backend_endpoint_records_validate
+test_retired_worktree_endpoint_validation
 test_orca_composite_worktree_id_validates
 test_tmux_empty_target_refuses_without_invocation
 test_recorded_process_identity_cleanup_is_exact
