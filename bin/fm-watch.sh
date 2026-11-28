@@ -3253,8 +3253,9 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # when the only bytes it grew past the classified offset are this home's own
 # bookkeeping appends; fm_wake_signal_seen_current (bin/fm-wake-lib.sh) owns that
 # rule and every other signature change still reads as unreported.
-# Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
-# The caller records reported state only after surfacing or intentional absorption,
+# A committed drain receipt can catch a lagging status marker up to its presented
+# endpoint. Print one "<seen-file>\t<sig>\t<file>" line per remaining change.
+# The caller records new state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
   local f sig sf exclude
@@ -3764,7 +3765,7 @@ evict_stalled_holder() {
 EVICTED_PID=
 EVICTED_BEAT_AGE=
 BEAT="$STATE/.last-watcher-beat"
-while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND"; do
+while ! fm_lock_try_acquire "$WATCH_LOCK" "$STARTUP_LOCK_BOUND" "${FM_WATCH_TAKEOVER_FROM:-}"; do
   if [ -n "${FM_LOCK_HELD_PATH:-}" ]; then
     # The reclaim helper releases its steal and marker locks on publish
     # failure. No blocking pid means the write failed, not contention.
@@ -3873,7 +3874,7 @@ pr_poll_publish_release() {
 }
 
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock staged lock
+  local cleanup_status=0 owns_lock=0 transition=release-lock publish_source=watcher staged lock
   # Join any interrupted owner creation/publication before the release sweep:
   # a child must not publish a lock or staging directory after we removed ours.
   fm_lock_wait_pending_mutation
@@ -3881,7 +3882,11 @@ watcher_cleanup() {
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
+    if fm_watcher_planned_stop_matches "$STATE" "${WATCHER_PID:-}"; then
+      fm_watcher_planned_stop_clear "$STATE"
+      publish_source=close
+    fi
+    if [ -n "${WATCHER_STARTUP_GENERATION:-}" ] \
       && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
       transition=release-lock-existing
     fi
@@ -3909,7 +3914,7 @@ watcher_cleanup() {
   done
   if [ "$owns_lock" -eq 1 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" \
-      downtime "$CLEANUP_LOCK_BOUND"; then
+      downtime "$CLEANUP_LOCK_BOUND" "$publish_source"; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
@@ -3941,10 +3946,8 @@ startup_lock_failed() {
   fi
   exit 1
 }
-WATCHER_RECOVERY_PENDING=0
-if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
-  WATCHER_RECOVERY_PENDING=1
-fi
+WATCHER_STARTUP_GENERATION=
+reclaimed_watcher=${FM_LOCK_RECOVERED_PID:-}
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
   && [ "${FM_WATCH_FOREGROUND_CHECKPOINT:-0}" != 1 ]; then
   fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
@@ -3952,10 +3955,9 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
 fi
 fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "$STARTUP_LOCK_BOUND" \
   || startup_lock_failed "could not be consumed safely"
-if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-  WATCHER_RECOVERY_PENDING=0
-elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
-  WATCHER_RECOVERY_PENDING=1
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ] \
+  && { [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || [ -n "$reclaimed_watcher" ]; }; then
+  WATCHER_STARTUP_GENERATION=${FM_RECOVERY_MARKER_TOKEN##*:}
 fi
 # Side-band ledger publication, detached from the poll loop.
 #
@@ -4057,21 +4059,16 @@ resurface_after_downtime() {
   # unbounded recovery loop. A handled host turn explicitly settles its
   # handoff after consuming the predecessor's rows, making any row left for
   # main a recoverable downtime episode.
-  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
-      echo "watcher: recovery state could not be consumed safely" >&2
-      exit 1
-    fi
-    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
-    [ "$FM_RECOVERY_MARKER_QUEUED" = 1 ] || return 0
-    wake "check: rearm-resurface"
+  if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER" "" "$WATCHER_STARTUP_GENERATION"; then
+    echo "watcher: recovery state could not be consumed safely" >&2
+    exit 1
   fi
-  if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
-    if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
-      echo "watcher: recovery state could not be consumed safely" >&2
-      exit 1
-    fi
-    [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
+  if [ "$FM_RECOVERY_MARKER_ACTION" != recover ]; then
+    WATCHER_STARTUP_GENERATION=
+    return 0
+  fi
+  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ] && [ "$FM_RECOVERY_MARKER_QUEUED" != 1 ]; then
+    return 0
   fi
   wake "check: rearm-resurface"
 }

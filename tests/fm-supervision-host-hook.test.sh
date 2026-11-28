@@ -363,6 +363,225 @@ test_claude_stop_hook_delivers_a_main_only_pass_through() {
 }
 
 
+test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode() {
+  local home acknowledged
+  home=$(make_primary_home hook-boundary-acked)
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook boundary: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed"
+  mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
+    || fail "fixture: could not acknowledge a downtime episode"
+  acknowledged=$(cat "$home/state/.watcher-down" 2>/dev/null || true)
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+  echo 60 > "$home/park-clock"
+  wait_until 150 hook_exited "$home" || fail "hook boundary: the Stop hook never returned: $(cat "$home/state/.supervision-host.log")"
+  assert_rewoke_main "$home" "hook boundary"
+  watcher_live "$home" && fail "the park boundary left the watcher running"
+
+  echo 0 > "$home/park-clock"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "hook boundary: the next park never started a watcher cycle"
+  sleep 2
+  hook_exited "$home" && fail "the next park delivered an empty recovery: $(cat "$home/hook.err")"
+  ! grep -q 'rearm-resurface' "$home/hook.err" || fail "the next park resurfaced the acknowledged episode: $(cat "$home/hook.err")"
+  kill -TERM "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")" 2>/dev/null || true
+  : > "$home/session.stop"
+  wait_until 100 hook_exited "$home" || true
+  pass "host+hook: a park boundary over an acknowledged episode still rewakes main without a resurface"
+}
+
+
+seed_acked_downtime() {  # <home>
+  local acknowledged
+  printf 'acked:downtime:seeded.1\n' > "$1/state/.watcher-down.seed"
+  mv -f "$1/state/.watcher-down.seed" "$1/state/.watcher-down" \
+    || fail "fixture: could not acknowledge a downtime episode"
+  acknowledged=$(cat "$1/state/.watcher-down" 2>/dev/null || true)
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+}
+
+
+hold_marker_lock() {  # <home>
+  FM_HOME="$1" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.1; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1/state/.watcher-down.lock" \
+    "$1/marker-lock-held" "$1/release-marker-lock" \
+    >/dev/null 2>&1 &
+  printf '%s\n' "$!" > "$1/marker-lock.pid"
+  wait_until 50 test -e "$1/marker-lock-held" \
+    || fail "fixture: the downtime-marker lock was not taken"
+}
+
+
+release_marker_lock() {  # <home>
+  local pid
+  : > "$1/release-marker-lock"
+  pid=$(cat "$1/marker-lock.pid" 2>/dev/null || true)
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+}
+
+
+assert_park_boundary_handback_failure_notifies() {  # <home> <label>
+  expect_code 2 "$(cat "$1/hook.rc")" "$2: the Stop hook must deliver the failure notice: $(cat "$1/hook.err" 2>/dev/null)"
+  assert_grep 'firstmate watcher auto-arm FAILED' "$1/hook.err" "$2: the failure notice must reach main"
+  assert_grep 'watcher: FAILED - the park-boundary hand-back could not restore watcher downtime' "$1/hook.err" \
+    "$2: the notice must carry the host failure"
+  assert_grep 'exited 1 without a wake' "$1/hook.err" "$2: the notice must report the host exit"
+  assert_no_re 'cycle boundary' "$1/hook.err" "$2: a failed hand-back must not be delivered as the boundary wake"
+  assert_re '^acked:' "$1/state/.watcher-down" "$2: the acknowledged episode must stay closed"
+  assert_re 'outcome=failed ' "$1/state/.claude-autoarm-epoch" "$2: the failure notice must be committed"
+}
+
+
+# A live holder of the recovery-marker lock must not keep the park open until
+# an outside timeout. The hand-back gives up and the Stop hook delivers the
+# failure notice while that holder still owns the lock.
+test_park_boundary_handback_reports_a_lock_wait_that_expires() {
+  local home
+  home=$(make_primary_home hook-boundary-lock)
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary lock: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  seed_acked_downtime "$home"
+  watcher_live "$home" || fail "boundary lock: the watcher exited before the boundary"
+  hold_marker_lock "$home"
+  echo 60 > "$home/park-clock"
+  wait_until_deadline 60 hook_exited "$home" \
+    || fail "boundary lock: the park did not end while the marker lock was held: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  [ -e "$home/release-marker-lock" ] && fail "boundary lock: the holder was released before the hook returned"
+  assert_park_boundary_handback_failure_notifies "$home" "boundary lock"
+  release_marker_lock "$home"
+  : > "$home/session.stop"
+  pass "host+hook: a park-boundary hand-back that cannot take the marker lock delivers the failure notice"
+}
+
+
+# The successor watcher has already exited, and the engine is still inside its
+# turn. The lock wait that remains is the hand-back, not watcher cleanup.
+test_successor_handback_reports_a_lock_wait_that_expires() {
+  local home successor
+  home=$(make_primary_home hook-successor-lock)
+  ln -s "$ROOT/.agents" "$home/.agents"
+  echo hang > "$home/stub-mode"
+  FM_SUPERVISION_HOST_TURN_TIMEOUT=15 start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "successor lock: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  append_status "$home" 'first actionable wake'
+  wait_until 250 test -e "$home/engine-call.1" \
+    || fail "successor lock: the engine did not start: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  successor=$(cat "$home/state/.watch.lock/pid")
+  append_status "$home" 'wake while the engine is handling'
+  wait_until 80 bash -c '! kill -0 "$1" 2>/dev/null' _ "$successor" \
+    || fail "successor lock: its watcher did not close during the engine turn: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  seed_acked_downtime "$home"
+  hold_marker_lock "$home"
+  wait_until_deadline 60 hook_exited "$home" \
+    || fail "successor lock: the park did not end while the marker lock was held: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  [ -e "$home/release-marker-lock" ] && fail "successor lock: the holder was released before the hook returned"
+  assert_park_boundary_handback_failure_notifies "$home" "successor lock"
+  assert_grep $'boundary\tdowntime-unrestored' "$home/state/.supervision-host.log" \
+    "successor lock: the host must log the unrestored hand-back"
+  release_marker_lock "$home"
+  : > "$home/session.stop"
+  pass "host+hook: a successor hand-back that cannot take the marker lock delivers the failure notice"
+}
+
+
+# A failed marker write used to be hidden, the host still exited 0 with the
+# boundary line, and the Stop hook dropped that wake because the marker stayed
+# acknowledged.
+test_park_boundary_handback_reports_a_failed_marker_write() {
+  local home real_mktemp
+  home=$(make_primary_home hook-boundary-write)
+  real_mktemp=$(command -v mktemp)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/fail-downtime-write" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp"
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=60 FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary write: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  seed_acked_downtime "$home"
+  watcher_live "$home" || fail "boundary write: the watcher exited before the boundary"
+  : > "$home/fail-downtime-write"
+  echo 60 > "$home/park-clock"
+  wait_until 40 hook_exited "$home" \
+    || fail "boundary write: the Stop hook never returned: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_park_boundary_handback_failure_notifies "$home" "boundary write"
+  : > "$home/session.stop"
+  pass "host+hook: a park-boundary hand-back that cannot write the marker delivers the failure notice"
+}
+
+test_queued_close_survives_a_failed_park_boundary_handback() {
+  local home real_mktemp real_node park=120 turn=3 grace=1
+  home=$(make_home hook-queued-close away)
+  git init -q "$home"
+  : > "$home/AGENTS.md"
+  ln -s "$ROOT/bin" "$home/bin"
+  ln -s "$ROOT/.agents" "$home/.agents"
+  real_mktemp=$(command -v mktemp)
+  real_node=$(command -v node)
+  cat > "$home/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/.watcher-down.tmp.'*) [ ! -e "\$FM_HOME/fail-downtime-write" ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  mkfifo "$home/render-release"
+  cat > "$home/fakebin/node" <<SH
+#!/usr/bin/env bash
+if [ "\${2:-}" = wake-prompt ]; then
+  : > "\$FM_HOME/render-held"
+  read -r _ < "\$FM_HOME/render-release"
+fi
+exec "$real_node" "\$@"
+SH
+  chmod +x "$home/fakebin/mktemp" "$home/fakebin/node"
+  echo 0 > "$home/park-clock"
+  FM_SUPERVISION_HOST_PARK_SECONDS=$park FM_SUPERVISION_HOST_TURN_TIMEOUT=$turn FM_SUPERVISION_ENGINE_GRACE=$grace \
+    FM_TEST_SUPERVISION_HOST_CLOCK="$home/park-clock" start_hook_session "$home"
+  turn_end "$home"
+  wait_until 150 watcher_live "$home" || fail "queued close: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
+  sleep 2
+  append_status "$home" 'arrives with just enough margin'
+  wait_until 300 test -e "$home/render-held" \
+    || fail "queued close: the host never reached the wake render: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "queued close: the close is not queued"
+  printf 'acked:downtime:seeded.1\n' > "$home/state/.watcher-down.seed"
+  mv -f "$home/state/.watcher-down.seed" "$home/state/.watcher-down" \
+    || fail "fixture: could not acknowledge a downtime episode"
+  : > "$home/fail-downtime-write"
+  echo $((park - turn - grace)) > "$home/park-clock"
+  exec 3<> "$home/render-release"
+  printf 'release\n' >&3
+  wait_until 150 hook_exited "$home" \
+    || fail "queued close: the Stop hook never returned: $(cat "$home/state/.supervision-host.log" 2>/dev/null)"
+  exec 3>&-
+  assert_park_boundary_handback_failure_notifies "$home" "queued close"
+  assert_no_re 'demo.status' "$home/hook.err" "queued close: the failure branch must not print the close"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "queued close: the close must stay queued for main"
+  main_drain "$home" | grep -q 'demo.status' || fail "queued close: main's drain does not present the close"
+  : > "$home/session.stop"
+  pass "host+hook: a queued close survives a failed park-boundary hand-back"
+}
+
 # The live failure (2026-10-17): after the engine handled a routine wake, the
 # host parked on the handling successor it started for that wake, and that
 # successor never resurfaced a durable row appended later. Five captain inbox
@@ -687,7 +906,121 @@ test_unrecorded_successor_is_stopped_rather_than_left_for_main() {
   pass "host+hook: a successor that cannot be recorded is stopped, and main's next turn end arms a fresh cycle"
 }
 
+# Pause the replacement at its first poll, after the startup arm check. Keep
+# the interrupted watcher's singleton only in the retained-lock variant.
+late_ack_takeover() {  # <empty|scout> <clean|retained>
+  local scenario=$1 cleanup=$2 home state generation replacement
+  home=$(make_primary_home "late-ack-$scenario-$cleanup")
+  state="$home/state"
+  cat > "$home/replay-env.sh" <<'SH'
+if [ "${0##*/}" = fm-watch.sh ]; then
+  cat() {
+    if [ "${1:-}" = "$STATE/.watch.lock/pid" ] && [ -f "$FM_HOME/retain-lock" ] \
+      && [ "$$" = "$(command cat "$FM_HOME/predecessor")" ] \
+      && [[ " ${FUNCNAME[*]} " = *" watcher_cleanup "* ]]; then return 1; fi
+    command cat "$@"
+  }
+  touch() {
+    command touch "$@" || return 1
+    if [ "${1:-}" = "$STATE/.last-watcher-beat" ] && [ -s "$FM_HOME/predecessor" ] \
+      && [ "$$" != "$(command cat "$FM_HOME/predecessor")" ]; then
+      printf '%s\n' "$$" >> "$FM_HOME/polls"
+      local i=0
+      while [ ! -e "$FM_HOME/release" ] && [ "$i" -lt 600 ]; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+    fi
+  }
+fi
+SH
+  BASH_ENV="$home/replay-env.sh" leave_a_cycle_for_main_and_restart "$home"
+  printf '%s\n' "$LEFT_WATCHER" > "$home/predecessor"
+  [ "$cleanup" != retained ] || : > "$home/retain-lock"
+  FM_HOME="$home" bash -c '. "$1"; fm_recovery_marker_publish "$STATE/.watcher-down"' _ "$ROOT/bin/fm-wake-lib.sh" \
+    || fail "fixture: could not open the empty downtime episode"
+  main_drain "$home" > "$home/empty.out"
+  case "$MAIN_ACK" in '--ack-through 0 --recovery-generation '*) ;; *) fail "fixture: missing zero-row acknowledgement: $MAIN_ACK" ;; esac
+  generation=${MAIN_ACK##* }
+  turn_end "$home"
+  wait_until 300 test -s "$home/polls" || fail "fixture: takeover did not reach its first poll"
+  replacement=$(head -1 "$home/polls")
+  [ "$(cat "$state/.watcher-down")" = "announced:downtime:$generation" ] || fail "fixture: takeover did not select the original generation"
+  if [ "$cleanup" = retained ]; then
+    grep -F "watcher_pid=$LEFT_WATCHER" "$state/.watch-cycle-exits.log" | grep -F "lock_after=pid:$LEFT_WATCHER|" >/dev/null \
+      || fail "fixture: the interrupted watcher released its singleton"
+  fi
+  if [ "$scenario" = scout ]; then
+    printf 'done [at=%s]: finished during takeover\n' "$(date +%s)" > "$state/scout.status"
+  fi
+  # shellcheck disable=SC2086 # Execute the exact bound printed by main_drain.
+  FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@"' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK || fail "fixture: late acknowledgement failed"
+  [ "$(cat "$state/.watcher-down")" = "acked:downtime:$generation" ] && [ ! -s "$state/.wake-queue" ] \
+    || fail "fixture: late acknowledgement did not retire the empty generation"
+  : > "$home/release"
+  if [ "$scenario" = empty ]; then
+    wait_until 300 bash -c 'test "$(wc -l < "$1/polls")" -ge 2 || test -s "$1/hook.rc"' _ "$home" \
+      || fail "the acknowledged replacement did not resume polling"
+    if [ "$(sed -n '2p' "$home/polls")" != "$replacement" ] || hook_exited "$home"; then
+      fail "an empty acknowledgement closed the parked cycle: $(cat "$home/hook.err"; cat "$state/.supervision-host.log")"
+    fi
+    printf 'done [at=%s]: finished during takeover\n' "$(date +%s)" > "$state/scout.status"
+  fi
+  wait_until_deadline 60 hook_exited "$home" || fail "the scout completion did not reach Stop"
+  assert_re '^signal: .*scout\.status$' "$home/hook.err" "the first close after the late acknowledgement must deliver the scout"
+  assert_rewoke_main "$home" "late acknowledgement ($cleanup)"
+  main_drain "$home" > "$home/scout.out"
+  assert_grep 'finished during takeover' "$home/scout.out" "the scout completion did not reach the primary drain"
+  assert_no_re 'rearm-resurface' "$state/.supervision-host.log" "the retired recovery woke the primary"
+  stop_home_processes "$home"
+  pass "host+hook: late acknowledgement ($scenario, $cleanup) keeps the next scout delivery"
+}
+
+test_empty_late_ack() { late_ack_takeover empty clean; }
+test_scout_after_late_ack() { late_ack_takeover scout clean; }
+test_scout_after_late_ack_with_retained_lock() { late_ack_takeover scout retained; }
+
+test_presented_status_history_stays_quiet_on_rearm() {
+  local home state task
+  home=$(make_primary_home presented-history)
+  state="$home/state"
+  for task in archived completed mixed; do
+    printf 'done [at=1]: previously delivered %s\n' "$task" > "$state/$task.status"
+    [ "$task" != mixed ] || printf 'note: directly presented with the completion\n' >> "$state/$task.status"
+    append_wake "$state" signal "$task.status" "signal: $task.status" || fail "fixture: could not queue old status"
+  done
+  # The drain presents only the note from this file. The watcher must still
+  # deliver the preceding scout completion.
+  printf 'done [at=2]: completion behind a note\nnote: visible incidental note\n' > "$state/buried.status"
+  main_drain "$home" > "$home/history.out"
+  assert_no_re 'completion behind a note' "$home/history.out" "fixture: the first drain already showed the buried event"
+  for task in archived completed mixed; do
+    assert_grep "previously delivered $task" "$home/history.out" "fixture: main never saw the old status"
+  done
+  [ -n "$MAIN_ACK" ] || fail "fixture: missing history acknowledgement"
+  # shellcheck disable=SC2086 # Execute the exact bound printed by main_drain.
+  FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@"' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK || fail "fixture: could not acknowledge old signals"
+  [ ! -s "$state/.wake-queue" ] || fail "fixture: old wakes still queued"
+  printf 'needs-decision [at=%s]: new question after restart\n' "$(date +%s)" >> "$state/completed.status"
+  start_hook_session "$home"
+  turn_end "$home"
+  wait_until_deadline 60 hook_exited "$home" || fail "the new status did not reach Stop"
+  assert_rewoke_main "$home" history
+  assert_re '^signal: .*completed\.status$' "$home/hook.err" "the new status must wake main"
+  assert_re 'buried\.status' "$home/hook.err" "the incidental note hid a scout completion"
+  assert_no_re '(archived|mixed)\.status' "$home/hook.err" "a file presented in full replayed as a new signal"
+  main_drain "$home" > "$home/new.out"
+  assert_grep 'new question after restart' "$home/new.out" "the append past the presented cursor was lost"
+  assert_no_re 'previously delivered' "$home/new.out" "previously presented bytes replayed beside a new signal"
+  stop_home_processes "$home"
+  pass "host+hook: re-arm delivers new bytes without replaying previously presented fleet history"
+}
+
 fm_test_run \
+  test_empty_late_ack \
+  test_scout_after_late_ack \
+  test_scout_after_late_ack_with_retained_lock \
+  test_presented_status_history_stays_quiet_on_rearm \
   test_main_only_close_after_handled_turn_restores_inherited_handling \
   test_main_only_close_after_handled_turn_delivers_restore_failure \
   test_returned_driver_is_caught_attended \
@@ -697,6 +1030,11 @@ fm_test_run \
   test_acknowledged_handoff_at_the_turn_keeps_the_pass_through_row \
   test_handoff_retry_respects_the_receiving_pane \
   test_handoff_retry_reaches_the_receiving_herdr_pane \
+  test_claude_stop_hook_rewakes_at_a_park_boundary_over_an_acknowledged_episode \
+  test_park_boundary_handback_reports_a_lock_wait_that_expires \
+  test_successor_handback_reports_a_lock_wait_that_expires \
+  test_park_boundary_handback_reports_a_failed_marker_write \
+  test_queued_close_survives_a_failed_park_boundary_handback \
   test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main \
   test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn \
   test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails \

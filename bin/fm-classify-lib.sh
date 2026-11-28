@@ -1886,18 +1886,38 @@ status_presentation_marker_commit() {
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
 
+# Only direct status annotations present the entire captured span. The
+# serialized drain writes this per-file receipt alongside the fleet cursor,
+# which may also advance when it prints an incidental informational note.
+status_direct_presentation_marker() {  # <status-file>
+  printf '%s/.%s.direct-presentation' "${1%/*}" "${1##*/}"
+}
+
+# Catch an observer up to a completed direct presentation of the same file.
+status_watcher_adopt_presentation() {  # <observer-marker> <status-file> <classified-offset>
+  local marker=$1 file=$2 classified=$3 ident size direct receipt
+  receipt=$(status_direct_presentation_marker "$file")
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  _fm_status_read_ident_size "$file" || return 1
+  ident=$_FM_STAT_IDENTITY size=$_FM_STAT_SIZE
+  direct=$(status_presentation_marker_offset "$receipt" "$file")
+  [ "$direct" -gt "$classified" ] && [ "$direct" -le "$size" ] || return 1
+  status_presentation_marker_commit "$marker" "$file" "$direct" "$ident"
+}
+
 # An optional archive filename is supplied only by teardown. The caller owns
 # path selection and retention; publication also checks for unsafe collisions.
 # No status consumer reads that archive.
 status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
   local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0 archive_published=0
-  local signal_marker heartbeat_marker daemon_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
+  local signal_marker heartbeat_marker daemon_marker direct_marker home_appends home_appends_lock archive=${3:-} archive_tmp=
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
   signal_marker=$(status_signal_seen_marker_path "$state" "$task")
   heartbeat_marker=$(status_heartbeat_seen_marker_path "$state" "$task")
   daemon_marker=$(status_daemon_seen_marker_path "$state" "$task")
+  direct_marker=$(status_direct_presentation_marker "$state/$task.status")
   home_appends="$state/.$task.home-appends"
   home_appends_lock="$home_appends.lock"
 
@@ -1915,7 +1935,8 @@ status_retire_presentation_task() {  # <state> <task-id> [<archive-file>]
     && [ ! -e "$home_appends_lock" ] && [ ! -L "$home_appends_lock" ] \
     && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
     && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
-    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ]; then
+    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ] \
+    && [ ! -e "$direct_marker" ] && [ ! -L "$direct_marker" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi
@@ -1981,7 +2002,7 @@ EOF
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
       "$state/.$task.open-decisions-cursor.timed" \
-      "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
+      "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" "$direct_marker" || rc=1
     fm_lock_remove_path "$home_appends_lock" 2>/dev/null || true
   fi
   if [ "$archive_published" -eq 1 ] && [ "$rc" -ne 0 ] \

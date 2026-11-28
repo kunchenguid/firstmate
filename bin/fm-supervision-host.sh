@@ -123,7 +123,13 @@
 # 27000, under the tracked 28800-second registration) it stops this home's
 # watcher and exits with one "supervision-host: cycle boundary" line, which the
 # owner delivers as an ordinary wake; main drains, acknowledges, and ends its
-# turn, and that turn end starts the next park. The verified Codex asynchronous owner sets
+# turn, and that turn end starts the next park. When that stop leaves an
+# acknowledged episode, the host hands it back as announced downtime before
+# the line. If that hand-back cannot take the marker lock within two seconds
+# or the marker write fails, the host prints a watcher FAILED line and exits 1, and it does
+# not print the boundary line. The successor hand-back uses that same bound and
+# that same failure, so a close that stops the successor cycle cannot wait
+# without a deadline or hide a failed restore. The verified Codex asynchronous owner sets
 # FM_CODEX_MODEL_FREE_PARK=1: its boundary resets the quiet timer while keeping
 # the watcher and recovery generation alive, with no output to the model.
 # All other owners keep the bounded lifecycle. The boundary is checked on
@@ -553,13 +559,16 @@ boundary_exit() {
   park_elapsed
   log_line "boundary	after ${PARK_ELAPSED}s"
   acknowledged_handback 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn'
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   retire_arm "$ARM_PID" "$ARM_OUT"
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   ARM_PID=
   ARM_OUT=
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  if ! hand_back_acknowledged_episode; then
+    fail_handback
+  fi
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
 }
@@ -700,14 +709,30 @@ emit() {  # [line...]
   [ -z "$text" ] || printf '%s\n' "$text"
 }
 
+hand_back_acknowledged_episode() {
+  fm_recovery_marker_read "$STATE/.watcher-down" || return 0
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    acked:*) fm_recovery_marker_handback "$STATE/.watcher-down" 2 >/dev/null 2>&1 ;;
+  esac
+}
+
+fail_handback() {
+  log_line "boundary	downtime-unrestored"
+  printf 'watcher: FAILED - the park-boundary hand-back could not restore watcher downtime\n'
+  exit 1
+}
+
 # Stop the successor cycle: the state main's own turn end starts from without
 # the host.
 retire_successor() {
   [ -n "$SUCCESSOR_PID" ] || return 0
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
-  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  if ! hand_back_acknowledged_episode; then
+    fail_handback
+  fi
 }
 
 # Hand the close to main: stop the successor cycle, print the close, why, and

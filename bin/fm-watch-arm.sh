@@ -627,6 +627,8 @@ stop_home_watcher() {
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   fm_pid_alive "$lock_pid" || return 0
   if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
+    # A failed record leaves the stop on the ordinary downtime recovery path.
+    fm_watcher_planned_stop_record "$STATE" "$lock_pid" "$FM_WATCHER_MATCHED_IDENTITY" || true
     kill -TERM "$lock_pid" 2>/dev/null || true
     i=0
     while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
@@ -662,12 +664,14 @@ fi
 # delivered before the stop landed, 0 once it stopped without delivering, and
 # 1 when it was not stopped (its handover state was unreadable, or it outlived
 # the stop), which leaves it to the plain attach below.
+FM_WATCH_TAKEOVER_FROM=
 take_over_cycle() {  # <watcher-pid> <identity>
-  local pid=$1 i owner_signal
+  local pid=$1 i owner_exit term_sent=0
   cycle_begin "$pid" attached "$2"
   fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
   if attached_holder_live "$pid"; then
-    kill -TERM "$pid" 2>/dev/null || true
+    fm_watcher_planned_stop_record "$STATE" "$pid" "$2" || return 1
+    kill -TERM "$pid" 2>/dev/null && term_sent=1
   fi
   i=0
   while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
@@ -685,19 +689,30 @@ take_over_cycle() {  # <watcher-pid> <identity>
   # Only the owner can wait on this watcher and distinguish our TERM from a
   # self-exit that raced the stop. Give its post-wait ledger append a short bound.
   i=0
-  owner_signal=
+  owner_exit=
   while [ "$i" -lt 50 ]; do
-    owner_signal=$(awk -F '\t' -v arm="$take_over_arm_pid" -v watcher="$pid" '
-      $1 == "arm_pid=" arm && $2 == "watcher_pid=" watcher { signal = $7 }
-      END { sub(/^signal=/, "", signal); print signal }
+    owner_exit=$(awk -F '\t' -v arm="$take_over_arm_pid" -v watcher="$pid" -v since="$cycle_started_at" '
+      $1 == "arm_pid=" arm && $2 == "watcher_pid=" watcher && $3 == "origin=started" &&
+        $5 ~ /^ended_at=[0-9]+$/ && substr($5, 10) + 0 >= since {
+        result = ($6 == "exit_code=143" && $7 == "signal=TERM" && $8 == "reason=signal-exit") ? "confirmed" : "other"
+      }
+      END { print result }
     ' "$CYCLE_LOG" 2>/dev/null || true)
-    [ -z "$owner_signal" ] || break
+    [ -z "$owner_exit" ] || break
     sleep 0.02
     i=$((i + 1))
   done
-  if [ "$owner_signal" = TERM ]; then
-    fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
-      "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
+  if [ "$term_sent" -eq 1 ] && [ "$owner_exit" = confirmed ]; then
+    if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null)" = "$pid" ]; then
+      # Cleanup left the singleton behind. Let its actual reclaimer finish
+      # this close under the steal mutex, without restoring over newer work.
+      case "$FM_RECOVERY_HANDOVER_TOKEN" in
+        acked:*) FM_WATCH_TAKEOVER_FROM="$pid:$2" ;;
+      esac
+    else
+      fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
+        "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
+    fi
     cycle_log_append unknown unknown taken-over none
   else
     cycle_log_append unknown unknown taken-over-unconfirmed-stop none
@@ -799,6 +814,7 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
 # date(1) exposes whole seconds. Keep the configured confirmation budget from
 # collapsing when startup begins just before the next second boundary.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT + 1 ))
+export FM_WATCH_TAKEOVER_FROM
 if [ -n "${FM_WATCH_PREDECESSOR_ARM_PID:-}" ]; then
   FM_WATCH_HANDLING_SUCCESSOR=1 "$WATCH" >"$child_out" &
 else
