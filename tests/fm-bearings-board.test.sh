@@ -769,6 +769,30 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+# A long risk string used to paint into the nowrap badge and clip at the card
+# edge with no ellipsis. The contract now keeps risk as a short tier and puts
+# the rationale in detail, so prose in risk must refuse before any board is
+# written.
+test_build_refuses_a_long_merge_risk_with_a_fixable_message() {
+  local home data rc out
+  home=$(make_home long-merge-risk)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  jq --arg risk 'Gering - der Eingriff betrifft nur, wo smartctl gesucht wird; die Bewertung bleibt unveraendert.' \
+    '.captains_call[1].risk = $risk' "$data" > "$data.tmp" && mv "$data.tmp" "$data"
+  set +e
+  out=$(run_board "$home" build "$data" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a long merge risk string was accepted"
+  assert_contains "$out" "merge risk must be a short tier" \
+    "the long-risk refusal did not name the fix: $out"
+  assert_contains "$out" "put the rationale in detail" \
+    "the long-risk refusal did not point at detail: $out"
+  assert_absent "$home/.lavish/bearings-board.html" "a refused long-risk payload still produced a board"
+  pass "build refuses a long merge risk with a fixable message"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
@@ -787,3 +811,4 @@ test_build_fails_when_reconcile_cannot_establish_a_listener
 test_every_decision_card_carries_the_reconcile_choice
 test_build_refuses_a_payload_that_occupies_the_reconcile_value
 test_build_refuses_a_nondecision_reconcile_value
+test_build_refuses_a_long_merge_risk_with_a_fixable_message
