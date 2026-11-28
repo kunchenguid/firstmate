@@ -21,6 +21,7 @@ fm_worktree_content_in_default() {  # <worktree> <default-branch>
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$worktree" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || {
     merge_status=$?
+    # shellcheck disable=SC2034 # Output global read by fm-teardown.sh after sourcing.
     case "$merge_status" in
       1) ;; # Git completed the merge and found conflicts.
       129) CONTENT_LANDED_PROOF_ERROR='git merge-tree --write-tree was rejected (Git 2.38 or newer required)' ;;
