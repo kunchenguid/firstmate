@@ -670,16 +670,22 @@ FM_COMPOSER_MODE_HINT_RE_DEFAULT='^[[:space:]]*(⏵|⏸)'
 # wrap region walks straight into that row and an idle omp pane reads
 # `pending`, the false verdict that skipped the doorbell on the first live omp
 # worker. A row is omp status furniture when it opens with omp's identity cell
-# then a middle dot (`π` under the unicode preset, `󰵗` under nerd: the
-# `icon.omp` of those omp 18.1.11 presets, never an arbitrary short token, so
+# then a middle dot (`π` under the unicode preset, `󰵗` under the omp 18.1.11
+# nerd preset, `` under the omp v19.2.1 nerd-icon minimal and compact
+# presets: the `icon.omp` of those presets, never an arbitrary short token, so
 # a wrapped typed row such as `fix · tests` stays composer input; the ascii
 # preset's `pi` is deliberately absent because that preset's `sep.dot` is
 # ` - `, so its status row never carries a middle dot and a `pi ·` alternative
 # could only ever match typed text), when it opens with one of omp's spinner
-# frames then an elapsed cell, or when it carries the context-usage cell after
-# a middle dot. It is consulted only as the boundary BELOW a bare composer,
-# never on the composer row itself.
-FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# frames then an elapsed cell, or when it carries the context-usage cell
+# (`%/NNNK`) after a middle dot. The identity and spinner cells may carry an
+# omp `--profile` suffix glued on as `-<name>` (` π-myprofile · …`,
+# ` ⠧-myprofile 7s · …`). A 1M-context model renders the usage cell as
+# `%/1M`, which is ordinary in typed text (`usage · 7%/1M`), so a `%/1M` row is
+# furniture only through the identity or spinner opening, never by that cell.
+# It is consulted only as the boundary BELOW a bare composer, never on the
+# composer row itself.
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗|)(-[[:alnum:]_.-]+)?[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'(-[[:alnum:]_.-]+)?[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
 # Pi's footer stats row opens at column 0 with the session cost when every
 # token counter is zero (`$0.000 (sub) 5.4%/272k (auto)` on pi 0.85.1).
 # That leading `$` is a cost cell, not a dead-shell prompt, only when a digit

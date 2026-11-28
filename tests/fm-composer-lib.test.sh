@@ -674,6 +674,32 @@ test_matrix_omp_status_row_bounds_bare_composer() {
     && fail "typed text opening 'pi ·' must not be mistaken for omp status furniture"
   _fm_composer_row_is_omp_status ' ⣾ 3s  · ◔ GPT-6-Astra' \
     || fail "the status-set omp spinner row must be recognized as furniture"
+  # Live omp v19.2.1 footers on a 1M-context model (minimal and compact
+  # presets, captured in a tmux pane): the usage cell is `%/1M`, so only the
+  # leading identity cell proves furniture, with or without a `--profile`
+  # suffix glued onto it.
+  local row omp_minimal omp_compact omp_minimal_profile omp_compact_profile omp_busy_profile
+  omp_minimal='  ·  …fa/01M8FT5SXKYCGT67EZA5GYEXHR ·  detached                                        4.2%/1M 󰁨'
+  omp_compact='  ·  Opus 5.5 ·  detached                                                              4.2%/1M 󰁨'
+  omp_minimal_profile=' -myprofile ·  …fa/01M8FT5SXKYCGT67EZA5GYEXHR ·  detached                              4.2%/1M 󰁨'
+  omp_compact_profile=' -myprofile ·  Opus 5.5 ·  detached                                                    4.2%/1M 󰁨'
+  omp_busy_profile=' ⠧-myprofile 7s ·  Opus 5.5 ·  detached                                                 4.2%/1M 󰁨'
+  for row in "$omp_minimal" "$omp_compact" "$omp_minimal_profile" "$omp_compact_profile" "$omp_busy_profile" ' π-myprofile  · ◔ GPT-6-Astra · ◫ 7%/1M'; do
+    _fm_composer_row_is_omp_status "$row" \
+      || fail "a live omp 1M footer must be recognized as furniture: '$row'"
+    assert_screen "idle omp with 1M footer '$row'" empty "$CAPS_STYLED" $'transcript line\n\n❯\n'"$row"
+  done
+  assert_screen "typed omp text above a 1M footer is pending" pending "$CAPS_STYLED" $'transcript line\n\n❯ ship it\n'"$omp_compact"
+  _fm_composer_row_is_omp_status 'deploy · eta 50%/3m' \
+    && fail "a draft line with a lowercase minutes cell must not be mistaken for omp status furniture"
+  # A wrapped draft whose continuation row merely contains `%/1M` is typed
+  # input, not the 1M footer: the whole draft must read back, or a backend
+  # proving its payload before Enter refuses to submit it.
+  _fm_composer_row_is_omp_status 'usage · 7%/1M' \
+    && fail "a draft line carrying '%/1M' must not be mistaken for omp status furniture"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" $'transcript line\n\n❯ please document\nusage · 7%/1M')
+  [ "$out" = 'please document usage · 7%/1M' ] \
+    || fail "a wrapped draft ending in '%/1M' should extract whole, got '$out'"
   assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
   assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
   assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
