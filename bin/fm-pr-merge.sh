@@ -676,12 +676,15 @@ merge_control_cleanup() {
   MERGE_CONTROL_LOCK=
 }
 MERGE_CONFIRMED=false
-# Locks are released first: the attempt record takes the meta lock itself.
+# The attempt is recorded before the locks this run still holds are released,
+# so teardown cannot take the control lock and read the task record first; the
+# record takes the meta lock after them unless this run already holds it.
 merge_attempt_exit() {
-  local rc=$?
-  merge_control_cleanup
+  local rc=$? held=false
+  [ -z "$MERGE_META_LOCK" ] || held=true
   fm_merge_attempt_report_exit "$STATE" "$ID" "$MERGE_EXPECTED_SPAWN_GEN" \
-    fm-pr-merge "$rc" "$MERGE_CONFIRMED"
+    fm-pr-merge "$rc" "$MERGE_CONFIRMED" "$held"
+  merge_control_cleanup
   return "$rc"
 }
 trap merge_attempt_exit EXIT
@@ -1923,12 +1926,8 @@ case "$PROVIDER" in
       FM_PR_GITHUB_MERGE_ACCEPTED=true
       persist_accepted_merge_authority || exit 1
       fm_afk_contract_lock_release || true
-      fm_lock_release "$MERGE_CONTROL_LOCK" || true
-      MERGE_CONTROL_LOCK=
     else
       fm_afk_contract_lock_release || true
-      fm_lock_release "$MERGE_CONTROL_LOCK" || true
-      MERGE_CONTROL_LOCK=
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
       if github_read_outcome; then
         if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
@@ -1956,6 +1955,8 @@ case "$PROVIDER" in
       github_report_unmerged_outcome
       exit 1
     fi
+    fm_lock_release "$MERGE_CONTROL_LOCK" || true
+    MERGE_CONTROL_LOCK=
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
@@ -1978,8 +1979,6 @@ case "$PROVIDER" in
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then
       fm_afk_contract_lock_release || true
-      fm_lock_release "$MERGE_CONTROL_LOCK" || true
-      MERGE_CONTROL_LOCK=
       exit "$merge_status"
     fi
     persist_accepted_merge_authority || exit 1
@@ -2026,8 +2025,6 @@ case "$PROVIDER" in
     done
     if [ "$forgejo_confirm_rc" -ne 0 ]; then
       fm_afk_contract_lock_release || true
-      fm_lock_release "$MERGE_CONTROL_LOCK" || true
-      MERGE_CONTROL_LOCK=
       [ -z "$merge_output" ] || printf 'error: > %s\n' "$merge_output" >&2
       echo "error: Forgejo did not confirm $URL as merged" >&2
       exit 1

@@ -23,22 +23,26 @@
 # bin/fm-wake-lib.sh and bin/fm-backlog-transition-lib.sh, as both merge scripts
 # do; the reader needs neither.
 
-# fm_merge_attempt_record <state> <task-id> <spawn-gen> <outcome> <script> [exit-status]
+# fm_merge_attempt_record <state> <task-id> <spawn-gen> <outcome> <script> <meta-lock-held> [exit-status]
 #
-# Writes the record under the task's meta lock, which the caller must not hold,
-# only while the task record still carries <spawn-gen> (empty for a legacy
-# record with none), so a later incarnation of the same id is never marked.
+# Writes the record under the task's meta lock, taking it unless
+# <meta-lock-held> is true (the caller already holds it), only while the task
+# record still carries <spawn-gen> (empty for a legacy record with none), so a
+# later incarnation of the same id is never marked. A caller still holding the
+# task's control lock keeps teardown out until the record lands.
 # Returns 0 when recorded or when the task record is gone, 1 otherwise.
-fm_merge_attempt_record() {  # <state> <task-id> <spawn-gen> <outcome> <script> [exit-status]
-  local state=$1 id=$2 spawn_gen=$3 outcome=$4 script=$5 rc=${6-}
-  local meta lock tmp='' line status=0
+fm_merge_attempt_record() {  # <state> <task-id> <spawn-gen> <outcome> <script> <meta-lock-held> [exit-status]
+  local state=$1 id=$2 spawn_gen=$3 outcome=$4 script=$5 held=$6 rc=${7-}
+  local meta lock='' tmp='' line status=0
   case "$outcome" in merged|queued) ;; refused) [ -n "$rc" ] || return 1 ;; *) return 1 ;; esac
   case "$rc" in *[!0-9]*) return 1 ;; esac
   meta="$state/$id.meta"
   [ -e "$meta" ] || return 0
   line="last_merge_attempt=$outcome $(date +%s) $script${rc:+ exit=$rc}"
-  lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock" || return 1
+  if [ "$held" != true ]; then
+    lock=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$lock" || return 1
+  fi
   if [ ! -e "$meta" ]; then
     :
   elif ! fm_backlog_meta_spawn_gen_optional "$meta" "$state" \
@@ -52,17 +56,18 @@ fm_merge_attempt_record() {  # <state> <task-id> <spawn-gen> <outcome> <script> 
     status=1
   fi
   [ "$status" -eq 0 ] || [ -z "$tmp" ] || rm -f -- "$tmp"
-  fm_lock_release "$lock" || status=1
+  [ -z "$lock" ] || fm_lock_release "$lock" || status=1
   return "$status"
 }
 
-# fm_merge_attempt_report_exit <state> <task-id> <spawn-gen> <script> <exit-status> <confirmed>
+# fm_merge_attempt_report_exit <state> <task-id> <spawn-gen> <script> <exit-status> <confirmed> <meta-lock-held>
 #
-# The exit-trap form both merge scripts call: a non-zero <exit-status> records
-# refused, otherwise <confirmed> true records merged and anything else queued.
-# A failed write warns on stderr; the caller's exit status is unaffected.
-fm_merge_attempt_report_exit() {  # <state> <task-id> <spawn-gen> <script> <exit-status> <confirmed>
-  local state=$1 id=$2 spawn_gen=$3 script=$4 rc=$5 confirmed=$6 outcome
+# The exit-trap form both merge scripts call before releasing their task locks:
+# a non-zero <exit-status> records refused, otherwise <confirmed> true records
+# merged and anything else queued. A failed write warns on stderr; the caller's
+# exit status is unaffected.
+fm_merge_attempt_report_exit() {  # <state> <task-id> <spawn-gen> <script> <exit-status> <confirmed> <meta-lock-held>
+  local state=$1 id=$2 spawn_gen=$3 script=$4 rc=$5 confirmed=$6 held=$7 outcome
   if [ "$rc" -ne 0 ]; then
     outcome=refused
   elif [ "$confirmed" = true ]; then
@@ -72,7 +77,7 @@ fm_merge_attempt_report_exit() {  # <state> <task-id> <spawn-gen> <script> <exit
     outcome=queued
     rc=
   fi
-  fm_merge_attempt_record "$state" "$id" "$spawn_gen" "$outcome" "$script" "$rc" && return 0
+  fm_merge_attempt_record "$state" "$id" "$spawn_gen" "$outcome" "$script" "$held" "$rc" && return 0
   printf 'warning: could not record this %s merge attempt (%s) in task %s metadata\n' \
     "$script" "$outcome" "$id" >&2
   return 0

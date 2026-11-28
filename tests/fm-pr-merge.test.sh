@@ -862,6 +862,24 @@ test_merge_failure_propagates_after_recording() {
   mkdir -p "$case_dir/wt"
   add_gh_mocks_merge_fails "$case_dir"
   : > "$case_dir/gh-axi.log"
+  # A `date +%s` stand-in probes the task control lock the moment the attempt
+  # record takes its timestamp: teardown try-acquires that lock first, so the
+  # refusal must land while this run still holds it.
+  cat > "$case_dir/fakebin/date" <<SH
+#!/usr/bin/env bash
+PATH=\${PATH#"$case_dir/fakebin:"}
+if [ "\$#" -eq 1 ] && [ "\$1" = +%s ]; then
+  . "$ROOT/bin/fm-wake-lib.sh"
+  if fm_lock_try_acquire "$case_dir/state/.control-task-x1.lock"; then
+    fm_lock_release "$case_dir/state/.control-task-x1.lock"
+    echo free >> "$case_dir/control-lock-probe"
+  else
+    echo held >> "$case_dir/control-lock-probe"
+  fi
+fi
+exec date "\$@"
+SH
+  chmod +x "$case_dir/fakebin/date"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/13 \
@@ -874,6 +892,8 @@ test_merge_failure_propagates_after_recording() {
     "merge-fails: pr= should already be recorded even though the merge itself failed"
   grep -Eq '^last_merge_attempt=refused [0-9]+ fm-pr-merge exit=1$' "$case_dir/state/task-x1.meta" \
     || fail "merge-fails: the refused merge was not recorded as the latest attempt"
+  [ "$(tail -n 1 "$case_dir/control-lock-probe" 2>/dev/null)" = held ] \
+    || fail "merge-fails: the refusal was recorded after the task control lock was released"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
 }
 

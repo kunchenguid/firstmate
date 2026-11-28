@@ -81,12 +81,18 @@ merge_control_cleanup() {
   MERGE_CONTROL_LOCK=
 }
 MERGE_CONFIRMED=false
-# Locks are released first: the attempt record takes the meta lock itself.
+# The attempt is recorded before the control and meta locks this run still
+# holds are released, so teardown cannot take them and read the task record
+# first; the record takes the meta lock itself unless this run already holds
+# it. The checkout lock is released first: the record needs no checkout.
 merge_attempt_exit() {
-  local rc=$?
-  merge_control_cleanup
+  local rc=$? held=false
+  [ -z "$MERGE_PROJECT_LOCK" ] || fm_lock_release "$MERGE_PROJECT_LOCK" || true
+  MERGE_PROJECT_LOCK=
+  [ -z "$MERGE_META_LOCK" ] || held=true
   fm_merge_attempt_report_exit "$STATE" "$ID" "$MERGE_EXPECTED_SPAWN_GEN" \
-    fm-merge-local "$rc" "$MERGE_CONFIRMED"
+    fm-merge-local "$rc" "$MERGE_CONFIRMED" "$held"
+  merge_control_cleanup
   return "$rc"
 }
 trap merge_attempt_exit EXIT
@@ -211,11 +217,11 @@ if [ "$merge_status" -ne 0 ]; then
     exit 1
   }
 fi
+[ "$merge_status" -eq 0 ] || exit "$merge_status"
 fm_lock_release "$MERGE_META_LOCK" || true
 MERGE_META_LOCK=
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
-[ "$merge_status" -eq 0 ] || exit "$merge_status"
 MERGE_CONFIRMED=true
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 fm_lock_release "$MERGE_PROJECT_LOCK" || true
