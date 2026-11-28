@@ -130,11 +130,10 @@
 # not genuinely this task's destroys another worker's live work. Before the first
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# in its worktree= or home=, except that a positive claim for this task permits
+# another non-secondmate record for the same slot: that record's teardown is
+# records-only. If the claim instead names another task, this teardown is
+# records-only and skips the scan. A secondmate record still blocks the return.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -175,7 +174,8 @@
 # every local Firstmate home hold the same lock from before slot allocation
 # through metadata publication, closing the publication
 # gap; forced secondmate teardown takes it and runs the same checks for every
-# descendant Treehouse slot before touching any child.
+# descendant Treehouse slot before touching any child. Lock acquisition waits
+# up to 15 seconds before refusing.
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.

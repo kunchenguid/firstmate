@@ -214,7 +214,8 @@
 #   because the existing task's control lock covers it.
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
 #   root Firstmate home's state directory before slot allocation and holds it through
-#   task metadata publication. Teardown holds that same lock while proving and
+#   task metadata publication, waiting up to 15 seconds before refusing.
+#   Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that same lock it writes the slot's owner claim, which is
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
