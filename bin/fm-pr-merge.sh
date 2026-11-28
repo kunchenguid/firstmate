@@ -53,6 +53,11 @@
 # source fails, so known missing checks and all read errors are reported together.
 # github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
 # exception; every other unreadable required source refuses.
+# While that exception applies, the checks this home declares for the
+# repository stand in for the hidden rules, and each must have succeeded at the
+# head from its declared app and event; docs/configuration.md "GitHub required
+# checks on plans without branch rules" owns the file and
+# github_declared_checks_unmet (bin/fm-pr-lib.sh) owns the matching.
 # Every failing condition is reported, not just the first.
 # The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
@@ -1138,6 +1143,7 @@ github_checks_not_green() {
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
   local json fields line red failed name covered missing unreported producers pending
+  local verdict source
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
   FM_PR_GITHUB_BEHIND=false
@@ -1285,6 +1291,37 @@ EOF
       unreported="${unreported:+$unreported, }$name"
     done <<EOF
 $missing
+EOF
+  fi
+  if ! github_declared_checks_unmet "$live_head"; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
+    refusals="$refusals  - $FM_PR_GITHUB_DECLARED_ERROR, so a declared required check cannot be judged
+"
+  else
+    while IFS=$'\t' read -r verdict name source; do
+      [ -n "$name" ] || continue
+      if [ "$verdict" = unreported ]; then
+        [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "${ALLOW_MISSING[0]}" = "$name" ] && continue
+        refusals="$refusals  - declared required check '$name' ($source) has not reported at head $live_head
+"
+        FM_PR_GITHUB_UNREPORTED=true
+        unreported="${unreported:+$unreported, }$name"
+        continue
+      fi
+      [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "${ALLOW_RED[0]}" = "$name" ] && continue
+      refusals="$refusals  - declared required check '$name' ($source) has not succeeded at head $live_head
+"
+      if [ "$verdict" = pending ]; then
+        FM_PR_GITHUB_CHECKS_PENDING=true
+      else
+        FM_PR_GITHUB_CHECKS_FAILED=true
+      fi
+      case ", $uncovered, " in
+        *", $name, "*) ;;
+        *) uncovered="${uncovered:+$uncovered, }$name" ;;
+      esac
+    done <<EOF
+$FM_PR_GITHUB_DECLARED_UNMET
 EOF
   fi
 

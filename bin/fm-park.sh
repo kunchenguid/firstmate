@@ -28,7 +28,9 @@
 #     base branch requires has also reported on the head, read with
 #     bin/fm-pr-merge.sh's required-check reading (bin/fm-pr-lib.sh), because
 #     the rollup holds only checks that reported; an unreadable requirement
-#     is unclean;
+#     is unclean; on a plan that hides branch rules, each check the home
+#     declares for the repository must also have succeeded from its declared
+#     app and event;
 #   - no changes requested (GitHub reviewDecision; GitLab requested_changes);
 #   - zero unresolved review threads, all of them read (a failed GitLab
 #     discussions read counts as not all read);
@@ -376,9 +378,11 @@ GITLAB_NORMALIZE='
            touched: (.updated_at // .created_at), on_head: false, approval_only: false}]
     }'
 
-# The required checks of the PR's base branch that have not reported on its
-# head, as a JSON array, read with the same required-check reading
-# bin/fm-pr-merge.sh does; fails when any requirement cannot be read.
+# The required checks of the PR's base branch that have not passed on its head,
+# read with the same required-check reading bin/fm-pr-merge.sh does, as
+# {missing, unmet}: missing names the required checks that have not reported,
+# and unmet names the declared required checks of a plan without branch rules
+# that reported without succeeding; fails when any requirement cannot be read.
 github_required_unreported() {  # <graphql-json>
   local raw=$1 base head rollup secs missing
   base=$(printf '%s' "$raw" | jq -er '.data.repository.pullRequest.baseRefName | select(type == "string" and length > 0)') || return 1
@@ -388,15 +392,24 @@ github_required_unreported() {  # <graphql-json>
   # shellcheck disable=SC2016
   missing=$(fm_run_timed "$secs" bash -c '
     . "$1/fm-pr-lib.sh"
-    PR_OWNER=$2 PR_REPO=$3
+    PR_HOST=$7 PR_OWNER=$2 PR_REPO=$3
     github_read_required_contexts "$4" && github_read_required_producers "$5" \
-      && github_required_checks_missing "$6" "$FM_PR_GITHUB_REQUIRED" "$FM_PR_GITHUB_PRODUCERS"' \
-    _ "$SCRIPT_DIR" "$FM_PR_OWNER" "$FM_PR_REPO" "$base" "$head" "$rollup" 2>/dev/null) || return 1
-  printf '%s' "$missing" | jq -Rsc 'split("\n") | map(select(length > 0))'
+      && missing=$(github_required_checks_missing "$6" "$FM_PR_GITHUB_REQUIRED" "$FM_PR_GITHUB_PRODUCERS") \
+      && github_declared_checks_unmet "$5" || exit 1
+    while IFS= read -r name; do
+      [ -z "$name" ] || printf "missing\t%s\n" "$name"
+    done <<< "$missing"
+    printf "%s\n" "$FM_PR_GITHUB_DECLARED_UNMET"' \
+    _ "$SCRIPT_DIR" "$FM_PR_OWNER" "$FM_PR_REPO" "$base" "$head" "$rollup" "$FM_PR_HOST" 2>/dev/null) || return 1
+  printf '%s' "$missing" | jq -Rsc '
+    split("\n") | map(select(length > 0) | split("\t"))
+    | {missing: [.[] | select(.[0] == "missing" or .[0] == "unreported") | .[1]],
+       unmet: [.[] | select(.[0] == "pending" or .[0] == "failed") | .[1]]}'
 }
 
 # snapshot <pr-url> [--required]: --required adds required_missing, the GitHub
-# required checks not yet reported on the head (null when unreadable), which
+# required checks not yet reported on the head (null when unreadable), and
+# required_unmet, the declared ones that reported without succeeding, which
 # only the gate reads.
 snapshot() {  # <pr-url> [--required]
   local url=$1 raw mr discussions enc secs snap missing complete
@@ -420,7 +433,8 @@ snapshot() {  # <pr-url> [--required]
       snap=$(printf '%s' "$raw" | jq -c "$GITHUB_NORMALIZE" 2>/dev/null) || return 1
       [ "${2-}" = --required ] || { printf '%s\n' "$snap"; return 0; }
       missing=$(github_required_unreported "$raw") || missing=null
-      printf '%s' "$snap" | jq -c --argjson m "$missing" '. + {required_missing: $m}'
+      printf '%s' "$snap" | jq -c --argjson m "$missing" '
+        . + {required_missing: $m.missing, required_unmet: ($m.unmet // [])}'
       ;;
     gitlab)
       command -v glab >/dev/null 2>&1 || return 1
@@ -472,6 +486,9 @@ GATE_PROGRAM="$JQ_TIME"'
       (if ($s | has("required_missing") | not) then empty
        elif $s.required_missing == null then "the required checks of the base branch could not be read"
        elif ($s.required_missing | length) > 0 then "required check(s) \($s.required_missing | join(", ")) have not reported on head \($s.head[0:12])"
+       else empty end),
+      (if (($s.required_unmet // []) | length) > 0
+       then "required check(s) \($s.required_unmet | join(", ")) have not succeeded on head \($s.head[0:12])"
        else empty end),
       (if $s.changes_requested then "changes are requested" else empty end),
       (if $s.threads_unresolved > 0 then "\($s.threads_unresolved) review thread(s) unresolved" else empty end),
