@@ -35,6 +35,7 @@ Exactly one signal selects hc, after every other surface marker has had its say:
 - `app-terminal`: this process's own `HC_TERMINAL_ID` terminal carries a non-empty `herdr.space` label in its core's record.
   The check is read-only and gated: a unix connect must first prove `HC_TERMINAL_SOCKET` live, because `hc` starts a core on contact with a missing socket and a bare `hc get` could create state; then one `hc get` reads the label through the resolved binary.
   Missing markers, a dead socket, a missing or unusable `hc`/`jq` toolchain, a `get` failure, or an empty label are all a miss, never a detection.
+  A Windows device path (`\\.\pipe\...`, as Herdr exports for `HC_TERMINAL_SOCKET` on Windows) is refused as a miss before any probe, because it is never a POSIX socket and probing a live named pipe blocks unkillably under MSYS.
 
 A live `herdr-app.sock` or an open window is deliberately not a signal: every process on the host can see it, so it cannot tell a Firstmate inside an app terminal from one on a bare shell while the window happens to be open elsewhere.
 Live testing against the real app confirmed the ambiguity - marker-less processes selected hc solely because a window existed - so only the terminal-level claim above can auto-select hc.
