@@ -84,6 +84,8 @@ tests/fm-ci-workflow.test.sh	13889
 tests/fm-classify-corr-token.test.sh	24516
 tests/fm-classify-decision-key.test.sh	3785
 tests/fm-claude-account-quota.test.sh	697
+tests/fm-claude-permission-live-e2e.test.sh	200
+tests/fm-claude-permission.test.sh	5500
 tests/fm-claude-stop-autoarm-live-e2e.test.sh	286
 tests/fm-claude-stop-autoarm.test.sh	95848
 tests/fm-claude-tool-exclude-live.test.sh	188
