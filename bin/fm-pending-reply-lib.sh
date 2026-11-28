@@ -613,13 +613,16 @@ fm_pending_reply_line_resolves() {  # <line> <corr_id>
 fm_pending_reply_find_resolve_line() {  # <status-file> <corr_id>
   local status_file=$1 corr=$2 line
   [ -f "$status_file" ] || return 0
+  # Only a line holding the literal token can resolve, so grep narrows the log
+  # first: the per-line check forks, and the watcher runs this scan for every
+  # open request against status logs that only grow.
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || continue
     if fm_pending_reply_line_resolves "$line" "$corr"; then
       printf '%s' "$line"
       return 0
     fi
-  done < "$status_file"
+  done < <(LC_ALL=C grep -aF -e "$(fm_pending_reply_corr_token "$corr")" -- "$status_file" 2>/dev/null)
   return 0
 }
 
