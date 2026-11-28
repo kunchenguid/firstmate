@@ -159,6 +159,7 @@ fm_pid_start_time() {
   printf '%s\n' "$out"
 }
 
+# The default stat reads a symlink's own mtime, including a dangling link.
 fm_path_mtime() {
   if [ "$_FM_UNAME" = Darwin ]; then
     /usr/bin/stat -f %m "$1" 2>/dev/null
@@ -167,6 +168,7 @@ fm_path_mtime() {
   fi
 }
 
+# Age is for old-record checks, never for deciding whether to destroy a lock.
 fm_path_age() {
   local path=$1 m now
   m=$(fm_path_mtime "$path") || { echo 999999; return; }
@@ -702,8 +704,25 @@ fm_lock_claim_blocked_by_steal() {
   return 0
 }
 
+# Failed confirmation is contention only when a foreign link is observed.
+fm_lock_classify_lost_publication() {
+  local lockdir=$1 ownerdir=$2 observed
+  observed=$(readlink "$lockdir" 2>/dev/null || true)
+  if [ "$observed" = "$ownerdir" ]; then
+    FM_LOCK_CREATE_VERDICT=verified-owned
+    FM_LOCK_CREATE_CAUSE=
+  elif [ -n "$observed" ]; then
+    FM_LOCK_CREATE_VERDICT=contended
+    FM_LOCK_CREATE_CAUSE='holder-pid-unreadable'
+  else
+    FM_LOCK_CREATE_VERDICT=publication-lost
+    FM_LOCK_CREATE_CAUSE='publication-lost'
+  fi
+}
+
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
+  FM_LOCK_CREATE_CAUSE='owner-write-failed'
   fm_current_pid mypid || return 1
   # The pid write goes through a same-directory rename: a plain truncating
   # redirect killed mid-write would leave the linked owner dir with an empty
@@ -721,10 +740,15 @@ fm_lock_claim() {
     return 1
   fi
   if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-    fm_lock_discard_owner "$ownerdir"
-    return 1
+    fm_lock_classify_lost_publication "$lockdir" "$ownerdir"
+    if [ "$FM_LOCK_CREATE_VERDICT" != verified-owned ]; then
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
   fi
   if fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+    FM_LOCK_CREATE_VERDICT=contended
+    FM_LOCK_CREATE_CAUSE='reclaim-marker-held'
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
@@ -755,10 +779,37 @@ fm_lock_wait_pending_mutation() {
   fi
 }
 
+# Only a non-directory that is not this lock's own protocol link is an invalid
+# shape. A directory, a protocol link (even dangling mid-reclaim) or a name
+# that vanished again is contention that the caller resolves by inspection.
+fm_lock_classify_taken_name() {  # <lockdir>
+  local lockdir=$1 owner lock_abs
+  FM_LOCK_CREATE_VERDICT=contended
+  FM_LOCK_CREATE_CAUSE='holder-pid-unreadable'
+  if [ -L "$lockdir" ]; then
+    [ ! -d "$lockdir" ] || return 0
+    owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    if lock_abs=$(fm_lock_abs_path "$lockdir"); then
+      case "$owner" in "$lock_abs".owner.*) return 0 ;; esac
+    fi
+  elif [ -d "$lockdir" ] || [ ! -e "$lockdir" ]; then
+    return 0
+  fi
+  FM_LOCK_CREATE_VERDICT=name-taken
+  FM_LOCK_CREATE_CAUSE='lock-path-occupied'
+}
+
+# fm_lock_try_create <lockdir> [allowed-steal-owner]
+# Publishes FM_LOCK_CREATE_VERDICT: created, contended, name-taken, refused,
+# or publication-lost; FM_LOCK_CREATE_CAUSE carries the concrete reason.
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir=
   local FM_LOCK_PENDING_PREVIOUS_PID FM_LOCK_PENDING_PID=
   FM_LOCK_OWNER_DIR=
+  FM_LOCK_CREATE_VERDICT=refused
+  FM_LOCK_CREATE_CAUSE='parent-unresolvable'
+  fm_lock_abs_path "$lockdir" >/dev/null || return 1
+  FM_LOCK_CREATE_CAUSE='create-denied'
   if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
     # This bash also applies nounset to ${!:-}; isolate the safe probe.
     FM_LOCK_PENDING_PREVIOUS_PID=$(set +u; printf '%s' "$!")
@@ -785,25 +836,44 @@ fm_lock_try_create() {
     FM_LOCK_PENDING_PID=
   fi
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
+    fm_lock_classify_taken_name "$lockdir"
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  FM_LOCK_CREATE_CAUSE='owner-write-failed'
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
   ln -s "$ownerdir" "$lockdir" 2>/dev/null &
   FM_LOCK_PENDING_PID=$!
-  if wait "$FM_LOCK_PENDING_PID" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if wait "$FM_LOCK_PENDING_PID"; then
+    if ! fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+      fm_lock_classify_lost_publication "$lockdir" "$ownerdir"
+      if [ "$FM_LOCK_CREATE_VERDICT" != verified-owned ]; then
+        fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+        fm_lock_discard_owner "$ownerdir"
+        return 1
+      fi
+    fi
+    FM_LOCK_CREATE_VERDICT=refused
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
+      FM_LOCK_CREATE_VERDICT=created
+      FM_LOCK_CREATE_CAUSE=
       return 0
     fi
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
       rm -f "$lockdir" 2>/dev/null || true
     fi
   else
-    fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    if ln -s "$ownerdir" "${ownerdir}.probe" 2>/dev/null; then
+      rm -f "${ownerdir}.probe" 2>/dev/null || true
+      fm_lock_classify_taken_name "$lockdir"
+    else
+      FM_LOCK_CREATE_VERDICT=refused
+      FM_LOCK_CREATE_CAUSE='create-denied'
+    fi
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
@@ -825,13 +895,38 @@ fm_lock_remove_path() {
   rmdir "$lockdir" 2>/dev/null
 }
 
+# Classify the lock link's own mtime. Failure never authorizes a reclaim.
+# Absence is proven by enumerating its parent, not by testing the target.
+fm_lock_freshness() {
+  local lockdir=$1 m now threshold parent base entries
+  FM_LOCK_FRESHNESS=unreadable
+  FM_LOCK_AGE=
+  if m=$(fm_path_mtime "$lockdir") && [[ "$m" =~ ^[0-9]+$ ]]; then
+    fm_epoch_seconds_to now
+    FM_LOCK_AGE=$((now - m))
+    threshold=$FM_LOCK_STALE_AFTER
+    [ "$threshold" -ge 2 ] || threshold=2
+    if [ "$FM_LOCK_AGE" -lt "$threshold" ]; then
+      FM_LOCK_FRESHNESS=fresh
+    else
+      FM_LOCK_FRESHNESS=stale
+    fi
+    return 0
+  fi
+  fm_dirname_to parent "$lockdir"
+  fm_basename_to base "$lockdir"
+  entries=$(ls -A -- "$parent" 2>/dev/null) || return 0
+  if ! printf '%s\n' "$entries" | grep -F -x -- "$base" >/dev/null; then
+    FM_LOCK_FRESHNESS=absent
+  fi
+}
+
 fm_lock_mid_acquire_is_fresh() {
-  local lockdir=$1 pid=$2 mid_acquire_stale
+  local lockdir=$1 pid=$2
   case "$pid" in
     ''|*[!0-9]*)
-      mid_acquire_stale=$FM_LOCK_STALE_AFTER
-      [ "$mid_acquire_stale" -lt 2 ] && mid_acquire_stale=2
-      [ "$(fm_path_age "$lockdir")" -lt "$mid_acquire_stale" ]
+      fm_lock_freshness "$lockdir"
+      [ "$FM_LOCK_FRESHNESS" != stale ]
       return
       ;;
   esac
@@ -844,7 +939,10 @@ fm_lock_nested_owners_stale() {
   local lockdir=$1 base=${2:-${1##*/}} owner pid
   for owner in "$lockdir/$base.owner."*; do
     [ -d "$owner" ] && [ ! -L "$owner" ] || continue
-    pid=$(cat "$owner/pid" 2>/dev/null || true)
+    if ! pid=$(cat "$owner/pid" 2>/dev/null); then
+      fm_lock_pid_absent "$owner" || return 1
+      pid=
+    fi
     fm_lock_holder_alive "$owner" "$pid" && return 1
     fm_lock_mid_acquire_is_fresh "$owner" "$pid" && return 1
   done
@@ -873,7 +971,10 @@ fm_lock_reap_dead_directory() {
       exit 1
     fi
     [ ! -L "$lock_abs" ] && [ . -ef "$lock_abs" ] || exit 1
-    directory_pid=$(cat ./pid 2>/dev/null || true)
+    if ! directory_pid=$(cat ./pid 2>/dev/null); then
+      fm_lock_pid_absent . || exit 1
+      directory_pid=
+    fi
     fm_lock_holder_alive "$lock_abs" "$directory_pid" && exit 1
     fm_lock_mid_acquire_is_fresh . "$directory_pid" && exit 1
     fm_lock_nested_owners_stale . "$base" || exit 1
@@ -896,6 +997,44 @@ fm_lock_reap_dead_directory() {
   return 1
 }
 
+# Return 0 only when enumeration proves there is no pid entry, or the owner
+# behind a dangling lock link is positively removed; 1 when one exists and 2
+# when the owner cannot be enumerated. A failed existence test cannot
+# distinguish an unsearchable directory from an absent pid.
+fm_lock_pid_absent() {
+  local entries owner
+  if ! entries=$(ls -A -- "$1" 2>/dev/null); then
+    [ -L "$1" ] && owner=$(fm_lock_link_owner "$1" 2>/dev/null) \
+      && fm_lock_path_removed "$owner" && return 0
+    return 2
+  fi
+  if printf '%s\n' "$entries" | grep -F -x -- pid >/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+# A stable real directory that cannot be searched is a named blocker. This
+# read-only probe never reaps it and never diagnoses a replaced successor.
+fm_lock_note_unsearchable_directory() {
+  local path=$1 before after
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  if [ "$_FM_UNAME" = Darwin ]; then
+    before=$(/usr/bin/stat -f '%d:%i' "$path" 2>/dev/null) || return 1
+  else
+    before=$(stat -c '%d:%i' "$path" 2>/dev/null) || return 1
+  fi
+  (cd -- "$path" 2>/dev/null) && return 1
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  if [ "$_FM_UNAME" = Darwin ]; then
+    after=$(/usr/bin/stat -f '%d:%i' "$path" 2>/dev/null) || return 1
+  else
+    after=$(stat -c '%d:%i' "$path" 2>/dev/null) || return 1
+  fi
+  [ "$before" = "$after" ] || return 1
+  FM_LOCK_RECLAIM_FAILED_PATH=$path
+}
+
 fm_lock_recheck_stale_owner() {
   local lockdir=$1 expected_owner=$2 expected_pid=$3 actual_pid
   if [ -n "$expected_owner" ]; then
@@ -903,7 +1042,11 @@ fm_lock_recheck_stale_owner() {
   elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
   fi
-  actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if ! actual_pid=$(cat "$lockdir/pid" 2>/dev/null); then
+    # Refuse a reclaim unless the owner can be enumerated without a pid.
+    fm_lock_pid_absent "$lockdir" || return 1
+    actual_pid=
+  fi
   [ "$actual_pid" = "$expected_pid" ] || return 1
   if fm_lock_holder_alive "$lockdir" "$actual_pid"; then
     return 1
@@ -1521,6 +1664,7 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
   local lockdir=$1 current
   FM_LOCK_OWNER_DIR=
   fm_lock_try_create "$lockdir" && return 0
+  case "$FM_LOCK_CREATE_VERDICT" in refused|name-taken|publication-lost) return 1 ;; esac
   fm_current_pid current || return 1
   fm_lock_reap_dead_link "$lockdir.steal" || true
   if [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$current" ]; then
@@ -1531,114 +1675,176 @@ fm_lock_try_acquire_steal_mutex() {  # <steal-lock>
   fm_lock_try_create "$lockdir"
 }
 
+# fm_lock_try_acquire <lockdir> [marker-bound]
+# Publishes FM_LOCK_OUTCOME as acquired, held, or refused and FM_LOCK_CAUSE.
+# FM_LOCK_HELD_PID is advisory only for held; FM_LOCK_OWNER_DIR identifies
+# the owner on acquisition. Creation retries are bounded to three per frame.
 fm_lock_try_acquire() {
-  local lockdir=$1 marker_publish_bound=${2:-} pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 marker_publish_bound=${2:-} pid steal cur steal_owner primary_owner current pid_status attempt=0
+  local observed_contention=0 publication_lost=0
   FM_LOCK_HELD_PID=
   FM_LOCK_HELD_PATH=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
   FM_LOCK_RECLAIM_FAILED_PATH=
-
-  if fm_lock_try_create "$lockdir"; then
-    return 0
-  fi
-
-  fm_current_pid current || return 1
-  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
-    # The recorded holder is THIS very process. Single-threaded bash can only
-    # observe that when an interrupting trap abandoned the frame that held the
-    # lock mid-critical-section (e.g. TERM inside a recovery-marker section,
-    # with the EXIT path then re-acquiring the same lock), and every
-    # lock-taking trap path in this repo exits rather than resuming the
-    # interrupted frame. Spinning here deadlocks the exit path against itself
-    # - the hang reproduced by the self-held reclaim regression in
-    # tests/fm-wake-queue.test.sh - so reclaim the abandoned hold instead.
-    fm_lock_remove_path "$lockdir" || true
+  FM_LOCK_OUTCOME=refused
+  FM_LOCK_CAUSE='create-denied'
+  while [ "$attempt" -lt 3 ]; do
+    attempt=$((attempt + 1))
     if fm_lock_try_create "$lockdir"; then
+      FM_LOCK_OUTCOME=acquired
+      FM_LOCK_CAUSE=
       return 0
     fi
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    return 1
-  fi
-  if fm_lock_holder_alive "$lockdir" "$pid"; then
-    FM_LOCK_HELD_PID=$pid
-    return 1
-  fi
-  if fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
-    FM_LOCK_HELD_PID=$pid
-    return 1
-  fi
-
-  steal="$lockdir.steal"
-  if ! fm_lock_try_acquire_steal_mutex "$steal"; then
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    FM_LOCK_OWNER_DIR=
-    return 1
-  fi
-  steal_owner=${FM_LOCK_OWNER_DIR:-}
-
-  cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_lock_holder_alive "$lockdir" "$cur"; then
-    fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$cur
-    FM_LOCK_OWNER_DIR=
-    return 1
-  fi
-  if fm_lock_mid_acquire_is_fresh "$lockdir" "$cur"; then
-    fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$cur
-    FM_LOCK_OWNER_DIR=
-    return 1
-  fi
-  if ! fm_lock_points_to_owner "$steal" "$steal_owner"; then
-    fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    FM_LOCK_OWNER_DIR=
-    return 1
-  fi
-
-  primary_owner=
-  if [ -L "$lockdir" ]; then
-    primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
-  fi
-  cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
-    fm_lock_release "$steal"
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    FM_LOCK_OWNER_DIR=
-    return 1
-  fi
-
-  if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
-    fm_lock_release "$steal"
-    if [ -n "$marker_publish_bound" ]; then
-      # The marker lock refused inside the caller's bound: surface it as the
-      # blocking lock rather than the dead watch-lock holder, and keep the
-      # holder pid the marker acquire last reported.
-      # shellcheck disable=SC2034 # Read by sourcing callers after try_acquire fails.
-      FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
-    else
-      FM_LOCK_HELD_PID=$cur
+    if [ "$FM_LOCK_CREATE_VERDICT" = refused ] || [ "$FM_LOCK_CREATE_VERDICT" = name-taken ]; then
+      FM_LOCK_CAUSE=$FM_LOCK_CREATE_CAUSE
+      return 1
     fi
+    if [ "$FM_LOCK_CREATE_VERDICT" = publication-lost ]; then
+      publication_lost=1
+      continue
+    fi
+    observed_contention=1
+    if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      continue
+    fi
+    fm_current_pid current || { FM_LOCK_CAUSE=create-denied; return 1; }
+    if ! pid=$(cat "$lockdir/pid" 2>/dev/null); then
+      if fm_lock_pid_absent "$lockdir"; then
+        pid=
+      else
+        pid_status=$?
+        if fm_lock_note_unsearchable_directory "$lockdir"; then
+          FM_LOCK_OUTCOME=held
+          FM_LOCK_CAUSE='holder-pid-unreadable'
+          return 1
+        fi
+        case "$pid_status" in
+          1) FM_LOCK_OUTCOME=held; FM_LOCK_CAUSE='holder-pid-unreadable'; return 1 ;;
+          *) continue ;;
+        esac
+      fi
+    fi
+    if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
+      # A lock-taking exit trap can interrupt its own abandoned critical
+      # section. Reclaim it instead of deadlocking that trap against itself.
+      fm_lock_remove_path "$lockdir" || true
+      continue
+    fi
+    if fm_lock_holder_alive "$lockdir" "$pid"; then
+      FM_LOCK_OUTCOME=held
+      FM_LOCK_CAUSE="holder-pid=$pid"
+      FM_LOCK_HELD_PID=$pid
+      return 1
+    fi
+    case "$pid" in
+      ''|*[!0-9]*)
+        fm_lock_freshness "$lockdir"
+        case "$FM_LOCK_FRESHNESS" in
+          fresh) FM_LOCK_OUTCOME=held; FM_LOCK_CAUSE=mid-acquire; return 1 ;;
+          absent|unreadable) continue ;;
+        esac
+        ;;
+    esac
+    [ "$attempt" -lt 3 ] || break
+    steal="$lockdir.steal"
+    if ! fm_lock_try_acquire_steal_mutex "$steal"; then
+      if [ "$FM_LOCK_CREATE_VERDICT" = refused ] || [ "$FM_LOCK_CREATE_VERDICT" = name-taken ] || [ "$FM_LOCK_CREATE_VERDICT" = publication-lost ]; then
+        FM_LOCK_CAUSE=$FM_LOCK_CREATE_CAUSE
+      else
+        FM_LOCK_OUTCOME=held
+        FM_LOCK_CAUSE='reclaim-marker-held'
+      fi
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
+    steal_owner=$FM_LOCK_OWNER_DIR
+    if ! cur=$(cat "$lockdir/pid" 2>/dev/null); then
+      if fm_lock_pid_absent "$lockdir"; then
+        cur=
+      else
+        pid_status=$?
+        fm_lock_release "$steal"
+        FM_LOCK_OWNER_DIR=
+        if [ "$pid_status" -eq 1 ]; then
+          FM_LOCK_OUTCOME=held
+          FM_LOCK_CAUSE='holder-pid-unreadable'
+          return 1
+        fi
+        continue
+      fi
+    fi
+    if fm_lock_holder_alive "$lockdir" "$cur"; then
+      fm_lock_release "$steal"
+      FM_LOCK_OUTCOME=held
+      FM_LOCK_CAUSE="holder-pid=$cur"
+      FM_LOCK_HELD_PID=$cur
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
+    primary_owner=
+    if [ -L "$lockdir" ]; then
+      primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+    fi
+    if ! fm_lock_points_to_owner "$steal" "$steal_owner" \
+      || ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
+      fm_lock_release "$steal"
+      FM_LOCK_OWNER_DIR=
+      continue
+    fi
+    if [ "$lockdir" = "$STATE/.watch.lock" ] \
+      && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
+      fm_lock_release "$steal"
+      FM_LOCK_OWNER_DIR=
+      if [ -n "$marker_publish_bound" ] && [ "$FM_LOCK_OUTCOME" = held ]; then
+        # The marker lock was contended inside the caller's bound: surface it
+        # as the blocking lock with the holder pid the marker acquire reported.
+        # shellcheck disable=SC2034 # Read by sourcing callers after try_acquire fails.
+        FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
+        return 1
+      fi
+      FM_LOCK_OUTCOME=refused
+      FM_LOCK_CAUSE='recovery-record-failed'
+      FM_LOCK_HELD_PID=
+      return 1
+    fi
+    if ! fm_lock_remove_path "$lockdir" stale && [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
+      fm_lock_release "$steal"
+      FM_LOCK_OUTCOME=refused
+      FM_LOCK_CAUSE='reclaim-failed'
+      FM_LOCK_OWNER_DIR=
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    if fm_lock_try_create "$lockdir" "$steal_owner"; then
+      # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
+      FM_LOCK_RECOVERED_PID=$cur
+      fm_lock_release "$steal"
+      FM_LOCK_OUTCOME=acquired
+      FM_LOCK_CAUSE=
+      return 0
+    fi
+    fm_lock_release "$steal"
     FM_LOCK_OWNER_DIR=
+    if [ "$FM_LOCK_CREATE_VERDICT" = refused ] || [ "$FM_LOCK_CREATE_VERDICT" = name-taken ]; then
+      FM_LOCK_OUTCOME=refused
+      FM_LOCK_CAUSE=$FM_LOCK_CREATE_CAUSE
+      return 1
+    fi
+    if [ "$FM_LOCK_CREATE_VERDICT" = publication-lost ]; then
+      publication_lost=1
+    else
+      observed_contention=1
+    fi
+  done
+  if [ "$publication_lost" -eq 1 ] && [ "$observed_contention" -eq 0 ]; then
+    FM_LOCK_OUTCOME=refused
+    FM_LOCK_CAUSE='publication-lost'
     return 1
   fi
-  fm_lock_remove_path "$lockdir" stale || true
-  rc=1
-  if fm_lock_try_create "$lockdir" "$steal_owner"; then
-    rc=0
-    # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
-    FM_LOCK_RECOVERED_PID=$cur
-  fi
-  if [ "$rc" -ne 0 ]; then
-    # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
-    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
-    FM_LOCK_OWNER_DIR=
-  fi
-  fm_lock_release "$steal"
-  return "$rc"
+  FM_LOCK_OUTCOME=held
+  FM_LOCK_CAUSE='holder-pid-unreadable'
+  return 1
 }
 
 # A lock is created inside its parent directory, so once that directory is gone
@@ -1652,28 +1858,56 @@ fm_lock_parent_gone() {  # <lockdir>
     *) parent=. ;;
   esac
   [ -n "$parent" ] || parent=/
-  [ -d "$parent" ] && return 1
+  fm_lock_path_removed "$parent" || return 1
   sleep 0.1
-  [ ! -d "$parent" ]
+  fm_lock_path_removed "$parent"
 }
 
-# Wait for a lock without a contention deadline. The 0.1s retry serves short
-# critical sections, where a wider interval would delay every handoff between
-# the watcher and its writers. It returns 1 within 0.2s of its parent's removal
-# (fm_lock_parent_gone) instead of polling for a lock that can never exist.
-# Callers that handle failure may opt into --refuse-unreapable to refuse a
-# stale real directory that cannot be removed, naming its exact path. The
-# ordinary wait and live contention retain their behavior without a deadline.
+# Removal is proven by a stat of a non-directory or by enumerating the nearest
+# existing ancestor without the entry. An unsearchable or unreadable ancestor
+# never proves removal.
+fm_lock_path_removed() {  # <path>
+  local path=$1 up base entries
+  [ -d "$path" ] && return 1
+  [ -e "$path" ] && return 0
+  [ ! -L "$path" ] || return 1
+  case "$path" in
+    */*) up=${path%/*}; base=${path##*/} ;;
+    *) up=.; base=$path ;;
+  esac
+  [ -n "$up" ] || up=/
+  [ -n "$base" ] || return 1
+  if [ ! -d "$up" ]; then
+    fm_lock_path_removed "$up"
+    return
+  fi
+  entries=$(ls -A -- "$up" 2>/dev/null) || return 1
+  ! printf '%s\n' "$entries" | grep -F -x -- "$base" >/dev/null
+}
+
+# Wait until acquired. The only failure is a lock directory whose parent is
+# positively removed (fm_lock_parent_gone), where no retry can ever succeed.
 fm_lock_acquire_wait() {
-  local lockdir=$1 refuse_unreapable=${2:-}
+  local lockdir=$1 since=-1 last=-1 now report=${FM_LOCK_WAIT_REFUSAL_REPORT_SECS:-10}
+  local repeat=${FM_LOCK_WAIT_REFUSAL_REPEAT_SECS:-300}
+  case "$report" in ''|*[!0-9]*) report=10 ;; esac
+  case "$repeat" in ''|*[!0-9]*|0) repeat=300 ;; esac
   while ! fm_lock_try_acquire "$lockdir"; do
-    if [ "$refuse_unreapable" = --refuse-unreapable ] && [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
-      echo "error: cannot reclaim lock directory $FM_LOCK_RECLAIM_FAILED_PATH; inspect its contents and permissions" >&2
-      return 1
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      ! fm_lock_parent_gone "$lockdir" || return 1
+      now=$SECONDS
+      [ "$since" -ge 0 ] || since=$now
+      if [ "$((now - since))" -ge "$report" ] && { [ "$last" -lt 0 ] || [ "$((now - last))" -ge "$repeat" ]; }; then
+        printf 'lock: cannot acquire %s: %s\n' "$lockdir" "$FM_LOCK_CAUSE" >&2
+        last=$now
+      fi
+    else
+      since=-1
+      last=-1
     fi
-    ! fm_lock_parent_gone "$lockdir" || return 1
     sleep 0.1
   done
+  return 0
 }
 
 # Bounded in-process variant of fm_lock_acquire_wait for the watcher's EXIT
@@ -1694,6 +1928,7 @@ fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
   local lockdir=$1 seconds=$2 deadline grace_deadline='' pid
   deadline=$((SECONDS + seconds))
   while ! fm_lock_try_acquire "$lockdir"; do
+    [ "$FM_LOCK_OUTCOME" != refused ] || return 1
     if [ "$SECONDS" -ge "$deadline" ]; then
       pid=$(cat "$lockdir/pid" 2>/dev/null || true)
       case "$pid" in
@@ -1721,7 +1956,11 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
   trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
-  fm_lock_acquire_wait "$lockdir" || return 1
+  # This child is bounded by fm_run_timed, so it may return on refusal.
+  while ! fm_lock_try_acquire "$lockdir"; do
+    [ "$FM_LOCK_OUTCOME" != refused ] || return 1
+    sleep 0.1
+  done
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
       fm_lock_release "$lockdir"
@@ -1756,10 +1995,11 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 #
 # Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
 # until fm-timeout-lib.sh's hard deadline, returns 124 for retriable contention,
-# and leaves FM_LOCK_HELD_PID naming a live holder when one is known.
-# Use it where a caller must refuse rather than block: wake presentation, and
-# the guarded remote link clear, whose whole contract is to return a
-# reconciliation refusal instead of wedging an unattended close.
+# and leaves FM_LOCK_HELD_PID naming a live holder when one is known. A typed
+# refusal (FM_LOCK_OUTCOME=refused, FM_LOCK_CAUSE) returns 1 without waiting.
+# Use it where a caller must refuse rather than block: wake presentation,
+# session claim, and the guarded remote link clear, whose whole contract is to
+# return a reconciliation refusal instead of wedging an unattended close.
 # Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
 fm_lock_acquire_wait_bounded() {
   local lockdir=$1 seconds=$2 caller_pid rc owner_pid
@@ -1768,6 +2008,11 @@ fm_lock_acquire_wait_bounded() {
   if fm_lock_try_acquire "$lockdir"; then
     return 0
   fi
+  if [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
+    echo "error: cannot reclaim lock directory $FM_LOCK_RECLAIM_FAILED_PATH; inspect its contents and permissions" >&2
+    return 1
+  fi
+  [ "$FM_LOCK_OUTCOME" != refused ] || return 1
 
   fm_current_pid caller_pid || return 1
   # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
@@ -1785,6 +2030,9 @@ fm_lock_acquire_wait_bounded() {
 
   owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if [ "$owner_pid" = "$caller_pid" ]; then
+    FM_LOCK_OUTCOME=acquired
+    FM_LOCK_CAUSE=
+    FM_LOCK_HELD_PID=
     return 0
   fi
   [ "$rc" -ne 0 ] || rc=1
@@ -1793,6 +2041,10 @@ fm_lock_acquire_wait_bounded() {
   # helper cleanup cannot manufacture a false contention advisory.
   if fm_lock_try_acquire "$lockdir"; then
     return 0
+  fi
+  if [ -n "${FM_LOCK_RECLAIM_FAILED_PATH:-}" ]; then
+    echo "error: cannot reclaim lock directory $FM_LOCK_RECLAIM_FAILED_PATH; inspect its contents and permissions" >&2
+    return 1
   fi
   if [ "$rc" -eq 124 ]; then
     owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)

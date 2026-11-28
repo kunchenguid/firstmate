@@ -134,6 +134,10 @@ lock_acquire_bounded() {  # <lock>
   local lock=$1 attempt=0
   while [ "$attempt" -lt "$LOCK_ATTEMPTS" ]; do
     fm_lock_try_acquire "$lock" && return 0
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      echo "error: cannot acquire lock $lock: $FM_LOCK_CAUSE" >&2
+      return 1
+    fi
     attempt=$((attempt + 1))
     [ "$attempt" -lt "$LOCK_ATTEMPTS" ] && sleep 0.1
   done

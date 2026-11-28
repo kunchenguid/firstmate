@@ -216,6 +216,10 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   [ "$FM_HERDR_CLEANUP_TOKEN" = "$token" ] || return 0
   task_lock="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$task_lock"; then
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      fm_herdr_cleanup_warn "$id skipped: cannot acquire $task_lock: $FM_LOCK_CAUSE"
+      return 0
+    fi
     fm_herdr_cleanup_warn "$id skipped because its task lock is busy"
     return 0
   fi
@@ -226,6 +230,10 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   }
   if ! fm_lock_try_acquire "$presentation_lock"; then
     fm_lock_release "$task_lock" || true
+    if [ "$FM_LOCK_OUTCOME" = refused ]; then
+      fm_herdr_cleanup_warn "$id skipped: cannot acquire $presentation_lock: $FM_LOCK_CAUSE"
+      return 0
+    fi
     fm_herdr_cleanup_warn "$id skipped because the shared presentation lock is busy"
     return 0
   fi

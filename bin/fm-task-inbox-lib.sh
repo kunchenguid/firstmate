@@ -196,11 +196,11 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   case "$wait" in ''|*[!0-9]*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
   probe=$(mktemp "${lock%/*}/.lock-probe.XXXXXX") || return 1
   rm -f "$probe" || return 1
-  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
-    fm_lock_try_create "$lock" && return 0
-  fi
+  fm_lock_try_create "$lock" && return 0
+  [ "$FM_LOCK_CREATE_VERDICT" != refused ] || return 1
   deadline=$(( $(date +%s) + wait ))
   while ! fm_lock_try_acquire "$lock"; do
+    [ "$FM_LOCK_OUTCOME" != refused ] || return 1
     [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep 0.1
   done
