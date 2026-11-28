@@ -1117,6 +1117,23 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+# The watcher names the task in a parenthetical after the window, so the daemon
+# must still resolve the window up to the first " (" and classify it unchanged.
+test_handle_wake_task_named_stale_resolves_window() {
+  local dir state key win
+  dir=$(make_supercase handle-task-named-stale)
+  state="$dir/state"
+  win="sess:fm-held-w10-named"
+  printf 'paused: awaiting the vendor rate-limit reset\n' > "$state/held-w10-named.status"
+  key=$(printf '%s' "held-w10-named" | tr ':/.' '___')
+  date +%s > "$state/.subsuper-stale-$key"
+  FM_STATE_OVERRIDE="$state" handle_wake "stale: $win (task=held-w10-named)" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "a task-named stale wake did not resolve its window to the paused task"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a task-named stale wake kept the wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a task-named stale wake for a declared pause escalated"
+  pass "handle_wake resolves the window from a task-named stale wake and classifies it unchanged"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -3893,6 +3910,7 @@ test_stale_paused_classifies_pause
 test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_handle_wake_task_named_stale_resolves_window
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker
@@ -4051,7 +4069,7 @@ test_dialog_name_survives_away_self_handle() {
   printf 'idle on the picker\n' > "$pane"
   fm_write_meta "$state/picker-ship.meta" "window=$win" "backend=tmux"
   printf 'working: parked between turns\n' > "$state/picker-ship.status"
-  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  reason="stale: $win (task=picker-ship, blocked-on-prompt: Claude background-task exit picker)"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   key=$(printf '%s' picker-ship | tr ':/.' '___')
   [ "$(cat "$state/.subsuper-dialog-$key" 2>/dev/null || true)" = 'Claude background-task exit picker' ] \
@@ -4117,7 +4135,7 @@ test_seen_terminal_dialog_stale_clears_like_a_plain_stale() {
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   [ ! -e "$state/.subsuper-stale-$key" ] \
     || fail "a seen terminal stale with no dialog recorded a wedge marker"
-  reason="stale: $win (blocked-on-prompt: Claude background-task exit picker)"
+  reason="stale: $win (task=picker-done, blocked-on-prompt: Claude background-task exit picker)"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
   grep -F 'stale + terminal (already escalated by signal)' "$dir/daemon.log" >/dev/null \
     || fail "the fixture did not take the seen terminal self-handle path: $(cat "$dir/daemon.log")"
@@ -4140,7 +4158,7 @@ test_dialog_name_joins_unseen_status_escalation() {
   fm_write_meta "$state/picker-new.meta" "window=$win" "backend=tmux"
   printf 'done: shipped the change\n' > "$state/picker-new.status"
   LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
-    handle_wake "stale: $win (blocked-on-prompt: Claude background-task exit picker)" "$state"
+    handle_wake "stale: $win (task=picker-new, blocked-on-prompt: Claude background-task exit picker)" "$state"
   grep -F 'done: shipped the change' "$state/.subsuper-escalations" \
     | grep -F 'blocked-on-prompt: Claude background-task exit picker' >/dev/null \
     || fail "an unseen status escalation dropped the dialog name: $(cat "$state/.subsuper-escalations" 2>/dev/null)"

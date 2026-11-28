@@ -687,7 +687,7 @@ test_afk_busy_declared_pause_hands_off_plain_stale() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 150 || { reap "$pid"; fail "the away-mode busy-turn bound never handed the declared pause to the daemon"; }
-  grep -Fx "stale: $window" "$out" >/dev/null \
+  grep -Fx "stale: $window (task=afk-review-scout)" "$out" >/dev/null \
     || fail "the away-mode busy-turn bound did not hand off the plain window identity: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null \
     && fail "away mode decorated a declared pause as a possible wedge: $(cat "$out")"
@@ -797,7 +797,7 @@ SH
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 150 || { reap "$pid"; fail "the away-mode busy-turn bound never handed a ticking declared pause to the daemon"; }
-  grep -Fx "stale: $window" "$out" >/dev/null \
+  grep -Fx "stale: $window (task=afk-ticking-scout)" "$out" >/dev/null \
     || fail "the away-mode busy-turn bound did not hand off the plain window identity for a ticking pane: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null \
     && fail "away mode decorated a ticking declared pause as a possible wedge: $(cat "$out")"
@@ -1050,6 +1050,7 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   wait_for_exit "$pid" 100 || fail "a long-running write deferral never re-surfaced on the bounded cadence"
   grep -F "stale: $window" "$out" >/dev/null || fail "the write-deferral recheck did not print a stale wake"
   grep -F "writing its worktree" "$out" >/dev/null || fail "the write-deferral recheck was not labeled as such"
+  grep -F " task=churn" "$out" >/dev/null || fail "the write-deferral recheck does not name the task id: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null && fail "a write-deferral recheck was mislabeled a possible wedge"
   [ -e "$state/.writing-resurfaced-$key" ] || fail "the write-deferral re-surface throttle marker was not recorded"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "a write-deferral recheck advanced the wedge escalation counter"
@@ -1782,7 +1783,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "AFK paused changed pane did not hand off a stale wake"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
+  grep -Fx "stale: $window (task=afk-held)" "$out" >/dev/null || fail "AFK paused stale did not preserve its plain window identity: $(cat "$out")"
   grep -F "awaiting external" "$out" >/dev/null && fail "AFK watcher decorated a stale identity instead of handing it to the daemon"
   [ ! -e "$state/.paused-$key" ] || fail "AFK watcher recorded normal-mode pause tracking instead of handing off"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after AFK paused stale failed"
@@ -1842,9 +1843,8 @@ test_exit_picker_stale_names_the_dialog() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "watcher did not surface a pane parked on the exit picker: $(cat "$out")"
-  grep -F "stale: $window" "$out" >/dev/null || fail "the picker wake was not a stale wake: $(cat "$out")"
-  grep -F 'blocked-on-prompt: Claude background-task exit picker' "$out" >/dev/null \
-    || fail "the picker wake did not name the dialog: $(cat "$out")"
+  grep -Fx "stale: $window (task=picker, blocked-on-prompt: Claude background-task exit picker)" "$out" >/dev/null \
+    || fail "the picker wake did not name the task and the dialog in one parenthetical: $(cat "$out")"
   grep -F 'possible wedge' "$out" >/dev/null && fail "the first picker stale was labeled a wedge: $(cat "$out")"
   [ "$(cat "$count_file")" -eq 1 ] || fail "the picker poll captured the pane $(cat "$count_file") times"
   [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$(hash_text "$(cat "$capture_file")")" ] \
@@ -1916,7 +1916,7 @@ test_quoted_exit_picker_stays_ordinary_stale() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "a quoted picker did not take the ordinary stale path: $(cat "$out")"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "a quoted picker was not an ordinary stale: $(cat "$out")"
+  grep -Fx "stale: $window (task=quoted)" "$out" >/dev/null || fail "a quoted picker was not an ordinary stale: $(cat "$out")"
   grep -F 'blocked-on-prompt' "$out" >/dev/null && fail "a quoted picker was named as a dialog: $(cat "$out")"
   unset FM_FAKE_CREW_STATE
   pass "picker text quoted above a composer stays an ordinary stale"
@@ -1964,7 +1964,7 @@ test_closed_exit_picker_drops_saved_dialog_name() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || fail "a closed picker did not take the ordinary stale path: $(cat "$out")"
-  grep -Fx "stale: $window" "$out" >/dev/null || fail "a closed picker was not an ordinary stale: $(cat "$out")"
+  grep -Fx "stale: $window (task=closer)" "$out" >/dev/null || fail "a closed picker was not an ordinary stale: $(cat "$out")"
   grep -F 'blocked-on-prompt' "$out" >/dev/null && fail "a closed picker was still named as a dialog: $(cat "$out")"
   [ ! -e "$state/.subsuper-dialog-closer" ] || fail "a closed picker left the saved dialog name"
   unset FM_FAKE_CREW_STATE
