@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>] [--account <entry>]
+#                                         [--expect-spawn-gen <gen>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -103,6 +104,11 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
+#              --expect-spawn-gen <gen> makes relaunch act only on the
+#              incarnation the caller observed: once this command holds the
+#              task's lifecycle lock, a record whose spawn_gen differs exits 3
+#              before anything is stopped or written, so a caller whose
+#              evidence predates another relaunch cannot stop its replacement.
 #              Records a durable checkpoint and that note, exits the old agent,
 #              then delegates the launch to its single owner,
 #              bin/fm-spawn.sh --relaunch. A failure before publication keeps
@@ -270,6 +276,8 @@ NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
 NEW_ACCOUNT=
+EXPECT_SPAWN_GEN=
+EXPECT_SPAWN_GEN_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -287,6 +295,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       account) NEW_ACCOUNT=$control_arg; ACCOUNT_SET=1 ;;
+      expect_spawn_gen) EXPECT_SPAWN_GEN=$control_arg; EXPECT_SPAWN_GEN_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -306,6 +315,8 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --account) control_want_value=account ;;
     --account=*) NEW_ACCOUNT=${control_arg#--account=}; ACCOUNT_SET=1 ;;
+    --expect-spawn-gen) control_want_value=expect_spawn_gen ;;
+    --expect-spawn-gen=*) EXPECT_SPAWN_GEN=${control_arg#--expect-spawn-gen=}; EXPECT_SPAWN_GEN_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -319,13 +330,16 @@ for control_arg in "$@"; do
 done
 if [ -n "$control_want_value" ]; then
   [ "$control_want_value" = note_file ] && die "--note-file requires a value"
+  [ "$control_want_value" = expect_spawn_gen ] && die "--expect-spawn-gen requires a value"
   die "--$control_want_value requires a value"
 fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$ACCOUNT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, --account, and --note apply to 'relaunch' only"
+    && [ "$EXPECT_SPAWN_GEN_SET" = 0 ] \
+    || die "--harness, --model, --effort, --account, --expect-spawn-gen, and --note apply to 'relaunch' only"
 fi
+[ "$EXPECT_SPAWN_GEN_SET" = 0 ] || [ -n "$EXPECT_SPAWN_GEN" ] || die "--expect-spawn-gen requires a non-empty value"
 [ "$ACCOUNT_SET" = 0 ] || [ -n "$NEW_ACCOUNT" ] || die "--account requires a non-empty value"
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
@@ -352,8 +366,13 @@ ID=$RAW_ID
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
-fm_lock_try_acquire "$CONTROL_LOCK" \
-  || die "another lifecycle action is already running for task $ID"
+if ! fm_lock_try_acquire "$CONTROL_LOCK"; then
+  if [ "$EXPECT_SPAWN_GEN_SET" = 1 ]; then
+    echo "error: another lifecycle action is already running for task $ID; not relaunching for incarnation $EXPECT_SPAWN_GEN" >&2
+    exit 3
+  fi
+  die "another lifecycle action is already running for task $ID"
+fi
 CONTROL_LOCK_HELD=1
 # do_exit runs in a command substitution. That subshell does not run this
 # EXIT trap, so the parent has to hold the path the trap removes. Set it
@@ -370,6 +389,10 @@ if [ ! -f "$META" ]; then
       ;;
   esac
   die "no task '$ID' in $STATE (fm-control resolves an exact task id only)"
+fi
+if [ "$EXPECT_SPAWN_GEN_SET" = 1 ] && [ "$(fm_meta_get "$META" spawn_gen)" != "$EXPECT_SPAWN_GEN" ]; then
+  echo "error: task $ID is no longer incarnation $EXPECT_SPAWN_GEN; refusing to relaunch a newer agent" >&2
+  exit 3
 fi
 
 # A remotely placed secondmate records its endpoint on ANOTHER host, so every

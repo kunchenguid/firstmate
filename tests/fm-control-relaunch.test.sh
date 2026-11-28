@@ -787,6 +787,23 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
 }
 
+test_relaunch_refuses_a_stale_expected_spawn_gen() {
+  local dir out rc before
+  dir=$(new_case stalegen rl3g)
+  add_ship_task "$dir" rl3g claude
+  printf 'spawn_gen=sNEW\n' >> "$dir/home/state/rl3g.meta"
+  before=$(cat "$dir/home/state/rl3g.meta")
+  out=$(run_control "$dir" rl3g relaunch --expect-spawn-gen sOLD --note "quota stop"); rc=$?
+  expect_code 3 "$rc" "a relaunch for an older incarnation should refuse"$'\n'"$out"
+  assert_contains "$out" "no longer incarnation sOLD" "the refusal should name the stale incarnation"
+  [ "$(cat "$dir/home/state/rl3g.meta")" = "$before" ] || fail "a stale relaunch must not touch the record"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a stale relaunch must send nothing"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a stale relaunch must not stop the agent"
+  out=$(run_control "$dir" rl3g relaunch --expect-spawn-gen sNEW --note "quota stop"); rc=$?
+  expect_code 0 "$rc" "a relaunch for the current incarnation should proceed"$'\n'"$out"
+  pass "fm-control relaunch: an expected spawn_gen that no longer matches refuses before anything stops"
+}
+
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
@@ -2429,6 +2446,33 @@ SH
   pass "fm-control relaunch: a vanished watcher scratch file does not fail the child-record checkpoint"
 }
 
+test_concurrent_expected_gen_relaunch_exits_stale() {
+  local dir out rc lock holder i
+  dir=$(new_case lockgen rl19g)
+  add_ship_task "$dir" rl19g claude
+  lock="$dir/home/state/.control-rl19g.lock"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || { kill "$holder" 2>/dev/null; fail "could not stage a held control lock"; }
+  out=$(run_control "$dir" rl19g relaunch --expect-spawn-gen sOLD --note "concurrent"); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 3 "$rc" "a busy control lock with an expected spawn_gen should exit as stale"$'\n'"$out"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a refused concurrent relaunch must not stop the agent"
+  pass "fm-control relaunch: a busy control lock with an expected spawn_gen exits 3"
+}
+
 test_concurrent_relaunch_is_refused() {
   local dir out rc lock holder i
   dir=$(new_case lock rl19)
@@ -3308,6 +3352,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_note_inbox_listing_is_safe_on_empty_inbox
 test_relaunch_requires_a_note_for_a_ship_task
+test_relaunch_refuses_a_stale_expected_spawn_gen
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_refused_relaunch_onto_polytoken_keeps_the_project_hook_layer
 test_refused_polytoken_profile_leaves_the_running_agent
@@ -3366,6 +3411,7 @@ test_secondmate_relaunch_checkpoints_child_work_and_spares_the_charter
 test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_secondmate_checkpoint_ignores_a_vanished_scratch_find_walk
+test_concurrent_expected_gen_relaunch_exits_stale
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution

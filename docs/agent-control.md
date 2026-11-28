@@ -74,6 +74,8 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 `relaunch` is the only verb that changes durable records, so it runs as a transaction with a journal at `state/<id>.control-relaunch`, the prior record preserved beside it, and a ship or scout's prior instructions preserved when a progress note is appended.
 
+With `--expect-spawn-gen <gen>`, a record whose `spawn_gen` differs, or a lifecycle lock another action holds, exits 3 before step 1, so a caller whose evidence predates another relaunch cannot stop the replacement.
+
 1. **Resolve the profile.**
    An explicit `--harness`, `--model`, or `--effort` wins.
    Without an explicit harness, a `kind=secondmate` task re-resolves its [configured runtime pin for that mate](configuration.md#choose-the-secondmate-harness) before the checkpoint.
