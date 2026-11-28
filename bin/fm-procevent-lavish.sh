@@ -101,9 +101,9 @@
 # An unreadable or missing session stops before the staged reply is consumed.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
-# bin/fm-procevent.sh. It reports what the captain actually chose, as
-# `<task-id>\t<answer>\t<label>` lines, and stops there. It maps nothing to a
-# task, records no decision, and closes nothing: a captain answer is not special
+# bin/fm-procevent.sh. It reports what the captain actually chose using the
+# keyed-line format owned by bin/fm-captain-hold.sh's header. It maps nothing to
+# a task, records no decision, and closes nothing: a captain answer is not special
 # to Lavish, so every rule about what a keyed answer DOES belongs to the one
 # intake in bin/fm-captain-hold.sh, which the runner feeds. A Lavish review is
 # just an ephemeral discussion format that happens to carry answers.
@@ -758,9 +758,8 @@ cmd_silent() {
   [ "$content_rc" -eq 1 ]
 }
 
-# Print `key<TAB>answer<TAB>label[<TAB>mode]` for each non-reconcile structured choice the
-# captain submitted in a captured result; the optional mode column relays the
-# card's declared close mode (`done` or `release`) to the keyed-answer intake.
+# Relay structured choices using the keyed-answer contract named in the header;
+# the intake owns date validation and hold mutation.
 # Items come from the shared result parser above, in either emission form, and
 # only items whose `tag` field is `choice` are read.
 # The header owns the partial-output and failure contract.
@@ -770,6 +769,8 @@ cmd_silent() {
 # is skipped. A time-limited rollout branch accepts the old question/answer
 # shape only for ordinary answers and rejects its bare or annotated reconcile
 # values because old rows do not separate the selected option from its note.
+# Deferrals require a versioned non-reconcile selection, so legacy captures
+# and note-only choices cannot acquire scheduling authority.
 # The question cap is 128 so any task id fits, including the long legacy
 # `<origin>-decision-<key>` identities pre-collapse decks still carry; the
 # security property is the slug SHAPE, which is unchanged.
@@ -808,7 +809,7 @@ cmd_choice_rows() {
       # Time-limited compatibility for captures from pre-change boards; remove
       # once no board carrying the old question/answer context can remain armed.
       } elsif (!exists($data->{schema}) && !exists($data->{selection})
-          && !exists($data->{note})) {
+          && !exists($data->{note}) && !exists($data->{defer_until})) {
         $key = $data->{question};
         $answer = $data->{answer};
         next if !defined($key) || ref($key) || !defined($answer) || ref($answer);
@@ -827,6 +828,13 @@ cmd_choice_rows() {
           || ($data->{close} ne "done" && $data->{close} ne "release");
         $mode = $data->{close};
       }
+      my $until = "";
+      if (exists $data->{defer_until}) {
+        next if $legacy || !length($selected) || $selected eq "reconcile";
+        next if !defined($data->{defer_until}) || ref($data->{defer_until})
+          || $data->{defer_until} !~ /\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z/;
+        $until = $data->{defer_until};
+      }
       my $label = defined $f{text} ? $f{text} : "";
       s/[\x00-\x1f\x7f]/ /g for ($answer, $note, $label);
       $label = substr($label, 0, 512);
@@ -834,7 +842,7 @@ cmd_choice_rows() {
       $seen{$key} = scalar @choices;
       push @choices, {
         key => $key, selection => $selected, note => $note, legacy => $legacy,
-        answer => $answer, label => $label, mode => $mode
+        answer => $answer, label => $label, mode => $mode, until => $until
       };
     }
     for my $choice (grep { defined } @choices) {
@@ -848,9 +856,13 @@ cmd_choice_rows() {
         next;
       }
       next if $choice->{selection} eq "reconcile";
-      print length $choice->{mode}
-        ? "$choice->{key}\t$choice->{answer}\t$choice->{label}\t$choice->{mode}\n"
-        : "$choice->{key}\t$choice->{answer}\t$choice->{label}\n";
+      if (length $choice->{until}) {
+        print "$choice->{key}\t$choice->{answer}\t$choice->{label}\t$choice->{mode}\t$choice->{until}\n";
+      } else {
+        print length $choice->{mode}
+          ? "$choice->{key}\t$choice->{answer}\t$choice->{label}\t$choice->{mode}\n"
+          : "$choice->{key}\t$choice->{answer}\t$choice->{label}\n";
+      }
     }
     if ($malformed || @$items != $want) {
       print STDERR "error: the result is not fully accounted for: declared $want, parsed ",
