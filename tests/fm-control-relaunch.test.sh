@@ -589,6 +589,18 @@ test_relaunch_preserves_durable_task_metadata() {
   pass "fm-control relaunch: an armed PR poll survives replacement launch publication"
 }
 
+test_relaunch_keeps_orca_cleanup_recovery() {
+  local dir out rc
+  dir=$(new_case orca-cleanup rl73)
+  add_ship_task "$dir" rl73 claude
+  printf '%s\n' 'cleanup_recovery=orca' >> "$dir/home/state/rl73.meta"
+  out=$(run_control "$dir" rl73 relaunch --note "retry after orca cleanup"); rc=$?
+  expect_code 0 "$rc" "relaunch should keep the orca cleanup marker"$'\n'"$out"
+  [ "$(meta_field "$dir" rl73 cleanup_recovery)" = orca ] \
+    || fail "cleanup_recovery=orca must survive relaunch, got '$(meta_field "$dir" rl73 cleanup_recovery)'"
+  pass "fm-control relaunch: an orca cleanup marker is kept across replacement"
+}
+
 test_traced_relaunch_keeps_an_armed_pr_poll_authenticated() {
   local dir out rc
   dir=$(new_case traced-pr-poll rl52)
@@ -3302,6 +3314,7 @@ test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_accepts_a_standalone_clone_worktree
 test_relaunch_refusal_of_the_project_primary_checkout_still_leaves_no_replacement
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_orca_cleanup_recovery
 test_traced_relaunch_keeps_an_armed_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context

@@ -1064,3 +1064,92 @@ test_marks_are_off_by_default
 test_marks_producer_converges_and_notifies_once
 test_marks_clear_removes_records_and_caches
 test_nm_run_progress_reads_captured_status
+
+# Capped away admission waits for startup only on tmux and Herdr. A rex spawn
+# opens a shell-only block; if that wait ran, worker_state would stay dead and
+# spawn would fail with "startup was not established". Success under a 2s
+# injectable wait is proof the wait was skipped, matching main.
+test_rex_capped_spawn_skips_startup_wait() {
+  local dir home id proj wt out rc t0 elapsed spawn_home n u
+  dir=$(new_case capped-spawn-skip-wait)
+  home="$dir/home"
+  id="rex-skip-wait-$$"
+  proj="$dir/project"
+  wt="$dir/wt"
+  spawn_home="$dir/user-home"
+  mkdir -p "$home/data/$id" "$home/state" "$home/config" "$home/projects" "$spawn_home"
+  touch "$home/state/.last-watcher-beat"
+  printf 'claude\n' > "$home/config/crew-harness"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise a capped rex spawn.
+
+## Firstmate spec
+Verify rex does not enter the away startup wait.
+EOF
+  fm_git_identity fmtest fmtest@example.invalid
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$dir/fakebin"
+  fm_fake_exit0 "$dir/fakebin" treehouse
+  # The pane wait for `treehouse get` reads the block's foreground cwd. Seed
+  # the fake process view so consecutive reads settle on the isolated worktree
+  # instead of the fixture default /tmp.
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    u=$(printf '%08x-0000-7000-8000-%012x' "$n" "$n")
+    printf '{"foreground":{"pid":%s,"name":"zsh","path":"/bin/zsh","argv0":"-zsh","cwd":"%s"},"ancestors":[],"last_exit":null}\n' \
+      "$DEAD_PID" "$wt" >"$dir/fake/process/$u.json"
+  done
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" enter --spend 2 >/dev/null \
+    || fail "away entry failed"
+  t0=$SECONDS
+  rc=0
+  out=$(
+    HOME="$spawn_home" CLAUDE_CONFIG_DIR='' \
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
+      FM_TEST_SPAWN_START_WAIT_SECONDS=2 FM_SUPERVISION_ACTOR=main \
+      FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" \
+      FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
+      FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+      PATH="$dir/bin:$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --scout --backend rex 2>&1
+  ) || rc=$?
+  elapsed=$((SECONDS - t0))
+  [ "$rc" -eq 0 ] || fail "capped rex spawn failed (rc=$rc): $out"
+  assert_contains "$out" "spawned $id" "capped rex spawn did not report success: $out"
+  assert_not_contains "$out" "startup was not established" \
+    "capped rex spawn entered the tmux/Herdr startup wait: $out"
+  [ "$elapsed" -le 15 ] || fail "capped rex spawn took ${elapsed}s, longer than a skipped wait allows: $out"
+  pass "a capped rex spawn skips the away startup wait and succeeds like main"
+}
+
+# live-workers must pass the task meta into fm_control_endpoint_absence_verdict
+# so Rex can read rex_server. Without it a closed block stays unproven and
+# keeps filling the spend cap.
+test_proven_absent_rex_worker_does_not_count() {
+  local dir home out sid bid t count
+  dir=$(new_case spend-absent)
+  home="$dir/home"
+  mkdir -p "$home/state"
+  out=$(rex_env "$dir" 'fm_backend_rex_create_task fm-alpha /tmp'); read -r sid _ bid <<<"$out"
+  t="${sid#session:}:${bid#block:}"
+  printf 'backend=rex\nwindow=%s\nkind=ship\nrex_server=unix:///fake/rex.sock\n' "$t" \
+    >"$home/state/gone.meta"
+  fake_rex "$dir" block close -s "$sid" "$bid"
+  count=$(
+    env -u TERM_PROGRAM -u REX_SESSION -u REX_BLOCK -u REX_SERVER \
+      FM_REX_FAKE_DIR="$dir/fake" REX_BIN_DIR="$dir/bin" \
+      FM_REX_FAKE_DEAD_PID="$DEAD_PID" \
+      FM_BACKEND_REX_BUNDLE_BIN="$dir/no-bundle/rex" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_SPAWN_CAP_LAUNCH_GRACE=0 \
+      "$ROOT/bin/fm-afk-contract.sh" live-workers
+  )
+  [ "$count" = 0 ] || fail "a proven-absent rex worker still counted as spending: $count"
+  pass "a proven-absent rex worker no longer counts toward the spend cap"
+}
+
+test_rex_capped_spawn_skips_startup_wait
+test_proven_absent_rex_worker_does_not_count

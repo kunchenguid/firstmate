@@ -239,3 +239,39 @@ assert_contains "$(cat "$case_dir/kill-unclosed" 2>/dev/null)" 'kill-window reco
 assert_contains "$out" 'task record is kept' 'unclosed stalled launch warning'
 assert_grep 'hermes_profile=example' "$home/state/hermes-unclosed.meta" 'unclosed stalled worker lost its task record'
 pass 'stalled Hermes launch whose pane cannot be closed keeps its task record'
+
+# Capped away admission sets SPAWN_START_PENDING before the Hermes TUI wait.
+# Closure then belongs to spawn_cancel_pending_start on abort; disabling
+# rollback from SPAWN_ENDPOINT_CLOSED=0 would keep a false record and Queued row.
+capped_home="$TMP_ROOT/capped-home"
+capped_proj="$TMP_ROOT/capped-project"
+capped_wt="$TMP_ROOT/capped-wt"
+capped_id=hermes-capped
+fm_test_spawn_home "$capped_home" hermes
+fm_git_worktree "$capped_proj" "$capped_wt" hermes-capped
+fm_test_spawn_brief "$capped_home" "$capped_id"
+if command -v tasks-axi >/dev/null 2>&1; then
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$capped_home/data/backlog.md"
+  tasks-axi add "$capped_id" "capped hermes fixture" --kind scout \
+    --file "$capped_home/data/backlog.md" >/dev/null \
+    || fail 'could not seed the capped Hermes backlog row'
+fi
+FM_HOME="$capped_home" "$ROOT/bin/fm-afk-contract.sh" enter --spend 1 >/dev/null \
+  || fail 'capped Hermes away entry failed'
+if out=$(FM_FAKE_HERMES_STALL_META="$capped_home/state/$capped_id.meta" \
+  FM_FAKE_HERMES_KILL_LOG="$TMP_ROOT/capped-kill" \
+  FM_HERMES_READY_POLLS=2 FM_HERMES_POLL_INTERVAL=0 FM_SUPERVISION_ACTOR=main \
+  fm_test_run_spawn "$capped_home" "$capped_wt" "$fakebin" \
+  "$capped_id" "$capped_proj" --scout --harness hermes --hermes-profile example 2>&1); then
+  fail "capped stalled Hermes launch accepted"
+fi
+assert_contains "$out" 'Hermes did not reach its TUI' 'capped stalled launch diagnostic'
+assert_not_contains "$out" 'task record is kept' 'capped stalled launch printed a false keep-record warning'
+[ ! -e "$capped_home/state/$capped_id.meta" ] || fail 'capped stalled Hermes launch kept its task record'
+if command -v tasks-axi >/dev/null 2>&1; then
+  capped_row=$(tasks-axi show "$capped_id" --file "$capped_home/data/backlog.md" 2>/dev/null |
+    sed -n 's/^  state: *//p' | head -1)
+  [ "$capped_row" = queued ] || fail "capped stalled Hermes launch left backlog at ${capped_row:-missing}"
+fi
+pass 'capped stalled Hermes launch rolls back its record and queued backlog row'

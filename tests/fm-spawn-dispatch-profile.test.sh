@@ -729,6 +729,28 @@ test_launch_preserves_inherited_git_config() {
   pass "launch appends the hooks config while preserving inherited Git credentials in every pane shell, fish included"
 }
 
+test_uncapped_launch_frame_sources_in_fish() {
+  local rec id out status launch launch_file result
+  command -v fish >/dev/null 2>&1 \
+    || fail "fish is required to prove uncapped spawn frames (install fish)"
+  id=uncapped-fish-z16
+  rec=$(make_spawn_case uncapped-fish claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness 'echo WORKER-RAN')
+  status=$?
+  expect_code 0 "$status" "uncapped fish-frame spawn should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" '__fm_launch_status' \
+    "uncapped launch captured agent status with POSIX assignment fish cannot parse"
+  launch_file="$CASE_DIR/uncapped-fish-launch.sh"
+  printf '%s\n' "$launch" > "$launch_file"
+  result=$(isolated_pane_env fish -c "source '$launch_file'") \
+    || fail "uncapped launch frame failed to source in fish: $result"
+  assert_contains "$result" WORKER-RAN "uncapped launch frame did not run in fish: $result"
+  pass "an uncapped spawn frame sources and runs in fish"
+}
+
 test_active_dispatch_profile_allows_raw_launch_command() {
   local rec id out status launch
   id=profile-raw-z15
@@ -3019,6 +3041,7 @@ test_codex_permission_modes
 test_codex_permission_invalid_refuses_before_mutation
 test_codex_permission_does_not_change_other_harnesses
 test_launch_preserves_inherited_git_config
+test_uncapped_launch_frame_sources_in_fish
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell

@@ -1396,8 +1396,8 @@ teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-te
 "$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
 
-# Two homes recovering concurrently serialize on the named session lock and
-# each replace only their own exact husk.
+# Two homes opting into waiting for concurrent recovery serialize on the named
+# session lock and each replace only their own exact husk.
 PRIMARY_WAVE_ID=resume-wave-primary
 BRAVO_WAVE_ID=resume-wave-bravo
 mkdir -p "$HOME_DIR/data/$PRIMARY_WAVE_ID" "$SECOND_HOME_B/data/$BRAVO_WAVE_ID"

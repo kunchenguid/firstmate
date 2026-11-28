@@ -412,8 +412,13 @@
 #   This keeps commands beyond the terminal's roughly 1,024-byte input boundary
 #   intact, prevents a delayed source line from being rebound by a relaunch, and
 #   prevents equal task ids in different Firstmate homes from sharing a file.
-#   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
-#   task teardown removes only the current home's launch namespace.
+#   Spawn refuses an unsafe pre-existing task temp root or launch namespace.
+#   On tmux and Herdr, capped fresh launches retain their metadata lock while a
+#   30s confirmation loop establishes startup or successful command completion.
+#   Running raw commands need process evidence rather than recognized harness identity.
+#   An abort during confirmation rolls back only after fm_backend_kill_confirmed proves closure;
+#   otherwise cleanup_recovery=launch retains the record for endpoint recovery.
+#   Task teardown removes only the current home's launch namespace.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every supported command-line launch (ship, scout, secondmate, raw
@@ -1741,7 +1746,191 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+SPAWN_AWAY_ADMISSION=0
+SPAWN_START_PENDING=0
 SPAWN_STAGED_LAUNCH_FILE=
+SPAWN_CAPPED_PANE_DIALECT=
+
+# Capped away launches wait for startup only on backends whose kill-confirmed
+# path can roll a failed start back: tmux and Herdr. Main's
+# fm_control_backend_state_verified also lists rex and t3code, but
+# fm_backend_kill_confirmed does not, and t3code has no pane to wait on.
+spawn_away_startup_wait_applies() {
+  [ "$SPAWN_AWAY_ADMISSION" = 1 ] || return 1
+  case "$BACKEND" in
+    tmux|herdr) return 0 ;;
+  esac
+  return 1
+}
+
+# Pane-shell dialect for capped start/status lines. FM_TEST_PANE_SHELL is a
+# test-only override: fake pane_current_command often reports the wait-loop
+# probe (sleep) rather than the shell that sources the launch file.
+spawn_capped_pane_comm() {
+  local comm='' session pane pid info
+  case "$BACKEND" in
+    tmux)
+      comm=$(fm_backend_tmux_current_command "$T" 2>/dev/null || true)
+      ;;
+    herdr)
+      session=${T%%:*}
+      pane=${T#*:}
+      info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null || true)
+      pid=$(printf '%s' "$info" | jq -er \
+        '.result.process_info.shell_pid | select(type == "number" and . > 1) | floor' \
+        2>/dev/null || true)
+      if [ -n "$pid" ]; then
+        comm=$(ps -o comm= -p "$pid" 2>/dev/null || true)
+      fi
+      ;;
+  esac
+  comm=${comm##*/}
+  comm=${comm#-}
+  comm=${comm%%[$' \t']*}
+  printf '%s' "$comm"
+}
+
+spawn_capped_pane_dialect() {
+  local comm
+  if [ -n "${SPAWN_CAPPED_PANE_DIALECT:-}" ]; then
+    printf '%s' "$SPAWN_CAPPED_PANE_DIALECT"
+    return
+  fi
+  case "${FM_TEST_PANE_SHELL:-}" in
+    fish) printf 'fish'; return ;;
+    bash|zsh|sh|dash|ash|ksh|mksh|tcsh|csh) printf 'posix'; return ;;
+  esac
+  comm=$(spawn_capped_pane_comm)
+  # Empty when Herdr process-info fails or omits shell_pid. Guess from SHELL so
+  # a fish pane is not treated as POSIX and then waited out for 30s.
+  [ -n "$comm" ] || comm=${SHELL##*/}
+  case "$comm" in
+    fish) printf 'fish' ;;
+    *) printf 'posix' ;;
+  esac
+}
+
+# Keep the uncapped OSC frame (arm / agent / disarm) byte for byte. Insert a
+# start marker after arm and a dialect-specific status capture after the agent
+# so the pane shell, not /bin/sh -c, runs the agent line. An enabled
+# launch-env allowlist already wraps that frame in /bin/sh -c, so those
+# additions stay POSIX. A typed source-line fallback writes the exit file
+# when git-hooks `return 1` from a sourced file, which does not run EXIT.
+spawn_apply_capped_launch_capture() {
+  local file_dialect head body disarm agent qstage qstart qexit qtraps
+  local trap_block start_line capture_block restore_trap
+  qstage=$(shell_quote "$LAUNCH_STAGE")
+  qstart=$(shell_quote "$LAUNCH_START_FILE")
+  qexit=$(shell_quote "$LAUNCH_EXIT_FILE")
+  qtraps=$(shell_quote "$LAUNCH_DIR/.launch.$SPAWN_GEN.traps")
+  SPAWN_CAPPED_PANE_DIALECT=$(spawn_capped_pane_dialect)
+  if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+    file_dialect=posix
+  else
+    file_dialect=$SPAWN_CAPPED_PANE_DIALECT
+  fi
+  head=${LAUNCH%%$'\n'*}
+  body=${LAUNCH#*$'\n'}
+  disarm=${body##*$'\n'}
+  agent=${body%$'\n'*}
+  start_line="echo 1 > $qstage && mv -f -- $qstage $qstart"
+  trap_block=
+  case "$file_dialect" in
+    fish)
+      # No fish_exit handler: exit/return in a sourced file does not leave the
+      # pane, and the typed fallback already records that status. A handler
+      # would only fire when the pane dies, and then it would write a false 0.
+      capture_block="set __fm_launch_status \$status
+echo \$__fm_launch_status > $qstage && mv -f -- $qstage $qexit"
+      ;;
+    *)
+      # Save every trap the pane shell already had (`trap > file`, not $(trap):
+      # zsh and dash print nothing there). Restore it after our EXIT trap, so
+      # an ssh-agent cleanup from an rc file still runs. Skip the source when
+      # a /tmp cleaner already removed the file: dash otherwise abandons the
+      # rest of the launch, including the typed fallback. A 0 from this trap
+      # is pane death (bash and fish both report 0 on SIGHUP / tmux
+      # kill-session before the capture line), not a successful launch, so
+      # map it to 129.
+      restore_trap="trap - EXIT; [ ! -f $qtraps ] || . $qtraps; rm -f $qtraps"
+      # shellcheck disable=SC2016 # $?, $1, and $s expand in the pane, not here.
+      trap_block="trap > $qtraps
+__fm_capped_on_exit() {
+$restore_trap
+[ -f $qexit ] && return 0
+s=\$1; [ \"\$s\" = 0 ] && s=129
+echo \"\$s\" > $qstage && mv -f -- $qstage $qexit
+}
+trap '__fm_capped_on_exit \$?' EXIT"
+      capture_block="__fm_launch_status=\$?
+$restore_trap
+echo \"\$__fm_launch_status\" > $qstage && mv -f -- $qstage $qexit
+unset -f __fm_capped_on_exit 2>/dev/null || true"
+      ;;
+  esac
+  if [ -n "$trap_block" ]; then
+    LAUNCH="${trap_block}
+${head}
+${start_line}
+${agent}
+${capture_block}
+${disarm}"
+  else
+    LAUNCH="${head}
+${start_line}
+${agent}
+${capture_block}
+${disarm}"
+  fi
+}
+
+spawn_capped_source_line() {
+  local qfile qstage qexit qtraps dialect
+  qfile=$(shell_quote "$LAUNCH_FILE")
+  qstage=$(shell_quote "$LAUNCH_STAGE")
+  qexit=$(shell_quote "$LAUNCH_EXIT_FILE")
+  qtraps=$(shell_quote "$LAUNCH_DIR/.launch.$SPAWN_GEN.traps")
+  dialect=$(spawn_capped_pane_dialect)
+  case "$dialect" in
+    fish)
+      # shellcheck disable=SC2016 # $status and $__fm_s expand in the pane, not here.
+      printf '%s; set __fm_s $status; if not test -f %s; echo $__fm_s > %s; and mv -f -- %s %s; end' \
+        ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit"
+      ;;
+    *)
+      # shellcheck disable=SC2016 # $? and $__fm_s expand in the pane, not here.
+      if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+        # The capture frame runs in `/bin/sh -c`, so the traps file is the
+        # child's. Restoring it here would wipe the pane's own EXIT trap.
+        printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }; rm -f %s' \
+          ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit" "$qtraps"
+      else
+        # A sourced `return` skips the capture block, so restore the pane's
+        # own EXIT trap here. The fallback still records N when the exit
+        # file is new.
+        printf '%s; __fm_s=$?; [ -f %s ] || { echo "$__fm_s" > %s && mv -f -- %s %s; }; [ ! -f %s ] || { trap - EXIT; . %s; rm -f %s; unset -f __fm_capped_on_exit; }' \
+          ". $qfile" "$qexit" "$qstage" "$qstage" "$qexit" "$qtraps" "$qtraps" "$qtraps"
+      fi
+      ;;
+  esac
+}
+
+spawn_cancel_pending_start() {
+  [ "$SPAWN_START_PENDING" = 1 ] || return 0
+  SPAWN_START_PENDING=0
+  rm -f "$LAUNCH_FILE"
+  # Single quotes defer positional argument expansion to the child bash.
+  # shellcheck disable=SC2016
+  if fm_run_timed 10 bash -c \
+    '. "$1"; fm_backend_kill_confirmed "$2" "$3"' \
+    _ "$SCRIPT_DIR/fm-backend.sh" "$BACKEND" "$T" 2>/dev/null; then
+    SPAWN_ENDPOINT_CLOSED=1
+  else
+    SPAWN_FRESH_COMMIT_PENDING=0
+    printf 'cleanup_recovery=launch\n' >> "$STATE/$ID.meta" || return 1
+    echo "error: task $ID's startup could not be cancelled; its record is retained for endpoint cleanup" >&2
+  fi
+}
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1785,6 +1974,7 @@ spawn_orca_reclaim_launch_file() {
 
 spawn_abort_cleanup() {
   local status=$?
+  spawn_cancel_pending_start || status=1
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -2257,7 +2447,7 @@ if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
 spawn_refuse_if_away_spend_cap() {
-  local cap live
+  local cap live live_err
   [ "$RELAUNCH" -ne 1 ] || return 0
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
@@ -2267,7 +2457,13 @@ spawn_refuse_if_away_spend_cap() {
   case "$cap" in
   '' | *[!0-9]* | 0) return 0 ;;
   esac
-  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>/dev/null || true)
+  SPAWN_AWAY_ADMISSION=1
+  live_err=$(mktemp) || live_err=
+  live=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" live-workers 2>"${live_err:-/dev/null}" || true)
+  if [ -n "$live_err" ] && grep -qxF 'live-workers truncated: remaining records counted as spending' "$live_err"; then
+    echo "live-workers truncated: remaining records counted as spending" >&2
+  fi
+  [ -z "$live_err" ] || rm -f "$live_err"
   case "$live" in
   '' | *[!0-9]*)
     echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and this home's live ordinary task count could not be read; task $ID stays queued (spend cap: bin/fm-afk-contract.sh)" >&2
@@ -2275,20 +2471,20 @@ spawn_refuse_if_away_spend_cap() {
     ;;
   esac
   if [ "$live" -ge "$cap" ]; then
-    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home or could not be proven idle within the budget; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
     exit 1
   fi
 }
 # Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while an
 # away record exists (never a quiet-mode one, whose captain is present and
 # spends as attended: bin/fm-afk-contract.sh mode), a fresh ordinary spawn
-# refuses for BOTH actors once this home already holds that many ordinary task
-# records, counted by that script's own `live-workers`, which is also the count
-# its entry records as the cap. A relaunch replaces a worker that already
-# counts, and a secondmate is a persistent home rather than spend, so both are
-# exempt. Checked before any endpoint, worktree, or record
-# exists, so a refusal costs nothing to unwind; rechecked after the task-set
-# lock so two fresh spawns cannot both publish from a stale count.
+# refuses for BOTH actors once this home already holds that many ordinary
+# workers able to spend, using `bin/fm-afk-contract.sh live-workers` for the
+# same count used when entry records the cap. Relaunches are exempt recovery of
+# existing tasks; secondmates are exempt persistent homes. Checked before any
+# endpoint, worktree, or record exists, so a refusal costs nothing to unwind;
+# rechecked after the task-set lock so two fresh spawns cannot use a stale count.
+# Both checks share FM_AFK_LIVE_WORKERS_TIMEOUT (default 20s).
 spawn_refuse_if_away_spend_cap
 spawn_require_relocated_queued_work() {
   local actor
@@ -5871,6 +6067,7 @@ rovo_spawn_fail() { # <detail>
 # the exact terminal is closed: that stops the CLI while its worktree stays
 # for the record's own teardown, which owns worktree deletion.
 rovo_endpoint_cleanup() {
+  [ "$SPAWN_START_PENDING" != 1 ] || return 0
   if [ "$BACKEND" = orca ]; then
     fm_backend_kill orca "$T" 2>/dev/null && SPAWN_ENDPOINT_CLOSED=1 || true
     return 0
@@ -7359,6 +7556,7 @@ preserve_relaunch_meta() {
       split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
+    $1 == "cleanup_recovery" && $2 == "launch" { next }
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
@@ -7987,6 +8185,13 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 fi
+LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
+LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+LAUNCH_EXIT_FILE="$LAUNCH_FILE.exit"
+LAUNCH_START_FILE="$LAUNCH_FILE.start"
+if spawn_away_startup_wait_applies; then
+  spawn_apply_capped_launch_capture
+fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
   # A configured Orca source replaces destination expansion of allowlisted
@@ -8061,8 +8266,6 @@ else
       exit 1
     fi
   fi
-  LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
-  LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     # The sourcing shell already holds the open file; unlink the credentials
     # before launching the worker, including on a later command failure.
@@ -8088,6 +8291,12 @@ else
     trap 'exit 143' TERM
   fi
   sleep 0.3
+  if spawn_away_startup_wait_applies; then
+    SPAWN_START_PENDING=1
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+  fi
   spawn_orca_launch_send_fail() {
     rm -f -- "$LAUNCH_FILE" 2>/dev/null || true
     kimi_spawn_fail "launch command could not be delivered to Orca terminal $T"
@@ -8115,7 +8324,11 @@ else
   SPAWN_LAUNCH_SENT=1
   # errexit is on here: a failed send still exits, and Orca source mode first
   # removes the credential-bearing file the pane never received.
-  LAUNCH_SOURCE_TEXT=". $(shell_quote "$LAUNCH_FILE")"
+  if spawn_away_startup_wait_applies; then
+    LAUNCH_SOURCE_TEXT=$(spawn_capped_source_line)
+  else
+    LAUNCH_SOURCE_TEXT=". $(shell_quote "$LAUNCH_FILE")"
+  fi
   if [ "$ORCA_LAUNCH_ENV_ENABLED" = 1 ]; then
     # A refused source-mode launch fails the source command, and some shells exit
     # under errexit on sourcing a file spawn already reclaimed even inside ||, so
@@ -8161,7 +8374,10 @@ if [ "$HARNESS" = hermes ] && [ "$RAW_LAUNCH" -eq 0 ]; then
   if [ "$HERMES_READY" != 1 ]; then
     echo "error: Hermes did not reach its TUI or process its brief in $T; inspect profile setup, provider errors, and first-run consent (only an already-selected No thanks is answered)" >&2
     rovo_endpoint_cleanup
-    if [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; then
+    # A capped tmux/Herdr start still owns closure through spawn_cancel_pending_start
+    # on abort. Do not disable rollback here: that path has not run yet, so
+    # SPAWN_ENDPOINT_CLOSED is still 0 even when the endpoint will close.
+    if [ "$SPAWN_START_PENDING" != 1 ] && [ "$SPAWN_ENDPOINT_CLOSED" != 1 ]; then
       # Hermes may still finish starting there, so the record stays for
       # supervision and teardown instead of being rolled back.
       SPAWN_FRESH_COMMIT_PENDING=0
@@ -8252,6 +8468,52 @@ if [ "$HARNESS" = polytoken ] && [ "$RAW_LAUNCH" -eq 0 ]; then
     polytoken_spawn_fail "polytoken session binding could not be recorded for $ID"
     exit 1
   fi
+fi
+
+if [ "$SPAWN_START_PENDING" = 1 ]; then
+  # FM_TEST_SPAWN_START_WAIT_SECONDS is a test-only hook, not a user setting.
+  spawn_start_wait=${FM_TEST_SPAWN_START_WAIT_SECONDS:-30}
+  spawn_start_deadline=$((SECONDS + spawn_start_wait))
+  spawn_start_state=unreadable
+  while :; do
+    if [ -f "$LAUNCH_EXIT_FILE" ]; then
+      spawn_start_exit=$(cat "$LAUNCH_EXIT_FILE")
+      if [ "$spawn_start_exit" != 0 ]; then
+        echo "error: task $ID's launch command exited with status ${spawn_start_exit:-unknown}" >&2
+        exit 1
+      fi
+      break
+    fi
+    spawn_start_probe=$((spawn_start_deadline - SECONDS))
+    if [ "$spawn_start_probe" -le 0 ]; then
+      echo "error: task $ID's startup was not established within ${spawn_start_wait}s (endpoint: $spawn_start_state)" >&2
+      exit 1
+    fi
+    # Herdr's idle-shell proof can spend up to 10 polls; 2s timed out
+    # healthy raw workers on a loaded host. Cap at 5s or whatever
+    # remains of the startup wait.
+    [ "$spawn_start_probe" -le 5 ] || spawn_start_probe=5
+    # Single quotes defer positional argument expansion to the child bash.
+    # shellcheck disable=SC2016
+    spawn_start_state=$(fm_run_timed "$spawn_start_probe" bash -c \
+      '. "$1"; fm_backend_worker_state "$2" "$3"' _ \
+      "$SCRIPT_DIR/fm-backend.sh" "$BACKEND" "$T" 2>/dev/null) || spawn_start_state=unreadable
+    case "$spawn_start_state" in
+      alive)
+        [ -f "$LAUNCH_EXIT_FILE" ] && continue
+        break
+        ;;
+      ambiguous)
+        if [ "$RAW_LAUNCH" = 1 ] && [ -f "$LAUNCH_START_FILE" ]; then
+          [ -f "$LAUNCH_EXIT_FILE" ] && continue
+          break
+        fi
+        ;;
+    esac
+    sleep 0.1
+  done
+  SPAWN_START_PENDING=0
+  trap - HUP INT TERM
 fi
 
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
