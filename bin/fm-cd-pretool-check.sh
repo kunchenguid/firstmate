@@ -134,21 +134,23 @@ fi
 # form the classifier decodes REQUIRES extending it here in the same change, or
 # the prefilter stops being a strict superset. Deliberate deeper obfuscation is
 # out of scope by the same agent-mistake threat model the policy uses.
-PREFILTER=$CMD
-PREFILTER=${PREFILTER//\\/}
-PREFILTER=${PREFILTER//\"/}
-PREFILTER=${PREFILTER//\'/}
-PREFILTER=${PREFILTER//$'\n'/}
-PREFILTER=${PREFILTER//$'\r'/}
-case "$CMD" in
-  *"\$'"*|*'$"'*) ;;
-  *)
-    case "$PREFILTER" in
-      *cd*|*pushd*|*popd*) ;;
-      *) exit 0 ;;
-    esac
-    ;;
-esac
+#
+# The strip is one tr pass, not per-byte ${CMD//...} substitutions, because
+# those are superlinear on long text under bash 3.2 with a UTF-8 locale. The
+# fast path runs only after the strip succeeds: BSD tr rejects an illegal byte
+# sequence and may emit just a prefix, and a partial strip cannot prove cd is
+# absent, so a failed strip delegates the unchanged command.
+if PREFILTER=$(set -o pipefail; printf '%s' "$CMD" | tr -d '\\"\047\n\r' 2>/dev/null); then
+  case "$CMD" in
+    *"\$'"*|*'$"'*) ;;
+    *)
+      case "$PREFILTER" in
+        *cd*|*pushd*|*popd*) ;;
+        *) exit 0 ;;
+      esac
+      ;;
+  esac
+fi
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
 FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
