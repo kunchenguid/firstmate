@@ -208,6 +208,21 @@ _fm_status_corr_attempt() {  # <word>
   return 1
 }
 
+# 0 when the verb status_line_verb read is a bare epoch ahead of one recognized
+# verb: the brief's <epoch> placeholder written before the verb instead of as
+# the [at=<epoch>] tag after it. Such a line matches no fold rule, so a reader
+# that would otherwise drop the declaration silently can name it for repair.
+# Fewer than 9 digits is a count or a year opening continuation prose
+# ("2 failed: lint and unit"), not an epoch.
+_fm_status_raw_epoch_verb() {  # <verb>
+  local epoch=${1%%[[:space:]]*} verb=${1#*[[:space:]]}
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#epoch}" -ge 9 ] || return 1
+  [ "$verb" != "$1" ] || return 1
+  verb=${verb#"${verb%%[![:space:]]*}"}
+  _fm_status_verb_recognized "$verb"
+}
+
 # 0 when <line> declares a status prefix that did not parse as a recognized verb.
 # An unknown lowercase word (parked:, holding:) is one shape. A recognized verb
 # followed only by a missing or mismatched correlation token is the other, as is
@@ -1009,27 +1024,38 @@ EOF
 # most-recently-opened-last order; prints nothing when none are open. Reads the
 # status file, plus its sibling `.meta` for the task kind the terminal rule needs
 # when the caller passes no <kind>; no globals beyond the optional
-# FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
-# snapshot and any point-in-time consumer must use instead of trusting the last
-# status line.
+# FM_CLASSIFY_RESOLVE_VERB and FM_CLASSIFY_CAPTAIN_HELD_VERB overrides. This is
+# the durable open-set the fleet snapshot and any point-in-time consumer must
+# use instead of trusting the last status line. A raw-epoch line
+# (_fm_status_raw_epoch_verb) folds as nothing and is reported on stderr as
+# "<file>:<line>: malformed status line ..." so the declaration it carries can
+# be repaired instead of vanishing. A caller folding a copy passes
+# <report-path>, the file a reader would repair.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
 # before any read - a cheap builtin, unlike fm_wake_latest_event's O_NOFOLLOW
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
-status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' folded verb
+status_open_decisions() {  # <status-file> [<kind>] [<report-path>]
+  local f=$1 kind=${2:-} report_path=${3:-$1} line resolve held open='' folded verb number=0
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
+    number=$((number + 1))
     status_line_verb "$line" verb
     case "$verb" in
       needs-decision|blocked|done|failed|"$resolve"|"$held")
         _fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind" '' folded
         open=$folded
+        ;;
+      *)
+        if _fm_status_raw_epoch_verb "$verb"; then
+          printf '%s:%s: malformed status line; repair the timestamp to [at=<epoch>] after the verb: %s\n' \
+            "$report_path" "$number" "$line" >&2
+        fi
         ;;
     esac
   done < "$f"

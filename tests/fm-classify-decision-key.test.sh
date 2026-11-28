@@ -99,6 +99,39 @@ test_resolution_closes_across_positions() {
   pass "a resolution closes its decision regardless of either line's key position"
 }
 
+test_raw_epoch_prefix_is_reported_without_erasing_open_decisions() {
+  local dir f errors expected report
+  dir=$(case_dir raw-epoch)
+  f="$dir/task.status"
+  # Line 2 is the exact line from issue #8048; lines 3-5 are the same mistake
+  # in the colon-first, indented and transfer-verb shapes the canonical reader
+  # accepts. Lines 6-8 merely start with a number and are ordinary prose, even
+  # where a recognized verb follows a count or a year.
+  printf '%s\n' \
+    'blocked [at=1793378273] [key=earlier]: An earlier blocker remains open.' \
+    '1793378273 blocked [key=example] An implementation decision needs an answer.' \
+    '1793378273 blocked: [key=colon] A colon-first raw epoch.' \
+    ' 1793378273 needs-decision [key=indent] An indented raw epoch.' \
+    '1793378273 captain-held [key=other] A raw epoch transfer.' \
+    '2026 release notes: nothing malformed here.' \
+    '2 failed: lint and unit' \
+    '2026 note: x' > "$f"
+
+  # assert_fold's stderr is the report channel under test, so capture it in a
+  # subshell and replay a captured failure instead of hiding it.
+  expected=$(printf 'earlier\tblocked\tAn earlier blocker remains open.\n')
+  errors=$(assert_fold "$f" "$expected" "raw epoch lines after an open blocker" 2>&1) \
+    || { printf '%s\n' "$errors" >&2; exit 1; }
+  report='malformed status line; repair the timestamp to [at=<epoch>] after the verb'
+  expected="$f:2: $report: 1793378273 blocked [key=example] An implementation decision needs an answer.
+$f:3: $report: 1793378273 blocked: [key=colon] A colon-first raw epoch.
+$f:4: $report:  1793378273 needs-decision [key=indent] An indented raw epoch.
+$f:5: $report: 1793378273 captain-held [key=other] A raw epoch transfer."
+  [ "$errors" = "$expected" ] \
+    || fail "raw epoch lines were not each reported with file and line number: got '$errors' want '$expected'"
+  pass "a raw epoch prefix is reported as malformed while earlier decisions remain open"
+}
+
 test_blocked_is_position_tolerant_like_needs_decision() {
   local dir expected
   dir=$(case_dir blocked)
@@ -265,6 +298,7 @@ test_incremental_agrees_with_full_fold_across_appends() {
 }
 
 test_stated_key_is_honored_in_both_positions
+test_raw_epoch_prefix_is_reported_without_erasing_open_decisions
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
 test_blocked_is_position_tolerant_like_needs_decision
