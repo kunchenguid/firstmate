@@ -362,7 +362,13 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+  # cmux can list a freshly created workspace a moment late, so retry briefly.
+  local _try
+  for _try in 1 2 3 4 5 6 7 8 9 10; do
+    wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
+    [ -n "$wsid" ] && break
+    sleep 0.3
+  done
   [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
   [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
