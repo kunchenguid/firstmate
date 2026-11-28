@@ -3269,28 +3269,44 @@ fm_backend_herdr_send_key() {  # <target> <key>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-keys "$FM_BACKEND_HERDR_PANE" "$key" >/dev/null 2>&1
 }
 
+fm_backend_herdr_viewport_rows() {  # <session> <pane_id>
+  local out rows
+  out=$(fm_backend_herdr_cli "$1" pane get "$2" 2>/dev/null) || return 1
+  rows=$(printf '%s' "$out" | jq -r '.result.pane.scroll.viewport_rows // empty' 2>/dev/null) || return 1
+  case "$rows" in
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$rows" -gt 0 ] || return 1 ;;
+  esac
+  printf '%s' "$rows"
+}
+
 # fm_backend_herdr_capture: bounded plain-text pane capture. Mirrors
-# fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
-# is the closest herdr analogue to tmux's scrollback-bounded capture.
+# fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. Herdr's
+# `--source recent` stays passive on alternate-screen panes only while the read
+# asks for no more rows than the CURRENT viewport height, so this caps the
+# request there and trims to the caller's requested bound with `tail`.
 #
 # Verified CLI quirk (herdr-verification-p2.md "pane read --lines bug", v0.7.1):
-# `pane read --source recent --lines N` returns COMPLETELY EMPTY output when N
-# is smaller than the pane's current viewport height (observed threshold ~23
-# rows for a default-sized pane), instead of clamping to the last N lines - it
-# does not merely ignore the bound, it drops the read entirely. This silently
-# broke exactly the small bounded reads this adapter relies on most (the peek
-# and watch tails, the rendered busy-footer read, and the shared inbox
-# pending-line read; the adapter's own composer reads now take the viewport
-# instead, so they need no line count at all). Workaround:
-# always request a generous fetch far above any realistic viewport height, then
-# trim to the caller's requested bound ourselves with `tail`.
+# a small `--source recent --lines N` read could return COMPLETELY EMPTY output
+# instead of clamping to the last N lines. On current Herdr the small passive
+# read works again, but keep the old-release guard by falling back to
+# `--source visible` when the bounded recent read comes back empty. When the
+# viewport height itself cannot be read, go straight to `--source visible`, the
+# other passive primitive this adapter already trusts for composer reads.
 fm_backend_herdr_capture() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
-  fetch=$lines
-  case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
+  fetch=$(fm_backend_herdr_viewport_rows "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  if [ -n "$fetch" ]; then
+    [ "$fetch" -le "$lines" ] || fetch=$lines
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" 2>/dev/null) || return 1
+  else
+    out=
+  fi
+  if [ -z "$out" ]; then
+    out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null) || return 1
+  fi
   printf '%s' "$out" | tail -n "$lines"
 }
 

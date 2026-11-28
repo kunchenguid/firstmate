@@ -747,9 +747,10 @@ A missed native transition falls through to the composer verdict rather than rep
 
 ### Capture size
 
-`pane read --lines N` can return empty output when N is below the viewport height.
-The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
-This generous floor is required for the small bounded reads that remain: peek and watch tails, the rendered busy-footer read, and the shared steering-inbox pending-line read.
+Herdr's `pane read --source recent` stays passive on alternate-screen panes only while it asks for no more rows than the pane's current viewport height.
+The capture owner (`fm_backend_herdr_capture`) therefore reads `viewport_rows` from `pane get`, requests the smaller of that height and the caller's bound, and trims locally to the caller's bound.
+Older Herdr releases could return empty output for a small `--lines N`, so an empty bounded recent read falls back to `pane read --source visible`; when the viewport height cannot be read, capture goes straight to the visible read.
+This applies to the small bounded reads that remain: peek and watch tails, the rendered busy-footer read, and the shared steering-inbox pending-line read.
 The adapter's own composer reads are exempt because they read the visible viewport instead, which takes no line count (see [Claude composer proof](#claude-composer-proof)).
 
 ### Native idle state
