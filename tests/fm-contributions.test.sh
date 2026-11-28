@@ -1563,6 +1563,70 @@ test_unmeasured_url_does_not_starve_the_tail() {
   pass 'rotation preserves timed-out records and refreshes every slow PR on successive cycles'
 }
 
+test_fifo_read_budget_keeps_prior_record() {
+  local home out pid
+  home=$(new_home fifo-budget)
+  forge_home "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  mv "$home/fakebin/gh" "$home/fakebin/gh-fixture"
+  mkfifo "$home/forge/entered" "$home/forge/release"
+  exec 6<> "$home/forge/entered" 5<> "$home/forge/release"
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = 'api repos/o/r/pulls/8' ]; then
+  trap '' ALRM
+  printf '%s\n' "$$" > "$FORGE/entered"
+  read -r _ < "$FORGE/release"
+  exit 1
+fi
+exec "$0-fixture" "$@"
+SH
+  chmod +x "$home/fakebin/gh"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" arm >/dev/null || fail 'FIFO check arming failed'
+  # Oracle: a budget cut is not a forge failure. The generated check must
+  # preserve the previous observation byte-for-byte and produce no wake.
+  out=$(bounded_check "$home" 9) || fail 'FIFO contribution check exceeded its watcher bound'
+  read -r -t 1 pid <&6 || fail 'contribution read never entered its FIFO'
+  ! kill -0 "$pid" 2>/dev/null || fail 'contribution check left its blocked forge alive'
+  [ -z "$out" ] || fail "budget cut raised a wake: $out"
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" || fail 'budget cut changed prior records'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'budget cut queued a wake'
+  exec 6>&- 5>&-
+  pass 'FIFO-stalled contribution check preserves prior records without a wake'
+}
+
+test_short_check_budget_observes_after_setup() {
+  local home out
+  home=$(new_home setup-budget)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  /bin/date +%s > "$home/forge/clock"
+  cat > "$home/fakebin/date" <<'SH'
+#!/bin/sh
+if [ "$*" = +%s ]; then
+  now=$(cat "$FORGE/clock")
+  if [ ! -e "$FORGE/setup-elapsed" ]; then
+    : > "$FORGE/setup-elapsed"
+    echo "$((now + 1))" > "$FORGE/clock"
+    echo "$now"
+  else
+    echo "$now"
+  fi
+else
+  exec /bin/date "$@"
+fi
+SH
+  out=$(with_home "$home" env FM_CHECK_TIMEOUT=18 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'short-budget poll failed after setup consumed one second'
+  [ -z "$out" ] || fail "responsive forge raised an unavailable wake: $out"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'one second of setup starved a responsive forge observation'
+  pass 'a short check budget still refreshes contributions after setup consumes one second'
+}
+
 test_budget_is_cut_down_to_the_watcher_check_bound() {
   local home out
   home=$(new_home check-bound-budget)
@@ -1579,6 +1643,81 @@ test_budget_is_cut_down_to_the_watcher_check_bound() {
     || fail 'a poll observed with the full budget despite a six-second check bound'
   [ ! -s "$home/state/.wake-queue" ] || fail 'a check-bound-capped poll enqueued a wake'
   pass 'the effective budget is cut down to the watcher per-check bound with margin'
+}
+
+# Holds this home's observation lock from another live process until released.
+# The holder reports through FIFOs, so the test waits on the lock being held
+# and on its release rather than on elapsed time.
+hold_contributions_lock() {  # <home>
+  local home=$1
+  rm -f "$home/lock-held" "$home/lock-release"
+  mkfifo "$home/lock-held" "$home/lock-release"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2/state/.contributions.lock" || exit 1
+    printf "held\n" > "$2/lock-held"
+    read -r _ < "$2/lock-release"
+    fm_lock_release "$2/state/.contributions.lock"' bash "$ROOT" "$home" &
+  LOCK_HOLDER=$!
+  read -r _ < "$home/lock-held"
+}
+
+release_contributions_lock() {  # <home>
+  printf 'release\n' > "$1/lock-release"
+  wait "$LOCK_HOLDER"
+}
+
+# Runs the check shim the way the watcher does: cut at FM_CHECK_TIMEOUT.
+bounded_check() {  # <home> <seconds>
+  local home=$1 seconds=$2
+  # shellcheck disable=SC2016 # Perl expands its own variables.
+  with_home "$home" env FM_CHECK_TIMEOUT="$seconds" perl -e 'my $t = shift; my $pid = fork; die unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid $pid, 0; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+    "$seconds" bash "$home/state/contributions.check.sh"
+}
+
+# Three sweeps under a held lock: each ends inside the watcher's check bound,
+# the first two silently and the third with the one persistence report.
+held_lock_sweeps() {  # <home> <label>
+  local home=$1 label=$2 out rc sweep
+  hold_contributions_lock "$home"
+  for sweep in 1 2 3; do
+    rc=0
+    out=$(bounded_check "$home" 6) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      release_contributions_lock "$home"
+      fail "$label sweep $sweep under a held lock was cut at the check bound: rc=$rc"
+    fi
+    if [ "$sweep" -lt 3 ] && [ -n "$out" ]; then
+      release_contributions_lock "$home"
+      fail "$label sweep $sweep under a held lock was not quiet: $out"
+    fi
+    if [ "$sweep" -eq 3 ] && [ "$out" != 'contributions: observation lock held by another process for 3 consecutive polls' ]; then
+      release_contributions_lock "$home"
+      fail "$label persistently held lock did not report on its third sweep: $out"
+    fi
+  done
+  release_contributions_lock "$home"
+}
+
+test_held_observation_lock_skips_quietly_and_wakes_when_persistent() {
+  local home out rc
+  home=$(new_home held-observation-lock)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" arm >/dev/null || fail 'arm failed'
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  held_lock_sweeps "$home" first
+  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail 'a poll that never held the lock changed a record'
+  # Once the lock is free the poll observes normally and ends the streak, so a
+  # later held lock again needs three sweeps before it reports.
+  rc=0
+  out=$(bounded_check "$home" 6) || rc=$?
+  { [ "$rc" -eq 0 ] && [ -z "$out" ]; } || fail "the poll after release did not observe quietly: rc=$rc out=$out"
+  ! cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
+    || fail 'the poll after release did not observe the contribution'
+  held_lock_sweeps "$home" second
+  pass 'a held observation lock skips the sweep quietly and wakes only when persistent'
 }
 
 test_arm_plumbs_a_configured_budget_into_the_check_shim() {
@@ -2322,7 +2461,7 @@ test_settled_task_gets_no_closed_event_for_its_other_pr() {
 }
 
 failures=0
-for test_name in test_forge_settlement_defers_while_the_task_is_busy test_settled_task_gets_no_closed_event_for_its_other_pr test_forge_release_waits_for_an_attended_session test_forge_release_waits_for_the_away_record_lock test_forge_policy_survives_a_follow_up_pr_link test_closed_pr_is_reported_only_to_open_captain_holds test_late_linked_hold_gets_its_own_closed_event_once test_forge_hold_settlement_retry test_forge_hold_settlement_rejects_uncertain_evidence test_forge_settles_only_declared_holds test_forge_hold_policy_guards test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
+for test_name in test_forge_settlement_defers_while_the_task_is_busy test_settled_task_gets_no_closed_event_for_its_other_pr test_forge_release_waits_for_an_attended_session test_forge_release_waits_for_the_away_record_lock test_forge_policy_survives_a_follow_up_pr_link test_closed_pr_is_reported_only_to_open_captain_holds test_late_linked_hold_gets_its_own_closed_event_once test_forge_hold_settlement_retry test_forge_hold_settlement_rejects_uncertain_evidence test_forge_settles_only_declared_holds test_forge_hold_policy_guards test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_review_bot_inline_wake test_review_bot_watching_is_opt_in test_review_bot_allowlist_is_configurable test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_unsupported_poll_is_silent_and_clears_legacy_errors test_legacy_cleanup_preserves_supported_failure test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_http_500_once_retries_without_waking test_http_500_twice_records_the_failed_read test_http_404_is_not_retried test_real_gh_errors_drive_retry_and_summary test_next_url_does_not_inherit_a_forge_diagnostic test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_many_settled_records_keep_the_poll_inside_the_check_bound test_many_settled_records_beside_a_malformed_one_keep_the_poll_inside_the_check_bound test_record_without_trailing_newline_does_not_join_its_neighbour test_records_beyond_one_read_batch_are_all_read test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_short_check_budget_observes_after_setup test_budget_is_cut_down_to_the_watcher_check_bound test_fifo_read_budget_keeps_prior_record test_held_observation_lock_skips_quietly_and_wakes_when_persistent test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_retire_ends_observation_of_a_gone_contribution test_late_owner_of_a_retired_final_contribution_is_not_retired test_retire_is_idempotent_and_refuses_unknown_pairs test_unanswered_thread_is_raised_again_under_hold test_resolved_thread_is_answered test_reply_rules test_reply_age_is_configurable_and_validated test_closed_pull_request_drops_its_threads test_unanswered_reraise_is_off_unless_configured test_arm_plumbs_the_reply_age_into_the_check_shim test_many_reviews_stay_readable; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

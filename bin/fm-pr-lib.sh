@@ -1869,3 +1869,45 @@ fm_pr_poll_train_clear() {  # <state> <id>
     rm -f -- "$marker"
   }
 }
+
+# A watcher check that misses one sweep for a transient reason - a PR poll
+# that could not reach its forge (bin/fm-pr-poll.sh's "unreachable"), or a
+# contribution poll that found its observation lock held (bin/fm-contributions.sh)
+# - is retried quietly on the next sweep and wakes only once this many
+# consecutive sweeps missed, so a transient failure raises no supervision wake
+# while a persistent one still does.
+FM_CHECK_PERSISTENT_SWEEPS=3
+
+# Records one more consecutive unreachable poll for the task and prints the
+# streak length; an unreadable count restarts the streak at one.
+fm_pr_poll_unreachable_note() {  # <state> <id>
+  local state=$1 id=$2 counter count="" tmp
+  fm_pr_task_id_valid "$id" || return 1
+  counter="$state/$id.pr-poll-unreachable"
+  if [ -f "$counter" ] && [ ! -L "$counter" ]; then
+    IFS= read -r count < "$counter" || count=
+  elif [ -e "$counter" ] || [ -L "$counter" ]; then
+    return 1
+  fi
+  case "$count" in ''|0*|*[!0-9]*) count=0 ;; esac
+  [ "${#count}" -le 9 ] || count=0
+  count=$((count + 1))
+  tmp=$(mktemp "$state/.fm-pr-poll-unreachable.XXXXXX") || return 1
+  if ! printf '%s\n' "$count" > "$tmp" || ! mv -f -- "$tmp" "$counter"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  printf '%s\n' "$count"
+}
+
+# Ends the task's unreachable streak after any other poll result, and
+# at teardown (bin/fm-teardown.sh) so a retired task id leaves no residue.
+fm_pr_poll_unreachable_clear() {  # <state> <id>
+  local state=$1 id=$2 counter
+  fm_pr_task_id_valid "$id" || return 1
+  counter="$state/$id.pr-poll-unreachable"
+  [ ! -e "$counter" ] && [ ! -L "$counter" ] || {
+    [ -f "$counter" ] && [ ! -L "$counter" ] || return 1
+    rm -f -- "$counter"
+  }
+}

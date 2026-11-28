@@ -4279,6 +4279,20 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+          # An unreachable forge is retried quietly on the next sweep; only a
+          # streak of FM_CHECK_PERSISTENT_SWEEPS consecutive unreachable
+          # polls wakes, once, and any other poll result ends the streak.
+          if [ "$out" = unreachable ]; then
+            unreachable_count=$(fm_pr_poll_unreachable_note "$STATE" "$id") || exit 1
+            if [ "$unreachable_count" -ne "$FM_CHECK_PERSISTENT_SWEEPS" ]; then
+              pr_poll_control_release || exit 1
+              triage_log "PR poll for $id could not reach its forge ($unreachable_count consecutive); retrying next sweep"
+              continue
+            fi
+            out="unreachable: its forge read timed out on $unreachable_count consecutive polls"
+          else
+            fm_pr_poll_unreachable_clear "$STATE" "$id" || exit 1
+          fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
