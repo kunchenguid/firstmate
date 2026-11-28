@@ -32,9 +32,7 @@ _FM_SECONDMATE_RESTART_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # open-record half of /stow and nothing more: a restart needs the state of work
 # written down, not a memory curation pass, and bundling one would make every
 # instruction update cost far more than the reload it is paying for.
-# The mate answers through its parent channel, which is what resolves the
-# parent-owned reply expectation fm-send arms for a marked request; that
-# correlated answer, never the wall clock, is what releases the restart.
+# bin/fm-secondmate-restart.sh's header owns the parent-channel reply gate.
 FM_SECONDMATE_PERSIST_REQUEST='Firstmate was updated and I am about to restart your agent so it comes up on the current instructions and launch-time settings, which drops your conversation but keeps every durable record. Before that, persist the open work you are holding only in this conversation, following the /stow skill'"'"'s "Open-record persistence" section and nothing else from that skill: file a task for each open record that exists only in this conversation, including any captain call you had formed but never registered, and correct any task whose status no longer reflects what you now know. Do NOT run the memory, learnings, or captain-preference sweeps. Then reply on your parent channel saying it is done, or saying what you deliberately left alone and why.'
 
 # Resolve one mate's restart capability from its durable record alone.
