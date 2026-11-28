@@ -519,6 +519,8 @@ fake_path_trusted() {
     "$FM_FAKE_AGY_SETTINGS" "$FM_FAKE_PANE_PATH"
 }
 case "$*" in
+  *"#{pane_current_command}"*) printf 'bash\n'; exit 0 ;;
+  *"#{pane_tty}"*) exit 0 ;;
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
   *"#{cursor_y}"*) printf '1\n'; exit 0 ;;
 esac
@@ -647,6 +649,8 @@ BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
+  local args=("$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@")
+  if [ "${1:-}" = --relaunch ]; then args=("$id" --relaunch); fi
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -663,7 +667,7 @@ run_agy_spawn() {
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
     FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "${args[@]}" 2>&1
 }
 
 test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
@@ -805,6 +809,45 @@ test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
   assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a successful agy spawn must never tear down the endpoint it just launched"
   pass "fm-spawn: agy pre-registers the worktree and launches straight into a busy turn"
+}
+
+test_agy_relaunch_trusts_standalone_clone_and_reuses_existing_trust() {
+  local id rec out rc clone store mode enters
+  for mode in register already-trusted; do
+    id="agy-relaunch-$mode-$$"
+    rec=$(make_agy_spawn_case "relaunch-$mode" "$id")
+    read_agy_spawn_record "$rec"
+    out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+    rc=$?
+    expect_code 0 "$rc" "initial spawn must succeed: $out"
+    clone="$CASE_DIR/clone"
+    git clone -q "$PROJ_DIR" "$clone" || fail "could not create standalone clone"
+    sed "s|^worktree=.*|worktree=$clone|" "$HOME_DIR/state/$id.meta" > "$CASE_DIR/meta"
+    mv "$CASE_DIR/meta" "$HOME_DIR/state/$id.meta"
+    store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+    if [ "$mode" = already-trusted ]; then
+      HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$clone" "$PROJ_DIR" >/dev/null || fail "could not seed trust"
+      chmod a-w "$store"
+      if [ -w "$store" ]; then
+        chmod u+w "$store"
+        fail "cannot simulate a read-only trust store"
+      fi
+      HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$clone" "$PROJ_DIR" >/dev/null 2>&1 && fail "registration should fail on read-only store"
+    fi
+    : > "$CASE_DIR/tmux-calls.log"
+    : > "$CASE_DIR/agy.state"
+    rc=0
+    out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$clone" "$FAKEBIN_DIR" "$id" --relaunch) || rc=$?
+    [ "$mode" != already-trusted ] || chmod u+w "$store"
+    expect_code 0 "$rc" "standalone clone relaunch ($mode) must succeed: $out"
+    assert_agy_trusted "$store" "$clone" "relaunch did not retain clone trust"
+    assert_not_contains "$out" "could not pre-register" "trusted relaunch warned of missing trust"
+    [ "$(cat "$CASE_DIR/agy.state")" = busy ] || fail "relaunch did not reach busy ($mode)"
+    enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+    [ "$enters" -eq 1 ] || fail "relaunch ($mode) must submit once without answering a dialog, got $enters Enter sends"
+    assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" "successful relaunch closed its endpoint"
+  done
+  pass "fm-spawn: standalone relaunch registers trust or uses existing trust after registration fails"
 }
 
 test_agy_dialog_despite_registration_is_answered_once() {
@@ -979,6 +1022,7 @@ test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
 test_agy_trust_relaunch_copy_accepts_standalone_clone_and_is_trusted
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
+test_agy_relaunch_trusts_standalone_clone_and_reuses_existing_trust
 test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn
