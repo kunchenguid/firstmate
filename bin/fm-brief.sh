@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit|forgejo|external> [--shape squash]] [--pr <auto|manual>] [--herdr-lab] [--brief-part <part>]...
+#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab] [--brief-part <part>]...
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -32,6 +32,8 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --brief-part <part> adds config/brief-include.d/<part>.md to the home brief
+#   additions (repeatable; see the include rule below).
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -153,6 +155,11 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# The same section then carries config/brief-include.d/<kind>.md when it exists
+# (ship.md or scout.md), followed by config/brief-include.d/<part>.md for each
+# --brief-part <part> in the order given; a requested part whose file is absent
+# stops the scaffold, so a mistyped part never silently drops its rules.
+# bin/fm-brief-include-lib.sh owns the reader and the part-name rule.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -178,6 +185,8 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-role-lib.sh
 . "$SCRIPT_DIR/fm-role-lib.sh"
+# shellcheck source=bin/fm-brief-include-lib.sh
+. "$SCRIPT_DIR/fm-brief-include-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - when deliberately waiting for work or an external condition expected to clear on its own, including your own validation round.
@@ -235,6 +244,7 @@ UPSTREAM_CONSENT=
 UPSTREAM_CONSENT_SET=0
 PROJECT_DIR=
 PROJECT_DIR_SET=0
+BRIEF_PARTS=()
 POS=()
 want_value=
 for a in "$@"; do
@@ -251,6 +261,7 @@ for a in "$@"; do
       pr) PR_TEXT=$a; PR_TEXT_SET=1 ;;
       upstream-consent) UPSTREAM_CONSENT=$a; UPSTREAM_CONSENT_SET=1 ;;
       project) PROJECT_DIR=$a; PROJECT_DIR_SET=1 ;;
+      brief-part) BRIEF_PARTS+=("$a") ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -277,6 +288,8 @@ for a in "$@"; do
     --upstream-consent=*) UPSTREAM_CONSENT=${a#--upstream-consent=}; UPSTREAM_CONSENT_SET=1 ;;
     --project) want_value="project" ;;
     --project=*) PROJECT_DIR=${a#--project=}; PROJECT_DIR_SET=1 ;;
+    --brief-part) want_value="brief-part" ;;
+    --brief-part=*) BRIEF_PARTS+=("${a#--brief-part=}") ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -417,24 +430,52 @@ fi
 BRIEF_INCLUDE_FILE="$CONFIG/brief-include.md"
 BRIEF_INCLUDE_BODY=
 if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; }; then
-  { [ -f "$BRIEF_INCLUDE_FILE" ] && BRIEF_INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
-    echo "error: $BRIEF_INCLUDE_FILE must be a readable regular file" >&2
-    exit 1
-  }
-  if printf '%s\n' "$BRIEF_INCLUDE_BODY" | grep -q '^Delivery contract: mode='; then
-    echo "error: $BRIEF_INCLUDE_FILE must not carry a 'Delivery contract: mode=' line; the delivery mode is a per-task --mode decision" >&2
-    exit 1
+  BRIEF_INCLUDE_BODY=$(fm_brief_include_read "$BRIEF_INCLUDE_FILE") || exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "${#BRIEF_PARTS[@]}" -gt 0 ]; then
+  echo "error: --brief-part applies only to ship and scout briefs" >&2
+  exit 1
+fi
+BRIEF_PART_BODIES=()
+if [ "$KIND" != secondmate ]; then
+  kind_part_file="$CONFIG/brief-include.d/$KIND.md"
+  if [ -e "$kind_part_file" ] || [ -L "$kind_part_file" ]; then
+    BRIEF_PART_BODIES+=("$(fm_brief_include_read "$kind_part_file")") || exit 1
   fi
-  [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
+  for part in ${BRIEF_PARTS[@]+"${BRIEF_PARTS[@]}"}; do
+    fm_brief_include_part_valid "$part" || {
+      echo "error: --brief-part must be lowercase letters, digits, and hyphens (got '$part')" >&2
+      exit 1
+    }
+    case "$part" in ship|scout)
+      echo "error: --brief-part $part is the brief kind's own part and is added automatically" >&2
+      exit 1 ;;
+    esac
+    part_file="$CONFIG/brief-include.d/$part.md"
+    [ -e "$part_file" ] || [ -L "$part_file" ] || {
+      echo "error: --brief-part $part names no file at $part_file" >&2
+      exit 1
+    }
+    BRIEF_PART_BODIES+=("$(fm_brief_include_read "$part_file")") || exit 1
+  done
 fi
 
 # Append the include as the last section of a ship or scout scaffold.
 append_brief_include() {
-  [ -n "$BRIEF_INCLUDE_BODY" ] || return 0
+  local body=$BRIEF_INCLUDE_BODY part_body
+  for part_body in ${BRIEF_PART_BODIES[@]+"${BRIEF_PART_BODIES[@]}"}; do
+    [ -n "$part_body" ] || continue
+    if [ -n "$body" ]; then
+      body="$body"$'\n\n'"$part_body"
+    else
+      body=$part_body
+    fi
+  done
+  [ -n "$body" ] || return 0
   printf '\n%s\n%s\n%s\n' \
     '# Home brief additions' \
     "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
-    "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
+    "$body" >> "$BRIEF"
 }
 
 BRIEF="$DATA/$ID/brief.md"

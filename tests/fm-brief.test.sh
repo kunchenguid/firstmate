@@ -1395,6 +1395,60 @@ test_home_brief_include_is_appended_last() {
   pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
 }
 
+# config/brief-include.d/<part>.md carries additions only some briefs take: the
+# kind's own part (ship.md, scout.md) when present, then each --brief-part in
+# order, all inside the one "# Home brief additions" section. A requested part
+# without a file, a malformed name, or a part on a charter stops the scaffold.
+test_home_brief_include_parts_follow_kind_and_request() {
+  local home config parts brief out rc
+  home="$TMP_ROOT/include-parts-home"
+  config="$home/config"
+  parts="$config/brief-include.d"
+  mkdir -p "$parts"
+  printf '%s\n' 'Common rule.' > "$config/brief-include.md"
+  printf '%s\n' 'Ship rule.' > "$parts/ship.md"
+  printf '%s\n' 'Scout rule.' > "$parts/scout.md"
+  printf '%s\n' 'Org rule.' > "$parts/org.md"
+  printf '%s\n' 'Creative rule.' > "$parts/creative.md"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" parts-scout some-proj --scout >/dev/null || fail "scout scaffold failed with parts"
+  brief="$home/data/parts-scout/brief.md"
+  assert_grep 'Common rule.' "$brief" "scout brief lost the common include"
+  assert_grep 'Scout rule.' "$brief" "scout brief lost its kind part"
+  assert_no_grep 'Ship rule.' "$brief" "scout brief took the ship part"
+  assert_no_grep 'Org rule.' "$brief" "scout brief took an unrequested part"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" parts-ship some-proj --mode no-mistakes --brief-part creative --brief-part=org >/dev/null \
+    || fail "ship scaffold failed with requested parts"
+  brief="$home/data/parts-ship/brief.md"
+  [ "$(grep -c -x '# Home brief additions' "$brief")" = 1 ] || fail "parts did not share one additions section"
+  [ "$(sed -n '/^# Home brief additions$/,$p' "$brief" | grep -x -e 'Common rule.' -e 'Ship rule.' -e 'Creative rule.' -e 'Org rule.' | tr '\n' '|')" = 'Common rule.|Ship rule.|Creative rule.|Org rule.|' ] \
+    || fail "parts did not follow common, kind, then request order"
+  assert_no_grep 'Scout rule.' "$brief" "ship brief took the scout part"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" parts-missing some-proj --scout --brief-part deploy 2>&1); rc=$?
+  expect_code 1 "$rc" "a requested part without a file must stop the scaffold"
+  assert_contains "$out" "--brief-part deploy names no file" "missing part refusal did not name the part"
+  assert_absent "$home/data/parts-missing" "a missing part left a partial scaffold behind"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" parts-bad some-proj --scout --brief-part ../x 2>&1); rc=$?
+  expect_code 1 "$rc" "a malformed part name must stop the scaffold"
+  assert_contains "$out" "--brief-part must be lowercase letters" "malformed part refusal did not explain itself"
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" parts-kind some-proj --scout --brief-part ship 2>&1); rc=$?
+  expect_code 1 "$rc" "requesting a kind part must stop the scaffold"
+
+  printf '%s\n' 'Delivery contract: mode=local-only' > "$parts/org.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" parts-contract some-proj --scout --brief-part org 2>&1); rc=$?
+  expect_code 1 "$rc" "a part carrying a delivery contract line must stop the scaffold"
+  assert_absent "$home/data/parts-contract" "a refused part left a partial scaffold behind"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+    "$ROOT/bin/fm-brief.sh" parts-mate --secondmate --no-projects --brief-part creative 2>&1); rc=$?
+  expect_code 1 "$rc" "a charter must refuse --brief-part"
+  pass "fm-brief.sh: brief include parts follow the kind and the request, in order, and fail closed"
+}
+
 # --base-branch names the branch a task starts from and a ship's PR targets. It is
 # recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
 # refused where no pull request carries the work.
@@ -1725,6 +1779,7 @@ test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_inbox_guidance_explains_marked_body_terminator
 test_home_brief_include_is_appended_last
+test_home_brief_include_parts_follow_kind_and_request
 test_base_branch_is_rendered_and_bounded
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes

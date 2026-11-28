@@ -274,6 +274,26 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+# A scout brief carries config/brief-include.d/scout.md and never the ship
+# part, so promotion appends config/brief-include.d/ship.md to the ship
+# instructions and to the promoted brief a relaunch reads.
+test_promotion_carries_the_home_ship_brief_part() {
+  local home meta out status
+  home="$TMP_ROOT/promote-ship-part/home"
+  mkdir -p "$home/state" "$home/config/brief-include.d"
+  meta="$home/state/promote-part1.meta"
+  write_brief "$home" promote-part1
+  printf 'window=fm-promote-part1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+  printf '%s\n' 'Ship-only rigor rule.' > "$home/config/brief-include.d/ship.md"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-part1 --mode direct-PR --yolo off 2>&1)
+  status=$?
+  expect_code 0 "$status" "promotion with a ship part should succeed"$'\n'"$out"
+  assert_grep 'Ship-only rigor rule.' "$home/data/promote-part1/ship-instructions.md" "ship instructions lost the home ship part"
+  assert_grep 'Ship-only rigor rule.' "$home/data/promote-part1/brief.md" "promoted brief lost the home ship part"
+  pass "fm-promote: promotion carries the home ship brief part a scout brief never had"
+}
+
 # A home with config/spawn-base-primary-checkout can start a scout from the
 # primary checkout's default branch, which may carry commits origin has never
 # received, so a promotion to a publishing mode names origin's default branch as
@@ -1980,6 +2000,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promotion_carries_the_home_ship_brief_part
 test_promote_names_origin_for_a_publishing_mode_in_an_opted_in_home
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
