@@ -2038,6 +2038,8 @@ test_forge_settles_only_declared_holds() {
     touch "$home/config/hold-pr-settle"
     for action in close release; do
       id="question-$action"
+      printf 'kind=ship\n' > "$home/state/$id.meta"
+      printf 'working: waiting for review\n' > "$home/state/$id.status"
       with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" 'Decide this PR' --pr https://github.com/o/r/pull/8 >/dev/null || fail 'add failed'
       with_home "$home" "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason 'Decide this PR' >/dev/null || fail 'hold failed'
       with_home "$home" "$ROOT/bin/fm-captain-hold.sh" pr-policy "$id" https://github.com/o/r/pull/8 terminal "$action" >/dev/null || fail 'policy failed'
@@ -2051,6 +2053,9 @@ test_forge_settles_only_declared_holds() {
     for action in close release; do
       id="question-$action"
       if with_home "$home" "$ROOT/bin/fm-captain-hold.sh" open "$id"; then fail "$mode left $id held"; fi
+      state=$(bash -c '. "$1/bin/fm-classify-lib.sh"; . "$1/bin/fm-hold-status-lib.sh"; last_status_line "$2"' \
+        bash "$ROOT" "$home/state/$id.status")
+      [ "$state" = 'working: waiting for review' ] || fail "forge settlement left the lane held: $state"
       body=$(with_home "$home" "$ROOT/bin/fm-tasks-axi.sh" show "$id" --full)
       printf '%s\n' "$body" | grep -F 'Reconciliation evidence:' >/dev/null || fail 'forge evidence missing'
       printf '%s\n' "$body" | grep -F "Forge PR $mode: https://github.com/o/r/pull/8" >/dev/null || fail 'terminal event missing'

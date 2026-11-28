@@ -916,6 +916,8 @@ auto_budget() {
   . "$SCRIPT_DIR/fm-lane-vitals-lib.sh"
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh"
+  # shellcheck source=bin/fm-hold-status-lib.sh
+  . "$SCRIPT_DIR/fm-hold-status-lib.sh"
   [ "$mode" != admit ] || [ -n "$min_gpu_free_gb" ] || want_gpu=0
   fm_lane_vitals_probe "$os" "$want_gpu"
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-capacity.XXXXXX") || tmp=

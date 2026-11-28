@@ -91,6 +91,11 @@ complete_through_sibling() {  # <home> <origin-id>
     && run_captain "$home" complete "$id" "$id-call"
 }
 
+# Hold-command appends stamp emission time; compare the unstamped bytes.
+unstamp_line() {
+  printf '%s' "$1" | sed -E 's/ \[at=[0-9]+\]//'
+}
+
 request_reconciles() {  # <home> <source-id> <task-id>...
   local home=$1 source_id=$2 id
   shift 2

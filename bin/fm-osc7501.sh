@@ -45,7 +45,9 @@
 #     needs-decision      -> blocked kind=question
 #     blocked             -> blocked kind=permission (kind=auth when the note
 #                            names a credential)
-#   otherwise the latest status line is captain-held -> blocked kind=question
+#   otherwise the latest status line (read past a settled captain hold;
+#   bin/fm-hold-status-lib.sh owns that read) is captain-held
+#                         -> blocked kind=question
 #   otherwise busy -> working
 #   otherwise the latest status line, when it is terminal:
 #     failed              -> error
@@ -275,6 +277,8 @@ osc_load_libs() {
   [ "$LIBS_LOADED" = 1 ] && return 0
   # shellcheck source=bin/fm-classify-lib.sh
   . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
+  # shellcheck source=bin/fm-hold-status-lib.sh
+  . "$SCRIPT_DIR/fm-hold-status-lib.sh" || return 1
   # shellcheck source=bin/fm-busy-lib.sh
   . "$SCRIPT_DIR/fm-busy-lib.sh" || return 1
   # shellcheck source=bin/fm-backend.sh

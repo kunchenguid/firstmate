@@ -1105,6 +1105,29 @@ t_captain_hold_stays_question_blocked() {
 }
 
 # A paused worker reports from its busy state like any other worker.
+# Contract: a settled captain hold is bookkeeping, not worker state. The
+# record must keep the delivered outcome the worker wrote before the hold,
+# not fall back to idle because the retraction is the log's last line.
+t_settled_hold_keeps_done() {
+  local d=$TMP_ROOT/settledhold wpid
+  mkhome "$d"
+  : >"$d/cap"
+  busy_rec "$d/state" t27 idle
+  printf '%s\n' 'done: PR https://example.test/pr/1' \
+    'captain-held [key=captain-hold-t27-1]: held for the captain' \
+    'resolved [key=captain-hold-t27-1]: captain call released by fm-captain-hold' >"$d/state/t27.status"
+  env "${CLEAN_UNSET[@]}" FM_OSC7501_TTY="$d/cap" FM_OSC7501_INTERVAL=1 \
+    bash "$SCRIPT" watch --task t27 --kind ship --state "$d/state" --harness opencode \
+    --parent "$$" &
+  wpid=$!
+  if ! wait_cap 'state=done' "$d/cap" 100; then
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+    fail "settled hold: the done outcome did not survive the retraction (got: $(grep -o 'state=[a-z]*' "$d/cap" | tr '\n' ' '))"
+  fi
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null || true
+  pass "mapping: a settled captain hold keeps the worker's done outcome"
+}
+
 t_paused_reads_from_busy_state() {
   local d=$TMP_ROOT/paused
   mkhome "$d"
@@ -1210,5 +1233,6 @@ fm_test_run \
   t_turn_then_terminal_line \
   t_paused_reads_from_busy_state \
   t_captain_hold_stays_question_blocked \
+  t_settled_hold_keeps_done \
   t_retire_waits_for_slow_reporter \
   t_hc_terminal_with_inherited_herdr_markers
