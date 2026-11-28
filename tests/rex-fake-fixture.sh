@@ -19,6 +19,10 @@
 # fake/status/<uuid>.json, fake/capture/<uuid>.txt and fake/capture/<uuid>.vt.
 # `do` stands in for the bounded event reader: it prints "@subscribed", then
 # replays fake/events (a `sleep N` line pauses), and exits 0.
+# `pty-echo` models the block's terminal echo for the adapter's read-back
+# verification: a `send` leaves its payload in the composer as a shell prompt
+# row and Enter moves it into fake/transcript, with the measured head-loss
+# available as fake/pty-max<N>, fake/pty-drop-writes<N>, and fake/pty-drop.
 #
 # Remote-readiness and remote-route coverage adds four controls on top:
 #   fake/endpoint    - the endpoint whoami reports (default unix:///fake/rex.sock)
@@ -95,6 +99,18 @@ newid() {
   printf '%s:%08x-0000-7000-8000-%012x' "$1" "$n" "$n"
 }
 save() { jq "$@" "$S" >"$S.tmp" && mv "$S.tmp" "$S"; }
+# pty-echo models the block's terminal echo: a `send` leaves its payload in the
+# composer (rendered as a shell prompt row) until Enter submits it, so an
+# adapter's read-back verification has a real screen to read. Drops are shared:
+# fake/pty-max<N> keeps only the last N characters of each write (the measured
+# head-loss of one large write), fake/pty-drop-writes<N> loses the first N
+# writes outright, and fake/pty-drop loses every write.
+render_draft() {
+  local u=$1 draft
+  draft=$(cat "$D/draft/$u" 2>/dev/null)
+  printf '❯ %s\n' "$draft" > "$D/capture/$u.txt"
+  printf '❯ %s\r\n' "$draft" > "$D/capture/$u.vt"
+}
 notfound() { echo "error: $1 not found" >&2; exit 3; }
 has_session() { jq -e --arg s "$1" 'any(.sessions[]; .session_id == $s)' "$S" >/dev/null; }
 has_block() {
@@ -204,11 +220,38 @@ case "$cmd:$sub" in
     has_block "$sid" "$bid" || notfound "block"
     [ -n "$p0" ] || exit 2
     printf '%s\n' "$p0" >>"$D/sent"
-    [ ! -f "$D/agent-on-send" ] || printf '%s\n' "$bid" >> "$D/agent-blocks" ;;
+    [ ! -f "$D/agent-on-send" ] || printf '%s\n' "$bid" >> "$D/agent-blocks"
+    if [ -f "$D/pty-echo" ]; then
+      u=${bid#block:}
+      text=$p0
+      max=$(cat "$D/pty-max" 2>/dev/null || printf 0)
+      case "$max" in '' | *[!0-9]*) max=0 ;; esac
+      drop=$(cat "$D/pty-drop-writes" 2>/dev/null || printf 0)
+      case "$drop" in '' | *[!0-9]*) drop=0 ;; esac
+      if [ "$max" -gt 0 ] && [ "${#text}" -gt "$max" ]; then text=${text:${#text}-max}; fi
+      if [ -f "$D/pty-drop" ]; then
+        text=
+      elif [ "$drop" -gt 0 ]; then
+        printf '%s\n' "$((drop - 1))" > "$D/pty-drop-writes"
+        text=
+      fi
+      mkdir -p "$D/draft"
+      [ -z "$text" ] || printf '%s' "$text" >> "$D/draft/$u"
+      render_draft "$u"
+    fi ;;
   send-key:)
     has_block "$sid" "$bid" || notfound "block"
     case "$p0" in enter|escape|tab|ctrl+c|ctrl+u) ;; *) exit 2 ;; esac
-    printf '%s\n' "$p0" >>"$D/keys" ;;
+    printf '%s\n' "$p0" >>"$D/keys"
+    if [ "$p0" = enter ] && [ -f "$D/pty-echo" ]; then
+      u=${bid#block:}
+      if [ -s "$D/draft/$u" ]; then
+        mkdir -p "$D/transcript"
+        printf '❯ %s\n' "$(cat "$D/draft/$u")" >> "$D/transcript/$u"
+        : > "$D/draft/$u"
+        render_draft "$u"
+      fi
+    fi ;;
   do:)
     has_session "$sid" || notfound "session"
     [ ! -f "$D/do-fail" ] || exit 3

@@ -239,6 +239,33 @@ test_busy_pane_ambiguous_pending_retries_without_conversion() {
   pass "fm_tmux_submit_enter_core: pending-unproven retries without busy conversion"
 }
 
+test_polytoken_ambiguous_pending_is_not_confirmed_by_busy() {
+  local dir fakebin composer sent vfile
+  dir="$TMP_ROOT/polytoken-ambiguous-pending"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  vfile="$dir/verdict"
+  : > "$sent"
+  # A polytoken worker renders ambiguous composer geometry, so its composer is
+  # pending-unproven. Only wintermolt draws its working row in the composer and
+  # is confirmed by the idle-to-busy transition; a busy polytoken pane must
+  # leave the unproven verdict untouched so the caller keeps treating the
+  # steer as unconfirmed.
+  printf '╭────────────╮\n│ > fix  │\n╰────────────╯\n' > "$composer"
+  touch "$dir/.swallow"
+  (
+    # shellcheck disable=SC2329 # Stub override: the harness under test calls this, not the test body.
+    fm_pane_is_busy() { return 0; }
+    PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+      FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
+      fm_tmux_submit_enter_core "win" 3 0.05 1 polytoken
+  ) > "$vfile" 2>/dev/null
+  [ "$(cat "$vfile")" = pending-unproven ] \
+    || fail "a busy polytoken pane must not confirm an unproven composer, got '$(cat "$vfile")'"
+  pass "fm_tmux_submit_enter_core: a busy pane never confirms another harness's pending-unproven"
+}
+
 test_unrecognized_state_skips_busy_conversion() {
   local dir fakebin composer busy_called vfile
   dir="$TMP_ROOT/unrecognized-state"
@@ -382,6 +409,35 @@ test_exit_picker_refuses_confirming_enter() {
 
 test_exit_picker_refuses_confirming_enter
 
+test_type_literal_never_splits_a_utf8_character() {
+  local dir fakebin composer sent joined w bad=0 payload='abcdef–ghij'
+  command -v iconv >/dev/null 2>&1 || { pass "tmux chunks: skipped (no iconv to validate UTF-8 with)"; return 0; }
+  dir="$TMP_ROOT/literal-utf8"
+  fakebin=$(make_submit_mock "$dir")
+  composer="$dir/composer"
+  sent="$dir/sent.log"
+  joined="$dir/joined"
+  printf '╭──────╮\n│ >    │\n╰──────╯\n' >"$composer"
+  : >"$sent"
+  # The dash straddles the 8-byte boundary, so a byte-wise cut would split it.
+  # Under LC_ALL=C the substring expansion counts bytes, which is the case this
+  # guards; a fresh shell makes the locale real at startup.
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$composer" FM_FAKE_SENT="$sent" \
+    LC_ALL=C bash -c '. "$0/bin/fm-tmux-lib.sh" && fm_tmux_type_literal "$1" "$2" "$3"' \
+    "$ROOT" win "$payload" 8 \
+    || fail "the literal write must succeed in a C locale"
+  : >"$joined"
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    w=${w#typed }
+    printf '%s' "$w" >>"$joined"
+    printf '%s' "$w" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 || bad=$((bad + 1))
+  done <"$sent"
+  assert_equals "$payload" "$(cat "$joined")" "the writes must join back into the payload"
+  assert_equals 0 "$bad" "no write may split a UTF-8 character, whatever the locale"
+  pass "fm_tmux_type_literal: a chunk boundary never lands inside a UTF-8 character, even in a C locale"
+}
+
 test_typed_submit_on_open_exit_picker_types_nothing() {
   local dir fakebin composer sent before rc=0 err
   # shellcheck source=/dev/null
@@ -411,6 +467,7 @@ test_typed_submit_on_open_exit_picker_types_nothing() {
   pass "fm_backend_send_text_submit: a typed message to the exit picker types nothing and sends no Enter"
 }
 
+test_type_literal_never_splits_a_utf8_character
 test_typed_submit_on_open_exit_picker_types_nothing
 test_wrapped_continuation_retries_swallowed_enter
 test_placeholder_like_bare_input_retries_swallowed_enter
@@ -419,5 +476,6 @@ test_idle_pane_composer_clears_first_try
 test_busy_pane_unknown_stays_unknown
 test_failed_baseline_capture_keeps_busy_unknown_unconfirmed
 test_busy_pane_ambiguous_pending_retries_without_conversion
+test_polytoken_ambiguous_pending_is_not_confirmed_by_busy
 test_unrecognized_state_skips_busy_conversion
 test_claude_busy_signature_uses_real_capture_shapes

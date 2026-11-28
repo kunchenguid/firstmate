@@ -60,7 +60,7 @@
 #                    unknown invalidation fm-control writes after a Devin interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, rex-native, t3code-native, tern-native, grok-regex, rovo-regex, agy-regex, wintermolt-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target, launch-prompt
 #
@@ -87,8 +87,8 @@
 #   5. no record at all: a native busy verdict from herdr, rex, or tern is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
-#      task from its rendered tail, then unknown missing
+#      Grok/Rovo/AGY/Wintermolt temporary regex fallbacks classify a grok,
+#      rovo, agy, or wintermolt task from its rendered tail, then unknown missing
 #   6. malformed, stale, or untrusted records -> unknown, never a fallback
 #
 # fm_busy_launch_prompt_parked (the launch-prompt classifier-only source): a
@@ -107,13 +107,14 @@
 # a real busy verdict once any hook has posted, and it defers to whatever
 # harness-specific trust pre-registration already exists (fm-claude-trust.sh,
 # GEMINI_CLI_TRUST_WORKSPACE) to stop the dialog from appearing at all.
-# Apart from the launch-prompt backstop above, Grok, Rovo, and AGY are the only
-# harnesses whose rendered text is their SOLE classification, because none of
-# their structured lifecycles was credited-live-verified
+# Apart from the launch-prompt backstop above, Grok, Rovo, AGY, and Wintermolt
+# are the only harnesses whose rendered text is their SOLE classification,
+# because none of their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
-# its own harness= and can never classify another adapter.
+# hook surface at all, see references/harness/agy.md; wintermolt 0.7.0 exposes
+# no hook or busy-state surface at all, see references/harness/wintermolt.md);
+# each is scoped to its own harness= and can never classify another adapter.
 # Kiro is different: its kiro-hook record above is its ONLY state source (a
 # live-verified per-turn userPromptSubmit/stop pair, references/harness/kiro.md),
 # and it has no rendered-tail arm here. Its `Kiro is working` footer is matched
@@ -1012,6 +1013,28 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# fm_busy_wintermolt_tail_busy: the Wintermolt-only temporary rendered-tail
+# fallback. Consumes the tail on stdin; 0 when Wintermolt's verified busy
+# signature matches. The full-screen TUI pins one footer row to the bottom of
+# the pane whose keybind segment changes between the idle `Esc quit` and the
+# busy `Esc stop`, and whose status cell ends the row with `working` under a
+# braille spinner frame while busy and `● ready` while idle (verified live on
+# wintermolt 0.7.0: an interrupted and a completed turn both returned to
+# `Esc quit` + `● ready`). The match is anchored to the pane's LAST non-empty
+# row - that footer - rather than scanned through the tail, so ordinary
+# conversation output containing the word cannot classify an idle worker as
+# busy; either footer signal carries the positive verdict. wintermolt has no
+# turn-end hook or busy-state writer, so this fallback, like grok's, rovo's,
+# and agy's, is the only pane-side source; it is never armed as a semantic
+# writer (fm_busy_sources_for_harness trusts nothing for wintermolt) and its
+# absence means "can't tell", never definitive idle, so a capture that misses
+# the footer surfaces rather than being absorbed. FM_BUSY_WINTERMOLT_REGEX
+# overrides the signature, mirroring the grok and rovo escape hatches.
+fm_busy_wintermolt_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -1 \
+    | grep -qiE "${FM_BUSY_WINTERMOLT_REGEX:-Esc[[:space:]]+stop|[[:space:]]working[[:space:]]*$}"
+}
+
 # --- launch-prompt signatures (fm_busy_launch_prompt_parked) ----------------
 #
 # Each function consumes a captured pane tail on stdin (the caller's whole
@@ -1293,6 +1316,29 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       fi
       return 0
       ;;
+    wintermolt)
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      # The footer is pinned to the pane's last row, so a capture that reaches
+      # the screen answers definitively for busy; anything else - including a
+      # pane whose footer scrolled out of a bounded capture - is "can't tell",
+      # never idle, matching the agy and rovo arms above.
+      if printf '%s' "$tail40" | fm_busy_wintermolt_tail_busy; then
+        printf 'busy wintermolt-regex'
+      else
+        printf 'unknown wintermolt-regex'
+      fi
+      return 0
+      ;;
   esac
   printf 'unknown missing'
 }
@@ -1317,7 +1363,8 @@ fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expe
 # consumer resolves backend, target, and harness the same way instead of
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
 # optional pre-captured plain output reused by the contract's rendered-text
-# checks: the Grok/Rovo/AGY busy fallbacks and the launch-prompt backstop.
+# checks: the Grok/Rovo/AGY/Wintermolt busy fallbacks and the launch-prompt
+# backstop.
 fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
   local meta=$1 id=$2 state=$3 tail40=${4-} backend target harness
   [ -f "$meta" ] || { printf 'unknown missing'; return 0; }

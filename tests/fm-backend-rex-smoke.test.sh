@@ -68,6 +68,39 @@ for key in Tab Escape C-c Enter; do
 done
 pass "real rex: line submit, capture, and a derived viewport of exactly size.rows lines; literal and every mapped key send"
 
+# --- chunked literal writes and the verified submit --------------------------
+
+# The measured payload: a brief pointer that one large write delivered as its
+# last five characters. Written in chunks it must arrive whole, which a plain
+# shell's visible viewport can prove even where its prompt is a shape this
+# fleet's composer reader cannot classify.
+POINTER='Read the brief at /srv/treehouse/firstmate/data/fm-wintermolt-rex/report.md and follow it'
+pointer_flat=$(printf '%s' "$POINTER" | tr -d '[:space:]')
+fm_backend_rex_send_literal "$T" "$POINTER" || fail "the chunked literal write failed"
+pointer_landed() { fm_backend_visible_capture rex "$T" | tr -d '[:space:]' | grep -qF -- "$pointer_flat"; }
+wait_for 50 pointer_landed || fail "the chunked write must land the whole payload; the viewport shows '$(fm_backend_visible_capture rex "$T" | tail -2)'"
+# The negative side of the read-back: a payload's tail is what a head-truncated
+# write leaves, and it must never read as delivered. A prompt shape the reader
+# cannot resolve answers unknown, which is equally not `held`.
+fm_backend_rex_send_key "$T" C-u || fail "C-u failed to clear the draft"
+fm_backend_rex_send_literal "$T" 'ef.md' || fail "the fragment literal failed"
+FRAGMENT=$(fm_backend_rex_typed_state "$T" '' "$POINTER")
+[ "$FRAGMENT" != held ] || fail "a fragment must never read as held"
+fm_backend_rex_send_key "$T" C-u || fail "C-u failed to clear the fragment"
+# The verified submit path end to end through the dispatcher. This shell's
+# prompt is a shape the shared composer reader cannot resolve, so its submit
+# verdict is the honest `unknown` (reading the composer back is unavailable
+# here); what must hold is that the whole payload ran.
+VERDICT=$(fm_backend_send_text_submit rex "$T" "printf 'fm-chunk-%s\\n' ok" 2 0.3 0.3) \
+  || fail "the verified submit failed"
+case "$VERDICT" in
+  empty | unknown) ;;
+  *) fail "a whole chunked payload must submit (empty or unknown on an unreadable prompt), got '$VERDICT'" ;;
+esac
+chunk_echoed() { fm_backend_rex_capture "$T" 20 | rg -qx 'fm-chunk-ok'; }
+wait_for 50 chunk_echoed || fail "the submitted payload must run in the block"
+pass "real rex: a chunked literal write lands the whole payload, a fragment never reads as held, and the verified submit confirms"
+
 # --- process view: cwd through a nested subshell, agent state -----------------
 
 wait_for 50 shell_ready || fail "the shell did not return to a prompt after the keys"

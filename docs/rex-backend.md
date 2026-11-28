@@ -69,7 +69,21 @@ Every CLI call passes the recorded session with `-s`, because the CLI otherwise 
 
 `send -- <text>` sends literal, unsubmitted input, and the caller sends Enter separately.
 Keys map to Rex names (`enter`, `escape`, `tab`, `ctrl+c`, `ctrl+u`); any other key is refused rather than guessed.
-Verified submit types the payload once, retries only Enter through the shared composer classifier, and converts still-pending text to success only when the shared queued-Enter policy accepts the trusted native busy state or rendered busy footer.
+
+Literal input is written in chunks, because one large `send` loses the head of its payload in a block's terminal: a brief pointer written that way reached a model endpoint as its last five characters while the send reported success, and a launch line lost the first two characters of `env` in a plain shell block.
+The defaults are tmux's measured ones, 8 characters per write with a 50 ms gap; `FM_BACKEND_REX_TYPE_CHUNK` and `FM_BACKEND_REX_TYPE_INTERVAL` override them, and a chunk of `0` restores one write per burst.
+That covers every literal write, including the pane launch line spawn types.
+
+Verified submit then reads the composer back before pressing Enter, and treats only content equal to the whole payload added to the baseline as delivered, where the baseline is the composer text read before the first key: it is empty only when the composer verdict itself was empty, and a draft already typed in the composer is that draft, so the read expects it to still be there beside our payload.
+Content that is neither that baseline nor the baseline plus the whole payload is a fragment, so it is never submitted on a guess.
+A truncated write lands as a suffix of the payload, so a suffix is never read as a wrapped or scrolled tail: it is reported `send-failed` with no Enter sent, leaving the fragment visible instead of submitting it.
+That fragment is deliberately not typed over, because clearing a composer means guessing a harness's own key semantics: inspect the pane with `bin/fm-peek.sh` and clear it before re-sending.
+The read has one known limitation, on this backend and on tmux: a payload wider than the visible composer row scrolls, so the visible row holds only its tail and no read can tell that from a head-truncated write.
+This backend refuses it rather than confirm it; the tmux read accepts a tail that fills the row as proof, which is a known gap there rather than a covered case.
+A composer the classifier calls a draft whose extractor read is empty is `unknown`, never proof that nothing landed, so that shape is never replayed.
+A burst is replayed only when the composer provably holds nothing of it, up to `FM_BACKEND_REX_TYPE_ATTEMPTS` bursts (default 3), so a replay can never duplicate text.
+A composer the read-back cannot resolve at all reads `unknown` rather than empty, so it is neither replayed nor refused: the chunked write is its only protection there, because guessing a failure from an unreadable pane would refuse deliveries that did land.
+The submit then retries only Enter through the shared composer classifier, and converts still-pending text to success only when the shared queued-Enter policy accepts the trusted native busy state or rendered busy footer.
 
 `capture --trim` returns the scrollback plus the screen as plain text, and the adapter trims the tail locally.
 Rex has no viewport-only capture, so the visible viewport is derived from one styled read through the `format` block method (`vt` with `extra_cursor`), which returns the scrollback plus the full screen grid, blank rows included, and then the cursor position as a trailing `ESC[<row>;<col>H`.
@@ -77,6 +91,11 @@ The vt grid joins rows with CRLF, so an empty bottom row leaves the content endi
 A full-screen program's grid is the screen alone, so the derivation holds on both screens; a resize landing between the size read and the grid read can skew it by the size difference.
 The composer classifier reads that styled viewport with styling, row count, process identity, and the cursor row available, the same evidence tmux gives it: the shape holding the cursor is the composer, so furniture a harness draws below its composer cannot decide the verdict.
 Where that cursor-anchored read is `unknown`, as for a harness that parks its cursor outside its composer, the cursorless read that takes the bottom-most shape decides instead.
+Wintermolt is the one verified harness that takes a composer scope on this backend: its TUI draws its own reverse-video cursor cell and parks the terminal cursor on its keybind row, so a block whose foreground process is exactly `wintermolt` is read cursorlessly under the wintermolt scope in [`fm-composer-lib.sh`](../bin/fm-composer-lib.sh), which is what lets its idle placeholder read `empty`.
+That scope is gated on that anchored foreground process and never on a verdict, so no other harness's read moves.
+Its busy footer is the block's last non-empty capture row, read through the same rendered-tail contract the tmux adapter uses, and its delivery read is scoped to that footer rather than the harness-less union.
+A wintermolt submit that still reads `pending-unproven` is confirmed through the idle-to-busy transition on that footer, with the adapter's own budget (`FM_WINTERMOLT_DELIVERY_POLLS`, `FM_WINTERMOLT_POLL_INTERVAL`), and only for a block that provably stood idle before the write.
+[`verification/wintermolt.md`](verification/wintermolt.md) owns the live evidence for both backends.
 
 The `process` block method reports the foreground process with its cwd, its ancestors, and the last exit.
 Spawn's worktree discovery reads the foreground cwd, which follows the nested subshell `treehouse get` opens.

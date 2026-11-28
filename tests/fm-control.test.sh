@@ -183,6 +183,19 @@ case "${1:-}" in
     done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    # FM_FAKE_CAPTURE_FAIL_AFTER_KEY models a pane that becomes unreadable once
+    # the named key is typed: the press is still authorized from the readable
+    # read before it, and every later read fails.
+    if [ -n "${FM_FAKE_CAPTURE_FAIL_AFTER_KEY:-}" ] \
+       && [ -f "$D/keys" ] && grep -qx "$FM_FAKE_CAPTURE_FAIL_AFTER_KEY" "$D/keys"; then
+      exit 1
+    fi
+    # after-escape is the pane a control key leaves behind, for an adapter whose
+    # rendered footer is what its postcondition reads.
+    if [ -f "$D/after-escape" ] && [ -f "$D/keys" ] && grep -qx Escape "$D/keys"; then
+      cat "$D/after-escape"
+      exit 0
+    fi
     if [ -f "$D/after-enter" ] && [ -f "$D/keys" ] && grep -qx Enter "$D/keys"; then
       # after-enter-late holds how many captures after Enter still show the
       # ordinary pane, for a screen that renders after the submit has read it.
@@ -1226,6 +1239,53 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed() {
   pass "fm-control interrupt: grok reports delivery without claiming cancellation"
 }
 
+# wintermolt's interrupt key is also its quit key, so the press is authorized
+# by a rendered busy footer and the cancellation is claimed only from that
+# footer clearing. A pane that stays busy, or becomes unreadable, cancelled
+# nothing this verb can see.
+WM_CTRL_FOOTER_BUSY=' Enter send  ↑↓ PgUp/PgDn scroll  Esc stop                                    openai · deepseek-v4.1-flash-1017  ⠴ working'
+WM_CTRL_FOOTER_IDLE=' Enter send  ↑↓ PgUp/PgDn scroll  Esc quit                                    openai · deepseek-v4.1-flash-1017  ● ready'
+
+wintermolt_interrupt_case() {  # <case-name> -> case dir with a working pane
+  local dir
+  dir=$(new_case "$1")
+  add_task "$dir" t1 wintermolt
+  alive_as "$dir" wintermolt
+  printf 'conversation\n%s\n' "$WM_CTRL_FOOTER_BUSY" > "$dir/fake/pane"
+  printf '%s\n' "$dir"
+}
+
+test_wintermolt_interrupt_confirms_from_the_cleared_footer() {
+  local dir out rc
+  dir=$(wintermolt_interrupt_case wm-int-cleared)
+  printf 'conversation\n%s\n' "$WM_CTRL_FOOTER_IDLE" > "$dir/fake/after-escape"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "a wintermolt interrupt on a working pane should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "wintermolt interrupts on one Escape, got: $(keys_sent "$dir")"
+  assert_contains "$out" 'cancel=confirmed' \
+    'the footer clearing is the stop a wintermolt interrupt waits for'
+  pass "fm-control wintermolt interrupt: the cleared footer confirms the stop"
+}
+
+test_wintermolt_interrupt_never_claims_a_stop_it_cannot_read() {
+  local dir out rc
+  dir=$(wintermolt_interrupt_case wm-int-busy)
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an interrupt on a pane that stays busy still delivers"$'\n'"$out"
+  assert_contains "$out" 'cancel=unconfirmed pane-still-working' \
+    'a footer that still reads busy has not proved the turn ended'
+
+  dir=$(wintermolt_interrupt_case wm-int-unreadable)
+  out=$(FM_FAKE_CAPTURE_FAIL_AFTER_KEY=Escape run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an interrupt whose settle read fails still delivers"$'\n'"$out"
+  assert_not_contains "$out" 'cancel=confirmed' \
+    'an unreadable pane must never be reported as a confirmed stop'
+  assert_contains "$out" 'cancel=unconfirmed pane-unreadable' \
+    'an unreadable pane names exactly what could not be read'
+  pass "fm-control wintermolt interrupt: an unreadable pane never confirms a stop"
+}
+
 test_grok_idle_footer_does_not_confirm_cancellation() {
   local dir out rc
   dir=$(new_case settles)
@@ -1370,5 +1430,7 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_wintermolt_interrupt_confirms_from_the_cleared_footer
+test_wintermolt_interrupt_never_claims_a_stop_it_cannot_read
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

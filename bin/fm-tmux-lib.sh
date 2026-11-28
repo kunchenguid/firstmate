@@ -201,6 +201,18 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   if [ "$verdict" = unknown ] && fm_tmux_pane_is_cursor "$target"; then
     verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
   fi
+  # Wintermolt parks its terminal cursor below its footer on the keybind row
+  # while drawing its own reverse-video cursor cell in the composer (verified
+  # live, wintermolt 0.7.0: cursor_y names the footer row, never the box), so it
+  # takes the same cursorless reclassification, gated on its own anchored
+  # foreground process name rather than on the verdict alone, and read with the
+  # wintermolt composer scope (FM_COMPOSER_HARNESS) so its palette-dim
+  # placeholder row resolves through the scoped rule in
+  # bin/fm-composer-lib.sh, the same identity-scoped routing hermes takes.
+  if [ "$verdict" = unknown ] && fm_tmux_pane_is_wintermolt "$target"; then
+    verdict=$(FM_COMPOSER_HARNESS=wintermolt \
+      fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" '')
+  fi
   # Cortex Code parks its terminal cursor in the first column of the blank row
   # under its footer, before and after typing (verified cortex 1.1.104 in
   # tmux), so the cursor row names no composer and the same cursorless read
@@ -220,6 +232,25 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
   printf '%s' "$verdict"
+}
+
+# fm_tmux_pane_is_wintermolt: true when the pane's FOREGROUND process group
+# contains a process named exactly `wintermolt` (the Zig-compiled single
+# binary's comm, verified live on wintermolt 0.7.0). The foreground scoping
+# (pgid = tpgid) keeps a backgrounded wintermolt out of the verdict, matching
+# fm_tmux_pane_is_cortex above.
+fm_tmux_pane_is_wintermolt() {  # <target>
+  local target=$1 tty pgid tpgid comm
+  tty=$(tmux display-message -p -t "$target" '#{pane_tty}' 2>/dev/null) || return 1
+  case "$tty" in /dev/*) ;; *) return 1 ;; esac
+  while read -r _ pgid tpgid comm; do
+    [ -n "$comm" ] || continue
+    [ "$pgid" = "$tpgid" ] || continue
+    [ "${comm##*/}" = wintermolt ] && return 0
+  done <<EOF
+$(LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null)
+EOF
+  return 1
 }
 
 # fm_tmux_pane_is_cortex: true when the pane's FOREGROUND process group contains
@@ -290,18 +321,40 @@ fm_pane_is_busy() {  # <target> [harness]
   [ "$(fm_pane_busy_state "$1" "${2:-}")" = busy ]
 }
 
-# fm_tmux_submit_core: type <text> into <target> ONCE, then submit with Enter,
-# verifying the composer cleared. Retries Enter ONLY — never retypes, because a
-# swallowed Enter leaves our text in the composer and retyping would duplicate
-# it. Echoes the final proof-carrying verdict on stdout so callers can require
-# exact `empty` before treating submission as confirmed.
+# fm_tmux_submit_core: type <text> into <target>, then submit with Enter,
+# verifying the composer cleared. Retries Enter ONLY — never retypes after an
+# Enter, because a swallowed Enter leaves our text in the composer and
+# retyping would duplicate it. Echoes the final proof-carrying verdict on
+# stdout so callers can require exact `empty` before treating submission as
+# confirmed.
+# [text-verified] wintermolt's TUI drops or truncates a literal burst typed
+# while its input loop is still settling (verified live, 0.7.0), and the empty
+# composer such a burst leaves behind is indistinguishable from a submitted
+# turn, so its submit verifies the typed text BEFORE Enter. Its input loop also
+# loses the head of one large literal write on a settled TUI (verified live on
+# 0.7.0: a 51-character steer arrived as its last 31 characters, while the same
+# text written in 8-character chunks landed whole), so a wintermolt burst is
+# written in chunks the loop keeps and every other pane keeps the one-shot
+# write. A burst is replayed only after a fresh read taken immediately before
+# that write still shows the composer holding exactly what it held before
+# typing - the speed of the TUI's own echo is the whole question, so one earlier read may never authorise a
+# later write. Every burst is judged that way, the last permitted one included,
+# so a slow echo is never reported as a failed delivery. A composer holding
+# anything else - a truncated burst, a late echo, or someone else's draft - is
+# refused as `send-failed` rather than submitted or replayed onto, because an
+# unconfirmed delivery is strictly better than the same text sent twice. The
+# verification needs a composer the classifier can read before typing (empty or
+# pending); an unreadable one keeps the unchanged path, and no other harness
+# gets this step.
+# FM_WINTERMOLT_SUBMIT_ATTEMPTS bounds the bursts, the same variable the spawn
+# gate's own swallow retry uses.
 # Busy-queued Enter (opencode 1.18.4): the harness accepts Enter while mid-turn
 # and queues it for after the current turn, but keeps the typed text visible in
 # the composer. Once the Enter-retry budget is spent and a structurally proven
 # composer still reads "pending", the submit core falls back to
 # `fm_pane_is_busy`: a busy pane means the Enter was accepted and queued (report
 # `empty` so the caller does not re-send), while an idle pane keeps `pending` as
-# a genuine swallow. Pending-unproven receives the same Enter retry budget but
+# a genuine swallow. Pending-unproven receives the same Enter retry budget and
 # never reaches this exception.
 # Turn-started confirmation (the strict blank-row posture's counterpart): a
 # harness whose mid-turn screen the classifier cannot positively identify (pi
@@ -315,11 +368,45 @@ fm_pane_is_busy() {  # <target> [harness]
 # fm_tmux_submit_enter_core caller, or a pane already busy before typing) an
 # `unknown` verdict is preserved untouched: busy conversion without the
 # transition evidence could mark an undelivered message delivered.
+# A composer the classifier refuses to prove is not outside that evidence: a
+# harness that renders its own working line in the composer box (wintermolt's
+# `working…` row) reads `pending-unproven`, never `pending`, so the queue
+# exception above can never fire for it. The same idle baseline plus the same
+# harness-scoped busy read confirm that submit, for a wintermolt pane alone: no
+# other harness renders its working row in the composer, and without the
+# baseline an unproven read stays unproven ([busy-harness] below scopes the
+# read, so a harness-less union match is not transition evidence for anyone).
 # [busy-harness] scopes every busy read to one harness signature; the submit
 # core passes polytoken for a pane whose composer identity is polytoken (its
-# `Running for` row is outside the harness-less union) and nothing otherwise.
+# `Running for` row is outside the harness-less union), wintermolt for a pane
+# whose foreground process is wintermolt (only its own pinned footer row may
+# acknowledge that pane; the union reaches it only by borrowing another
+# harness's wording from the working row), and nothing otherwise.
+# fm_tmux_submit_busy_confirm: poll the submit's busy read across the retry
+# budget, because a turn takes a beat to render; 0 only when the pane proves it
+# is busy under the signature the caller scoped. A wintermolt footer renders
+# well after the shared Enter budget, so the confirmation that follows a
+# submitted turn ([footer-budget] = 1) uses the same poll budget the adapter's
+# spawn gate already grants that verdict (FM_WINTERMOLT_DELIVERY_POLLS and
+# FM_WINTERMOLT_POLL_INTERVAL); every other read, including one on a pane whose
+# composer is no longer readable (a `/quit` that left a shell prompt), keeps the
+# caller's own retries. No other harness's budget moves.
+fm_tmux_submit_busy_confirm() {  # <target> <retries> <enter-sleep> [busy-harness] [footer-budget]
+  local target=$1 retries=$2 sleep_s=$3 busy_harness=${4:-} footer_budget=${5:-} j=0
+  if [ "$busy_harness" = wintermolt ] && [ "$footer_budget" = 1 ]; then
+    retries=${FM_WINTERMOLT_DELIVERY_POLLS:-60}
+    sleep_s=${FM_WINTERMOLT_POLL_INTERVAL:-0.5}
+  fi
+  while [ "$j" -lt "$retries" ]; do
+    fm_pane_is_busy "$target" "$busy_harness" && return 0
+    j=$((j + 1))
+    [ "$j" -ge "$retries" ] || sleep "$sleep_s"
+  done
+  return 1
+}
+
 fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle] [busy-harness]
-  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 j state busy_state
+  local target=$1 retries=$2 sleep_s=$3 baseline_idle=${4:-} busy_harness=${5:-} i=0 state busy_state
   while :; do
     tmux send-keys -t "$target" Enter 2>/dev/null || true
     sleep "$sleep_s"
@@ -332,16 +419,10 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     case "$state" in
       pending|pending-unproven) ;;
       unknown)
-        if [ "$baseline_idle" = 1 ]; then
-          j=0
-          while [ "$j" -lt "$retries" ]; do
-            if fm_pane_is_busy "$target" "$busy_harness"; then
-              printf 'empty'
-              return 0
-            fi
-            j=$((j + 1))
-            [ "$j" -ge "$retries" ] || sleep "$sleep_s"
-          done
+        if [ "$baseline_idle" = 1 ] \
+           && fm_tmux_submit_busy_confirm "$target" "$retries" "$sleep_s" "$busy_harness"; then
+          printf 'empty'
+          return 0
         fi
         printf 'unknown'
         return 0
@@ -351,6 +432,15 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || break
   done
+  # A composer the classifier refused to prove (wintermolt's working row)
+  # confirms through the turn-started transition, never through the
+  # harness-less union. Only wintermolt renders that working row in its
+  # composer; every other harness keeps pending-unproven unproven.
+  if [ "$state" = pending-unproven ] && [ "$busy_harness" = wintermolt ] && [ "$baseline_idle" = 1 ] \
+     && fm_tmux_submit_busy_confirm "$target" "$retries" "$sleep_s" "$busy_harness" 1; then
+    printf 'empty'
+    return 0
+  fi
   if [ "$state" != pending ]; then
     printf '%s' "$state"
     return 0
@@ -363,29 +453,217 @@ fm_tmux_submit_enter_core() {  # <target> <retries> <enter-sleep> [baseline-idle
 }
 
 # fm_tmux_submit_busy_harness: the busy-footer harness for a submit on
-# <target> - polytoken when the pane's composer identity is polytoken, empty
-# (the harness-less union) for every other pane.
+# <target> - polytoken when the pane's composer identity is polytoken,
+# wintermolt when the pane's foreground process group is wintermolt (its TUI
+# draws its own cursor cell, so the composer identity probe never answers for
+# it, and its pinned footer row is the only acknowledgement its panes accept),
+# and empty (the harness-less union) for every other pane.
 fm_tmux_submit_busy_harness() {  # <target>
   local identity
-  identity=$(fm_tmux_composer_identity "$1") || return 0
+  if ! identity=$(fm_tmux_composer_identity "$1"); then
+    fm_tmux_pane_is_wintermolt "$1" || return 0
+    printf 'wintermolt'
+    return 0
+  fi
   [ "${identity%%$'\t'*}" != polytoken ] || printf 'polytoken'
+}
+
+# fm_tmux_composer_text: the composer's real typed text, styling stripped
+# through the shared extractor; fails when the pane has no readable composer.
+fm_tmux_composer_text() {  # <target>
+  local pane
+  pane=$(fm_tmux_composer_capture "$1") || return 1
+  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$pane"
+}
+
+# fm_tmux_composer_scroll_capacity: a proven lower bound on how many typed
+# characters the wintermolt composer shows at once. Its box spans the pane and
+# keeps its chrome (borders, indent, cursor cell, padding) around one
+# horizontally scrolling row - measured live as 7 columns, so 10 is the
+# conservative allowance: a row showing at least pane_width - 10 characters is
+# provably full, whatever that chrome grows to. Fails when the pane width is
+# unreadable, which keeps the exact comparison below for every caller that
+# cannot measure it.
+fm_tmux_composer_scroll_capacity() {  # <target>
+  local width
+  width=$(tmux display-message -p -t "$1" '#{pane_width}' 2>/dev/null) || return 1
+  case "$width" in ''|*[!0-9]*) return 1 ;; esac
+  width=$((width - 10))
+  [ "$width" -gt 0 ] || return 1
+  printf '%s' "$width"
+}
+
+# fm_tmux_submit_typed_state: what a wintermolt composer holds against the
+# burst just typed - `held` when it holds exactly the pre-typing content plus
+# <text>, `nothing` when it still holds only the pre-typing content (the burst
+# never landed, so replaying it cannot duplicate anything), and `other` for
+# content that is neither. Line wrapping is ignored, because the composer
+# re-wraps what was typed rather than changing it.
+#
+# <scroll-capacity>, when the caller can prove one, covers the composer's
+# other shape: a single row that scrolls horizontally once a draft outgrows it,
+# so a wholly landed long draft shows only its tail. A visible run that fills
+# at least that much of the row and is a suffix of the expected text landed
+# whole, with its head scrolled out of view. A shorter run is never accepted
+# this way - a truncated write is the same shape as a scroll tail, so only a
+# provably full row may stand in for the whole draft, and the text is still
+# reported unconfirmed rather than risk submitting a fragment.
+fm_tmux_submit_typed_state() {  # <target> <before> <text> [scroll-capacity]
+  local held visible='' before_n expect_n capacity=${4:-0}
+  # An empty verdict is the classifier's own positive proof that nothing is
+  # held; the raw row it reads there is the harness's idle placeholder, not a
+  # draft.
+  case "$(fm_tmux_composer_state "$1")" in
+    empty) held='' ;;
+    *) visible=$(fm_tmux_composer_text "$1") || { printf 'other'; return 0; }
+       held=$visible ;;
+  esac
+  held=$(printf '%s' "$held" | tr -d '[:space:]')
+  before_n=$(printf '%s' "$2" | tr -d '[:space:]')
+  expect_n=$(printf '%s%s' "$2" "$3" | tr -d '[:space:]')
+  if [ -n "$expect_n" ] && [ "$held" = "$expect_n" ]; then
+    printf 'held'
+  elif [ "$capacity" -gt 0 ] && [ "${#expect_n}" -gt "${#held}" ] \
+       && [ "${#visible}" -ge "$capacity" ] \
+       && case "$expect_n" in *"$held") true ;; *) false ;; esac; then
+    printf 'held'
+  elif [ "$held" = "$before_n" ]; then
+    printf 'nothing'
+  else
+    printf 'other'
+  fi
+}
+
+# fm_tmux_type_literal: write <text> into <target> as literal keys, echoing
+# tmux's own refusal text when a write fails. With <chunk> > 0 the text goes in
+# writes of at most that many characters, spaced by
+# FM_WINTERMOLT_TYPE_INTERVAL: the wintermolt TUI drops the head of one large
+# literal write, and the chunked write is the shape its input loop keeps. Every
+# other caller passes 0 and keeps the single one-shot write.
+#
+# The end-of-flags marker `--` is passed only for a write whose own bytes begin
+# with `-`: tmux reads a leading `-` as one of its own flags, so
+# `send-keys -l "-brief"` fails with `unknown flag -b`, while a payload that
+# begins with anything else is an ordinary positional argument and lands whole
+# whatever dashes it contains later on (verified on tmux 3.6/3.8: `-l 'run -l
+# it'` arrives intact, `-l '-x y'` fails, `-l -- '-x y'` arrives intact).
+# Keeping the plain shape for ordinary payloads matters because it is the shape
+# every tmux double and recorded transcript in this repository models; only the
+# option-shaped write, which would break without the marker, takes it.
+fm_tmux_type_literal() {  # <target> <text> [chunk]
+  local target=$1 text=$2 chunk=${3:-0} i=0 n=0 end=0 byte probe err
+  # bash 3.2 expands a whole `local` line before assigning any of it, so the
+  # length must be taken after `text` is bound, or `${#text}` reads the caller's
+  # scope (and aborts a `set -u` caller that has no `text`).
+  n=${#text}
+  if [ "$chunk" -le 0 ] || [ "$n" -le "$chunk" ]; then
+    if [ "${text:0:1}" = - ]; then
+      err=$(tmux send-keys -t "$target" -l -- "$text" 2>&1 >/dev/null) \
+        || { printf '%s' "$err"; return 1; }
+    else
+      err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null) \
+        || { printf '%s' "$err"; return 1; }
+    fi
+    return 0
+  fi
+  while [ "$i" -lt "$n" ]; do
+    end=$((i + chunk))
+    while [ "$end" -lt "$n" ]; do
+      probe=${text:end:1}
+      case "$probe" in
+        [[:print:]]) break ;;
+      esac
+      byte=$(printf '%d' "'$probe" 2>/dev/null) || break
+      byte=$(((byte % 256 + 256) % 256))
+      { [ "$byte" -ge 128 ] && [ "$byte" -le 191 ]; } || break
+      end=$((end + 1))
+    done
+    [ "$end" -gt "$n" ] && end=$n
+    # A chunk boundary can fall anywhere, so the chunk itself decides: one that
+    # begins with `-` would be read as a tmux flag and needs the marker.
+    if [ "${text:i:1}" = - ]; then
+      err=$(tmux send-keys -t "$target" -l -- "${text:i:end-i}" 2>&1 >/dev/null) \
+        || { printf '%s' "$err"; return 1; }
+    else
+      err=$(tmux send-keys -t "$target" -l "${text:i:end-i}" 2>&1 >/dev/null) \
+        || { printf '%s' "$err"; return 1; }
+    fi
+    i=$end
+    if [ "$i" -lt "$n" ]; then sleep "${FM_WINTERMOLT_TYPE_INTERVAL:-0.05}"; fi
+  done
+  return 0
 }
 
 fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 baseline_idle='' baseline_state err busy_harness
+  local before='' verify=0 attempts=0 max_attempts typed chunk=0 scroll_cap=0
   # The turn-started baseline must predate our own typing: a pane already
   # busy before the text lands can turn "busy" for reasons unrelated to our
   # Enter, so only a clean idle-to-busy transition may confirm a submit.
   busy_harness=$(fm_tmux_submit_busy_harness "$target")
   baseline_state=$(fm_pane_busy_state "$target" "$busy_harness")
   [ "$baseline_state" = idle ] && baseline_idle=1
-  # A failed literal send replays tmux's stderr (for example "command too
-  # long") so the caller can log why nothing was typed.
-  if ! err=$(tmux send-keys -t "$target" -l "$text" 2>&1 >/dev/null); then
-    [ -z "$err" ] || printf '%s\n' "$err" >&2
+  if [ "$busy_harness" = wintermolt ]; then
+    case "$(fm_tmux_composer_state "$target")" in
+      empty) verify=1 ;;
+      pending)
+        if before=$(fm_tmux_composer_text "$target"); then
+          verify=1
+        fi
+        ;;
+    esac
+  fi
+  max_attempts=${FM_WINTERMOLT_SUBMIT_ATTEMPTS:-3}
+  if [ "$busy_harness" = wintermolt ]; then
+    # The chunk size is an arithmetic operand and a substring length, so an
+    # operator value that is not a plain decimal integer (including a leading
+    # zero, which arithmetic reads as octal) would stall or abort the write
+    # instead of shortening it. Such a value falls back to the verified default.
+    chunk=${FM_WINTERMOLT_TYPE_CHUNK:-8}
+    case "$chunk" in
+      '' | *[!0-9]* | 0*) chunk=8 ;;
+    esac
+  fi
+  # The scrolling-composer tail read belongs to the chunked write it exists
+  # for. A one-shot write can lose its head, and a head-truncated long message
+  # renders exactly like a scrolled one, so an unchunked burst keeps the exact
+  # comparison and only reports a long draft unconfirmed.
+  if [ "$busy_harness" = wintermolt ] && [ "$chunk" -gt 0 ]; then
+    scroll_cap=$(fm_tmux_composer_scroll_capacity "$target") || scroll_cap=0
+  fi
+  while :; do
+    # A failed literal send replays tmux's stderr (for example "command too
+    # long") so the caller can log why nothing was typed.
+    if ! err=$(fm_tmux_type_literal "$target" "$text" "$chunk"); then
+      [ -z "$err" ] || printf '%s\n' "$err" >&2
+      printf 'send-failed'
+      return 0
+    fi
+    sleep "$settle"
+    [ "$verify" = 1 ] || break
+    typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text" "$scroll_cap")
+    [ "$typed" = held ] && break
+    if [ "$typed" = nothing ]; then
+      sleep "$sleep_s"
+      # Every burst, the last permitted one included, is judged by a read taken
+      # here rather than by the one above, because the echo may have landed
+      # while this loop waited.
+      typed=$(fm_tmux_submit_typed_state "$target" "$before" "$text" "$scroll_cap")
+      [ "$typed" = held ] && break
+      if [ "$typed" != nothing ]; then
+        printf 'send-failed'
+        return 0
+      fi
+      attempts=$((attempts + 1))
+      [ "$attempts" -lt "$max_attempts" ] || { printf 'send-failed'; return 0; }
+      continue
+    fi
+    # A render can trail the keys by a moment; content that is still neither
+    # ours nor the pre-typing read after that grace is not a burst to replay.
+    sleep "$sleep_s"
+    [ "$(fm_tmux_submit_typed_state "$target" "$before" "$text" "$scroll_cap")" = held ] && break
     printf 'send-failed'
     return 0
-  fi
-  sleep "$settle"
+  done
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle" "$busy_harness"
 }

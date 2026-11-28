@@ -304,7 +304,7 @@ family_for_basename() {
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-forge-detect.test.sh|fm-grok-harness.test.sh|\
     fm-fork-free-helpers.test.sh|\
     fm-harness-precedence.test.sh|fm-install-herdr.test.sh|\
-    fm-kimi-harness.test.sh|fm-devin-harness.test.sh|fm-commandcode-harness.test.sh|fm-cortex-harness.test.sh|fm-hermes-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-kiro-harness.test.sh|fm-omp-harness.test.sh|fm-polytoken-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
+    fm-kimi-harness.test.sh|fm-devin-harness.test.sh|fm-commandcode-harness.test.sh|fm-cortex-harness.test.sh|fm-hermes-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-kiro-harness.test.sh|fm-omp-harness.test.sh|fm-polytoken-harness.test.sh|fm-wintermolt-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|fm-read-repetition.test.sh|\
     fm-calm-claude-mod.test.sh|\
@@ -379,7 +379,7 @@ family_for_basename() {
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|fm-backend-hc-liveness-live-e2e.test.sh|\
     fm-kimi-trust-prompt-live-e2e.test.sh|\
-    fm-devin-signals-live-e2e.test.sh|fm-commandcode-signals-live-e2e.test.sh|fm-cortex-signals-live-e2e.test.sh|fm-hermes-signals-live-e2e.test.sh|fm-hermes-profile-safety-live-e2e.test.sh|fm-hermes-gateway-coexistence-live-e2e.test.sh|fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|fm-kiro-signals-live-e2e.test.sh|fm-polytoken-signals-live-e2e.test.sh|\
+    fm-devin-signals-live-e2e.test.sh|fm-commandcode-signals-live-e2e.test.sh|fm-cortex-signals-live-e2e.test.sh|fm-hermes-signals-live-e2e.test.sh|fm-hermes-profile-safety-live-e2e.test.sh|fm-hermes-gateway-coexistence-live-e2e.test.sh|fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|fm-kiro-signals-live-e2e.test.sh|fm-polytoken-signals-live-e2e.test.sh|fm-wintermolt-signals-live-e2e.test.sh|\
     fm-launch-prompt-signals-live-e2e.test.sh|fm-backend-t3code-live-e2e.test.sh|\
     fm-backend-t3code-pr-tools-live-e2e.test.sh|\
     fm-pi-seeded-home-trust-live-e2e.test.sh|\
@@ -705,20 +705,42 @@ is_proven_isolated_script() {
 # secondmate lifecycle, bootstrap, the live-harness-optin family, GUI-backend,
 # and other unproven work stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
+#
+# The membership probes and the output write are deliberately fork-light and
+# file-staged: a bash printf blocked on a full pipe does not retry EINTR on
+# stock bash 3.2, so a SIGCHLD from a per-script child exiting mid-listing
+# kills the listing and silently truncates every shard packed from it. The
+# proven-isolated set is therefore read once into the shell instead of probed
+# per script, and the listing is staged in a file and copied out with cat
+# (whose exec resets signal dispositions) rather than written straight into a
+# caller's pipe.
 list_portable_serial() {
-  local s base fam
+  local s base fam p proven tmp
+  local -a proven_list=()
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    proven_list+=("$p")
+  done < <(list_proven_isolated)
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-serial-lane.XXXXXX") || return 1
   while IFS= read -r s; do
     [ -n "$s" ] || continue
-    base=$(basename "$s")
+    base=${s##*/}
     fam=$(family_for_basename "$base")
     if [ "$fam" = "real-herdr-gated" ]; then
       continue
     fi
-    if is_proven_isolated_script "$s"; then
-      continue
-    fi
+    proven=0
+    for p in "${proven_list[@]+"${proven_list[@]}"}"; do
+      if [ "$p" = "$s" ]; then
+        proven=1
+        break
+      fi
+    done
+    [ "$proven" -eq 0 ] || continue
     printf '%s\n' "$s"
-  done < <(all_repo_tests)
+  done < <(all_repo_tests) >"$tmp/serial"
+  cat "$tmp/serial"
+  rm -rf "$tmp"
 }
 
 # Measured portable-serial script durations in milliseconds, from the
@@ -776,14 +798,23 @@ portable_serial_weight_for() {
 # PORTABLE_SERIAL_SHARDS bins, printing "<shard>\t<script>" for every script.
 # Deterministic: candidates are ordered by hint descending then path, and ties
 # between equally loaded bins always take the lowest bin index.
+#
+# The weighted candidate list comes from one awk join of the hints with the
+# serial listing, and the packed result is staged in a file and copied out with
+# cat: the previous shape ran a hint-reading child per script and wrote the
+# joined lines from a bash printf straight into sort's pipe, so a single
+# SIGCHLD exiting one of those children during a blocked write (bash 3.2 does
+# not retry EINTR) truncated the packing input and split one script across two
+# shards.
 portable_serial_assignments() {
-  local ms script i best best_load
+  local ms script i best best_load tmp
   local -a loads=()
   i=1
   while [ "$i" -le "$PORTABLE_SERIAL_SHARDS" ]; do
     loads[i]=0
     i=$((i + 1))
   done
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-serial-assign.XXXXXX") || return 1
   while IFS=$'\t' read -r ms script; do
     [ -n "$script" ] || continue
     best=1
@@ -799,11 +830,14 @@ portable_serial_assignments() {
     loads[best]=$((best_load + ms))
     printf '%s\t%s\n' "$best" "$script"
   done < <(
-    while IFS= read -r script; do
-      [ -n "$script" ] || continue
-      printf '%s\t%s\n' "$(portable_serial_weight_for "$script")" "$script"
-    done < <(list_portable_serial) | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
-  )
+    LC_ALL=C awk -v fallback="$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS" '
+      NR == FNR { if (NF) { hint[$1] = $2 }; next }
+      NF { printf "%d\t%s\n", (($1 in hint) ? hint[$1] : fallback), $1 }
+    ' <(portable_serial_weight_hints) <(list_portable_serial) \
+      | LC_ALL=C sort -t$'\t' -k1,1nr -k2,2
+  ) >"$tmp/assign"
+  cat "$tmp/assign"
+  rm -rf "$tmp"
 }
 
 # Parse "<k>of<n>" from a portable-serial shard lane and echo <k>, refusing when
@@ -1920,7 +1954,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --proven-isolated)
       [ -z "$MODE" ] || die "only one selection mode is allowed"
-      MODE=proven-isolated
+      MODE="proven-isolated"
       shift
       ;;
     --changed)

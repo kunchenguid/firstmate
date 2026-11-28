@@ -7,6 +7,9 @@
 # Split-file weights for fm-watch-triage-busy, fm-captain-hold-teardown, and the
 # reduced watch-triage/captain-hold parents are proportional splits of those
 # parent measurements, pending a refresh from green CI.
+# The two fm-wintermolt rows are provisional measurements from the adapter-
+# verification macOS host, taken when those suites landed after this refresh;
+# replace them with green-CI maxima at the next one.
 path	duration_ms
 tests/fm-afk-contract.test.sh	13161
 tests/fm-afk-inject-e2e.test.sh	41468
@@ -348,6 +351,8 @@ tests/fm-watch-wedge-cap-live.test.sh	309
 tests/fm-watch-wedge-cap-unconfigured-parity.test.sh	58895
 tests/fm-watch-wedge-cap.test.sh	446250
 tests/fm-watcher-lock.test.sh	141417
+tests/fm-wintermolt-harness.test.sh	83584
+tests/fm-wintermolt-signals-live-e2e.test.sh	506
 tests/fm-worker-account-live-e2e.test.sh	3444
 tests/fm-worker-account.test.sh	98618
 tests/fm-x-mode.test.sh	40866
