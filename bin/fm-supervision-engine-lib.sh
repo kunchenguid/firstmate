@@ -413,15 +413,17 @@ fm_supervision_engine_turn() {
 
 # fm_supervision_engine_result <engine> <result-file> [<prior-conversation-cost>]:
 # print one line "error=0|1 cost=<usd> conversation_cost=<usd> input=<n>
-# cache_read=<n> cache_write=<n> output=<n> turns=<n>" from the engine's
-# machine-readable result, where cost is this turn's and conversation_cost the
-# conversation's running total (the caller records it and passes it back for
-# the next turn; 0 for a new conversation). Claude's total_cost_usd is that
-# running total on a resumed conversation, while its usage and num_turns are
-# per turn. error=0 only for a complete success result: type "result",
-# subtype "success", is_error false, and finite total_cost_usd, num_turns, and
-# the four usage token counts; any other shape is error=1. Returns 1 when the
-# result cannot be read. The host treats both as a failed turn.
+# cache_read=<n> cache_write=<n> output=<n> turns=<n> denied=<n>" from the
+# engine's machine-readable result, where cost is this turn's and
+# conversation_cost the conversation's running total (the caller records it
+# and passes it back for the next turn; 0 for a new conversation), and denied
+# counts the tool calls the engine's permission rules refused. Claude's
+# total_cost_usd is that running total on a resumed conversation, while its
+# usage and num_turns are per turn. error=0 only for a complete success
+# result: type "result", subtype "success", is_error false, and finite
+# total_cost_usd, num_turns, and the four usage token counts; any other shape
+# is error=1. Returns 1 when the result cannot be read. The host treats both
+# as a failed turn.
 fm_supervision_engine_result() {
   case "$1" in
     claude)
@@ -437,12 +439,13 @@ fm_supervision_engine_result() {
         const complete = j.type === "result" && j.subtype === "success" && j.is_error === false
           && finite(j.total_cost_usd) && finite(j.num_turns) && finite(u.input_tokens)
           && finite(u.cache_read_input_tokens) && finite(u.cache_creation_input_tokens) && finite(u.output_tokens);
+        const denied = Array.isArray(j.permission_denials) ? j.permission_denials.length : 0;
         const error = complete ? 0 : 1;
         const total = n(j.total_cost_usd);
         const prior = Number(process.argv[2]);
         const turn = Number.isFinite(prior) && prior >= 0 && prior <= total ? total - prior : total;
         const usd = (v) => Number(v.toFixed(6));
-        process.stdout.write(`error=${error} cost=${usd(turn)} conversation_cost=${usd(total)} input=${n(u.input_tokens)} cache_read=${n(u.cache_read_input_tokens)} cache_write=${n(u.cache_creation_input_tokens)} output=${n(u.output_tokens)} turns=${n(j.num_turns)}\n`);
+        process.stdout.write(`error=${error} cost=${usd(turn)} conversation_cost=${usd(total)} input=${n(u.input_tokens)} cache_read=${n(u.cache_read_input_tokens)} cache_write=${n(u.cache_creation_input_tokens)} output=${n(u.output_tokens)} turns=${n(j.num_turns)} denied=${denied}\n`);
       ' "$2" "${3:-0}" 2>/dev/null
       ;;
     *) return 1 ;;

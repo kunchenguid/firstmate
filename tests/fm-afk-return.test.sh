@@ -1062,6 +1062,21 @@ $((now + 120))${tab}latch${tab}errors=3${tab}cooldown=600s"
   assert_contains "$out" '  - at least 1 supervision engine turn(s) ended in an engine error during the away window without latching; not paused at return' \
     "engine errors that did not latch were not reported"
 
+  # A turn whose calls were refused and that recorded no report is an engine
+  # error, as the host counts it; a refused call on a turn that reported is not.
+  dir="$TMP_ROOT/brief-engine-refused"
+  install_runner "$dir"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
+  now=$(date +%s)
+  seed_host_latch "$dir" 1 0 0 "$now${tab}failed${tab}turn=t.1${tab}posture=away${tab}rc=0${tab}reports=0${tab}unacked=2${tab}error=0 cost=0.25 turns=3 denied=1${tab}${tab}signal: a
+$now${tab}failed${tab}turn=t.2${tab}posture=away${tab}rc=0${tab}reports=1${tab}unacked=3${tab}error=0 cost=0.25 turns=3 denied=1${tab}${tab}signal: b"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" FM_CONFIG_OVERRIDE="$dir/home/config" \
+    "$dir/bin/fm-afk-return.sh" begin 2>&1) || fail "a refused engine turn with no blocker should not hold the gate: $out"
+  assert_contains "$out" '  - at least 1 supervision engine turn(s) ended in an engine error during the away window without latching; not paused at return' \
+    "a refused turn that recorded no report was not reported as the one engine error"
+
   # A paused latch record whose trip row the bounded ledger no longer holds,
   # or whose ledger is missing, is still a failure, named without a trip time.
   dir="$TMP_ROOT/brief-engine-trimmed"

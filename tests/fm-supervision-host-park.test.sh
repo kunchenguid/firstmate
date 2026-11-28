@@ -17,6 +17,76 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
 
+# Claude Code reports a refused tool call as a successful turn that lists it
+# in permission_denials; on a turn that recorded no report the host must count
+# it as an engine error, say the commands were refused, and latch on the
+# second one rather than handing every wake back unexplained.
+test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch() {
+  local home
+  home=$(make_home away-denied away)
+  echo denied > "$home/stub-mode"
+  start_session "$home"
+  park_again "$home"
+  append_status "$home" 'first'
+  wait_until_deadline 60 host_exited "$home" || fail "denied: the first refused turn did not hand the wake back"
+  assert_re "^supervision-host: the away session could not take this wake: the engine's commands were refused by its permission rules \\(1 refused\\); this wake is yours$" \
+    "$home/host.out" "a refused turn must hand the wake back saying its commands were refused"
+  assert_re '	failed	turn=.*	reports=0	.* denied=1	' "$home/state/.supervision-host.log" "the ledger must record the refused turn as failed"
+  assert_grep 'errors=1' "$home/state/.supervision-host-health" "a refused turn must count as an engine error"
+  main_drain_and_ack "$home"
+  park_again "$home"
+  append_status "$home" 'second'
+  wait_until_deadline 60 host_exited "$home" || fail "denied: the second refused turn did not hand the wake back"
+  assert_re '^supervision-host: the supervision session is paused after repeated engine errors; every wake reaches you for the next 5 minutes' \
+    "$home/host.out" "the second refused turn must trip the latch with one line"
+  assert_grep 'cooldown=300' "$home/state/.supervision-host-health" "refused turns must start the latch's cooldown"
+  pass "host: an engine turn whose commands were refused is an engine error that names the refusal and trips the latch"
+}
+
+# A turn that reported and acknowledged its wake stays handled even when one
+# of its calls was refused: the refusal is recorded, not counted as an engine
+# error, so the wakes stay with the away session.
+test_refused_call_on_a_turn_that_handled_its_wake_keeps_it_handled() {
+  local home
+  home=$(make_home away-handled-denied away)
+  echo handle-denied > "$home/stub-mode"
+  start_session "$home"
+  park_again "$home"
+  append_status "$home" 'first'
+  wait_until 250 handled_at_least "$home" 1 || fail "handled denied: the first turn was not handled: $(cat "$home/host.out")"
+  append_status "$home" 'second'
+  wait_until 250 handled_at_least "$home" 2 || fail "handled denied: the second turn was not handled: $(cat "$home/host.out")"
+  host_exited "$home" && fail "a turn that handled its wake must not hand it back for a refused call: $(cat "$home/host.out")"
+  [ "$(engine_calls "$home")" -eq 2 ] || fail "each wake must reach the engine once"
+  assert_re '	handled	turn=.*	error=0 .* denied=1	' "$home/state/.supervision-host.log" "the ledger must record the refused call on the handled turn"
+  assert_no_re '	(failed|latch)	' "$home/state/.supervision-host.log" "a refused call on a handled turn must neither fail it nor latch"
+  assert_grep 'errors=0' "$home/state/.supervision-host-health" "a refused call on a handled turn must not count as an engine error"
+  pass "host: a turn that handled its wake stays handled when one of its calls was refused, and its ledger line records the refusal"
+}
+
+# The result's denied count is the length of its permission_denials list; a
+# missing field or any value that is not a list records no refusal.
+test_engine_result_counts_refusals_only_from_a_permission_denials_list() {
+  local dir file value want got
+  dir="$TMP_ROOT/result-denied"; mkdir -p "$dir"
+  for value in '[{"tool_name":"Bash"},{"tool_name":"Read"}]=2' '[]=0' 'absent=0' 'null=0' 'false=0' '0=0' '""=0' '"Bash"=0' '{}=0' '{"tool_name":"Bash"}=0'; do
+    want=${value##*=}; value=${value%=*}
+    file="$dir/result.json"
+    {
+      printf '{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.25,'
+      [ "$value" = absent ] || printf '"permission_denials":%s,' "$value"
+      printf '"usage":{"input_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":20}}\n'
+    } > "$file"
+    got=$(bash -c '. "$1"; fm_supervision_engine_result claude "$2"' _ "$ROOT/bin/fm-supervision-engine-lib.sh" "$file") \
+      || fail "the engine result with permission_denials $value could not be read"
+    case "$got" in
+      "error=0 "*" denied=$want") ;;
+      *) fail "permission_denials $value must read as error=0 with denied=$want, got: $got" ;;
+    esac
+  done
+  pass "engine result: denied counts the entries of a permission_denials list and is 0 for any other value"
+}
+
 test_latch_trips_after_two_engine_errors_then_probes_and_recovers() {
   local home
   home=$(make_home away-latch away)
@@ -671,7 +741,10 @@ test_superseded_host_leaves_the_owner_untouched() {
 }
 
 fm_test_run \
+  test_engine_result_counts_refusals_only_from_a_permission_denials_list \
   test_latch_trips_after_two_engine_errors_then_probes_and_recovers \
+  test_refused_engine_commands_count_as_engine_errors_and_trip_the_latch \
+  test_refused_call_on_a_turn_that_handled_its_wake_keeps_it_handled \
   test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes \
   test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main \
   test_engine_turn_is_bounded_and_its_descendants_reaped \
