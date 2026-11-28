@@ -32,6 +32,15 @@
 # captain-approved <host>/<owner>/<repo> publication scope for this one task,
 # rendered as an `upstream-consent=<scope>` suffix token on the Delivery
 # contract line so brief, spawn record, and worker instructions agree.
+# The optional eighth argument is the issue the task fixes, from bin/fm-brief.sh
+# --closes: an explicit positive number, never inferred from the task id, title,
+# or branch. It renders a `closes=<n>` suffix token on the Delivery contract line
+# and tells the worker to pass `--closes <n>` on every `no-mistakes axi run` that
+# starts a run, because a run started without it drops the reference; under
+# pr=manual, which skips the pr step that `--closes` cannot combine with, it
+# names only the plain `Closes #<n>` line the worker writes into the PR body it
+# owns. Empty renders nothing, so a brief without one is unchanged.
+# fm_closes_valid refuses it outside a no-mistakes ship on no forge binding.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
@@ -225,6 +234,28 @@ fm_pr_text_valid() {  # <pr> <mode> <forge> <caller>
   fi
   if [ "$forge" != none ]; then
     echo "error: $caller: pr=manual ships on a GitHub-style forge with no forge binding only, not forge=$forge" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Closed-set gate for the linked issue a task closes. Only a no-mistakes ship
+# with no forge binding passes `--closes` to a pipeline whose pull request
+# GitHub can link; every other delivery has no run to carry it.
+fm_closes_valid() {  # <issue> <mode> <forge> <caller>
+  local closes=$1 mode=$2 forge=$3 caller=$4
+  [ -n "$closes" ] || return 0
+  case "$closes" in
+    0* | *[!0-9]*)
+      echo "error: $caller: closes '$closes' is not a positive issue number" >&2
+      return 1 ;;
+  esac
+  if [ "$mode" != no-mistakes ]; then
+    echo "error: $caller: a linked issue is carried by the no-mistakes pipeline only, not mode=$mode" >&2
+    return 1
+  fi
+  if [ "$forge" != none ]; then
+    echo "error: $caller: a linked issue is supported on a GitHub-style forge with no forge binding only, not forge=$forge" >&2
     return 1
   fi
   return 0
@@ -539,12 +570,20 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
-  local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<closes>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto} closes=${8:-}
+  local branch=${3:-fm/$id} pr_base='' nm_base='' nm_closes='' nm_closes_manual='' contract_closes='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
   fm_pr_text_valid "$pr" "$mode" "$forge" fm_dod_block || return 1
+  fm_closes_valid "$closes" "$mode" "$forge" fm_dod_block || return 1
+  if [ -n "$closes" ]; then
+    contract_closes=" closes=$closes"
+    nm_closes="This task closes issue #$closes: pass \`--closes $closes\` on every \`no-mistakes axi run\` that starts a run, including a new run after a failed or cancelled one, because a run started without it drops the closing reference from the PR body.
+"
+    nm_closes_manual="This task closes issue #$closes: put a plain \`Closes #$closes\` line in the PR body you write, because the skipped \`pr\` step writes no closing reference.
+"
+  fi
   if [ -n "$consent" ]; then
     if [ "$mode" = local-only ]; then
       echo "error: fm_dod_block: upstream consent authorizes a publication that local-only never performs; drop it" >&2
@@ -675,18 +714,18 @@ EOF
       if [ "$pr" = manual ]; then
         [ -z "$nm_base" ] || nm_base="This task's base branch is \`$base\`, not the repository default: pass \`--base-branch $base_q\` on every \`no-mistakes axi run\` that starts a run, so the pipeline rebases onto that branch, and open the PR against it with \`--base $base_q\`.
 "
-        fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent" "$nm_base" "$pr_base"
+        fm_dod_manual_pr_block "$branch" "$forge_cli" "$draft_check" "$contract_forge$contract_consent$contract_closes" "$nm_base$nm_closes_manual" "$pr_base"
         return
       fi
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes$contract_forge$contract_consent
+Delivery contract: mode=no-mistakes$contract_forge$contract_consent$contract_closes
 Ship branch: $branch
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 That first \`done:\` is the handoff that starts the pipeline, which owns the push; it is not a request to push from this copy.
-${nm_base}
+${nm_base}${nm_closes}
 EOF
       fm_nm_driving_block "$forge"
       cat <<EOF
