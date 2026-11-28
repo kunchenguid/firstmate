@@ -610,6 +610,11 @@ A genuinely missing answer still gets exactly one repost once the mirror is know
 
 The [process-to-event operating contract](configuration.md#process-to-event-sources-stateprocevent) owns automatic application, one-announcement replay deduplication, and the unhandled fallback path.
 
+A handler that stops before it records its own receipt can leave a capture unacknowledged after another capture of the same bytes was applied and the cursor moved on.
+The adapter's `silent` command retires that capture on the next reconcile, without a `check` wake.
+A capture the cursor can still apply, and a capture whose only matching receipt is its own, stay announced until `handle` completes.
+The [`bin/fm-procevent-remote-reply.sh` header](../bin/fm-procevent-remote-reply.sh) owns the exact rule, and [`tests/fm-remote-reply.test.sh`](../tests/fm-remote-reply.test.sh) holds the regression.
+
 ### Source log continuity
 
 The source log is never truncated or consumed.
