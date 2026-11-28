@@ -44,6 +44,11 @@
 #
 # Selection walks the recorded array after the current profile and takes the
 # first candidate that passes those gates. It does not re-rank by spendPriority.
+# A candidate on another runner whose Claude or Codex account list is declared
+# is ineligible, because a relaunch onto it needs an account choice.
+# bind refuses a pi, pi-signed, or opencode profile with no provider.
+# The relaunch passes --expect-spawn-gen with the spawn_gen consider read first.
+# A refusal for a newer incarnation (fm-control exit 3) records nothing.
 # No such candidate appends one needs-decision line and exits 2.
 # A successful switch appends midtask_switch= (from, to, reason, at) and a
 # switched status line, and prints relaunched: <harness> <model> <effort> on
@@ -71,6 +76,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -208,6 +215,7 @@ quota_exhausted() {
 }
 
 default_provider() {
+  [ "$1" != opencode ] || return 0
   fm_quota_single_provider_for_harness "$1" 2>/dev/null \
     || fm_quota_provider_for_harness "$1" "$2" 2>/dev/null || true
 }
@@ -378,8 +386,8 @@ cmd_bind() {
   fi
   printf '%s\n' "$array" | jq -e 'type == "array" and length > 0 and all(.[]; (.harness | type) == "string" and (.harness | length) > 0)' >/dev/null \
     || die "the matched profile set is empty or has no harness"
-  printf '%s\n' "$array" | jq -e 'all(.[]; (.harness | IN("pi", "pi-signed") | not) or ((.provider // "") | length) > 0)' >/dev/null \
-    || die "pi and pi-signed profiles need a provider to enable mid-task fallback"
+  printf '%s\n' "$array" | jq -e 'all(.[]; (.harness | IN("pi", "pi-signed", "opencode") | not) or ((.provider // "") | length) > 0)' >/dev/null \
+    || die "pi, pi-signed, and opencode profiles need a provider to enable mid-task fallback"
   lock=$(fm_meta_lock_path "$meta") || return 1
   lock_same_incarnation "$lock" "$meta" "$key_before" || die "task $id was retired or replaced"
   printf 'dispatch_array=%s\ndispatch_fallback=on\n' "$array" >> "$meta"
@@ -390,7 +398,7 @@ cmd_bind() {
 cmd_consider() {
   local id snapshot='' account='' pane='' mode meta kind array cur_h cur_m cur_e
   local rows='' idx harness model effort provider qscope last_match=-1 exact_match=-1 wild_match=-1
-  local ch='' cm='' ce='' reason='' epoch note rc=0 key_before gen_before control_rc lock
+  local ch='' cm='' ce='' reason='' epoch note rc=0 key_before gen_before control_rc lock listed
   [ "$#" -ge 1 ] || usage
   id=$(task_id_or_die "$1")
   shift
@@ -427,6 +435,8 @@ cmd_consider() {
   array=$(fm_meta_get "$meta" dispatch_array)
   [ -n "$array" ] || return 0
   key_before=$(incarnation_key "$meta")
+  gen_before=$(fm_meta_get "$meta" spawn_gen)
+  [ -n "$gen_before" ] || die "task $id has no spawn_gen on its record"
   if [ -n "$snapshot" ] && [ "$(jq -r '.shared_quota // false' "$DISPATCH_FILE")" = true ]; then
     snapshot=''
   fi
@@ -480,6 +490,10 @@ cmd_consider() {
     fm_control_harness_supported "$harness" || continue
     fm_control_harness_supports_kind "$harness" "$kind" || continue
     failed_candidate "$meta" "$harness" "$model" "$effort" && continue
+    if [ "$harness" != "$cur_h" ]; then
+      listed=$(fm_worker_account_list "$harness" "$CONFIG") || die "the account list for $harness is unreadable"
+      [ -z "$listed" ] || continue
+    fi
     if [ -n "$snapshot" ]; then
       [ -n "$provider" ] || provider=$(default_provider "$harness" "$model")
       if [ -n "$provider" ]; then
@@ -505,8 +519,12 @@ cmd_consider() {
   fi
   epoch=$(date +%s)
   note='The previous run stopped on a usage limit. Continue this task from the existing local copy, including uncommitted work.'
-  "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --note "$note"
+  "$CONTROL_BIN" "$id" relaunch --harness "$ch" --model "$cm" --effort "$ce" --expect-spawn-gen "$gen_before" --note "$note"
   control_rc=$?
+  if [ "$control_rc" -eq 3 ]; then
+    printf 'task %s was relaunched by another caller; nothing recorded\n' "$id" >&2
+    return 1
+  fi
   lock=$(fm_meta_lock_path "$meta") || return 1
   if ! lock_same_incarnation "$lock" "$meta" "$key_before"; then
     printf 'task %s was retired or replaced; nothing recorded\n' "$id" >&2

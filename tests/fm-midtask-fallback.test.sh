@@ -61,6 +61,7 @@ harness=claude
 model=claude-sonnet-5
 effort=high
 worktree=$CASE/work
+spawn_gen=sOLD
 EOF
 }
 
@@ -133,8 +134,8 @@ assert_switch() {
   local harness=$1 model=$2 effort=$3 reason=$4 line n
   [ -s "$CASE/control-calls" ] || fail "control was not called"
   n=$(awk 'NR==1 { print; exit }' "$CASE/control-calls")
-  [ "$n" = 10 ] || fail "expected 10 control arguments, got $n"
-  line=$(sed -n '2,11p' "$CASE/control-calls")
+  [ "$n" = 12 ] || fail "expected 12 control arguments, got $n"
+  line=$(sed -n '2,13p' "$CASE/control-calls")
   [ "$line" = "$ID
 relaunch
 --harness
@@ -143,6 +144,8 @@ $harness
 $model
 --effort
 $effort
+--expect-spawn-gen
+sOLD
 --note
 $NOTE" ] || fail "relaunch arguments were: $line"
   grep -Eq "^switched \\[at=[0-9]+\\]: claude claude-sonnet-5 high -> $harness $model $effort because a usage limit stopped the worker$" \
@@ -151,7 +154,7 @@ $NOTE" ] || fail "relaunch arguments were: $line"
     --arg h "$harness" --arg m "$model" --arg e "$effort" --arg reason "$reason" \
     '.from == {harness:"claude", model:"claude-sonnet-5", effort:"high"} and .to == {harness:$h, model:$m, effort:$e} and .reason == $reason and (.at | type) == "number"' \
     >/dev/null || fail "task record did not store the switch"
-  [ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 11 ] || fail "control ran more than once"
+  [ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 13 ] || fail "control ran more than once"
 }
 
 # Setting absent: a recorded array does not relaunch.
@@ -198,7 +201,7 @@ assert_kept "eligible next"
 out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
 rc=$?
 [ "$rc" -eq 0 ] || fail "second consider exited $rc: $out"
-[ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 11 ] || fail "second consider relaunched again"
+[ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 13 ] || fail "second consider relaunched again"
 assert_kept "second consider"
 ok "setting present relaunches the next eligible profile and keeps the local copy"
 
@@ -373,7 +376,7 @@ CONTROL_RC=0
 out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
 rc=$?
 [ "$rc" -eq 2 ] || fail "retry after failure exited $rc: $out"
-[ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 11 ] || fail "failed candidate was retried"
+[ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 13 ] || fail "failed candidate was retried"
 assert_kept "retry after failure"
 [ "$(grep -c 'key=midtask-fallback' "$CASE/state/$ID.status")" = 2 ] || fail "later no-candidate stall was not reported"
 ok "failed relaunch is not retried"
@@ -558,7 +561,7 @@ printf 'paused [at=100]: rate limit\n' > "$CASE/state/$ID.status"
 out=$(invoke consider "$ID" --snapshot "$CASE/snap.json")
 rc=$?
 [ "$rc" -eq 0 ] || fail "recorded switch exited $rc: $out"
-[ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 11 ] || fail "recorded switch relaunched again"
+[ "$(wc -l < "$CASE/control-calls" | tr -d '[:space:]')" = 13 ] || fail "recorded switch relaunched again"
 assert_kept "recorded switch"
 ok "a recorded switch does not relaunch again"
 
@@ -630,6 +633,7 @@ harness=agy
 model=default
 effort=high
 worktree=$CASE/work
+spawn_gen=sOLD
 EOF
 invoke bind "$ID" --rule 0 >/dev/null
 printf 'paused [at=100]: out of credits\n' > "$CASE/state/$ID.status"
@@ -650,7 +654,7 @@ begin_agy_scope() {
   jq -n --argjson shared "$2" '{mid_task_fallback:true, rules:[{when:"work", use:[
     {harness:"agy", model:"default", effort:"high", quota_scope:"claude_gpt"},
     {harness:"codex", model:"gpt-5.5", effort:"high"}]}]} + (if $shared then {shared_quota:true} else {} end)' > "$CASE/config/crew-dispatch.json"
-  printf 'kind=ship\nharness=agy\nmodel=default\neffort=high\nworktree=%s\n' "$CASE/work" > "$CASE/state/$ID.meta"
+  printf 'kind=ship\nharness=agy\nmodel=default\neffort=high\nworktree=%s\nspawn_gen=sOLD\n' "$CASE/work" > "$CASE/state/$ID.meta"
   invoke bind "$ID" --rule 0 >/dev/null
   printf 'paused [at=100]: out of credits\n' > "$CASE/state/$ID.status"
 }
@@ -710,3 +714,52 @@ scope_doc "$CASE/snap.json" claude_gpt exhausted_now
 invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "shared_quota consider failed"
 assert_no_control "shared_quota with an exhausted snapshot"
 ok "shared_quota ignores per-provider exhaustion"
+
+begin opencode-no-provider
+write_rules true
+write_meta
+jq '.rules[0].use[0] = {harness:"opencode", model:"anthropic/claude-sonnet-5", effort:"high"}' \
+  "$CASE/config/crew-dispatch.json" > "$CASE/config/next.json"
+mv "$CASE/config/next.json" "$CASE/config/crew-dispatch.json"
+invoke bind "$ID" --rule 0 >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] || fail "bind accepted an opencode profile with no provider"
+grep -q '^dispatch_array=' "$CASE/state/$ID.meta" && fail "refused opencode bind recorded an array" || true
+sed 's/^harness=claude$/harness=opencode/; s|^model=claude-sonnet-5$|model=anthropic/claude-sonnet-5|' "$CASE/state/$ID.meta" > "$CASE/state/$ID.meta.next"
+mv "$CASE/state/$ID.meta.next" "$CASE/state/$ID.meta"
+printf 'dispatch_array=%s\ndispatch_fallback=on\n' \
+  "$(jq -c '.rules[0].use' "$CASE/config/crew-dispatch.json")" >> "$CASE/state/$ID.meta"
+: > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" codex exhausted_now 0 grok through_reset 40 claude through_reset 40
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "opencode consider failed"
+assert_no_control "an opencode worker read against codex quota"
+ok "an opencode profile needs a provider and never reads codex quota by default"
+
+begin runner-switch-account-list
+write_meta
+jq -n '{mid_task_fallback:true, rules:[{when:"work", use:[
+  {harness:"claude", model:"claude-sonnet-5", effort:"high"},
+  {harness:"codex", model:"gpt-5.5", effort:"high"},
+  {harness:"grok", model:"grok-4", effort:"high"}]}]}' > "$CASE/config/crew-dispatch.json"
+printf 'ordinary\n' > "$CASE/config/codex-accounts"
+invoke bind "$ID" --rule 0 >/dev/null
+: > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 codex through_reset 40 grok through_reset 40
+invoke consider "$ID" --snapshot "$CASE/snap.json" >/dev/null || fail "runner switch past an account list failed"
+assert_switch grok grok-4 high usage-limit
+ok "a runner switch skips a destination whose account list needs a choice"
+
+begin stale-incarnation
+write_rules true
+write_meta
+invoke bind "$ID" --rule 0 >/dev/null
+: > "$CASE/state/$ID.status"
+quota_doc "$CASE/snap.json" claude exhausted_now 0 grok through_reset 40 codex through_reset 40
+CONTROL_RC=3
+out=$(invoke consider "$ID" --snapshot "$CASE/snap.json" 2>&1); rc=$?
+CONTROL_RC=0
+[ "$rc" -eq 1 ] || fail "stale-incarnation consider exited $rc: $out"
+grep -qx -- '--expect-spawn-gen' "$CASE/control-calls" || fail "relaunch did not pin the observed incarnation"
+grep -qx 'sOLD' "$CASE/control-calls" || fail "relaunch pinned the wrong incarnation"
+grep -q '^midtask_switch' "$CASE/state/$ID.meta" && fail "stale-incarnation refusal was recorded on the task" || true
+[ ! -s "$CASE/state/$ID.status" ] || fail "stale-incarnation refusal reported: $(cat "$CASE/state/$ID.status")"
+ok "a relaunch refused for a newer incarnation records nothing"

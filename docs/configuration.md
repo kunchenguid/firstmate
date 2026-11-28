@@ -2268,8 +2268,10 @@ A switch can move the task onto a smaller model, so existing files stay on dispa
 
 `bin/fm-midtask-fallback.sh` owns the record, the detection, the relaunch, and the task-record fields.
 Bind the matched array after spawn.
-Bind refuses an array that holds a `pi` or `pi-signed` profile with no `provider`.
+Bind refuses an array that holds a `pi`, `pi-signed`, or `opencode` profile with no `provider`.
 Consider relaunches through `bin/fm-control.sh relaunch` and does not delete the local copy or its uncommitted work.
+That relaunch names the incarnation consider observed, so a worker that another relaunch already replaced is not stopped, and nothing is recorded.
+A candidate on another runner whose [Claude](#several-claude-accounts-configclaude-accounts) or [Codex](#several-codex-accounts-configcodex-accounts) account list is declared is not eligible, because that switch needs an account choice.
 No eligible candidate stays on the current profile and is reported for a decision.
 A completed switch is stored on the task record and reported as an outcome.
 Consider switches when a snapshot passed with `--snapshot` marks the current profile `exhausted_now`.
