@@ -88,7 +88,19 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
-# A scratch copy (kind=scout) and a --force run discard untracked content.
+# GNHF history is never disposable scratch, including under --force.
+# An initial cleanup scan finding any .gnhf entry (even empty, ignored, symlinked
+# or nonregular) refuses before destructive steps; an unreadable scan refuses too.
+# Scans repeat before scratch scrubbing, pool return and direct removal to protect
+# history created during shutdown; a late refusal can leave an endpoint closed.
+# Scans include nested scratch repositories, child worktrees and secondmate homes,
+# but prune .git entries and do not follow descendant symlinks.
+# The slot-ownership contract below excludes proven reassigned slots from scanning.
+# Preserve that history outside the cleanup target before retrying.
+# tests/fm-teardown-endpoint-safety.test.sh --gnhf-only pins this boundary with
+# synthetic CLI fixtures, not real backend lifecycle coverage.
+#
+# A scratch copy (kind=scout) and a --force run discard other untracked content.
 # Treehouse's return resets with `git clean -fd`, which never deletes a nested
 # git repository, so the pool slot stays dirty and later checkouts skip it.
 # Before that return, teardown runs `git clean -ffdq` in the copy, and a forced
@@ -311,10 +323,13 @@
 #     whose CURRENT WORKING DIRECTORY is this task's own worktree or tasktmp
 #     root via `lsof -a -d cwd` (cheap: bounded by process count, not by
 #     walking the worktree's file tree) and sends TERM, then KILL after a short
-#     grace period to any survivor whose process identity still matches. Both
-#     roots are unique per task and never
-#     shared, so this can never reach another task's or the primary's
-#     processes. Idempotent: nothing left to find is a silent no-op.
+#     grace period to any survivor whose process identity still matches.
+#     Secondmate home removal and forced child-worktree cleanup use this same
+#     reaper before their final history scan and disposal: closing an endpoint
+#     alone cannot stop disowned writers. These paths require lsof and refuse
+#     if it is missing, the scan fails, or verified processes remain.
+#     Only owned targets are reaped; proven reassigned slots stay untouched.
+#     Idempotent: nothing left to find is a silent no-op.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -375,11 +390,9 @@ teardown_require_backend_prerequisites() {  # <backend> <task-id>
   fi
 }
 
-# Retiring a T3 secondmate home needs lsof to prove its provider processes
-# have left it (t3code_secondmate_home_shutdown_barrier).
-t3code_secondmate_lsof_check() {  # <task-id> <home>
+teardown_target_lsof_check() {
   command -v lsof >/dev/null 2>&1 && return 0
-  echo "REFUSED: cannot prove T3 secondmate $1's provider processes have left ${2:-its home} (lsof is unavailable); preserving the home and its records for retry" >&2
+  echo "REFUSED: cannot prove $1's processes have left $2 (lsof is unavailable); preserving the target and its records for retry" >&2
   return 1
 }
 for _teardown_source in \
@@ -1295,7 +1308,7 @@ teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
 # even under --force.
 if [ "$BACKEND" = t3code ]; then
   fm_backend_runtime_check t3code || exit 1
-  [ "$TEARDOWN_META_KIND" != secondmate ] || t3code_secondmate_lsof_check "$ID" "$(fm_meta_get "$META" home)" || exit 1
+  [ "$TEARDOWN_META_KIND" != secondmate ] || teardown_target_lsof_check "T3 secondmate $ID" "$(fm_meta_get "$META" home)" || exit 1
 fi
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
   "$FM_ROOT/bin/fm-guard.sh" || true
@@ -2042,6 +2055,7 @@ cleanup_stale_lock_for_safety_check() {
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
   local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  validate_no_gnhf_history "$dir" || return 1
   local out lock attempt=0 max_retries lock_desc
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
@@ -2133,11 +2147,28 @@ report_worktree_dirt() {
   ' >&2
 }
 
+# Presence alone protects history: never read it or follow a .gnhf symlink.
+# Scan nested repositories too, since the scratch scrub removes them wholesale.
+validate_no_gnhf_history() {  # <cleanup-target>
+  local target=$1 histories
+  [ -n "$target" ] || return 0
+  [ -e "$target" ] || [ -L "$target" ] || return 0
+  if ! histories=$(find -H "$target" -name .git -prune -o -name .gnhf -print -prune); then
+    echo "REFUSED: cannot inspect $target for protected GNHF history; preserving the cleanup target and task records." >&2
+    return 1
+  fi
+  if [ -n "$histories" ]; then
+    echo "REFUSED: protected GNHF history (.gnhf) exists under $target; preserve it outside the cleanup target before retrying. --force does not bypass this check." >&2
+    return 1
+  fi
+}
+
 # Scratch and --force copies are scrubbed before Treehouse return. See the
 # script header for why `git clean -fd` is not enough and why a dirty return
 # is not reported as clean.
 teardown_scrub_scratch_copy() {
   local wt=$1
+  validate_no_gnhf_history "$wt" || return 1
   # A non-git path has no nested repository this clean can remove.
   git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
   git -C "$wt" clean -ffdq || {
@@ -2906,6 +2937,7 @@ validate_child_worktree_for_removal() {
   [ -n "$target" ] || return 0
   [ -e "$target" ] || return 0
   abs_target=$(validate_removal_target "$target" "child worktree") || return 1
+  validate_no_gnhf_history "$abs_target" || return 1
   if abs_home=$(cd "$FM_HOME" 2>/dev/null && pwd -P); then
     if path_is_ancestor_of "$abs_home" "$abs_target"; then
       echo "REFUSED: unsafe child worktree removal target $target is inside the active firstmate home" >&2
@@ -2927,6 +2959,7 @@ validate_child_worktree_for_removal() {
 safe_rm_rf() {
   local target=$1 label=$2
   validate_removal_target "$target" "$label" >/dev/null || return 1
+  validate_no_gnhf_history "$target" || return 1
   rm -rf -- "$target"
 }
 
@@ -2959,6 +2992,7 @@ validate_firstmate_home_for_removal() {
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_removal_target "$home" "$label") || return 1
+  validate_no_gnhf_history "$abs_home_path" || return 1
   if [ ! -f "$abs_home_path/$SUB_HOME_MARKER" ]; then
     echo "REFUSED: unsafe $label removal target $home is not a seeded secondmate home" >&2
     return 1
@@ -3007,16 +3041,9 @@ EOF
   printf '%s\n' "$abs_home_path"
 }
 
-# t3code_secondmate_home_shutdown_barrier: T3 detaches a provider session as a
-# separate effect after its thread's archive reads back, so the secondmate's
-# Claude or Codex process, and anything it started, can still be running in
-# the home after the proven archive. Worker teardown's worktree reaper never
-# runs for a secondmate, so the same structural reaper runs here, over the
-# home, before it is returned or removed; without lsof nothing can prove the
-# home is quiet, and the home and its records are kept.
-t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
-  t3code_secondmate_lsof_check "$2" "$1" || return 1
-  reap_task_worktree_processes "secondmate home" "$1"
+teardown_target_shutdown_barrier() {
+  teardown_target_lsof_check "$1" "$2" || return 1
+  reap_task_worktree_processes "$1" "$2"
 }
 
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
@@ -3036,8 +3063,7 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
-  if [ "$backend" = t3code ] \
-    && ! t3code_secondmate_home_shutdown_barrier "$abs_home_path" "$expected_id"; then
+  if ! teardown_target_shutdown_barrier "$label" "$abs_home_path"; then
     restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
     return 1
   fi
@@ -3380,7 +3406,7 @@ preflight_descendant_treehouse_slots() {
 }
 
 validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_owner_rc
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3396,7 +3422,7 @@ validate_firstmate_home_children_removal() {
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
-      [ "$child_backend" != t3code ] || t3code_secondmate_lsof_check "$child_id" "$child_home" || return 1
+      [ "$child_backend" != t3code ] || teardown_target_lsof_check "T3 secondmate $child_id" "$child_home" || return 1
       validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
       validate_firstmate_home_children_removal "$child_home" || return 1
     elif [ "$child_backend" = orca ]; then
@@ -3408,6 +3434,15 @@ validate_firstmate_home_children_removal() {
       fi
     elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
+      if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
+        child_owner_rc=0
+        require_owned_worktree_slot_record "$child_id" "$child_wt" || child_owner_rc=$?
+        case "$child_owner_rc" in
+          0) ;;
+          "$TEARDOWN_SLOT_REASSIGNED_RC") continue ;;
+          *) return 1 ;;
+        esac
+      fi
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
   done
@@ -3655,6 +3690,7 @@ cleanup_firstmate_home_children() {
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+        teardown_target_shutdown_barrier "child worktree" "$child_wt" || return 1
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3675,6 +3711,8 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        teardown_target_shutdown_barrier "child worktree" "$child_wt" || return 1
+        validate_no_gnhf_history "$child_wt" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3695,10 +3733,10 @@ cleanup_firstmate_home_children() {
             if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
               return "$child_return_rc"
             fi
-            safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+            safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return $?
           fi
         else
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+          safe_rm_rf_child_worktree "$child_wt" "$child_proj" || return $?
         fi
       fi
     fi
@@ -3749,6 +3787,11 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+
+# Refuse before pipeline abort, process termination, endpoint close or pool return.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  validate_no_gnhf_history "$WT" || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -4132,6 +4175,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
+  validate_no_gnhf_history "$WT" || exit 1
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
