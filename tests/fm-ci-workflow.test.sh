@@ -748,7 +748,7 @@ raise "lint must keep FM_LINT_JOBS=1" unless lint_run.dig("env", "FM_LINT_JOBS")
 serial = jobs.fetch("tests-portable-serial")
 raise "serial timeout-minutes must stay 30" unless serial.fetch("timeout-minutes") == 30
 shards = serial.fetch("strategy").fetch("matrix").fetch("shard")
-raise "serial matrix must be 19 shards" unless shards == (1..19).to_a
+raise "serial matrix must be 20 shards" unless shards == (1..20).to_a
 
 %w[tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial].each do |name|
   job = jobs.fetch(name)

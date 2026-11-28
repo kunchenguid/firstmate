@@ -151,6 +151,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-control-lib.sh`      | One executable owner of the control-plane verb allowlist, per-harness interrupt/exit mechanics, per-backend capability, and the endpoint-absence proof both `exit` and `relaunch` read |
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, per-harness sources, and the optional Pi model-stream evidence and ordering contract |
 | `fm-busy-event.sh`       | The only writer of task busy and progress evidence under the contract in `fm-busy-lib.sh`; its header and help own lifecycle and optional stream operations |
+| `fm-sandbox-lib.sh`      | One owner of the `config/sandbox` grammar, profile resolution, and the per-task relay helper behind the worker sandbox seam ([configuration.md](configuration.md#worker-sandbox-configsandbox)) |
+| `fm-sandbox-relay.sh`    | Host-side relay that validates a sandboxed omp worker's busy-edge files and applies them through `fm-busy-event.sh`; its header owns the event format and caps |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for composer capture, verified submit, and the submit-time busy check |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
