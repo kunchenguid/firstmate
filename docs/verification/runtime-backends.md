@@ -466,6 +466,31 @@ The 2.0.0 wording keeps its existing cases in the same suite.
 
 ## Claude workspace trust
 
+### Added task-channel directories
+
+Verified 2026-11-17 on Linux ARM64 with Claude Code 2.1.326 using a private config, synthetic API key, loopback API endpoint, and disposable repositories.
+The token-free PTY guard compares a trusted task worktree with unregistered external channels against the same launch after `fm-claude-trust.sh` registers those channels.
+The first launch displays the added-directory trust gate; the second reaches the composer and handles `/exit` with exit status zero.
+No model prompt is submitted.
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-add-dir-trust-live.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude 2.1.326 (Claude Code): unregistered channel prompts; registered channels reach composer
+```
+
+The guard expects the unregistered launch to reach the composer on versions before 2.1.326 and to show the trust gate on 2.1.326 and later.
+It names the installed Claude version if either arm diverges.
+Portable scope, atomic-refusal, and spawn integration coverage lives in `tests/fm-claude-trust.test.sh`, with relaunch coverage in `tests/fm-control-relaunch.test.sh`.
+The PTY guard invokes Claude directly from a task worktree with the same configuration store used for registration.
+See the [Claude permission mode reference](../configuration.md#accepted-values-and-refusals) for the launch contract and separate worker stores.
+
+### Workspace and external-import approval
+
 Verified 2026-09-03 on Claude Code 2.1.259.
 Claude gates a folder it has never seen behind an interactive workspace-trust dialog, and the CLI documents the only bypass as non-interactive mode, which a crewmate pane is not.
 
