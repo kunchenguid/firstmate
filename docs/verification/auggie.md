@@ -84,4 +84,5 @@ The bash tool schema auggie 1.2.0 presents to the model documents a 600-second d
   `tests/fm-arm-pretool-check.test.sh` drives the registered command with an auggie-shaped payload, and the payload shape, matcher semantics, exit-2 blocking, and `AUGMENT_PROJECT_DIR` come from Augment's hook documentation.
 - No prompt-submitting live e2e exists yet for the session-start digest, the foreground checkpoint loop, or the seatbelt; it is pending.
 - Away-mode daemon injection into an auggie pane is unverified.
+- The macOS working-directory lookup through `lsof`, used to resolve a relative auggie script path when `/proc` is absent, is implemented and covered by stubbed tests but not verified on a real Mac.
 - Worker launch, busy state, interrupt, exit, and resume are unverified, which is why auggie is primary-only.

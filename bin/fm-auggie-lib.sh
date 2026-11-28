@@ -185,6 +185,9 @@ fm_auggie_process_matches() {  # <comm> <args> [pid]
             n/*) cwd=${line#n}; break ;;
           esac
         done <<<"$cwd_info"
+        if [ -n "$cwd" ]; then
+          cwd=$(CDPATH='' cd -- "$cwd" 2>/dev/null && pwd -P) || cwd=
+        fi
       fi
       script=$(
         [ -z "$cwd" ] || cd -- "$cwd" || exit 1

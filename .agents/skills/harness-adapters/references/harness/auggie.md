@@ -23,6 +23,7 @@ An `env -S` split string and compound launches are refused best-effort, and a sh
 `../../../../../bin/fm-auggie-lib.sh` owns auggie process identity: an exact `auggie` command name, or a node interpreter whose script argument resolves into the `@augmentcode/auggie` package; a script merely named `auggie` outside that package never matches.
 `../../../../../bin/fm-harness.sh` reports that match at comm strength, so it outranks a retained foreign marker such as `CLAUDECODE` or `PI_CODING_AGENT`.
 `../../../../../bin/fm-session-lock-lib.sh` delegates to the same owner, so an auggie session can hold a home's session lock; auggie is deliberately not in the session-lock name vocabulary, and a bare node process never matches.
+A relative script path resolves against the process working directory, read through `lsof` where `/proc` is absent; that macOS lookup is implemented but not verified on a real Mac, and an unresolvable working directory leaves identity unknown.
 
 ## Primary integration
 

@@ -326,6 +326,12 @@ SH
         [ \"\$FM_LOCK_INSPECT_STATE\" = unknown ] || exit 5
       " || fail "auggie: $mode lsof lookup lost safe unresolved-holder behavior"
   done
+  # An lsof cwd that cannot be entered leaves the relative script's identity unknown.
+  local rc
+  FM_TEST_AUGGIE_CWD="$dir/no-such-cwd" lib_eval "$fakebin" "
+    fm_auggie_process_matches node 'node ./bin/auggie' 2147483647
+  " && rc=0 || rc=$?
+  [ "$rc" -eq 2 ] || fail "auggie: unenterable lsof cwd returned $rc, not identity-unknown 2"
   pass "session-lock: an auggie node bundle is identified from its package script, and only from it"
 }
 
