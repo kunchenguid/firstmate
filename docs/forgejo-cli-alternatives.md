@@ -147,6 +147,8 @@ That is the whole reason `fgj` is usable where `fj` is not, and why the head-bin
 **Exit status differs from `tea`, and neither one is trusted.** `executeAPI` in `cmd/api.go` writes a non-2xx body to stderr and returns an error, so `fgj api` exits non-zero where `tea api` exits 0 with the error body on stdout.
 `bin/fm-pr-merge.sh` judges both merges solely by reading the pull request back and requiring `merged: true`, so this difference changes nothing about how a merge is confirmed.
 
+**`fgj` also ships a native `pr` surface, verified against the installed generation's own `--help` before the worker's Definition of done names any of it.** `fgj pr list` lists the repository's pull requests (state filter, no head-branch filter), `fgj pr edit <number> --title <t> --body-file <path>` sets a pull request's title and body, and `fgj pr create` opens one with `-H/--head`, `-B/--base`, `-t/--title`, and `-F/--body-file`. That generation ships no `pr checks` subcommand and no `--watch` flag, so the Definition of done's checks wait for an `fgj` project describes reading the pull request's checks in words rather than naming a command, and no exit-status claim is made for a `pr checks` that does not exist. An `fgj` generation that changes any of these spellings must be re-verified through its `--help` before the Definition of done names it again.
+
 ## Host and login resolution
 
 Both CLIs keep one login per instance and select it on the command line, but the stores and the way each answers for a host differ.

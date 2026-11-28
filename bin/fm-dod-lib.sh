@@ -516,6 +516,12 @@ EOF
 # block, then what to do once the run passes. Callers are fm_dod_block only.
 fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffix> <nm-base> <pr-base>
   local branch=$1 forge_cli=$2 draft_check=$3 suffix=$4 nm_base=$5 pr_base=$6
+  local find_line="2. Find the PR for your branch first (\`$forge_cli pr list --head <branch>\`). If one exists, update its title and body with \`$forge_cli pr edit <number> --title '<title>' --body-file <path>\`. Otherwise open it with \`$forge_cli pr create\` from the branch the run pushed, ready for review, not a draft$pr_base."
+  local wait_line="4. Wait for the PR's checks with \`$forge_cli pr checks <number> --watch\`, under the ten-minute command limit as the driving block bounds its waits, and run the same command again whenever it returns with checks still pending. \`$forge_cli pr checks\` exits 1 when the project reports no checks at all: that is not a failed check and needs no fix. If a check fails, commit the fix, drive a new run with the same \`--skip pr,ci\`, and update the PR text if the change affects it."
+  if [ "$forge_cli" = fgj ]; then
+    find_line="2. Find the PR for your branch first with \`$forge_cli pr list\`, which lists the repository's open pull requests, and take the one for your branch. If one exists, update its title and body with \`$forge_cli pr edit <number> --title '<title>' --body-file <path>\`. Otherwise open it with \`$forge_cli pr create\` from the branch the run pushed, ready for review, not a draft$pr_base."
+    wait_line="4. Wait for the PR's checks to finish by reading them from the pull request's page on the forge, under the ten-minute command limit as the driving block bounds its waits, and read the pull request again whenever its checks are still pending. A project that reports no checks at all is not a failed check and needs no fix. If a check fails, commit the fix, drive a new run with the same \`--skip pr,ci\`, and update the PR text if the change affects it."
+  fi
   cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$suffix pr=manual
@@ -533,9 +539,9 @@ EOF
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override, write the PR title and body yourself and publish them with \`$forge_cli\`:
 1. Write the PR body to a file of your own under the scratch location rule 2 names, and verify it with \`head\` before using it. Match the title and body style of the project's recent merged PRs and its contribution guide, in plain English for a reviewer who lacks your context, with no direct address, and keep any issue reference the captain's intent names.
-2. Find the PR for your branch first (\`$forge_cli pr list --head <branch>\`). If one exists, update its title and body with \`$forge_cli pr edit <number> --title '<title>' --body-file <path>\`. Otherwise open it with \`$forge_cli pr create\` from the branch the run pushed, ready for review, not a draft$pr_base.
+$find_line
 3. Never post a comment or review on the PR or on any other thread, and never rely on the pipeline for the PR text: it is yours on every push.
-4. Wait for the PR's checks with \`$forge_cli pr checks <number> --watch\`, under the ten-minute command limit as the driving block bounds its waits, and run the same command again whenever it returns with checks still pending. \`$forge_cli pr checks\` exits 1 when the project reports no checks at all: that is not a failed check and needs no fix. If a check fails, commit the fix, drive a new run with the same \`--skip pr,ci\`, and update the PR text if the change affects it.
+$wait_line
 Then read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
