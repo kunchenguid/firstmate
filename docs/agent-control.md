@@ -33,7 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
-| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` (or, on Rex, `unreadable`) goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr and Rex can supply one (T3 Code refuses `exit` before reading anything): proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
+| `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` (or, on Rex, `unreadable`) goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr, Rex, and hc can supply one (T3 Code refuses `exit` before reading anything): proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -93,7 +93,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
-   When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr and Rex can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
+   When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr, Rex, and hc can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 6. **Preserve runtime-bound status authority where supported.**
    The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
    This reference is a launch input, never authority to send, close, or act on the pane.
@@ -101,12 +101,28 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
+### Moving a task to another backend
+
+`relaunch --backend hc` moves a ship or scout task onto the experimental hc backend ([`hc-backend.md`](hc-backend.md)).
+Secondmates do not move, because hc does not run them.
+It runs the same transaction: the old agent is stopped on its recorded endpoint and must read agent-free there, one fresh hc terminal opens in the same recorded worktree, the replacement launches there, and the record is republished with `backend=hc` and that terminal.
+The old endpoint is closed only after that record is committed, and only while it still reads agent-free.
+The worktree, branch, and every uncommitted change are reused untouched.
+The target's spawn, core, and harness checks run before the old agent stops, so a move hc cannot take refuses with nothing changed.
+A Pi replacement resumes the session the old endpoint's runtime recorded, as an in-place relaunch does.
+A Claude replacement resumes the conversation the old Claude agent was running: before the stop, the control plane reads its session id from the per-process record Claude keeps under `sessions/` in the control plane's own Claude config directory (`CLAUDE_CONFIG_DIR`, else `~/.claude`), and only exactly one live interactive Claude record in the worktree counts.
+A worker whose Claude account is pinned to another config directory is not read there.
+Without such a record, or without that session's saved transcript, and for every other harness, the replacement starts a fresh conversation from the brief and the progress note.
+An in-place relaunch never resumes a Claude conversation, because it replaces an agent that may be confused or out of context.
+`relaunch --backend herdr` moves a task back from hc the same way, into this seat's Herdr session.
+hc and herdr are the only move targets.
+
 ### Reclaiming a task whose endpoint is gone
 
 A Herdr pane or workspace, or a Rex block, can be destroyed out from under a live task by churn, a session restart, or a stopped Rex server.
 The task's worktree, branch, commits, and uncommitted changes all survive that; only its terminal does not.
 
-**Reclaim is Herdr- and Rex-only.** On tmux, both verbs refuse a `missing` endpoint, leaving it exactly as deadlocked as it was before this mechanism existed - deliberately, and with the reason stated rather than guessed past.
+**Reclaim is Herdr-, Rex-, and hc-only.** On tmux, both verbs refuse a `missing` endpoint, leaving it exactly as deadlocked as it was before this mechanism existed - deliberately, and with the reason stated rather than guessed past.
 
 Two endpoint verdicts are agent-free, and both license a relaunch:
 
@@ -127,6 +143,8 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
   [Rex's server-stop limits](rex-backend.md#active-limits) distinguish a restored shell from a missing block.
   A block that is still there is classified from its process view, so `dead` is adopted and `alive` refuses ([`docs/rex-backend.md`](rex-backend.md) "Cleanup and the absence proof").
   Rex's passive reads never start a server, so a stopped Rex server reads `unreadable` rather than `missing`; a Rex `unreadable` therefore goes through this recheck too, and still refuses unless the recheck settles it.
+- **hc can prove it.** Every read sets the recorded `HC_SESSION`, hc never reuses a terminal address, and a finished terminal stays readable across core restarts.
+  A finished terminal carrying the task's labels proves absence, and so does a structured not-found from the core whose id the record names (`hc_core=`); a not-found from any other core, or from a record without that id, refuses ([`docs/hc-backend.md`](hc-backend.md)).
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
   A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
   There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.
@@ -187,10 +205,10 @@ The worktree and the task's records are unaffected either way.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
   T3 Code has no composer, so Escape and Ctrl+C are both a turn interrupt and Ctrl+U is refused.
-- `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux, herdr, rex, and t3code - because without one the "the agent stopped" postcondition cannot be proven.
+- `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux, herdr, rex, t3code, and hc - because without one the "the agent stopped" postcondition cannot be proven.
   zellij, orca, cmux, and paseo are refused rather than reported as successful blind.
 - On t3code, `exit` refuses before anything is sent: a T3 thread has no composer for a typed exit command, and T3's `/mcp` tools offer no session stop.
-- `relaunch` additionally requires a backend that can host a replacement agent - tmux, herdr, and rex.
+- `relaunch` additionally requires a backend that can host a replacement agent - tmux, herdr, rex, and hc.
   t3code is refused before anything is stopped: a T3 thread keeps its conversation, so a new turn or a provider change on it continues the same agent rather than launching a fresh one.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts; a Rex `unreadable` acts only once the absence proof above settles it.
