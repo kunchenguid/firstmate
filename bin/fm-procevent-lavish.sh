@@ -10,6 +10,7 @@
 #   fm-procevent-lavish.sh reconciles <result-file>
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
+#   fm-procevent-lavish.sh relisten
 #   fm-procevent-lavish.sh retire <artifact.html>
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
 #   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
@@ -54,6 +55,15 @@
 #            3 when the installed Lavish is a confirmed older release without
 #            synchronous reply so the listener keeps the legacy path, and any
 #            other status when the reply failed or the version is unknown.
+# relisten   Exit 0 so the process-event runner keeps its claim and polls again
+#            after a silent or empty round. The runner owns the claim check.
+#            Same-process re-polling stays paced because a real `lavish-axi
+#            poll` reports a disconnect once and then blocks: on Lavish 0.1.80,
+#            closing an attached browser page made the pending poll return
+#            `status: browser_disconnected` after the disconnect grace period,
+#            and two further polls without reattaching each held a 6s
+#            --timeout-ms for its full timeout (about 7.2s with CLI startup)
+#            and returned `status: waiting`, not another immediate disconnect.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -967,6 +977,7 @@ case "${1-}" in
   poll)      shift; cmd_poll "$@" ;;
   deliver-reply) shift; cmd_deliver_reply "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
+  relisten)  shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   classify)  shift; cmd_classify "$@" ;;
   terminal)  shift; cmd_terminal "$@" ;;
   silent)    shift; cmd_silent "$@" ;;
