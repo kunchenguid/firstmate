@@ -836,7 +836,7 @@ acknowledge() { # <fingerprint>
 
 acknowledge_status() { # <task-id> [<status-endpoint> <status-identity>]
   local id=$1 endpoint=${2:-} ident=${3:-} status="$STATE/$1.status" meta="$STATE/$1.meta"
-  local incarnation kind size current_ident line state pr fingerprint spawn_epoch status_epoch rc=0
+  local incarnation kind size current_ident line state state_line pr fingerprint spawn_epoch status_epoch rc=0
   local home_rc=0
   home_secondmate_id >/dev/null || home_rc=$?
   [ "$home_rc" -eq 1 ] || return 0
@@ -865,7 +865,14 @@ acknowledge_status() { # <task-id> [<status-endpoint> <status-identity>]
   case "$spawn_epoch" in ''|*[!0-9]*) ;; *) [ "$spawn_epoch" -le "$status_epoch" ] || return 0 ;; esac
 
   pr=
-  [ "$kind" = scout ] || pr=$(terminal_note_pr "$(status_line_note "$line")")
+  if [ "$kind" != scout ]; then
+    pr=$(terminal_note_pr "$(status_line_note "$line")")
+    state_line=$(fm_run_timed "$FM_INACTIVE_RECONCILE_BUDGET_SECS" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+      "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
+    if [ "$(state_line_source "$state_line")" = run-step ] && [ "${state_line#state: "$state" }" != "$state_line" ]; then
+      pr=$(terminal_outcome_pr "$state_line" "$kind")
+    fi
+  fi
   fingerprint=$(direct_outcome_fingerprint "$incarnation" "$id" "$state" "$pr")
   # The queue lock serializes this receipt with queue_presentation's guard.
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1

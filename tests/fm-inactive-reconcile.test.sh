@@ -183,15 +183,19 @@ test_main_direct_terminal_presentation_receipt() {
 }
 
 test_acknowledged_terminal_status() {
-  local path=$1 state=${2:-done} note='PR https://example.test/owner/repo/pull/1 checks green'
+  local path=$1 state=${2:-done} source=${3:-status-log} note='PR https://example.test/owner/repo/pull/1 checks green' detail
   local seq generation output expected=0 status_line queued branch="$ROOT/bin/fm-branch-outcome.sh"
   [ "$state" = 'done' ] || note='build failed'
   status_line="$state: $note"
-  make_world "terminal-$path-$state"
+  detail=$note
+  [ "$source" != run-step ] || detail='pr=https://example.test/owner/repo/pull/1'
+  make_world "terminal-$path-$state-$source"
   case "$path" in *-older) write_child "$MAIN" child 'working: building' ;; *) write_child "$MAIN" child "$status_line" ;; esac
 
   (
     export FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state"
+    export FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh"
+    export FM_FAKE_CREW_STATE="$state" FM_FAKE_CREW_SOURCE="$source" FM_FAKE_CREW_DETAIL="$detail"
     case "$path" in
       signal|signal-older)
         bash -c '. "$1"; fm_wake_append signal child.status "status changed"' _ "$ROOT/bin/fm-wake-lib.sh" || exit 1
@@ -217,7 +221,7 @@ test_acknowledged_terminal_status() {
 
   case "$path" in unseen|*-older) expected=1 ;; esac
   age "$MAIN/state/child.status"
-  output=$(FM_FAKE_CREW_STATE="$state" FM_FAKE_CREW_SOURCE=status-log FM_FAKE_CREW_DETAIL="$note" \
+  output=$(FM_FAKE_CREW_STATE="$state" FM_FAKE_CREW_SOURCE="$source" FM_FAKE_CREW_DETAIL="$detail" \
     run_reconcile "$MAIN" --startup) || fail "$path: reconciliation failed"
   queued=$(wake_count "$MAIN" 'inactive-outcome:')
   [ "${queued:-0}" = "$expected" ] \
@@ -1527,6 +1531,8 @@ test_acknowledged_terminal_status branch-older
 test_acknowledged_terminal_status signal-older
 test_acknowledged_terminal_status signal failed
 test_acknowledged_terminal_status branch failed
+test_acknowledged_terminal_status signal failed run-step
+test_acknowledged_terminal_status branch failed run-step
 
 test_main_direct_terminal_presentation_receipt
 test_busy_agent_withholds_terminal_outcome
