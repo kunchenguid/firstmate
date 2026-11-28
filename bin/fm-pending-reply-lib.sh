@@ -173,7 +173,7 @@ fm_pending_reply_path() {  # <state-dir> <corr_id>
 
 # Privacy-safe correlation id: 16 lowercase hex chars (64 bits of entropy).
 fm_pending_reply_new_id() {
-  local raw hex
+  local raw="" hex=""
   if command -v openssl >/dev/null 2>&1; then
     raw=$(openssl rand -hex 8 2>/dev/null || true)
   fi

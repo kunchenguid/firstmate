@@ -43,8 +43,8 @@
 # preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
 # nonzero: with the recovery marker stored the watcher reconciles it silently,
-# and with both the commit and the marker lost the send prints a distinct
-# "reply-tracking-degraded (steer delivered, do not resend)" warning instead,
+# and with both the commit and the marker lost the send prints the distinct
+# "advisory (steer delivered): reply-tracking-degraded" line instead,
 # because a resend-inviting status there would duplicate a delivered
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
@@ -110,8 +110,8 @@
 # record, so the expectation is marked delivered at enqueue time; when that
 # bookkeeping commit fails after its durable recovery marker is stored, the
 # send remains successful and watcher reconciliation owns the repair, and when
-# the commit and marker are BOTH lost the send still remains successful with a
-# reply-tracking-degraded warning naming the expectation an operator must
+# the commit and marker are BOTH lost the send still remains successful with the
+# reply-tracking-degraded advisory naming the expectation an operator must
 # inspect (it can no longer reconcile or escalate on its own). Only a
 # failed enqueue discards the expectation. On the typed plane an unconfirmed submit (exit 3) keeps
 # it armed rather than dropping it, and only a proven send failure discards it.
@@ -153,6 +153,20 @@
 # FM_SEND_EXPECTED_REMOTE_HOST to require that sampled identity to still match
 # during the final locked remote-route validation; unset or empty guards do not
 # change ordinary sends.
+# A delivered remote steer never leaves an operator to infer delivery: fm-send
+# prints one "sent:" confirmation naming the far-side record, read from the
+# remote leg's "steer_record=<path>" stdout report (that leg's cmd_send owns
+# emitting it). Reading the report is decoration only - the confirmation and its
+# exit 0 come from the leg's status alone, so a remote leg older than the report
+# still gets a delivered verdict without the named path. Trouble this plane
+# reports after a confirmed delivery is labelled "advisory (steer delivered):"
+# and names that same record, and the remote leg's own notice lines lead with the
+# delivered outcome and name that record, so no line of a delivered send can be
+# mistaken for a refusal that invites a resend. Holding that order means the
+# remote leg's stderr is buffered for the whole attempt and replayed only after
+# the confirmation, so an unusable temp directory refuses the send before any
+# remote attempt: nonzero, with the pending-reply expectation discarded, because
+# nothing was delivered.
 #
 # Decision closure (answerer-closes): pass --resolve-key <key> (repeatable,
 # before the message) when this send answers an open keyed needs-decision: or
@@ -1065,6 +1079,9 @@ else
     fi
     remote_rc=0
     remote_completion_unknown=0
+    # The report line this leg prints is captured, never forwarded raw: the
+    # parent parses it for the far-side record it names.
+    remote_report=
     REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID")
     [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
     # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
@@ -1074,57 +1091,90 @@ else
     # retry that would only wait out the same busy remote queue again. (A
     # remote job's own timeout also relays as 124; treating it as unconfirmed
     # stays safe because the remote enqueue deduplicates.)
-    printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
-      "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
+    if ! remote_stderr_file=$(mktemp "${TMPDIR:-/tmp}/fm-send-remote-stderr.XXXXXX"); then
+      fm_lock_release "$REMOTE_META_LOCK"
+      fm_send_known_undelivered_cleanup ||
+        echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+      echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: could not create remote stderr buffer; check TMPDIR" >&2
+      exit 1
+    fi
+    remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+      "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" 2>"$remote_stderr_file") || remote_rc=$?
     if [ "$remote_rc" -eq 124 ]; then
       remote_completion_unknown=1
     elif [ "$remote_rc" -eq 255 ]; then
       remote_completion_unknown=1
       remote_rc=0
-      printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
-        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" || remote_rc=$?
+      remote_report=$(printf '%s' "$MESSAGE" | fm_run_timed "$FM_SEND_REMOTE_BUDGET" "$SCRIPT_DIR/fm-on.sh" --stdin \
+        "$TARGET_REMOTE_ID" fm-remote-secondmate-control.sh send-stdin "${REMOTE_SEND_ARGS[@]}" 2>>"$remote_stderr_file") || remote_rc=$?
     fi
     fm_lock_release "$REMOTE_META_LOCK"
-    if [ "$remote_rc" -ne 0 ] && [ "$remote_completion_unknown" -eq 1 ]; then
-      if [ -n "$FIRE_AND_FORGET_ID" ]; then
-        echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
-        exit 3
-      fi
-      if [ -n "$PENDING_REPLY_CORR" ]; then
-        fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
-      fi
-      if [ "$remote_rc" -eq 255 ]; then
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
-      elif [ "$remote_rc" -eq 124 ]; then
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
-      else
-        echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
-      fi
-      printf '%s' "$(fm_send_resend_env)" >&2
-      printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
-        "$PENDING_REPLY_CORR" "$(fm_send_resend_exe)" >&2
-      for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
-        printf ' %q' "$resend_arg" >&2
-      done
-      printf '\n' >&2
-      exit 1
-    fi
+    # Anything the remote leg printed on stdout that this layer does not own
+    # passes through unchanged on every outcome, so reading the report line
+    # above never swallows a future remote line.
+    printf '%s\n' "$remote_report" | sed -e '/^steer_record=/d' -e '/^$/d'
     if [ "$remote_rc" -ne 0 ]; then
+      if [ -s "$remote_stderr_file" ]; then
+        cat "$remote_stderr_file" >&2
+      fi
+      rm -f "$remote_stderr_file"
+      if [ "$remote_completion_unknown" -eq 1 ]; then
+        if [ -n "$FIRE_AND_FORGET_ID" ]; then
+          echo "error: fire-and-forget steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (delivery-id=$FIRE_AND_FORGET_ID); retry only with the same delivery id" >&2
+          exit 3
+        fi
+        if [ -n "$PENDING_REPLY_CORR" ]; then
+          fm_pending_reply_mark_delivery_unknown "$STATE" "$PENDING_REPLY_CORR" || true
+        fi
+        if [ "$remote_rc" -eq 255 ]; then
+          echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (transport lost twice; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        elif [ "$remote_rc" -eq 124 ]; then
+          echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the remote transport did not complete within its ${FM_SEND_REMOTE_BUDGET}s budget; remote completion unknown). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        else
+          echo "error: steer to remote secondmate $TARGET_REMOTE_ID is unconfirmed (the first transport attempt had unknown completion and the retry failed). Only the correlation-reusing resend below is idempotent and lands on the same remote inbox record:" >&2
+        fi
+        printf '%s' "$(fm_send_resend_env)" >&2
+        printf 'FM_PENDING_REPLY_EXISTING_CORR=%q %s' \
+          "$PENDING_REPLY_CORR" "$(fm_send_resend_exe)" >&2
+        for resend_arg in "${FM_SEND_ORIGINAL_ARGS[@]}"; do
+          printf ' %q' "$resend_arg" >&2
+        done
+        printf '\n' >&2
+        exit 1
+      fi
       fm_send_known_undelivered_cleanup ||
         echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
       echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID (the remote steering-inbox record could not be written; the remote leg's stderr above has the reason)" >&2
       exit 1
     fi
     # The remote record is durable delivery, exactly as a local enqueue is.
+    # Say so first, and name the far-side record when this leg reported one:
+    # a delivered steer that prints no verdict of its own leaves any advisory
+    # line as the only output an operator sees, and an advisory reads as a
+    # refusal. The confirmation depends on this leg's exit status alone, so a
+    # parent older than the report line still reports delivery - only the named
+    # path is missing.
+    remote_record=$(printf '%s\n' "$remote_report" | sed -n -e 's/^steer_record=//p' | tail -1)
+    if [ -n "$remote_record" ]; then
+      remote_steer_where="durably recorded at $remote_record"
+    else
+      remote_steer_where="durably recorded in remote secondmate $TARGET_REMOTE_ID's own steering inbox"
+    fi
+    printf 'sent: steer to remote secondmate %s %s - delivery is complete, do not resend\n' \
+      "$TARGET_REMOTE_ID" "$remote_steer_where" >&2
+    if [ -s "$remote_stderr_file" ]; then
+      cat "$remote_stderr_file" >&2
+    fi
+    rm -f "$remote_stderr_file"
     if [ -n "$PENDING_REPLY_CORR" ]; then
       if fm_pending_reply_confirm_delivery "$STATE" "$PENDING_REPLY_CORR"; then
         :
       else
         delivery_commit_status=$?
         if [ "$delivery_commit_status" = 2 ]; then
-          echo "notice: the steer was durably recorded in the remote inbox, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+          echo "advisory (steer delivered): the steer is $remote_steer_where, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it; do not resend." >&2
         else
-          echo "warning: reply-tracking-degraded (steer delivered, do not resend): the steer was durably recorded in the remote inbox, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own. Inspect $STATE." >&2
+          echo "advisory (steer delivered): reply-tracking-degraded - the steer is $remote_steer_where, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own; inspect $STATE; do not resend." >&2
         fi
       fi
     fi
@@ -1204,7 +1254,7 @@ else
       else
         delivery_commit_status=$?
         if [ "$delivery_commit_status" = 2 ]; then
-          echo "notice: the steer was recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+          echo "advisory (steer delivered): the steer is durably recorded at $INBOX_RECORD, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it; do not resend." >&2
         else
           # Both the commit and its recovery marker failed. The durable inbox
           # record is what delivers the steer, so the send still SUCCEEDED:
@@ -1214,7 +1264,7 @@ else
           # non-resend-inviting condition instead: reply tracking for this
           # request may not resolve or escalate on its own until an operator
           # inspects it.
-          echo "warning: reply-tracking-degraded (steer delivered, do not resend): the steer was durably recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own. Inspect $STATE." >&2
+          echo "advisory (steer delivered): reply-tracking-degraded - the steer is durably recorded at $INBOX_RECORD, but its pending-reply delivery commit and recovery marker both failed, so the reply expectation for this request may not reconcile on its own; inspect $STATE; do not resend." >&2
         fi
       fi
     fi
