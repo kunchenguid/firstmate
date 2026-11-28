@@ -3880,10 +3880,39 @@ Real Herdr.app exercise on 2026-11-02: the official herdr-app 0.1.11 bundle (sha
 | Marker-less process with no `herdr-app.sock` at all | Undetected, resolving `tmux`. |
 | Real `default` core file-meta before/after | Byte-identical - the lab never drove the shared core. |
 
-`bin/fm-supervisor-target-lib.sh` now resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc`; `bin/fm-supervise-daemon.sh` still supports only `tmux herdr rex t3code` and refuses the resolved backend loudly.
+### Away-mode supervisor
+
+Measured on 2026-11-15 with `hc 0.1.14` (installed by `bin/fm-install-hc.sh`) on Linux aarch64, inside `bin/fm-hc-lab.sh` sessions whose fleet-state tripwire passed at teardown.
+The daemon resolves `$HC_TERMINAL_ID`+`$HC_TERMINAL_SOCKET` to `<session>:<address>`/`hc` through `bin/fm-supervisor-target-lib.sh` and supports `hc` as a supervisor backend.
+
+```sh
+FM_HC_BIN=<installed herdr-core> tests/fm-afk-inject-hc-smoke.test.sh
+```
+
+```text
+ok - real hc: the plain-screen composer reader proves the idle supervisor composer empty
+ok - real hc: a terminal's own markers resolve <session>:<address> + hc and pass identity; another core's address is refused
+ok - real hc: the daemon accepts backend=hc and delivers exactly one clean envelope-first digest through send --wait
+ok - real hc: a composer holding a draft defers the digest; it arrives clean once the draft is submitted
+ok - real hc: the rendered busy line defers injection, and a gone core reads as gone without being started
+FM_TEST_COMPLETE
+```
+
+The supervisor terminal in that test is a scripted composer that reports no native status, so `send --wait` returned `started:null` and the verdict fell back to the composer screen.
+A real Claude Code 2.1.325 primary started directly as a lab terminal's program, then driven by `inject_msg` with `FM_SUPERVISOR_BACKEND=hc`, gave:
+
+| Probe | Result |
+| --- | --- |
+| `hc get` of the idle primary | `status` was `{"app":"claude-code","state":"idle"}`, so `fm_backend_hc_busy_state` read `idle` natively. |
+| `fm_backend_composer_state hc` of the idle primary | `empty` from the plain screen, a `❯` row between two rules with the auto-mode footer below. |
+| `inject_msg` into the idle primary | Returned 0 with verdict `empty`; the screen showed the record-backed doorbell submitted as one prompt. |
+| A second `inject_msg` while the primary showed a login prompt | `hc send` refused with exit 9 (`t1 is blocked (auth)`); the daemon kept the digest and never forced the send. Native status read neither working nor idle there, so the busy guard fell through to that refusal. |
+
+The lab terminal could not reach the primary's login, so the submitted turn ended at a login prompt rather than doing model work.
 
 ### Not verified
 
 - A spawn with a real harness rather than the stand-in.
-- `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
+- `send --wait`'s `started`/`working` proof against a real status-reporting harness doing model work; the lab runs covered a non-reporting script and a Claude primary whose turn stopped at a login prompt.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
+- The away daemon on hc for a primary harness other than Claude, and an hc primary inside a real Herdr app window.

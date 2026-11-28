@@ -727,18 +727,24 @@ Test cleanup must use the guarded path in [`docs/tern-backend.md`](tern-backend.
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own endpoint independently of where new task endpoints are spawned.
-It supports `tmux`, `herdr`, and `rex` supervisor panes and `t3code` supervisor threads.
+It supports `tmux`, `herdr`, and `rex` supervisor panes, `hc` supervisor terminals, and `t3code` supervisor threads.
 
-Set `FM_SUPERVISOR_BACKEND=tmux|herdr|rex|t3code` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly.
+Set `FM_SUPERVISOR_BACKEND=tmux|herdr|rex|hc|t3code` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly.
 For tmux, accepted targets are `%pane-id`, `@window-id`, `session:@window-id`, a bare session, `session:window-name`, `session:index`, `session:index.pane-index`, and the supported `=session:=window` exact-marker forms; the `fm_backend_target_exists` header in `bin/fm-backend.sh` owns this grammar.
-For herdr, the target is `"<session>:<pane-id>"`; for Rex it is `<session-uuid>:<block-uuid>`, with both kind prefixes removed; and for t3code it is the thread id.
+For herdr, the target is `"<session>:<pane-id>"`; for Rex it is `<session-uuid>:<block-uuid>`, with both kind prefixes removed; for hc it is `<session>:<address>`, the same shape an hc task records; and for t3code it is the thread id.
 Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then `TERM_PROGRAM=rex` with both `REX_SESSION` and `REX_BLOCK`, then `HC_TERMINAL_ID` with `HC_TERMINAL_SOCKET` (resolving `hc`), then a cwd match over T3's live threads only when T3 Code is explicitly selected, then falls back to `tmux`.
 T3 discovery requires explicit `FM_BACKEND=t3code` or `config/backend=t3code` and the `config/t3code-token` credential from the [T3 sign-in](t3code-backend.md#sign-in) under the effective config directory before making a T3 call.
 
 That keeps a nested tmux or Herdr pane on its own transport, matching the runtime backend's innermost-first rule.
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the prefix-stripped `REX_SESSION` and `REX_BLOCK` under Rex, then `"${HC_SESSION:-default}:${HC_TERMINAL_ID}"` when both hc terminal markers are present, then the thread id from that T3 cwd match, then the legacy `firstmate:0` tmux fallback with a warning.
 
-Selecting or discovering any other supervisor backend, including `hc`, `zellij`, `orca`, `cmux`, or `tern`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+An hc target composed from the terminal markers names that terminal only on its own core, because hc terminal addresses are per-core: the daemon refuses at startup unless `HC_TERMINAL_SOCKET` accepts connections and is the core socket that session resolves to (the `FM_HC_SOCKET` pin, else hc's own per-session path; [hc runtime auto-detection](hc-backend.md#runtime-auto-detection) owns that layout).
+Set `HC_SESSION` to the terminal's session, or set `FM_SUPERVISOR_TARGET` explicitly, when they disagree.
+The daemon reads an hc supervisor only while its core accepts connections, so a stopped core reads as a gone endpoint rather than being started empty by the read.
+On hc, target existence, native busy state, screen capture, composer state, and verified submit route through the shared backend dispatcher, as they do for Herdr.
+`bin/fm-afk-launch.sh start` has no hc terminal-launch primitive, so on hc the daemon runs only as the primary harness's own tracked background job (`start-native`).
+
+Selecting or discovering any other supervisor backend, including `zellij`, `orca`, `cmux`, or `tern`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
