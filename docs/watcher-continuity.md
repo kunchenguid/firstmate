@@ -252,7 +252,7 @@ Its ordinary arm check still announces a never-announced generation, including o
 ### Generation reuse
 
 An ordinary watcher close attempts to publish downtime, and every durable queue append publishes it.
-A watcher closing to resurface the recovery it found at its start preserves the existing marker instead, while a handling successor resurfacing a later row publishes downtime like any close.
+A watcher closing to deliver `check: rearm-resurface` preserves the existing marker instead, whether it resurfaces the recovery it found at its start or is a handling successor resurfacing a later queued row from a recovery episode.
 If EXIT cleanup cannot acquire the downtime-marker lock within its bound, it retains the stale singleton for the next arm to publish the missing downtime before clearing that lock (see [Grace, beacon, and stop signals](#grace-beacon-and-stop-signals)).
 A downtime republication of a pending episode reuses its generation.
 A watcher close leaves an announced downtime episode announced, while a successful durable append opens a fresh pending generation so a live watcher can recover the new work.
