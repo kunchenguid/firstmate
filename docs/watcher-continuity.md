@@ -305,6 +305,9 @@ An ordinary presentation drain bounds both its initial queue-lock acquire and it
 | Initial queue lock | One PID-naming advisory, and the whole drain is skipped before any claim or mutation. |
 | Status-presentation lock | One such advisory after raw wake presentation, and status annotations, sections, and cursors are left retriable on the next drain. |
 
+The holder-identity check in [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) also applies when reporting a timed-out acquisition.
+If a live PID has a proven mismatch with the recorded identity and stale-lock recovery cannot complete by the deadline, the drain reports that the lock could not be acquired safely, without naming that unrelated process as a live holder.
+
 Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
 
 ### Guard counts for branch-held rows
@@ -537,6 +540,10 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Bounded and successor-linked lifecycle rows.
 - Startup-stop resilience: slow post-claim confirmation, typed startup-lock and identity-publication failures, safe-point deadline and signal forwarding, and cleanup of published locks and in-flight staging while preserving foreign owners.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- Protection for a live owner with a matching start token and reclamation after PID reuse with a mismatched start token.
+- The reused-PID deadline case in [Lock deadlines during presentation](#lock-deadlines-during-presentation), exercised while a live `.steal` holder blocks reclamation.
+- Normalized macOS `ps` start tokens, and recorded start tokens that match `fm_pid_start_time` by string equality, with the real `ps` checks skipped where `ps -o lstart=` is unavailable.
+- Reporting the displaced PID when a reused-PID stale lock is reclaimed.
 
 ### Claude auto-arm and turn-end guard
 

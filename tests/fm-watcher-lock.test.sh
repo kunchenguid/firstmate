@@ -547,6 +547,139 @@ test_lock_steals_dead_pid_lock() {
   pass "dead-pid stale lock is reclaimed by a single acquirer"
 }
 
+test_lock_reclaims_reused_pid_but_not_a_live_owner() {
+  local dir state lockdir recorded owner_pid rc newpid
+  dir=$(make_case lock-reused-pid-live-owner)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  mkdir "$lockdir"
+  owner_pid=$$
+  printf '%s\n' "$owner_pid" > "$lockdir/pid"
+  recorded=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_time "$2"' _ "$LIB" "$owner_pid") \
+    || fail "could not compute the live owner's start token"
+  printf '%s\n' "$recorded" > "$lockdir/pid-start"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a live owner was evicted"
+  printf '%sX\n' "$recorded" > "$lockdir/pid-start"
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2" || exit 7; cat "$2/pid"; fm_lock_release "$2"' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a recycled-pid lock was not reclaimed (rc=$rc)"
+  [ "$newpid" != "$owner_pid" ] || fail "reclaimed lock still names the recycled owner"
+  pass "a live owner remains protected while a mismatched start token is reclaimed"
+}
+
+test_lock_bounded_acquire_reused_pid_under_live_stealer() {
+  local dir state lockdir holder_file release decoy recorded stealer i out rc held
+  dir=$(make_case lock-bounded-reused-pid-stealer)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/stealer.ready"
+  release="$dir/stealer.release"
+  mkdir -p "$state" "$lockdir"
+
+  sleep 30 &
+  decoy=$!
+
+  printf '%s\n' "$decoy" > "$lockdir/pid"
+  recorded=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_time "$2"' _ "$LIB" "$decoy") \
+    || { kill "$decoy" 2>/dev/null || true; wait "$decoy" 2>/dev/null || true; fail "could not compute decoy start token"; }
+  printf '%sX\n' "$recorded" > "$lockdir/pid-start"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    while [ ! -e "$4" ] && kill -0 "$FM_TEST_SUITE_PID" 2>/dev/null \
+      && [ "$SECONDS" -lt "$FM_TEST_STUB_MAX_BLOCK_SECONDS" ]; do
+      sleep 0.05
+    done
+    [ -e "$4" ] || exit 8
+    fm_lock_release "$2.steal"
+  ' _ "$LIB" "$lockdir" "$holder_file" "$release" &
+  stealer=$!
+
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || {
+    kill "$stealer" "$decoy" 2>/dev/null || true
+    wait_for_exit "$stealer" 50 || true
+    wait "$decoy" 2>/dev/null || true
+    fail "live steal mutex holder did not start"
+  }
+
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    rc=0
+    fm_lock_acquire_wait_bounded "$2" 1 || rc=$?
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+
+  : > "$release"
+  rc=0
+  wait_for_exit "$stealer" 50 || rc=$?
+  kill "$decoy" 2>/dev/null || true
+  wait "$decoy" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "live steal mutex holder failed (rc=$rc)"
+
+  rc=${out#rc=}; rc=${rc%% *}
+  held=${out#*held=}; held=${held%% *}
+  [ "$rc" -eq 1 ] || fail "bounded acquire on reused-PID lock returned $rc instead of 1: $out"
+  [ -z "$held" ] || fail "bounded acquire blamed unrelated PID as lock holder: $held"
+  pass "bounded acquire with reused PID and live stealer returns 1 and empty holder"
+}
+
+test_mac_ps_start_token_normalizes_whitespace() {
+  local dir token rc
+  dir=$(make_case lock-mac-start-token)
+  if ! LC_ALL=C ps -p "$$" -o lstart= >/dev/null 2>&1; then
+    pass "real ps start-token check skipped where ps -o lstart= is unsupported"
+    return
+  fi
+  token=$(FM_PROC_ROOT_OVERRIDE="$dir/no-proc" FM_STATE_OVERRIDE="$dir/state" bash -c '
+    . "$1"
+    first=$(fm_pid_start_time "$$") || exit 1
+    second=$(fm_pid_start_time "$$") || exit 1
+    [ "$first" = "$second" ] || exit 2
+    printf "%s" "$first"
+  ' _ "$LIB") || {
+    rc=$?
+    [ "$rc" -eq 2 ] && fail "portable start token changed between reads"
+    fail "portable start-token fallback failed"
+  }
+  case "$token" in
+    *=*) fail "portable start token is not a bare ps lstart date: <$token>" ;;
+  esac
+  case "$token" in [[:space:]]*|*[[:space:]]) fail "portable start token retained edge whitespace: <$token>" ;; esac
+  pass "macOS-style ps start tokens normalize leading and trailing whitespace"
+}
+
+# fm_lock_holder_alive compares the recorded pid-start to fm_pid_start_time by
+# string equality, so every record the writer leaves must equal that probe for
+# its live holder, on both the /proc and the ps paths.
+test_lock_start_record_matches_probe() {
+  local dir proc_root out
+  dir=$(make_case lock-start-record-probe)
+  for proc_root in /proc "$dir/no-proc"; do
+    if [ "$proc_root" = "$dir/no-proc" ] && ! LC_ALL=C ps -p "$$" -o lstart= >/dev/null 2>&1; then
+      continue
+    fi
+    out=$(FM_PROC_ROOT_OVERRIDE="$proc_root" FM_STATE_OVERRIDE="$dir/state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2" || exit 10
+      recorded=$(cat "$2/pid-start")
+      legacy=$(fm_pid_start_time "$(cat "$2/pid")")
+      fm_lock_release "$2"
+      [ -n "$recorded" ] && [ "$recorded" = "$legacy" ] || { printf "<%s> <%s>" "$recorded" "$legacy"; exit 11; }
+    ' _ "$LIB" "$dir/state/.contend.lock") \
+      || fail "proc root $proc_root: recorded pid-start does not equal fm_pid_start_time: $out"
+  done
+  pass "recorded pid-start matches fm_pid_start_time by string equality"
+}
+
 # Start a process that claims each given link lock, then SIGKILL it so every
 # claim is left behind with a dead owner - an acquirer TERMed mid-steal.
 leave_dead_link_locks() {  # <state> <lock>...
@@ -1039,7 +1172,7 @@ test_lock_respects_live_holder_matching_its_start_time() {
   [ -s "$dir/holder.ready" ] \
     || { kill "$holder" 2>/dev/null || true; fail "identity fixture holder never acquired its lock"; }
   recorded=$(cat "$lockdir/pid-start" 2>/dev/null || true)
-  expected=$(start_time_of "$holder" 2>/dev/null || true)
+  expected=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_start_time "$2"' _ "$LIB" "$holder" 2>/dev/null || true)
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; fm_lock_release "$2"; else rc=1; fi
@@ -2823,6 +2956,10 @@ test_watch_replaced_holder_stands_down_after_successor_exits
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
+test_lock_reclaims_reused_pid_but_not_a_live_owner
+test_lock_bounded_acquire_reused_pid_under_live_stealer
+test_mac_ps_start_token_normalizes_whitespace
+test_lock_start_record_matches_probe
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
