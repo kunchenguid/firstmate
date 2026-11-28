@@ -34,6 +34,12 @@
 #                   exit, duration, whether it gate-skipped, and the reason it
 #                   gave (empty when it ran), so a lane can say which harness or
 #                   tool this host could not exercise.
+#                   Every record also carries failed_invocation (the function
+#                   active at abort), skipped_after_failure (the count of later
+#                   invocations), and unexecuted_invocations (their names in
+#                   registration order). Without a suite abort report, these are
+#                   "", 0, and [], including for unregistered suites. Empty
+#                   values alone do not prove suite completion.
 #   --list          print selected script paths (one per line) and exit 0
 #   --list-scheduled
 #                   print selected paths longest-hint-first and exit 0.
@@ -88,6 +94,13 @@
 # Per-script machine-parseable markers (stdout):
 #   FM_TEST_BEGIN <iso8601> <script> family=<family> expected_gate_skip=<class>
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
+#     When the selected suite's shell reports an abort, appends
+#     failed_invocation=<name>, skipped_after_failure=<n> and
+#     unexecuted=<comma-separated-names>.
+#     These fields describe test progress independently of the exit code.
+#     Use FM_TEST_END for attribution because raw FM_TEST_ABORT lines in the
+#     console can also come from nested fixtures. See fm_test_run in tests/lib.sh
+#     for the suite's abort report contract.
 #
 # After all scripts (stdout):
 #   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
@@ -123,7 +136,7 @@
 # Family labels, the changed-file map, and production portable-shard composition
 # live in this script only (one owner). The proven-isolated candidate set remains
 # owned by bin/fm-test-isolation-proof.sh; portable parallel shards are a
-# duration-balanced partition of that exact set, packed from the measured hints
+# duration-balanced partition of that exact set, packed from the committed hints
 # in tests/fm-test-ci-timings.tsv (see docs/fm-test-portable-shards.md).
 # --check-coverage reports parallel_max_ms (the larger lane hint sum),
 # parallel_imbalance_ms (the absolute difference between the sums), and
@@ -663,11 +676,13 @@ standalone
 EOF
 }
 
+# Repeated scheduling lookups use here-strings because Bash 3.2 can retain
+# process-substitution descriptors while running shell functions.
 family_is_concurrent_safe() {
   local want=$1 line
   while IFS= read -r line; do
     [ "$line" = "$want" ] && return 0
-  done < <(list_concurrent_safe_families)
+  done <<<"$(list_concurrent_safe_families)"
   return 1
 }
 
@@ -687,8 +702,9 @@ script_allows_concurrency() {
   family=$(family_for_basename "$(basename "$s")")
   family_is_concurrent_safe "$family" || return 1
   while IFS= read -r repo_script; do
+    [ -n "$repo_script" ] || continue
     [ "$repo_script" = "$s" ] && return 0
-  done < <(all_repo_tests)
+  done <<<"$(all_repo_tests)"
   return 1
 }
 
@@ -696,7 +712,7 @@ is_proven_isolated_script() {
   local want=$1 line
   while IFS= read -r line; do
     [ "$line" = "$want" ] && return 0
-  done < <(list_proven_isolated)
+  done <<<"$(list_proven_isolated)"
   return 1
 }
 
@@ -721,7 +737,7 @@ list_portable_serial() {
   done < <(all_repo_tests)
 }
 
-# Measured portable-serial script durations in milliseconds, from the
+# Portable-serial duration hints in milliseconds, from the
 # committed CI timings file. A script with no row falls back to
 # PORTABLE_SERIAL_DEFAULT_WEIGHT_MS. These are balance hints only: the shard
 # partition stays complete and disjoint whatever they say, so a stale hint costs
@@ -730,9 +746,8 @@ portable_serial_weight_hints() {
   portable_ci_weight_hints
 }
 
-# The portable-serial scripts with no measured hint, one per line. These fall
-# back to PORTABLE_SERIAL_DEFAULT_WEIGHT_MS, so they are balanced on a guess
-# rather than on evidence; the coverage guard bounds how many there may be.
+# Portable-serial scripts with no committed hint, one per line. These use
+# PORTABLE_SERIAL_DEFAULT_WEIGHT_MS, and the coverage guard bounds their share.
 portable_serial_unhinted() {
   local tmp
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-unhinted.XXXXXX") || return 1
@@ -764,11 +779,11 @@ portable_parallel_weight_for() {
 portable_serial_weight_for() {
   local want=$1 path ms
   while read -r path ms; do
-    if [ "$path" = "$want" ]; then
+    if [ -n "$path" ] && [ "$path" = "$want" ]; then
       printf '%s\n' "$ms"
       return 0
     fi
-  done < <(portable_serial_weight_hints)
+  done <<<"$(portable_serial_weight_hints)"
   printf '%s\n' "$PORTABLE_SERIAL_DEFAULT_WEIGHT_MS"
 }
 
@@ -1840,7 +1855,8 @@ with open(records_file, encoding="utf-8") as fh:
         line = line.rstrip("\n")
         if not line:
             continue
-        path, family, expected, exit_s, dur_s, gate, reason = line.split("\t")
+        path, family, expected, exit_s, dur_s, gate, reason, failed_invocation, unexecuted = line.split("\t")
+        unexecuted = unexecuted.split(",") if unexecuted else []
         scripts.append({
             "path": path,
             "family": family,
@@ -1849,6 +1865,9 @@ with open(records_file, encoding="utf-8") as fh:
             "exit": int(exit_s),
             "gate_skip": gate == "true",
             "gate_skip_reason": reason,
+            "failed_invocation": failed_invocation,
+            "skipped_after_failure": len(unexecuted),
+            "unexecuted_invocations": unexecuted,
         })
 
 families = []
@@ -2296,7 +2315,7 @@ if [ "$JOBS" -gt 1 ]; then
         while IFS= read -r admitted_family; do
           [ "$family" = "$admitted_family" ] && break
           phase=$((phase + 1))
-        done < <(list_concurrent_safe_families)
+        done <<<"$(list_concurrent_safe_families)"
       fi
       # Longest first within each isolation phase: workers are handed scripts
       # in order, so starting the longest last strands it at the tail.
@@ -2324,6 +2343,7 @@ if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
 fi
 
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
+RUN_TMP=$(cd "$RUN_TMP" && pwd)
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
 : >"$RECORDS"
@@ -2379,6 +2399,7 @@ family_bump() {
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
   local base family expected gate_skip gate_reason fail_delta
+  local abort failed_invocation='' unexecuted='' skipped_after_failure=0
   base=$(basename "$script")
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
@@ -2399,8 +2420,22 @@ record_script_result() {
     log "gate skip: $script: ${gate_reason:-<no reason given>}"
   fi
 
-  printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s\n' \
+  # Each selected suite's shell has its own report file. Nested fixture output
+  # can contain an abort marker that belongs to a different suite.
+  if [ -f "$out.abort" ] && IFS= read -r abort <"$out.abort"; then
+    failed_invocation=${abort#FM_TEST_ABORT failed=}
+    failed_invocation=${failed_invocation%% skipped_after_failure=*}
+    skipped_after_failure=${abort#* skipped_after_failure=}
+    skipped_after_failure=${skipped_after_failure%% unexecuted=*}
+    unexecuted=${abort#* unexecuted=}
+  fi
+  printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s' \
     "$end_iso" "$script" "$rc" "$duration" "$gate_skip"
+  if [ -n "$failed_invocation" ]; then
+    printf ' failed_invocation=%s skipped_after_failure=%s unexecuted=%s' \
+      "$failed_invocation" "$skipped_after_failure" "$unexecuted"
+  fi
+  printf '\n'
 
   fail_delta=0
   if [ "$rc" -ne 0 ]; then
@@ -2409,8 +2444,9 @@ record_script_result() {
     AGG_RC=1
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" "$gate_reason" >>"$RECORDS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$script" "$family" "$expected" "$rc" "$duration" "$gate_skip" "$gate_reason" \
+    "$failed_invocation" "$unexecuted" >>"$RECORDS"
   family_bump "$family" "$duration" "$fail_delta"
   TOTAL=$((TOTAL + 1))
 }
@@ -2429,6 +2465,8 @@ run_script_bounded() {  # <script> <out> <stream> <id>
   # shellcheck source=tests/git-config-helpers.sh
   . "$ROOT/tests/git-config-helpers.sh" || return
   local rc
+  # shellcheck disable=SC2016
+  local -a suite_command=(bash -c 'FM_TEST_ABORT_OWNER=$$ FM_TEST_ABORT_FILE=$1 exec bash "$2"' _ "$out.abort" "$script")
   : "$id"
   set +e
   if [ "$stream" -eq 1 ]; then
@@ -2436,17 +2474,17 @@ run_script_bounded() {  # <script> <out> <stream> <id>
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
       fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
-        'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
+        'out=$1; shift; "$@" 2>&1 | tee "$out"; exit "${PIPESTATUS[0]}"' _ "$out" "${suite_command[@]}"
       rc=$?
     else
-      bash "$script" 2>&1 | tee "$out"
+      "${suite_command[@]}" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
+    fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" "${suite_command[@]}" >"$out" 2>&1
     rc=$?
   else
-    bash "$script" >"$out" 2>&1
+    "${suite_command[@]}" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then

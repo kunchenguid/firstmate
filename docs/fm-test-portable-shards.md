@@ -6,11 +6,10 @@
 
 ## Verification inputs
 
-Balance hints come from successful Ubuntu CI samples, not from local runs.
+The [timing table header](../tests/fm-test-ci-timings.tsv) records the successful Ubuntu CI source runs, the refresh date, and the basis for provisional estimates.
 The concurrent isolation proof in [fm-test-isolation-proof.md](fm-test-isolation-proof.md) establishes concurrency safety, not serial CI duration.
 Local timings are not interchangeable with CI timings: platform and machine load can affect each script differently and change their relative weights.
 
-The committed table records the slowest successful `duration_ms` per `tests/*.test.sh` across green main CI runs [43359484992](https://github.com/kunchenguid/firstmate/actions/runs/43359484992), [43331691300](https://github.com/kunchenguid/firstmate/actions/runs/43331691300), and [43209319634](https://github.com/kunchenguid/firstmate/actions/runs/43209319634), refreshed 2026-11-13.
 Failed or cancelled scripts are ignored, so a timeout does not become a packing weight.
 Observed maxima provide conservative packing weights, not an upper bound on future durations.
 A passing coverage guard does not establish a healthy job duration; refresh the table from uploaded timing artifacts when a member grows or the lane gains scripts.
@@ -20,8 +19,8 @@ Measure that script through the focused Git Bash runner rather than a portable s
 
 A timed-out shard may upload no artifact, so a complete green run is what keeps the slowest scripts measured in the shard that needs them most.
 
-The 2026-11-13 `tests/fm-pi-bash-timeout.test.sh` serial hint is a provisional local measurement of 1486 ms, the slowest of five successful `bin/fm-test-run.sh tests/fm-pi-bash-timeout.test.sh` samples (1288-1486 ms) on a macOS arm64 host, collected separately from coverage and lint checks.
-Replace it with an Ubuntu timing-artifact maximum at the next CI refresh; this is not whole-shard CI timing evidence.
+On 2026-11-13, five successful local runs of `bin/fm-test-run.sh tests/fm-pi-bash-timeout.test.sh` took 1288-1486 ms on macOS arm64.
+The suite has no committed hint and uses the default weight until a green Ubuntu CI timing artifact supplies one.
 
 ## Parallel lanes
 
@@ -56,7 +55,7 @@ A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` 
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 The packing target is 15 minutes (`serial_budget_ms=900000`).
 `--check-coverage` refuses a modeled multi-script shard above that target; an indivisible suite may occupy a shard alone when its own hint is already above 15 minutes.
-`bin/fm-test-run.sh --check-coverage` reports the unmeasured share as `serial_unhinted=` and refuses past `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`.
+`bin/fm-test-run.sh --check-coverage` reports the share of scripts without a committed hint as `serial_unhinted=` and refuses past `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`.
 
 `bin/fm-test-run.sh` owns the per-shard packing, so its `--check-coverage` output is the current account of lane size and coverage rather than a copied inventory.
 [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh), in `test_portable_serial_packing_budget_boundary`, verifies acceptance exactly at the budget, a singleton overflow, and refusal of a multi-script overflow through the executable runner.
