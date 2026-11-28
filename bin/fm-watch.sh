@@ -3417,11 +3417,11 @@ watcher_stop_signals() {
 }
 
 run_check_capture() {
-  local pgid rc=0
+  local pgid rc=0 owner_pid=${BASHPID:-$$}
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_CUT=
-  FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
+  FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.$owner_pid.XXXXXX") || return 1
   chmod 0600 "$FM_CHECK_OUTPUT" || { fm_check_output_cleanup; return 1; }
   FM_CHECK_SIGNAL_PENDING=
   # Defer stop signals only until the check's process group is recorded for

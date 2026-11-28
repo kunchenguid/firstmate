@@ -27,7 +27,10 @@
 # was bootstrap-then-lock):
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
-#                       mutating step runs.
+#                       mutating step runs. On a locked start (not --reemit),
+#                       run fm_state_reap_orphans from fm-wake-lib.sh before
+#                       the home-summary refresh and deferred worker launch;
+#                       that helper owns the dead-process litter safety rules.
 #   1b. home role    - the resolved firstmate-repository role line
 #                      (bin/fm-role.sh report), purely local, no network.
 #   2. bootstrap      - home-local stale Herdr projection cleanup runs only
@@ -736,6 +739,9 @@ if [ "$READ_ONLY" -eq 0 ]; then
   # Publication is side-band and best-effort, so it can never change the
   # session-start result. A context re-emit is not another session start.
   if [ "$REEMIT" -eq 0 ]; then
+    # Killed processes can strand lock staging directories and temporary
+    # files in state/; reclaim those whose owning pid is dead.
+    fm_state_reap_orphans "$STATE"
     "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
   fi
   # Every network call and the potentially slow inactive-outcome startup scan

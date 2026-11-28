@@ -2426,6 +2426,237 @@ test_staged_owner_cleanup_preserves_other_acquirers() {
   pass "staged-owner cleanup removes only unpublished empty or self-owned staging"
 }
 
+# A process killed mid-acquire strands its unpublished staging directory: a
+# spinning acquirer behind a live holder strands a lock owner, and one reaping
+# a dead holder strands a steal-mutex owner. The fake mktemp creates the
+# directory, marks the kill, and TERMs the acquirer without ever handing it the
+# path, so the directory survives whenever the acquirer dies; printing into the
+# dead reader instead would let GNU mktemp delete it on a write error.
+# The state sweep must then leave no owner directory that no lock names, and
+# must keep each published owner, live or dead, for ordinary lock recovery.
+write_killing_mktemp() {  # <fakebin>
+  cat > "$1/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"$TEST_KILL_MATCH"*)
+    count=$(( $(cat "$TEST_KILL_COUNT" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$count" > "$TEST_KILL_COUNT"
+    if [ "$count" -ge "$TEST_KILL_AT" ] && mkdir "$TEST_KILL_ONCE" 2>/dev/null; then
+      "$TEST_KILL_REAL" "$@" >/dev/null || exit 1
+      : > "$TEST_KILL_DONE"
+      kill -TERM "$(cat "$TEST_KILL_PIDFILE")"
+      exit 1
+    fi ;;
+esac
+exec "$TEST_KILL_REAL" "$@"
+SH
+  chmod +x "$1/mktemp"
+}
+
+test_killed_acquirer_owner_litter_is_reaped() {
+  local shape dir state fakebin lock holder holder_pid held acquirer_pid owner real_mktemp
+  local match at stranded kind lock_parent live_owner
+  real_mktemp=$(command -v mktemp)
+  for kind in meta session registry reply extension presentation nested; do
+  for shape in live-holder dead-holder; do
+    dir=$(make_case "killed-acquirer-$kind-$shape")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    case "$kind" in
+      meta) lock="$state/.meta-demo.lock" ;;
+      session) lock="$state/.lock.acquire" ;;
+      registry) lock="$state/public-followup/.registry-demo.lock" ;;
+      reply) lock="$state/inbox/.replies.lock" ;;
+      extension) lock="$state/procevent/.extension-binding-lifecycle.lock" ;;
+      presentation) lock="$state/.status-presentation-lock" ;;
+      nested) lock="$state/arbitrary/deeper/.future-mutex" ;;
+    esac
+    lock_parent=${lock%/*}
+    mkdir -p "$lock_parent" && chmod 700 "$lock_parent"
+    write_killing_mktemp "$fakebin"
+    if [ "$shape" = live-holder ]; then
+      # The holder stays alive blocked on a FIFO nobody writes, bounded by
+      # the suite's stub limit, and reports its acquire result through another.
+      mkfifo "$dir/held" "$dir/idle"
+      FM_STATE_OVERRIDE="$state" bash -c '
+        . "$1"
+        exec 3<>"$3"
+        fm_lock_try_acquire "$2" || { echo failed > "$4"; exit 1; }
+        echo held > "$4"
+        read -r -t "$FM_TEST_STUB_MAX_BLOCK_SECONDS" _ <&3 || true
+      ' _ "$LIB" "$lock" "$dir/idle" "$dir/held" >/dev/null 2>&1 &
+      holder_pid=$!
+      held=
+      read -r held < "$dir/held" || true
+      [ "$held" = held ] || fail "$shape: the holder did not acquire the lock"
+      match="${lock##*/}.owner."
+      at=3
+    else
+      FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' \
+        _ "$LIB" "$lock" || fail "$shape: the holder did not acquire the lock"
+      holder_pid=
+      match="${lock##*/}.steal.owner."
+      at=1
+    fi
+    holder=$(readlink "$lock") || fail "$shape: the holder did not publish its owner"
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+      TEST_KILL_MATCH="$match" TEST_KILL_AT="$at" TEST_KILL_COUNT="$dir/count" \
+      TEST_KILL_ONCE="$dir/once" TEST_KILL_PIDFILE="$dir/acquirer.pid" \
+      TEST_KILL_DONE="$dir/done" TEST_KILL_REAL="$real_mktemp" \
+      bash -c '
+        printf "%s\n" "$$" > "$2"
+        . "$1"
+        if [ "$4" = registry ]; then
+          . "$5"
+          fm_pf_registry_lock_acquire "$6" demo
+        else
+          fm_lock_acquire_wait "$3"
+        fi
+      ' _ "$LIB" "$dir/acquirer.pid" "$lock" "$kind" \
+        "$ROOT/bin/fm-public-followup-lib.sh" "$state" &
+    acquirer_pid=$!
+    wait "$acquirer_pid" 2>/dev/null
+    [ -e "$dir/done" ] || fail "$shape: the acquirer was never killed mid-acquire"
+    stranded=0
+    for owner in "$lock_parent"/.*.owner.*; do
+      [ -d "$owner" ] && [ ! -L "$owner" ] && [ "$owner" != "$holder" ] || continue
+      stranded=$((stranded + 1))
+    done
+    [ "$stranded" -ge 1 ] || fail "$shape: the killed acquirer stranded no staging directory"
+    live_owner="$lock.owner.$$.staging"
+    mkdir "$live_owner"
+    : > "$lock_parent/unrelated-file"
+    FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_state_reap_orphans "$2"' _ "$LIB" "$state" \
+      || fail "$shape: the state sweep failed"
+    for owner in "$lock_parent"/.*.owner.*; do
+      [ -d "$owner" ] && [ ! -L "$owner" ] || continue
+      [ "$owner" = "$holder" ] || [ "$owner" = "$live_owner" ] \
+        || fail "$shape: the state sweep left stranded owner $owner"
+    done
+    [ "$(readlink "$lock")" = "$holder" ] && [ -d "$holder" ] \
+      || fail "$shape: the state sweep removed the published owner"
+    [ -d "$live_owner" ] || fail "$kind: the state sweep removed live staging"
+    [ -f "$lock_parent/unrelated-file" ] || fail "$kind: the state sweep removed an unrelated file"
+    if [ -n "$holder_pid" ]; then
+      kill "$holder_pid" 2>/dev/null || true
+      wait "$holder_pid" 2>/dev/null || true
+    fi
+  done
+  done
+  pass "killed lock and steal staging is reaped recursively; published and live owners stay"
+}
+
+test_killed_inbox_enqueue_owner_litter_is_reaped() {
+  local dir state inbox lock holder fakebin real_mktemp acquirer_pid owner stranded
+  dir=$(make_case killed-inbox-enqueue)
+  state="$dir/state"
+  inbox="$state/demo.inbox"
+  lock="$inbox/.seq.lock"
+  fakebin="$dir/fakebin"
+  real_mktemp=$(command -v mktemp)
+  mkdir -p "$inbox"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_try_acquire "$2"' \
+    _ "$LIB" "$lock" || fail "inbox holder did not acquire the lock"
+  holder=$(readlink "$lock") || fail "inbox holder did not publish its owner"
+  write_killing_mktemp "$fakebin"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    TEST_KILL_MATCH='.seq.lock.steal.owner.' TEST_KILL_AT=1 TEST_KILL_COUNT="$dir/count" \
+    TEST_KILL_ONCE="$dir/once" TEST_KILL_PIDFILE="$dir/acquirer.pid" \
+    TEST_KILL_DONE="$dir/done" TEST_KILL_REAL="$real_mktemp" bash -c '
+      printf "%s\n" "$$" > "$3"
+      . "$1"
+      . "$4"
+      fm_task_inbox_write "$2" demo "interrupted enqueue"
+    ' _ "$LIB" "$state" "$dir/acquirer.pid" "$ROOT/bin/fm-task-inbox-lib.sh" &
+  acquirer_pid=$!
+  wait "$acquirer_pid" 2>/dev/null
+  [ -e "$dir/done" ] || fail "inbox enqueue was not killed mid-acquire"
+  stranded=0
+  for owner in "$inbox"/.*.owner.*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] && [ "$owner" != "$holder" ] || continue
+    stranded=$((stranded + 1))
+  done
+  [ "$stranded" -ge 1 ] || fail "killed inbox enqueue stranded no owner"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_state_reap_orphans "$2"' _ "$LIB" "$state" \
+    || fail "inbox state sweep failed"
+  for owner in "$inbox"/.*.owner.*; do
+    [ -d "$owner" ] && [ ! -L "$owner" ] || continue
+    [ "$owner" = "$holder" ] || fail "inbox state sweep left stranded owner $owner"
+  done
+  [ "$(readlink "$lock")" = "$holder" ] && [ -d "$holder" ] \
+    || fail "inbox state sweep removed the published owner"
+  pass "killed inbox enqueue staging is reaped while its published owner stays"
+}
+
+# The state sweep removes an entry only when the pid its name leads with is
+# dead and nothing still claims it; every other shape is left for its owner or
+# for ordinary lock recovery.
+test_state_reap_orphans_boundaries() {
+  local dir state dead live name
+  dir=$(make_case state-reap-boundaries)
+  state="$dir/state"
+  dead=$(dead_pid)
+  live=$$
+  mkdir "$state/.a.lock.owner.$dead.gone" "$state/.lock.owner.$dead.gone" \
+    "$state/b.lock.owner.$dead.gone" "$state/.c.lock.steal.owner.$dead.gone" \
+    "$state/.a.lock.owner.$live.staging" "$state/.a.lock.owner.$dead.handed" \
+    "$state/.d.lock.owner.$dead.published" "$state/.a.lock.owner.$dead.unknown" \
+    "$state/.a.lock.owner.legacy" "$state/.a.notlock.owner.$dead.x" \
+    "$state/.a.lock.owner.$dead.x.reaped.$dead"
+  printf '%s\n' "$dead" > "$state/.a.lock.owner.$dead.gone/pid"
+  printf '%s\n' "$live" > "$state/.a.lock.owner.$dead.handed/pid"
+  printf '%s\n' "$dead" > "$state/.d.lock.owner.$dead.published/pid"
+  ln -s "$state/.d.lock.owner.$dead.published" "$state/.d.lock"
+  : > "$state/.a.lock.owner.$dead.unknown/foreign"
+  for name in home-summary.json home-summary-error claude-autoarm-output \
+    watch-arm-output fm-check-output fm-custom-check; do
+    : > "$state/.$name.$dead.AbCdEf"
+    : > "$state/.$name.$live.AbCdEf"
+  done
+  : > "$state/.claude-autoarm-epoch.tmp.$dead"
+  : > "$state/.claude-autoarm-epoch.tmp.$live"
+  : > "$state/.watch-arm-output.AbCdEf"
+  : > "$state/home-summary.json"
+  ln -s "$state/home-summary.json" "$state/.fm-check-output.$dead.link"
+  mkdir -p "$dir/outside/.foreign.owner.$dead.staging" \
+    "$state/.retired.reaped.$dead/.nested.owner.$dead.staging" \
+    "$state/.unknown.owner.$dead.staging/.nested.owner.$dead.staging"
+  ln -s "$dir/outside" "$state/linked-directory"
+  ln -s "$dir/outside" "$state/.linked.owner.$dead.staging"
+
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_state_reap_orphans "$2"' _ "$LIB" "$state" \
+    || fail "the state sweep failed"
+
+  for name in .a.lock.owner.$dead.gone .lock.owner.$dead.gone b.lock.owner.$dead.gone \
+    .c.lock.steal.owner.$dead.gone .a.notlock.owner.$dead.x \
+    .home-summary.json.$dead.AbCdEf .home-summary-error.$dead.AbCdEf \
+    .claude-autoarm-output.$dead.AbCdEf .watch-arm-output.$dead.AbCdEf \
+    .fm-check-output.$dead.AbCdEf .fm-custom-check.$dead.AbCdEf \
+    .claude-autoarm-epoch.tmp.$dead; do
+    [ ! -e "$state/$name" ] || fail "the state sweep kept dead-process litter $name"
+  done
+  for name in .a.lock.owner.$live.staging .a.lock.owner.$dead.handed \
+    .d.lock.owner.$dead.published .a.lock.owner.$dead.unknown/foreign .a.lock.owner.legacy \
+    .a.lock.owner.$dead.x.reaped.$dead \
+    .home-summary.json.$live.AbCdEf \
+    .home-summary-error.$live.AbCdEf .claude-autoarm-output.$live.AbCdEf \
+    .watch-arm-output.$live.AbCdEf .fm-check-output.$live.AbCdEf \
+    .fm-custom-check.$live.AbCdEf .claude-autoarm-epoch.tmp.$live \
+    .watch-arm-output.AbCdEf home-summary.json; do
+    [ -e "$state/$name" ] || fail "the state sweep removed protected entry $name"
+  done
+  [ -L "$state/.fm-check-output.$dead.link" ] || fail "the state sweep removed a symlink"
+  [ -L "$state/linked-directory" ] && [ -L "$state/.linked.owner.$dead.staging" ] \
+    && [ -d "$dir/outside/.foreign.owner.$dead.staging" ] \
+    || fail "the state sweep followed or removed a directory symlink"
+  [ -d "$state/.retired.reaped.$dead/.nested.owner.$dead.staging" ] \
+    && [ -d "$state/.unknown.owner.$dead.staging/.nested.owner.$dead.staging" ] \
+    || fail "the state sweep descended into a tombstone or unknown owner contents"
+  [ "$(readlink "$state/.d.lock")" = "$state/.d.lock.owner.$dead.published" ] \
+    || fail "the state sweep disturbed a published lock"
+  pass "the state sweep removes only unclaimed dead-pid litter"
+}
+
 # The clean-interruption contract includes mutations still running in external
 # children: cleanup must wait for them before releasing published locks and
 # discarding staging. Delaying the real filesystem command after signalling the
@@ -2871,6 +3102,9 @@ test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_arm_confirms_a_slow_post_claim_startup
 test_arm_relays_a_startup_lock_held_by_live_pid
 test_staged_owner_cleanup_preserves_other_acquirers
+test_killed_acquirer_owner_litter_is_reaped
+test_killed_inbox_enqueue_owner_litter_is_reaped
+test_state_reap_orphans_boundaries
 test_startup_cleanup_waits_for_inflight_lock_mutations
 test_forced_term_before_the_safe_point_stays_clean
 test_unpublishable_identity_exits_through_cleanup

@@ -523,11 +523,13 @@ autoarm_exit_suppressed() {  # <cause> [interrupted-session-identity]
 handle_autoarm_signal() {
   local signal=$1
   trap - HUP TERM INT
+  # Remove the capture first: a host that escalates to KILL while the arm
+  # wait below blocks must not strand it.
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
   if [ -n "${ARM_PID:-}" ]; then
     kill -TERM "$ARM_PID" 2>/dev/null || true
     wait "$ARM_PID" 2>/dev/null || true
   fi
-  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
   if ! fm_autoarm_session_matches "$STATE" "$SESSION_IDENTITY" "$SESSION_ID"; then
     autoarm_record session-ended
     exit 0
@@ -647,7 +649,7 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     exit 0
   fi
   attempt=$((attempt + 1))
-  OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
+  OUT=$(mktemp "$STATE/.claude-autoarm-output.$$.XXXXXX") || OUT=
   if [ "$HOST_MODE" -eq 1 ]; then
     HOST_RC=0
     FM_SUPERVISION_HOST_AUTOARM_GEN=$MY_GEN FM_SUPERVISION_HOST_OWNER_PID=$$ \
