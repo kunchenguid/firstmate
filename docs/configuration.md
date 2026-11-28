@@ -1287,6 +1287,25 @@ With the flag absent the wedge timer spends no current-state read for it and kee
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
 [`architecture.md`](architecture.md) owns the deferral contract and `bin/fm-classify-lib.sh`'s `crew_run_is_validating` owns which verdicts count.
 
+## Pause cadence (config/pause-cadence)
+
+The optional local, gitignored `config/pause-cadence` presence flag makes the watcher honor a standing `paused:` or `captain-held` declaration regardless of agent liveness.
+Create the empty file to enable it, or remove it to restore the default liveness gate.
+No existing setting enables this behavior, including `config/pause-ceiling` and `config/watch.env`.
+The flag is home-local and is not inherited by secondmate homes.
+
+With the flag present, only a provably working crew overrides the declaration.
+An ordinary idle crew gets one plain stale wake on its first stable sight, including when its agent has exited.
+Later sights use `FM_PAUSE_RESURFACE_SECS`, keyed to the declaration rather than pane changes.
+A future `until` time, a secondmate, a lane parked on review, and a busy pane retain their existing first-sight handling.
+A pane that never settles gets its recheck once the declaration has stood a whole cadence.
+An elapsed `until` time on that pane gets one recheck after two consecutive changing polls instead of waiting for the cadence.
+The existing pause-ceiling decision still takes precedence when enabled.
+
+Without the file, the watcher retains its existing liveness gate, first-sight output, and changing-pane handling.
+The away-mode daemon is unchanged.
+`bin/fm-watch.sh` owns the classification and cadence mechanics, covered by `tests/fm-watch-triage-pause.test.sh`.
+
 ## Pause ceiling (config/pause-ceiling)
 
 The optional local, gitignored `config/pause-ceiling` presence flag opts this home into a default-off ceiling on declared `paused:` waits.
