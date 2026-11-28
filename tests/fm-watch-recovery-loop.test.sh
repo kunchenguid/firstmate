@@ -305,6 +305,71 @@ test_handling_successor_resurfaces_a_row_appended_during_startup() {
   pass "a handling successor resurfaces a row appended during startup"
 }
 
+# A recovered stale watch lock is not itself evidence that anything is waiting.
+# Before this guard, a home whose startup kept recovering a stale watch lock
+# resurfaced `check: rearm-resurface` on every cycle even with an empty queue and
+# an already acknowledged episode, which woke main forever with nothing to hand
+# it. This drives the real watcher across several poll cycles.
+test_empty_queue_does_not_resurface_a_recovered_stale_lock() {
+  local dir home state fakebin child out dead now
+  dir=$(make_case recovery-loop-empty-queue)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  # An already acknowledged episode and nothing queued: there is no work to
+  # hand main, so the recovered lock must not resurface it.
+  printf 'acked:downtime:empty.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  : > "$state/.wake-queue"
+  dead=999999
+  while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$dead" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  child=$!
+  now=0
+  while [ "$now" -lt 40 ] \
+    && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$child" ]; do
+    sleep 0.1
+    now=$((now + 1))
+  done
+  if [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$child" ]; then
+    kill -TERM "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    fail "the watcher never recovered the stale watch lock: $(cat "$out")"
+  fi
+  now=0
+  while [ "$now" -lt 40 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    now=$((now + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] \
+    || { kill -TERM "$child" 2>/dev/null || true; fail "the watcher never finished startup"; }
+  # The recovery must actually have happened, or the wake assertion below would
+  # hold vacuously: reclaiming the dead lock republishes the episode, which
+  # startup then announces.
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    announced:downtime:*) ;;
+    *) kill -TERM "$child" 2>/dev/null || true
+       fail "the stale watch lock recovery was never published: $(cat "$state/.watcher-down")" ;;
+  esac
+  # Outlast several poll cycles: the old path woke on its first one.
+  sleep 3
+  kill -TERM "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+  ! grep -q '^check: rearm-resurface$' "$out" \
+    || fail "an empty queue resurfaced a recovered stale lock: $(cat "$out")"
+  pass "a recovered stale watch lock alone does not resurface an empty queue"
+}
+
 test_handling_successor_does_not_go_blind
 test_handling_successor_resurfaces_a_row_appended_during_startup
 test_unacknowledged_recovery_is_announced_once_per_generation
+test_empty_queue_does_not_resurface_a_recovered_stale_lock
