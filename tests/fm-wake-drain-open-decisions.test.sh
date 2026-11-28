@@ -215,8 +215,133 @@ test_over_long_decision_note_is_capped_with_a_marker() {
   pass "an over-long open decision is cut to its per-item budget with the shared truncation marker"
 }
 
+# The section's fixed header and closing-key hint lines sit outside the byte
+# budget, as does the pre-existing entry-omission count; every other line -
+# entries, the total, the counts, and the hidden-task aggregate - is charged.
+assert_open_decisions_budget() {  # <drain-output> <case>
+  local out=$1 name=$2 charged
+  charged=$(grep -Ev '^OPEN DECISIONS( \(still open|: close one by|: <key> is the|: [0-9]+ more omitted \(byte cap\)$)' "$out" \
+    | grep -E '^(task|OPEN DECISIONS)' | wc -c | tr -d ' ')
+  [ "$charged" -le 4000 ] || fail "$name: the section charged $charged bytes against its 4000-byte budget"
+  grep -F "close one by answering it: bin/fm-send.sh <task> --resolve-key <key>" "$out" >/dev/null \
+    || fail "$name: the listing lost the answerer-closes hint"
+  grep -F 'OPEN DECISIONS: <key> is the [key=...] printed before the verb' "$out" >/dev/null \
+    || fail "$name: the listing lost the closing-key hint"
+}
+
+# <status-file> <task> <first> <last> <epoch-base> <pad-words>: append one
+# needs-decision per key number, each stamped <epoch-base>+<n>.
+write_open_decisions() {
+  local f=$1 task=$2 first=$3 last=$4 base=$5 pad=$6 k
+  for k in $(seq "$first" "$last"); do
+    printf 'needs-decision [at=%s] [key=%s-%s]: ' "$((base + k))" "$task" "$k"
+    awk -v n="$pad" 'BEGIN { while (i++ < n) printf "padding-text " }'
+    printf '\n'
+  done >> "$f"
+}
+
+test_listing_within_budget_is_unchanged() {
+  local dir state out
+  dir=$(make_case within-budget)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=one]: first call\nblocked [key=two]: second call\n' > "$state/task-a.status"
+  printf 'needs-decision [key=three]: third call\n' > "$state/task-b.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a within-budget decision set"
+
+  [ "$(grep -E '^task-' "$out")" = "task-a [key=one] needs-decision: first call
+task-a [key=two] blocked: second call
+task-b [key=three] needs-decision: third call" ] \
+    || fail "a within-budget listing did not print every entry in fold order: $(cat "$out")"
+  if grep -E '^OPEN DECISIONS: [0-9]+ open across|^OPEN DECISIONS counts:|more omitted|more tasks with' "$out" >/dev/null; then
+    fail "a within-budget listing grew count or omission lines"
+  fi
+  assert_open_decisions_budget "$out" within-budget
+  pass "an OPEN DECISIONS listing that fits its budget prints every entry with no count lines"
+}
+
+# Tasks that sort first by name carry far more open decisions than the budget
+# holds and a task that sorts last carries two; walking in name order used to
+# spend the whole budget before the last task and leave it with no line at all.
+test_over_budget_listing_counts_every_task_first() {
+  local dir state out task
+  dir=$(make_case over-budget)
+  state="$dir/state"
+  out="$dir/drain.out"
+  write_open_decisions "$state/task-a.status" task-a 1 20 1795400000 18
+  write_open_decisions "$state/task-b.status" task-b 1 20 1795400100 18
+  write_open_decisions "$state/task-c.status" task-c 1 25 1795400000 18
+  write_open_decisions "$state/task-z.status" task-z 1 2 1795400000 1
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-budget decision set"
+
+  grep -Fx 'OPEN DECISIONS: 67 open across 4 tasks' "$out" >/dev/null \
+    || fail "the over-budget listing has no exact total line"
+  # Largest first; task-a and task-b tie at 20 and task-b's newest entry is newer.
+  grep -Fx 'OPEN DECISIONS counts: task-c:25 task-b:20 task-a:20 task-z:2' "$out" >/dev/null \
+    || fail "the over-budget counts are not compact and largest first: $(grep -F 'counts:' "$out")"
+  [ "$(grep -n -E '^OPEN DECISIONS: 67 open|^OPEN DECISIONS counts:|^task-' "$out" | head -2 | cut -d: -f2- | cut -c1-22)" = "OPEN DECISIONS: 67 ope
+OPEN DECISIONS counts:" ] || fail "the total and counts did not print before the entries"
+  for task in task-a task-b task-c; do
+    grep -F "$task [key=$task-" "$out" | tail -1 | grep -F "[key=$task-$(grep -c . "$state/$task.status")]" >/dev/null \
+      || fail "the newest open decision for $task was not shown"
+    if grep -F "$task [key=$task-1] needs-decision:" "$out" >/dev/null; then
+      fail "the oldest decision for $task was shown ahead of its newer ones"
+    fi
+  done
+  [ "$(grep -c '^task-z \[key=task-z-' "$out")" -eq 2 ] || fail "the last task by name did not get its entries"
+  grep -E '^OPEN DECISIONS: [0-9]+ more omitted \(byte cap\)$' "$out" >/dev/null \
+    || fail "the over-budget listing lost its omission count"
+  if grep -F 'more tasks with' "$out" >/dev/null; then
+    fail "an over-budget listing whose counts fit printed a hidden-task aggregate"
+  fi
+  assert_open_decisions_budget "$out" over-budget
+  pass "an over-budget OPEN DECISIONS listing prints the total and largest-first counts, then shares entries round-robin, newest first"
+}
+
+# So many tasks hold decisions that even their compact counts outrun the budget.
+test_count_overflow_keeps_the_total_exact() {
+  local dir state out k long total listed hidden_tasks hidden_decisions tasks_listed smallest
+  dir=$(make_case count-overflow)
+  state="$dir/state"
+  out="$dir/drain.out"
+  long=$(printf 'long-task-name-%.0s' 1 2 3)
+  for k in $(seq 10 99); do
+    write_open_decisions "$state/$long$k.status" "x" 1 $(( (k % 3) + 1 )) 1795400000 8
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed when the counts outran the budget"
+
+  total=$(sed -n 's/^OPEN DECISIONS: \([0-9]*\) open across 90 tasks$/\1/p' "$out")
+  [ "$total" = 180 ] || fail "the count-overflow listing has no exact total line"
+  hidden_tasks=$(sed -n 's/^OPEN DECISIONS: \([0-9]*\) more tasks with [0-9]* decisions (byte cap)$/\1/p' "$out")
+  hidden_decisions=$(sed -n 's/^OPEN DECISIONS: [0-9]* more tasks with \([0-9]*\) decisions (byte cap)$/\1/p' "$out")
+  [ -n "$hidden_tasks" ] && [ "$hidden_tasks" -gt 0 ] || fail "the count-overflow listing has no hidden-task aggregate line"
+  listed=$(grep '^OPEN DECISIONS counts:' "$out" | tr ' ' '\n' | sed -n 's/^.*:\([0-9][0-9]*\)$/\1/p' | awk '{ s += $1 } END { print s + 0 }')
+  tasks_listed=$(grep '^OPEN DECISIONS counts:' "$out" | tr ' ' '\n' | grep -c ':[0-9][0-9]*$')
+  [ $((listed + hidden_decisions)) -eq "$total" ] \
+    || fail "listed counts ($listed) plus hidden decisions ($hidden_decisions) do not equal the total ($total)"
+  [ $((tasks_listed + hidden_tasks)) -eq 90 ] \
+    || fail "listed tasks ($tasks_listed) plus hidden tasks ($hidden_tasks) do not account for all 90"
+  # Largest first: listed counts never rise, and no hidden task can hold more
+  # than the smallest listed count.
+  smallest=$(grep '^OPEN DECISIONS counts:' "$out" | tr ' ' '\n' | sed -n 's/^.*:\([0-9][0-9]*\)$/\1/p' \
+    | awk 'NR > 1 && $1 > prev { print "rising"; exit } { prev = $1 } END { print prev }')
+  case "$smallest" in
+    *rising*|'') fail "the listed counts are not largest first" ;;
+  esac
+  [ "$hidden_decisions" -le $((hidden_tasks * smallest)) ] \
+    || fail "a hidden task holds more decisions than the smallest listed count ($smallest)"
+  assert_open_decisions_budget "$out" count-overflow
+  pass "when even the counts outrun the budget the largest print and one aggregate keeps the total exact"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
+test_listing_within_budget_is_unchanged
+test_over_budget_listing_counts_every_task_first
+test_count_overflow_keeps_the_total_exact
 test_explicit_resolution_closes_it
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library
