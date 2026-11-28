@@ -111,6 +111,9 @@ wake() {
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
   fi
   [ "$output_status" -eq 0 ] || exit "$output_status"
+  # A delivery exit is a planned close. The record, not the exit status,
+  # is what cleanup trusts (docs/watcher-continuity.md).
+  fm_watcher_planned_stop_record "$STATE" "${WATCHER_PID:-${BASHPID:-$$}}" || true
   exit 0
 }
 
