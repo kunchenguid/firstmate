@@ -239,8 +239,10 @@ EOF
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
     "an unclaimed actionable result never reached the wake queue"
 
+  # A different finding: an identical one is already announced and stays quiet
+  # (test_an_unchanged_finding_is_announced_once owns that contract).
   : > "$home/state/.wake-queue"
-  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: other-tool (install: brew install other-tool)' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the dead-claim worker never published"
   wait_for_startup_network_wake "$home" || fail "the dead-claim worker never settled delivery"
@@ -859,12 +861,85 @@ EOF
   pass "fm-startup-network: a held publish lock ends the worker inside its budget with a failed-rerun record"
 }
 
+# A finding that stands unchanged is announced once. The delivered record is
+# bound to the report's content, so a republication that is byte-identical keeps
+# it (through the wake path and through harvest alike), while a changed report, or
+# a failed or timed-out run, still announces every time.
+test_an_unchanged_finding_is_announced_once() {
+  local rec home root log finding other record
+  rec=$(new_world unchanged-finding-once)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  finding='FLEET_SYNC: some-clone: STUCK: on branch main with uncommitted changes, 12 commits behind origin/main - needs attention'
+  other='FLEET_SYNC: other-clone: STUCK: on branch main with uncommitted changes, 3 commits behind origin/main - needs attention'
+  woke() { grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null; }
+  stage() {  # <out> [rc]
+    : > "$home/state/.wake-queue"
+    FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT="$1" FM_FAKE_BOOTSTRAP_RC="${2:-0}" \
+      run_stage "$home" "$root" run --locked 0 >/dev/null || true
+  }
+
+  stage "$finding"
+  woke || fail "a new finding did not announce"
+  stage "$finding"
+  woke && fail "an unchanged finding re-announced on an identical republication"
+  record=$(cat "$home/state/.startup-network.delivered" 2>/dev/null)
+  stage "$finding"
+  woke && fail "an unchanged finding re-announced on a third republication"
+  [ -s "$home/state/.startup-network.delivered" ] \
+    || fail "the content-bound delivered record was lost across identical runs"
+  [ "$(cat "$home/state/.startup-network.delivered")" = "$record" ] \
+    || fail "the delivered record changed across byte-identical republications"
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "an identical republication queued a row, which would wake a turn and its session-start sweeps"
+
+  stage "$other"
+  woke || fail "a changed finding was silently swallowed"
+  stage "$other"
+  woke && fail "the changed finding re-announced after it was announced"
+
+  # A broken run surfaces every time, exactly as before, and clears the record.
+  stage "$other" 3
+  woke || fail "a failed run did not announce"
+  stage "$other" 3
+  woke || fail "an identical failed run was suppressed"
+  assert_absent "$home/state/.startup-network.delivered" "a failed run left a delivered record"
+  stage "$other"
+  woke || fail "the finding did not re-announce after a failed run cleared the record"
+
+  # Harvest's acknowledgement is bound the same way, and survives fresh processes.
+  : > "$home/state/.wake-queue"
+  rm -f "$home/state/.startup-network.delivered" "$home/state/.startup-network.announced"
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT="$finding" \
+    run_stage "$home" "$root" run --locked 0 >/dev/null
+  : > "$home/state/.wake-queue"
+  run_stage "$home" "$root" harvest --pid $$ >/dev/null
+  rm -f "$home/state/.startup-network.announced"
+  stage "$finding"
+  woke && fail "a harvested finding re-announced when republished unchanged"
+  stage "$other"
+  woke || fail "a harvested finding's change was swallowed"
+
+  # A fresh session (a different lock owner) has not seen the announcement the
+  # dead one received, so the standing finding announces to it exactly once.
+  stage "$other"
+  woke && fail "setup: the finding should be quiet for the owner that saw it"
+  printf '222222\n' > "$home/state/.lock"
+  stage "$other"
+  woke || fail "a fresh session got no announcement for a finding only the dead session saw"
+  stage "$other"
+  woke && fail "the fresh session was re-announced an unchanged finding"
+  pass "fm-startup-network: an unchanged finding announces once and a changed one announces immediately"
+}
+
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
 test_a_successful_result_never_queues_a_wake
+test_an_unchanged_finding_is_announced_once
 test_an_actionable_successful_result_still_queues_a_wake
 test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
