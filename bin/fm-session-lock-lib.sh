@@ -128,7 +128,7 @@ fm_ps_ppid() {  # <pid> -> parent pid
 # An omp daemon worker never matches (fm_omp_daemon_worker), whatever its name.
 #
 # Evidence, in order:
-#   1. the basename of the reported command name, against FM_HARNESS_RE.
+#   1. the lower-cased basename of the reported command name, against FM_HARNESS_RE.
 #   2. an exact harness component in that command path or in argv[0]. Both are
 #      needed because the two platforms report different things: macOS reports
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
@@ -144,6 +144,8 @@ fm_harness_process_matches() {  # <comm> <args>
   FM_HARNESS_IS_CLAUDE=0
   fm_omp_daemon_worker "$args" && return 1
   base=$(basename -- "$comm")
+  # macOS app bundles can report capitalized executable names, such as Claude.
+  base=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
