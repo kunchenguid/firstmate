@@ -2720,7 +2720,7 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]; then
+        if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] && [ "$(fm_meta_get "$other" kind)" != secondmate ]; then
           fm_treehouse_slot_owner_state "$slot" "$other_id"
           other_owner_state=$FM_TREEHOUSE_SLOT_OWNER
           fm_treehouse_slot_owner_state "$slot" "$record_id"

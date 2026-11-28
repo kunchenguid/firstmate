@@ -6104,6 +6104,33 @@ test_teardown_allows_claimant_when_stale_record_shares_slot() {
   pass "teardown allows positive slot claimant when stale record shares the pool slot"
 }
 
+test_teardown_refuses_claimant_when_secondmate_shares_slot() {
+  local case_dir slot_wt rc field
+  . "$ROOT/bin/fm-wake-lib.sh"
+  for field in worktree home; do
+    case_dir=$(make_case "slot-secondmate-$field")
+    wt_commit "$case_dir" "feature done"
+    git -C "$case_dir/project" merge -q fm/task-x1
+    slot_wt=$(move_case_to_pool_slot "$case_dir" 2)
+    write_meta "$case_dir" local-only ship "$slot_wt"
+    fm_treehouse_slot_owner_claim "$slot_wt" "task-x1" "$case_dir"
+    fm_write_meta "$case_dir/state/mate-x.meta" \
+      "kind=secondmate" "$field=$slot_wt"
+    printf 'preserve\n' > "$slot_wt/secondmate-data"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    [ "$rc" -ne 0 ] || fail "slot-secondmate-$field: teardown should refuse"
+    assert_present "$case_dir/state/task-x1.meta" "slot-secondmate-$field: task record was removed"
+    assert_present "$case_dir/state/mate-x.meta" "slot-secondmate-$field: secondmate record was removed"
+    assert_present "$slot_wt/secondmate-data" "slot-secondmate-$field: secondmate data was removed"
+  done
+  pass "teardown preserves a secondmate sharing a claimed pool slot"
+}
+
 test_teardown_waits_for_treehouse_project_lock_and_succeeds() {
   local case_dir slot_wt lock ready release holder_pid rc
   # shellcheck source=/dev/null
@@ -6942,4 +6969,5 @@ test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_teardown_allows_claimant_when_stale_record_shares_slot
+test_teardown_refuses_claimant_when_secondmate_shares_slot
 test_teardown_waits_for_treehouse_project_lock_and_succeeds
