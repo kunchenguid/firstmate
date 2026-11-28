@@ -570,22 +570,23 @@ test_ledger_report_names_a_replacement_pr() {
   pass "with the scan opt-in, a child report names a replacement or forge PR and keeps a recorded PR the log never named"
 }
 
-# Without config/pr-register-scan, the same children report exactly what main
-# reports: a recorded PR always stands, and only a GitHub-shaped ready line
-# fills in a missing one.
-test_ledger_report_without_scan_opt_in_keeps_recorded_pr() {
+# Without config/pr-register-scan, a GitHub-shaped ready line names the PR its
+# report carries, even over a different recorded PR, so for such a line the
+# text and its pr= never disagree. Any other ready line, a GitLab one included,
+# leaves the recorded PR standing, so there the text and pr= can still differ.
+test_ledger_report_without_scan_opt_in_names_the_ready_pr() {
   make_world ledger-no-replacement; bind_secondmate local
   write_replacement_children
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
-  assert_child_report replaced "child replaced done: PR https://example.test/owner/repo/pull/22 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
-    "a newer ready line replaced the recorded PR without the opt-in"
-  assert_child_report kept "child kept done: PR https://example.test/owner/repo/pull/23 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
-    "the report overrode the recorded PR without the opt-in"
+  assert_child_report replaced "child replaced done: PR https://example.test/owner/repo/pull/22 checks green pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+    "the report kept the replaced PR without the opt-in"
+  assert_child_report kept "child kept done: PR https://example.test/owner/repo/pull/23 checks green pr=https://example.test/owner/repo/pull/23 mode=no-mistakes yolo=off" \
+    "the report named the registered PR instead of the reported one without the opt-in"
   assert_child_report gitlab "child gitlab done: PR https://gitlab.example/group/sub/project/-/merge_requests/8 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
     "a GitLab ready line replaced the recorded PR without the opt-in"
   assert_child_report unrecorded "child unrecorded done: PR https://gitlab.example/group/sub/project/-/merge_requests/9 checks green mode=no-mistakes yolo=off" \
     "a GitLab ready line carried a PR without the opt-in"
-  pass "without the scan opt-in, a child report keeps the recorded PR and accepts only a GitHub-shaped ready line"
+  pass "without the scan opt-in, a child report names its GitHub-shaped ready PR over a different recorded one"
 }
 
 # A PR URL a worker only ever mentioned in prose is never claimed as the
@@ -1524,7 +1525,7 @@ test_reconciliation_sets_no_forge_mode_for_state_read
 test_terminal_outcome_never_names_a_pr_the_run_did_not_open
 test_terminal_outcome_takes_the_pr_its_run_opened
 test_ledger_report_names_a_replacement_pr
-test_ledger_report_without_scan_opt_in_keeps_recorded_pr
+test_ledger_report_without_scan_opt_in_names_the_ready_pr
 test_status_log_sourced_outcome_keeps_its_own_pr
 test_status_log_outcome_keeps_gitlab_and_gerrit_reviews
 test_status_log_outcome_never_borrows_an_earlier_pr
