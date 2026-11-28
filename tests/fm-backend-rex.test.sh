@@ -690,6 +690,20 @@ test_dead_recorded_session_is_replaced_once() {
   pass "fm_backend_rex_create_task: a dead recorded session is replaced once and the record updated"
 }
 
+test_reclaim_backfills_the_record_for_an_unrecorded_home_session() {
+  local dir label sid
+  dir=$(new_case reclaim-backfill)
+  label=$(home_label "$dir")
+  sid=$(fake_rex "$dir" new "$label" --window x --cwd /tmp --json | jq -r .session_id)
+  [ ! -e "$(record_file "$dir")" ] || fail "a case without a record must start without one"
+  rex_env "$dir" "fm_backend_rex_create_task_in_session '$sid' fm-beta /tmp" >/dev/null || fail "reclaim must succeed"
+  assert_equals "$sid" "$(cat "$(record_file "$dir")")" "reclaim in the home's labeled session must record it"
+  relabel_session "$dir" "$sid" renamed-by-a-worker
+  rex_env "$dir" 'fm_backend_rex_create_task fm-gamma /tmp' >/dev/null || fail "a spawn after a relabel must succeed"
+  assert_equals 1 "$(state_json "$dir" '.sessions | length')" "the relabeled session must be reused, not replaced"
+  pass "fm_backend_rex_create_task_in_session: backfills the record for an unrecorded home session"
+}
+
 test_unrecorded_labeled_session_is_adopted_and_recorded() {
   local dir label sid
   dir=$(new_case adopt-record)
@@ -1163,6 +1177,7 @@ test_create_task_refusals
 test_relabeled_home_session_is_reused
 test_dead_recorded_session_is_replaced_once
 test_unrecorded_labeled_session_is_adopted_and_recorded
+test_reclaim_backfills_the_record_for_an_unrecorded_home_session
 test_retire_uses_the_recorded_session
 test_reclaim_replaces_a_husk_and_refuses_a_live_one
 test_reclaim_fallback_placement_replaces_a_husk

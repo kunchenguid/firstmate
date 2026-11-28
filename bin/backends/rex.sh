@@ -481,6 +481,11 @@ fm_backend_rex_create_task_in_session() {  # <session-id> <label> <cwd>
     return 1
   }
   fm_backend_rex_open_tab_locked "$sid" "$label" "$cwd" reclaim || rc=$?
+  if [ "$rc" -eq 0 ] && [ -z "$(fm_backend_rex_recorded_home_session)" ] \
+    && [ "$(fm_backend_rex_home_sessions "$(fm_backend_rex_home_label)" 2>/dev/null)" = "$sid" ]; then
+    fm_backend_rex_record_home_session "$sid" \
+      || echo "warning: could not record rex session $sid for this home" >&2
+  fi
   fm_backend_rex_session_unlock
   [ "$rc" -eq 0 ] || return "$rc"
   fm_backend_rex_finish_tab "$sid" "$FM_BACKEND_REX_NEW_WINDOW" "$FM_BACKEND_REX_NEW_BLOCK" "$label"
