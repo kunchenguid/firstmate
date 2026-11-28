@@ -130,11 +130,10 @@
 # not genuinely this task's destroys another worker's live work. Before the first
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# in its worktree= or home=, except that a positive claim for this task permits
+# another non-secondmate record for the same slot: that record's teardown is
+# records-only. If the claim instead names another task, this teardown is
+# records-only and skips the scan. A secondmate record still blocks the return.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -175,7 +174,8 @@
 # every local Firstmate home hold the same lock from before slot allocation
 # through metadata publication, closing the publication
 # gap; forced secondmate teardown takes it and runs the same checks for every
-# descendant Treehouse slot before touching any child.
+# descendant Treehouse slot before touching any child. Lock acquisition waits
+# up to 15 seconds before refusing.
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
@@ -595,7 +595,7 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
       echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
       exit 1
     }
-    fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+    fm_lock_acquire_wait_bounded "$TREEHOUSE_PROJECT_LOCK" 15 || {
       echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
       exit 1
     }
@@ -2697,7 +2697,7 @@ collect_local_firstmate_states() {
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field other_path other_slot other_owner_state
   slot=$(canonical_existing_dir "$worktree") || return 0
   # A slot whose owner claim names another task was reassigned, so this record's
   # teardown is records-only and touches nothing under it; another record naming
@@ -2720,6 +2720,18 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        if [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] && [ "$(fm_meta_get "$other" kind)" != secondmate ]; then
+          fm_treehouse_slot_owner_state "$slot" "$other_id"
+          other_owner_state=$FM_TREEHOUSE_SLOT_OWNER
+          fm_treehouse_slot_owner_state "$slot" "$record_id"
+          if [ "$other_owner_state" = other ]; then
+            # The slot was claimed by record_id after other_id's record was
+            # written. other_id no longer owns the slot and its own teardown
+            # will leave it untouched (TEARDOWN_SLOT_REASSIGNED), so returning
+            # this slot for record_id is no hazard to other_id.
+            continue
+          fi
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -3345,7 +3357,7 @@ preflight_descendant_treehouse_slots() {
       [ "$target" != "$lock_path" ] || held=1
     done
     if [ "$held" = 0 ]; then
-      fm_lock_try_acquire "$lock_path" || {
+      fm_lock_acquire_wait_bounded "$lock_path" 15 || {
         echo "REFUSED: another Treehouse slot allocation or return is in progress for child $task_id; forced teardown changed nothing" >&2
         return 1
       }

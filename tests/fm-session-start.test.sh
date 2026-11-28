@@ -2457,7 +2457,7 @@ EOF
   printf '# Firstmate\n' > "$root/AGENTS.md"
   ln -s "$ROOT/bin" "$root/bin"
   mkdir -p "$w/vendor"
-  cp "$(command -v bash)" "$w/vendor/codex"
+  ln -s "$(command -v bash)" "$w/vendor/codex"
   codex="$w/vendor/codex"
   hook=$(jq -er '.hooks.SessionStart[0].hooks[0].command' "$ROOT/.codex/hooks.json") \
     || fail "the tracked Codex SessionStart hook command could not be read"
@@ -2487,6 +2487,73 @@ EOF
   assert_not_contains "$out" "primary harness: unknown" \
     "the digest under the real Codex SessionStart hook chain fell back to the unknown protocol"
   pass "the real Codex SessionStart hook chain renders the Codex supervision protocol"
+}
+
+# Regression: Antigravity CLI (agy) publishes no harness-identity marker and runs
+# .agents/hooks.json -> bin/fm-sessionstart-agy.sh -> bin/fm-sessionstart-run.sh
+# -> bin/fm-session-start.sh -> fm_run_timed -> bin/fm-harness.sh. An ancestry
+# walk shorter than that depth reports `primary harness: unknown` even while the
+# session lock still names the agy process. Pin both the default timeout runner
+# and the deeper pure-Bash fallback (with an in-flight task so fm-wake-drain ->
+# fm-guard -> fm-supervision-instructions also reaches agy).
+test_agy_sessionstart_hook_chain_selects_the_agy_protocol() {
+  local rec root home fakebin w agy hook raw out
+  command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the agy SessionStart hook stands down without it)"; return 0; }
+  rec=$(new_world agy-hook-chain)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  w=${root%/root}
+  make_fake_toolchain "$fakebin"
+  printf '# Firstmate\n' > "$root/AGENTS.md"
+  ln -s "$ROOT/bin" "$root/bin"
+  ln -s "$ROOT/docs" "$root/docs"
+  mkdir -p "$root/.agents" "$w/vendor"
+  cp "$ROOT/.agents/hooks.json" "$root/.agents/hooks.json"
+  ln -s "$(command -v bash)" "$w/vendor/agy"
+  agy="$w/vendor/agy"
+  hook=$(jq -er '[.[] | .SessionStart // empty | .[].command][0]' "$ROOT/.agents/hooks.json") \
+    || fail "the tracked agy SessionStart hook command could not be read"
+
+  # 1. Default timeout runner from .agents/ CWD (the real agy hook working dir).
+  # shellcheck disable=SC2016 # $FM_TEST_HOOK must expand inside the agy-named shell.
+  raw=$(cd "$root/.agents" && env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS -u FM_HERMES_HARNESS \
+    -u FM_SUPERVISION_ACTOR -u FM_SUPERVISION_PRIMARY_HARNESS \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    FM_TEST_HOOK="$hook" "$agy" -c \
+    'printf "%s" "{\"sessionId\":\"s-agy\",\"conversationId\":\"c-agy\",\"source\":\"new\"}" | sh -c "$FM_TEST_HOOK"')
+  out=$(printf '%s' "$raw" | jq -er '.injectSteps[0].systemMessage.systemMessage' 2>/dev/null) \
+    || fail "the agy SessionStart hook chain did not emit injectSteps JSON: $raw"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the agy hook chain did not take the session lock"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: agy" \
+    "the digest under the real agy SessionStart hook chain did not detect the agy primary"
+  assert_contains "$out" "Mode: Antigravity Stop-hook-owned supervision." \
+    "the digest under the real agy SessionStart hook chain did not render agy's supervision protocol"
+  assert_not_contains "$out" "primary harness: unknown" \
+    "the digest under the real agy SessionStart hook chain fell back to the unknown protocol"
+
+  # 2. Deepest fallback (pure-Bash timeout) with an in-flight task so the nested
+  # wake-drain -> guard -> repair-line probe also resolves agy.
+  rm -f "$home/state/.lock" "$home/state/.guard-watcher-stale-banner"
+  printf 'id=task-agy-depth\nkind=ship\n' > "$home/state/task-agy-depth.meta"
+  # shellcheck disable=SC2016 # $FM_TEST_HOOK must expand inside the agy-named shell.
+  raw=$(cd "$root/.agents" && env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u FM_OMP_HARNESS -u FM_HERMES_HARNESS \
+    -u FM_SUPERVISION_ACTOR -u FM_SUPERVISION_PRIMARY_HARNESS \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    PATH="$fakebin:$BASE_PATH" FM_TEST_HOOK="$hook" "$agy" -c \
+    'printf "%s" "{\"sessionId\":\"s-agy-2\",\"conversationId\":\"c-agy-2\",\"source\":\"new\"}" | sh -c "$FM_TEST_HOOK"')
+  out=$(printf '%s' "$raw" | jq -er '.injectSteps[0].systemMessage.systemMessage' 2>/dev/null) \
+    || fail "the agy SessionStart hook chain under bash timeout did not emit injectSteps JSON: $raw"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: agy" \
+    "the agy SessionStart hook chain under bash timeout fell back from agy"
+  assert_contains "$out" "Stop-hook park (.agents/hooks.json -> bin/fm-turnend-guard-agy.sh)" \
+    "the nested guard repair line under agy SessionStart did not resolve agy"
+  assert_not_contains "$out" "primary harness: unknown" \
+    "the agy SessionStart hook chain under bash timeout emitted unknown"
+  pass "the real agy SessionStart hook chain renders the agy supervision protocol"
 }
 
 # --- context re-emit (--reemit) ----------------------------------------------
@@ -3241,6 +3308,7 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_codex_sessionstart_hook_chain_selects_the_codex_protocol
+test_agy_sessionstart_hook_chain_selects_the_agy_protocol
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
 test_reemit_cue_survives_the_hook_output_preview
 test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
