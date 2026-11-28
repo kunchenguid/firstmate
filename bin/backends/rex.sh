@@ -15,8 +15,10 @@
 # block (TERM_PROGRAM=rex with REX_BLOCK, resolved by the server), every task
 # tab goes into that launcher session. Otherwise, and for a secondmate's own
 # home, the tab goes into ONE session per home labeled with the home tag
-# (bin/fm-backend-hometag-lib.sh), adopted when exactly one session carries
-# that label, created once when none does, and refused when several do. A
+# (bin/fm-backend-hometag-lib.sh). The session id is recorded in
+# state/.home-rex-session and decides while that session is live, whatever its
+# label. A home with no record adopts the one session carrying the label,
+# creates one when none does, and refuses when several do. A
 # created session's first window becomes the first task's tab, and cleanup
 # kills that per-home session once its last window closes. `rex window new`
 # rather than `rex run` opens the tab because `rex run` requires a command
@@ -364,10 +366,6 @@ fm_backend_rex_record_home_session() {  # <session-id>
   path=$(fm_backend_rex_home_session_record_path)
   mkdir -p "${path%/*}" 2>/dev/null || return 1
   printf '%s\n' "$1" >"$path.$$" && mv -f "$path.$$" "$path"
-}
-
-fm_backend_rex_clear_home_session_record() {
-  rm -f "$(fm_backend_rex_home_session_record_path)"
 }
 
 # fm_backend_rex_home_sessions: ids of this home's live per-home sessions, one
@@ -1100,7 +1098,6 @@ fm_backend_rex_retire_session() {  # <session-id>
       '(if $recorded != "" then $sid == $recorded else .label == $want end)
         and ((.windows // []) | type == "array" and length == 0)' >/dev/null 2>&1; then
     fm_backend_rex_cli kill "$sid" >/dev/null 2>&1 || true
-    [ "$sid" != "$recorded" ] || fm_backend_rex_clear_home_session_record
   fi
   fm_backend_rex_session_unlock
   return 0

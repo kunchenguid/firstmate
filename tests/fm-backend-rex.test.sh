@@ -714,10 +714,16 @@ test_retire_uses_the_recorded_session() {
     "the emptied recorded session must be retired although it was relabeled"
   assert_equals 1 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$other\")] | length")" \
     "an empty session carrying the home label that is not the recorded one must survive"
-  [ ! -e "$(record_file "$dir")" ] || fail "retiring the recorded session must clear the record"
+  assert_equals "$sid" "$(cat "$(record_file "$dir")")" "retiring must leave the record in place"
+  rex_env "$dir" "fm_backend_rex_retire_session '$other'"
+  assert_equals 1 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$other\")] | length")" \
+    "a home with a record must not retire a session it did not record"
+  dir=$(new_case retire-unrecorded)
+  other=$(fake_rex "$dir" new "$(home_label "$dir")" --window x --cwd /tmp --json | jq -r .session_id)
+  fake_rex "$dir" block close -s "$other" "$(state_json "$dir" ".sessions[] | select(.session_id == \"$other\") | .windows[0].blocks[0].block_id")"
   rex_env "$dir" "fm_backend_rex_retire_session '$other'"
   assert_equals 0 "$(state_json "$dir" "[.sessions[] | select(.session_id == \"$other\")] | length")" \
-    "a home with no record keeps today's label-based retirement"
+    "a home that never had a record keeps label-based retirement"
   pass "fm_backend_rex_retire_session: retires the recorded session by id, whatever its label, and refuses any other"
 }
 

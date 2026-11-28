@@ -116,9 +116,8 @@ Cleanup closes only the task's block, which closes its tab, and then proves it g
 An already-gone block counts as closed.
 A per-home session left with no tabs is then killed, but only the exact session recorded in `state/.home-rex-session`, never the launcher session, and never when its view cannot be read.
 A home with no record falls back to the session carrying its label.
-Retiring the recorded session clears the record.
 An omitted `windows` field is treated as an empty session for both retirement and adoption, so a crewless secondmate can relaunch into its emptied session.
-When main retires a local secondmate, it checks and retires that secondmate's session using the secondmate home's identity; sessions with tabs or renamed labels are preserved.
+When main retires a local secondmate, it checks and retires that secondmate's session using the secondmate home's identity; sessions with tabs are preserved, and an empty recorded session is retired whatever its label. A label mismatch preserves a session only when the home has no record.
 Spawning, reclaiming, and that retirement share one home-wide lock (`state/.rex-session.lock`), so a new tab can never land in a session between its empty check and its kill.
 
 `bin/fm-control.sh` `exit` and `relaunch` work on Rex; [`agent-control.md`](agent-control.md#reclaiming-a-task-whose-endpoint-is-gone) owns the recorded-server absence proof, stopped-server recovery, reclaim placement, and reclaim-only shell-husk cleanup.
