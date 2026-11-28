@@ -190,14 +190,18 @@ test_acknowledged_terminal_status() {
   detail=$note
   [ "$source" != run-step ] || detail='pr=https://example.test/owner/repo/pull/1'
   make_world "terminal-$path-$state-$source"
-  case "$path" in *-older) write_child "$MAIN" child 'working: building' ;; *) write_child "$MAIN" child "$status_line" ;; esac
+  case "$path" in
+    *-older) write_child "$MAIN" child 'working: building' ;;
+    *-prose) write_child "$MAIN" child "$status_line"$'\nAll tests passed.' ;;
+    *) write_child "$MAIN" child "$status_line" ;;
+  esac
 
   (
     export FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state"
     export FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh"
     export FM_FAKE_CREW_STATE="$state" FM_FAKE_CREW_SOURCE="$source" FM_FAKE_CREW_DETAIL="$detail"
     case "$path" in
-      signal|signal-older)
+      signal|signal-older|signal-prose)
         bash -c '. "$1"; fm_wake_append signal child.status "status changed"' _ "$ROOT/bin/fm-wake-lib.sh" || exit 1
         "$DRAIN" > "$WORLD/drain.out" 2> "$WORLD/drain.err" || exit 1
         if [ "$path" = signal-older ]; then
@@ -210,7 +214,7 @@ test_acknowledged_terminal_status() {
         [ -n "$seq" ] && [ -n "$generation" ] || exit 1
         "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" || exit 1
         ;;
-      branch|branch-older)
+      branch|branch-older|branch-prose)
         seq=$("$branch" append --task child --verdict captain --summary "$note") || exit 1
         if [ "$path" = branch-older ]; then printf '%s\n' "$status_line" >> "$MAIN/state/child.status"; fi
         "$branch" mark-read --through "$seq" || exit 1
@@ -227,6 +231,25 @@ test_acknowledged_terminal_status() {
   [ "${queued:-0}" = "$expected" ] \
     || fail "$path: expected $expected inactive outcome(s), got: $output"
   pass "$path $state produces $expected inactive outcome(s)"
+}
+
+test_acknowledgement_retires_queued_duplicate() {
+  local seq generation
+  make_world queued-duplicate
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" bash -c '. "$1"; fm_wake_append signal child.status "status changed"' _ "$ROOT/bin/fm-wake-lib.sh" || fail "queue setup failed"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" > "$WORLD/drain.out" 2> "$WORLD/drain.err" || fail "drain failed"
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$WORLD/drain.err")
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$WORLD/drain.err")
+  [ -n "$seq" ] && [ -n "$generation" ] || fail "drain required no acknowledgement"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" bash -c '. "$1"; fm_wake_append check unrelated-key "keep me"' _ "$ROOT/bin/fm-wake-lib.sh" || fail "queue setup failed"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE=done run_reconcile "$MAIN" --startup >/dev/null || fail "scan failed"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] || fail "scan did not queue the outcome before acknowledgement"
+  FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" || fail "acknowledgement failed"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] || fail "queued duplicate survived acknowledgement"
+  grep -q 'unrelated-key' "$MAIN/state/.wake-queue" || fail "unrelated queue row was removed"
+  pass "acknowledgement retires the queued duplicate outcome"
 }
 
 arm_claude_busy() { # <home> <id> <busy|idle>
@@ -1531,6 +1554,9 @@ test_acknowledged_terminal_status branch-older
 test_acknowledged_terminal_status signal-older
 test_acknowledged_terminal_status signal failed
 test_acknowledged_terminal_status branch failed
+test_acknowledged_terminal_status signal-prose
+test_acknowledgement_retires_queued_duplicate
+test_acknowledged_terminal_status branch-prose
 test_acknowledged_terminal_status signal failed run-step
 test_acknowledged_terminal_status branch failed run-step
 

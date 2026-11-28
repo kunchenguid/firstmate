@@ -834,10 +834,20 @@ acknowledge() { # <fingerprint>
   mv -f "$pending" "$presented"
 }
 
+retire_queued_presentation() { # <fingerprint>; caller holds FM_WAKE_QUEUE_LOCK
+  local tmp
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  tmp=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+  awk -F '\t' -v key="inactive-outcome:$1" '!(NF >= 5 && $3 == "check" && $4 == key)' \
+    "$FM_WAKE_QUEUE" > "$tmp" || { rm -f "$tmp"; return 1; }
+  _fm_atomic_replace "$tmp" "$FM_WAKE_QUEUE" || { rm -f "$tmp"; return 1; }
+}
+
 acknowledge_status() { # <task-id> [<status-endpoint> <status-identity>]
   local id=$1 endpoint=${2:-} ident=${3:-} status="$STATE/$1.status" meta="$STATE/$1.meta"
   local incarnation kind size current_ident line state state_line pr fingerprint spawn_epoch status_epoch rc=0
-  local home_rc=0
+  local home_rc=0 scratch event_mtime
   home_secondmate_id >/dev/null || home_rc=$?
   [ "$home_rc" -eq 1 ] || return 0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -854,14 +864,18 @@ acknowledge_status() { # <task-id> [<status-endpoint> <status-identity>]
     ident=$current_ident
   fi
   [ "$ident" = "$current_ident" ] || return 0
-  status_snapshot_latest_event "$status" "$size" "$ident" || return 0
-  [ "$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT" -le "$endpoint" ] || return 0
-  line=$FM_STATUS_SNAPSHOT_EVENT_LINE
+  scratch=$(_fm_status_span_scratch "$status").ack
+  _fm_status_read_span "$status" 0 "$endpoint" > "$scratch" 2>/dev/null || { rm -f "$scratch"; return 0; }
+  line=$(last_status_line "$scratch")
+  rm -f "$scratch"
+  [ -n "$line" ] && [ "$line" = "$(last_status_line "$status")" ] || return 0
+  _fm_status_read_ident_size "$status" && [ "$_FM_STAT_IDENTITY" = "$ident" ] || return 0
+  event_mtime=$(_fm_status_file_mtime "$status") || return 0
   state=$(status_line_verb "$line")
   case "$state" in done|failed) ;; *) return 0 ;; esac
   spawn_epoch=${incarnation#s}
   spawn_epoch=${spawn_epoch%%.*}
-  status_epoch=$(status_line_at_epoch "$line") || status_epoch=$FM_STATUS_SNAPSHOT_EVENT_MTIME
+  status_epoch=$(status_line_at_epoch "$line") || status_epoch=$event_mtime
   case "$spawn_epoch" in ''|*[!0-9]*) ;; *) [ "$spawn_epoch" -le "$status_epoch" ] || return 0 ;; esac
 
   pr=
@@ -881,6 +895,7 @@ acknowledge_status() { # <task-id> [<status-endpoint> <status-identity>]
     && terminal_presentation_missing "$fingerprint"; then
     write_record "$(record_path "$fingerprint" presented)" "$fingerprint" "$id" "$incarnation" "$state" \
       "inactive-outcome-main-$id-$state" direct presentation "$pr" "$(sha256_text "$line")" || rc=$?
+    [ "$rc" -ne 0 ] || retire_queued_presentation "$fingerprint" || rc=$?
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$rc"
