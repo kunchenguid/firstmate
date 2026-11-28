@@ -535,9 +535,17 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
   }
 }
 
-function classifyClose(stdout: string, stderr: string, code: number | null, signal: NodeJS.Signals | null): CloseClassification {
+function classifyClose(
+  stdout: string,
+  stderr: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  completeLinesOnly = false,
+): CloseClassification {
   const combined = `${stdout}\n${stderr}`.trim();
-  const reason = actionableLine(combined);
+  const reason = completeLinesOnly
+    ? completedActionableLine(stdout) || completedActionableLine(stderr)
+    : actionableLine(combined);
   if (reason) return { kind: "actionable", message: reason };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
@@ -1262,13 +1270,17 @@ export default function (pi: ExtensionAPI) {
       stderr += chunk.toString();
       observeEstablishedArm();
     });
-    const finishArm = (code: number | null, signal: NodeJS.Signals | null): void => {
+    const finishArm = (code: number | null, signal: NodeJS.Signals | null, fromExit = false): void => {
       if (settled) return;
       settled = true;
       resolveClosed();
       settleReadiness(false);
       releaseChild();
-      const classification = classifyClose(stdout, stderr, code, signal);
+      // `exit` can arrive with a wake line still half drained. Settling from it
+      // counts only newline-terminated lines, as observeEstablishedArm does, so
+      // a cut-off line takes the retry path and the completed line is
+      // delivered once when it lands.
+      const classification = classifyClose(stdout, stderr, code, signal, fromExit);
       const predecessor = String(armChild.pid ?? "");
       if (classification.kind === "actionable") {
         const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);
@@ -1297,7 +1309,7 @@ export default function (pi: ExtensionAPI) {
     };
     armChild.on("close", finishArm);
     armChild.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-      setImmediate(() => finishArm(code, signal));
+      setImmediate(() => finishArm(code, signal, true));
     });
     armChild.on("error", (error: Error) => {
       if (settled) return;
