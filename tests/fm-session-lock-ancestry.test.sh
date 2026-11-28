@@ -291,6 +291,41 @@ SH
   if ! auggie_owns node-MainThread "node $link" || auggie_owns node-MainThread "node $dir/other/myauggie"; then
     fail "auggie: the comm alone decided the verdict, so the script-path case is vacuous"
   fi
+
+  # Oracle: these relative script paths belong to the holder's cwd, not the
+  # checker's. The impossible PID forces the non-/proc path on every platform;
+  # lsof's cwd record is the external process-data boundary stubbed here.
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 6 ] && [ "$1" = -a ] && [ "$2" = -p ] &&
+  [ "$3" = 2147483647 ] && [ "$4" = -d ] && [ "$5" = cwd ] &&
+  [ "$6" = -Fn ] || exit 98
+case "${FM_TEST_LSOF_MODE:-ok}" in
+  ok) printf 'p2147483647\nfcwd\nn%s\n' "$FM_TEST_AUGGIE_CWD" ;;
+  failed) printf 'n%s\n' "$FM_TEST_AUGGIE_CWD"; exit 1 ;;
+  missing) exit 127 ;;
+  empty) printf 'p2147483647\nfcwd\n' ;;
+esac
+SH
+  chmod +x "$fakebin/lsof"
+  for args in 'node ./bin/auggie --resume session' \
+    'node ./lib/node_modules/@augmentcode/auggie/auggie-v2.mjs'; do
+    FM_TEST_AUGGIE_CWD="$dir/prefix" auggie_owns node "$args" \
+      || fail "auggie: lsof cwd did not resolve relative script '$args'"
+  done
+  local mode
+  for mode in failed missing empty; do
+    FM_TEST_LSOF_MODE="$mode" FM_TEST_AUGGIE_CWD="$dir/prefix" \
+      FM_TEST_AUGGIE_COMM=node FM_TEST_AUGGIE_ARGS='node ./bin/auggie' \
+      lib_eval "$fakebin" "
+        if fm_harness_ancestry_pid; then exit 1; fi
+        if fm_harness_pid_alive 2147483647; then exit 2; fi
+        if fm_session_lock_owned_by_self '$dir/state'; then exit 3; fi
+        fm_session_lock_pid_blocks_reclaim 2147483647 || exit 4
+        fm_session_lock_inspect '$dir/state'
+        [ \"\$FM_LOCK_INSPECT_STATE\" = unknown ] || exit 5
+      " || fail "auggie: $mode lsof lookup lost safe unresolved-holder behavior"
+  done
   pass "session-lock: an auggie node bundle is identified from its package script, and only from it"
 }
 

@@ -169,7 +169,7 @@ fm_auggie_script_arg() {  # <args> [pid]
 # Return 2 for an unresolved relative script: identity is unknown, so a live
 # lock holder must remain protected from reclaim.
 fm_auggie_process_matches() {  # <comm> <args> [pid]
-  local comm=$1 args=${2:-} pid=${3:-} base script cwd
+  local comm=$1 args=${2:-} pid=${3:-} base script cwd cwd_info line
   [ -n "$comm" ] || return 1
   base=${comm##*/}
   base=${base#-}
@@ -178,6 +178,14 @@ fm_auggie_process_matches() {  # <comm> <args> [pid]
     node|node-*|node[0-9]*|MainThread)
       # Both argv readers must interpret relative paths in the process cwd.
       cwd=$(CDPATH='' cd -- "/proc/$pid/cwd" 2>/dev/null && pwd -P) || cwd=
+      if [ -z "$cwd" ] && [ -n "$pid" ]; then
+        cwd_info=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null) || cwd_info=
+        while IFS= read -r line; do
+          case "$line" in
+            n/*) cwd=${line#n}; break ;;
+          esac
+        done <<<"$cwd_info"
+      fi
       script=$(
         [ -z "$cwd" ] || cd -- "$cwd" || exit 1
         fm_auggie_script_arg "$args" "$pid"
