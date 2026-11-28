@@ -1467,7 +1467,7 @@ fm_pr_forgejo_cli_login() {  # <cli> <host>
 # (fm_pr_forgejo_cli_api_capable); this function only answers "which CLI, which
 # login", so a caller can report `fj` by name instead of reporting nothing.
 fm_pr_forgejo_resolve() {  # <host> [<preference>]
-  local host=${1:-} preference=${2:-auto} cli login
+  local host=${1:-} preference=${2:-auto} login
   FM_PR_FORGEJO_CLI=
   FM_PR_FORGEJO_LOGIN=
   case "$host" in
@@ -1596,11 +1596,17 @@ fm_pr_forgejo_cli_preference() {  # <task-meta-file>
   preference=$(FM_HOME="${FM_HOME:-$_FM_PR_LIB_ROOT}" FM_DATA_OVERRIDE="$data" \
     "$_FM_PR_LIB_ROOT/bin/fm-project-mode.sh" --forge-cli "$project" 2>"$errfile") || status=$?
   if [ "$status" -eq 3 ]; then
+    # Consumed by bin/fm-pr-check.sh and bin/fm-pr-merge.sh, which quote the
+    # parser's refusal instead of reporting an unread registry entry.
+    # shellcheck disable=SC2034
     FM_PR_FORGEJO_CLI_PREFERENCE_ERROR=$(cat "$errfile" 2>/dev/null)
   fi
   rm -f "$errfile"
   [ "$status" -ne 3 ] || return 1
   [ "$status" -eq 0 ] || return 0
+  # The assignment below is consumed by bin/fm-pr-check.sh, bin/fm-pr-merge.sh,
+  # bin/fm-crew-state.sh, and bin/fm-teardown.sh, which all source this lib.
+  # shellcheck disable=SC2034
   case "$preference" in
     tea|fgj|fj) FM_PR_FORGEJO_CLI_PREFERENCE=$preference ;;
     auto) ;;
