@@ -48,6 +48,54 @@ process.exit(1);
 '
 }
 
+# Snapshot only the explicitly selected tmux session's local environment, never
+# its server-global environment or the invoking process. The caller places these
+# quoted assignments in its private staged launch file, never terminal input.
+# Every allowlisted name must exist in the session; an explicit -NAME record is
+# a deliberate unset, and a missing name refuses rather than falling back.
+fm_backend_orca_launch_env_args() {  # <tmux-session> <newline-separated names>
+  node - "$1" "$2" <<'JS'
+const { spawnSync } = require("child_process");
+const [session, names] = process.argv.slice(2);
+function refuse(name) {
+  // Do not echo tmux output or errors: they may contain credential values.
+  const required = name === undefined ? "" : ` (required name ${name})`;
+  console.error(`error: cannot snapshot configured tmux launch environment${required}; refusing Orca launch`);
+  process.exit(1);
+}
+function read(name) {
+  // Without -u, tmux sanitizes values when the client lacks a UTF-8 locale.
+  const args = ["-u", "show-environment", "-t", `=${session}`];
+  if (name !== undefined) args.push(name);
+  // latin1 maps each byte to one code unit, so values that are not valid UTF-8
+  // reach the launch file byte for byte instead of as replacement characters.
+  const result = spawnSync("tmux", args, {
+    encoding: "latin1", timeout: 10000, maxBuffer: 4 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) refuse(name);
+  return result.stdout;
+}
+// Verify the session even for an empty allowlist. Never derive names from raw
+// multiline values or tmux's automatically populated update-environment.
+read();
+const assignments = [];
+for (const name of new Set(names.split("\n").filter(Boolean))) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) refuse();
+  // Read each name separately so embedded/trailing newlines are preserved and
+  // a value resembling another NAME=value line cannot supply another variable.
+  const output = read(name);
+  if (!output.endsWith("\n")) refuse(name);
+  const record = output.slice(0, -1);
+  if (record === `-${name}`) continue;
+  if (!record.startsWith(`${name}=`)) refuse(name);
+  const value = record.slice(name.length + 1);
+  if (value.includes("\0")) refuse(name);
+  assignments.push(`${name}='${value.replace(/'/g, "'\\''")}'`);
+}
+process.stdout.write(assignments.join(" "), "latin1");
+JS
+}
+
 fm_backend_orca_json_get() {  # <field> ; fields: worktree-id worktree-path terminal-handle worktree-terminal-handle repo-id
   # Terminal handles are accepted only from verified terminal result shapes:
   # result.terminal or a root terminal object with .handle. Undocumented

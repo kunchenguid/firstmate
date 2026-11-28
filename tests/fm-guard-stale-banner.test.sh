@@ -438,6 +438,21 @@ test_autoarm_fresh_beacon_without_watcher_is_healthy() {
   pass "fm-guard stale banner: auto-arm fresh beacon without a live watcher is healthy"
 }
 
+test_autoarm_future_beacon_is_fresh_not_a_banner() {
+  local dir out beat
+  dir=$(make_guard_case autoarm-future)
+  beat="$(case_home "$dir")/state/.last-watcher-beat"
+  : > "$beat"
+  # A beacon stamped two seconds ahead of the guard's clock read gives a negative
+  # age; it is fresh, not "not a number".
+  python3 -c 'import os,sys,time; t=time.time()+2; os.utime(sys.argv[1], (t, t))' "$beat"
+  out=$(run_guard_case_autoarm "$dir")
+  assert_not_contains "$out" "WATCHER DOWN" "a future-stamped beacon printed the banner"
+  [ -z "$out" ] \
+    || fail "a beacon 2s ahead of the clock must stay silent, got: $out"
+  pass "fm-guard stale banner: a beacon slightly ahead of the clock is fresh"
+}
+
 test_autoarm_stale_beacon_alarms_with_correct_reason() {
   local dir out
   dir=$(make_guard_case autoarm-stale)
@@ -647,6 +662,60 @@ test_extension_handoff_with_live_session_is_healthy() {
   assert_absent "$home/state/.guard-watcher-stale-banner" \
     "a healthy extension-owned hand-off must not open a down-episode"
   pass "fm-guard stale banner: extension-owned hand-off with a live session is healthy"
+}
+
+# A fakebin whose uname reports <uname> and whose `ps -W` lists one Pi-shaped
+# Windows process, WINPID 7204; every other ps question is the real one.
+windows_table_fakebin() {  # <dir> <uname>
+  local fakebin
+  fakebin=$(fm_fakebin "$1")
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %s\n' "$2" > "$fakebin/uname"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = -W ] || exec /bin/ps "$@"
+printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+printf '%s\n' '  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\AppData\Roaming\npm\pi.exe'
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  fm_fake_gnu_stat "$fakebin"
+  printf '%s\n' "$fakebin"
+}
+
+# A Windows/Git Bash home records its session as a tagged win:<pid>
+# (bin/fm-session-lock-lib.sh). That holder is outside the local process table,
+# so the hand-off tolerance answers its liveness from the Windows table instead
+# of reading a correctly locked home as supervision off. A dead or malformed
+# tagged holder, and the same tag on a non-Windows host, stay loud.
+test_extension_handoff_with_tagged_windows_session() {
+  local spec case_name uname session_pid expect dir home fakebin out
+  for spec in \
+    "live:MINGW64_NT-10.0-26200:win:7204:healthy" \
+    "dead:MINGW64_NT-10.0-26200:win:7300:alarm" \
+    "malformed:MINGW64_NT-10.0-26200:win:72x4:alarm" \
+    "not-windows:Linux:win:7204:alarm"; do
+    case_name=${spec%%:*}
+    uname=$(printf '%s' "$spec" | cut -d: -f2)
+    session_pid=$(printf '%s' "$spec" | cut -d: -f3-4)
+    expect=${spec##*:}
+    dir=$(make_guard_case "extension-tagged-$case_name")
+    home=$(case_home "$dir")
+    fakebin=$(windows_table_fakebin "$dir" "$uname")
+    record_pi_extension_session "$dir" "$session_pid" \
+      || fail "could not record the tagged Pi extension session for $case_name"
+    touch "$home/state/.last-watcher-beat"
+    out=$(PATH="$fakebin:$PATH" run_guard_case_extension "$dir")
+    case "$expect" in
+      healthy)
+        [ -z "$out" ] \
+          || fail "an extension-owned hand-off with a live tagged session must stay silent, got: $out"
+        ;;
+      alarm)
+        [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+          || fail "a $case_name tagged session must not prove extension ownership; guard output: $out"
+        ;;
+    esac
+  done
+  pass "fm-guard stale banner: a live Windows-tagged session owns the extension hand-off, a dead or malformed one does not"
 }
 
 # A released owner may leave the lock directory briefly before cleanup. It is
@@ -947,6 +1016,7 @@ test_full_banner_names_quiet_mode_when_active
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
 test_extension_handoff_with_live_session_is_healthy
+test_extension_handoff_with_tagged_windows_session
 test_extension_handoff_with_empty_lock_is_healthy
 test_extension_held_unhealthy_locks_stay_alarm
 test_extension_without_ownership_evidence_stays_alarm
@@ -958,6 +1028,7 @@ test_branch_actor_is_never_told_to_repair_the_watcher
 test_persistent_model_ignores_pi_extension_evidence
 test_extension_live_watcher_is_healthy_without_ownership_evidence
 test_autoarm_fresh_beacon_without_watcher_is_healthy
+test_autoarm_future_beacon_is_fresh_not_a_banner
 test_autoarm_stale_beacon_alarms_with_correct_reason
 test_autoarm_stale_episode_is_stable
 test_autoarm_long_handling_turn_stays_silent

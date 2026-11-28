@@ -17,9 +17,13 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-batch)
 export FM_BACKEND=tmux
 
 # Clear ambient firstmate overrides so the behavior test owns its environment.
+# The scratch home keeps the repo root's own gitignored config (notably
+# config/crew-dispatch.json) from changing the arg-routing behavior under test.
 run_spawn() {
+  local home="$TMP_ROOT/run-spawn-home"
+  mkdir -p "$home/data" "$home/config"
   FM_ROOT_OVERRIDE='' \
-    FM_HOME='' \
+    FM_HOME="$home" \
     FM_STATE_OVERRIDE='' \
     FM_DATA_OVERRIDE='' \
     FM_PROJECTS_OVERRIDE='' \
@@ -85,6 +89,7 @@ test_projects_path_scoping() {
     projects="$TMP_ROOT/$id projects"
     mkdir -p "$home/data" "$projects/alpha"
     git -C "$projects/alpha" init -q || fail "$label: could not initialize project fixture"
+    git -c user.name=test -c user.email=test@example.com -C "$projects/alpha" commit -q --allow-empty -m init || fail "$label: could not commit project fixture"
     if [ "$use_override" = yes ]; then
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
@@ -92,6 +97,7 @@ test_projects_path_scoping() {
     else
       mkdir -p "$home/projects/alpha"
       git -C "$home/projects/alpha" init -q || fail "$label: could not initialize home project fixture"
+      git -c user.name=test -c user.email=test@example.com -C "$home/projects/alpha" commit -q --allow-empty -m init || fail "$label: could not commit home project fixture"
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
         "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
