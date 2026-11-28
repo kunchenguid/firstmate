@@ -16,30 +16,96 @@ set -u
 # shellcheck source=tests/supervision-host-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/supervision-host-helpers.sh"
 
-test_park_exit_probe_uses_half_second_child_sleeps() {
-  local home host_pid
-  home=$(make_home park-cadence attended)
-  cat > "$home/fakebin/sleep" <<'SH'
-#!/bin/bash
-pid=''
-if [ -f "$FM_HOME/probe-host" ]; then
-  IFS= read -r pid < "$FM_HOME/probe-host" || true
-  if [ "$PPID" = "$pid" ]; then
-    printf '%s\n' "$1" >> "$FM_HOME/park-sleeps"
-  fi
+# Shims for the commands a parked host could start. Each one logs its own
+# command line to $FM_HOME/host-processes when the host started it, directly
+# or through its subshells, and not through an arm, and only while
+# $FM_HOME/probe-host names the host. It uses builtins and the real ps only.
+install_host_process_shims() {  # <home>
+  local home=$1 name real real_ps
+  real_ps=$(command -v ps) || fail "fixture: ps is missing"
+  for name in sleep cat od tr sed awk ps grep head wc date mktemp mv rm rmdir mkfifo; do
+    real=$(command -v "$name") || continue
+    cat > "$home/fakebin/$name" <<SH
+#!/usr/bin/env bash
+if [ -f "\$FM_HOME/probe-host" ]; then
+  IFS= read -r host < "\$FM_HOME/probe-host" || true
+  arms=' '
+  while IFS=\$'\t' read -r role pid _; do
+    [ "\$role" != arm ] || arms="\$arms\$pid "
+  done < "\$FM_HOME/state/.supervision-host"
+  p=\$PPID
+  n=0
+  while [ "\$n" -lt 8 ] && [ -n "\$p" ] && [ "\$p" -gt 1 ]; do
+    case "\$arms" in *" \$p "*) break ;; esac
+    if [ "\$p" = "\$host" ]; then
+      printf '%s\n' "$name \$*" >> "\$FM_HOME/host-processes"
+      break
+    fi
+    p=\$("$real_ps" -o ppid= -p "\$p" 2>/dev/null)
+    p=\${p//[[:space:]]/}
+    n=\$((n + 1))
+  done
 fi
-exec /bin/sleep "$@"
+exec "$real" "\$@"
 SH
-  chmod +x "$home/fakebin/sleep"
+    chmod +x "$home/fakebin/$name"
+  done
+}
+
+# Once the arm has reported, the wait for its close starts no process on Bash
+# 4.1 and later, and only half-second sleeps on Bash 3.2, which has no
+# fractional read timeout. The close that ends the window proves the shims see
+# the host's own processes, so a quiet window cannot pass vacuously.
+test_parked_host_starts_no_process_once_its_arm_reported() {
+  local home host_pid version window
+  home=$(make_home park-processes attended)
+  install_host_process_shims "$home"
   start_host "$home"
-  wait_until 150 watcher_live "$home" || fail "park-cadence: no watcher started"
+  wait_until 150 grep -qs '^watcher: started ' "$home/host.out" || fail "park-processes: the arm never reported"
   host_pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
-  [ -n "$host_pid" ] || fail "park-cadence: no recorded host"
+  [ -n "$host_pid" ] || fail "park-processes: no recorded host"
+  # Two more polls let the host take the refresh that follows the report.
+  sleep 2.5
   printf '%s\n' "$host_pid" > "$home/probe-host"
-  wait_until 100 test -s "$home/park-sleeps" || fail "park-cadence: no child sleep observed"
-  [ "$(sort -u "$home/park-sleeps")" = 0.5 ] || fail "park-cadence: exit probing did not use half-second sleeps"
+  sleep 3
+  window=$(cat "$home/host-processes" 2>/dev/null)
+  append_status "$home" 'which export format?' needs-decision
+  wait_until_deadline 60 host_exited "$home" || fail "park-processes: the close did not reach main"
+  rm -f "$home/probe-host"
+  [ "$(wc -l < "$home/host-processes" | tr -d ' ')" -gt "$(printf '%s' "$window" | grep -c .)" ] \
+    || fail "park-processes: the shims saw no process from the host's close, so the quiet window proves nothing"
+  version=$(PATH="$home/fakebin:$PATH" bash -c 'echo "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"')
+  case "$version" in
+    3.*|4.0)
+      [ -n "$window" ] || fail "park-processes: Bash $version should probe with child sleeps"
+      ! printf '%s\n' "$window" | grep -qvx 'sleep 0.5' \
+        || fail "park-processes: the parked host started more than half-second sleeps: $window"
+      ;;
+    *)
+      [ -z "$window" ] || fail "park-processes: the parked host started processes while waiting: $window"
+      ;;
+  esac
+  pass "host: a parked host whose arm reported waits for the close without starting processes (Bash $version)"
+}
+
+# An arm that disappears without printing a close ends the wait at the next
+# half-second probe, and the host passes the arm's result through exactly as
+# without the host.
+test_arm_that_disappears_ends_the_wait() {
+  local home arm
+  home=$(make_home arm-gone attended)
+  start_host "$home"
+  wait_until 150 grep -qs '^watcher: started ' "$home/host.out" || fail "arm-gone: the arm never reported"
+  arm=$(awk -F '\t' '$1 == "arm" { print $2; exit }' "$home/state/.supervision-host")
+  [ -n "$arm" ] || fail "arm-gone: no recorded arm"
+  kill -KILL "$arm"
+  wait_until 30 host_exited "$home" || fail "arm-gone: the host did not see its arm disappear within 3 seconds"
+  expect_code 0 "$(cat "$home/host.rc")" "a close without a wake must exit 0"
+  assert_re '	pass-through	a close without a wake' "$home/state/.supervision-host.log" \
+    "the ledger must record the close without a wake"
+  assert_no_re '^supervision-host' "$home/host.out" "a close without a wake must reach the owner as the arm printed it"
   stop_home_processes "$home"
-  pass "host: parked child-exit sampling uses ordinary half-second sleeps"
+  pass "host: an arm that disappears without a close ends the wait within a probe"
 }
 
 test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main() {
@@ -916,8 +982,22 @@ test_incomplete_engine_result_hands_the_wake_to_main() {
   pass "host: an engine turn whose result is incomplete hands its wake to main"
 }
 
+# Manual mode, set by no CI lane: on a machine with stock Bash 3.2, run
+#   FM_TEST_STOCK_BASH=1 /bin/bash tests/fm-supervision-host.test.sh
+# to run just the await_close cases. The host starts through env, so the first
+# bash on PATH must be 3.2 too: the first pass line names the version that
+# ran. The rest of this file is not a Bash 3.2 suite.
+if [ -n "${FM_TEST_STOCK_BASH:-}" ]; then
+  fm_test_run \
+    test_parked_host_starts_no_process_once_its_arm_reported \
+    test_arm_that_disappears_ends_the_wait \
+    test_attended_main_only_close_passes_straight_to_main
+  exit 0
+fi
+
 fm_test_run \
-  test_park_exit_probe_uses_half_second_child_sleeps \
+  test_parked_host_starts_no_process_once_its_arm_reported \
+  test_arm_that_disappears_ends_the_wait \
   test_attended_routine_wake_is_handled_on_the_engine_and_stays_off_main \
   test_host_stopped_right_after_a_handled_wake_exits_and_frees_the_queue \
   test_engine_in_another_time_zone_handles_its_granted_rows \
