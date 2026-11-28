@@ -93,7 +93,7 @@ test_guard_denies_hypothetical_future_tools() {
   local tool
   for tool in SubagentCreate SpawnWorker DelegateTask AgentPool WorkflowRun \
               ScheduleJob CronSchedule CreateWorktree DispatchAgent TaskHandoff \
-              RemoteExec BackgroundAgent; do
+              RemoteExec BackgroundAgent Swarm swarm; do
     expect_deny "future delegation tool" "$tool"
   done
   pass "the guard denies delegation-shaped tools that no deny list knows about yet"
