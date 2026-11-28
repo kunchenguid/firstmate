@@ -48,7 +48,8 @@
 # is ineligible, because a relaunch onto it needs an account choice.
 # bind refuses a pi, pi-signed, or opencode profile with no provider.
 # The relaunch passes --expect-spawn-gen with the spawn_gen consider read first.
-# A refusal for a newer incarnation (fm-control exit 3) records nothing.
+# A refusal for a newer incarnation or a busy control lock (fm-control exit 3)
+# records nothing.
 # No such candidate appends one needs-decision line and exits 2.
 # A successful switch appends midtask_switch= (from, to, reason, at) and a
 # switched status line, and prints relaunched: <harness> <model> <effort> on
