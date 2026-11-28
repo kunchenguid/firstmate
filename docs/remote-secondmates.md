@@ -46,6 +46,7 @@ Provisioning checks any available supported backend; launch checks the selected 
 `fm-on.sh` adds its own protections:
 
 - On every call, it also disables agent forwarding, forwarding setup, and configured `SendEnv` patterns.
+- It runs SSH with `BatchMode=yes`, so the alias must authenticate without a prompt (for example, with an unencrypted key or a key already loaded in `ssh-agent`), and its host key must already be trusted (for example, connect once with plain `ssh <alias>`).
 - It arms bounded SSH dead-peer detection, so a vanished host (a reboot, a dropped link) fails within a bounded window instead of hanging indefinitely.
 
 Its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
