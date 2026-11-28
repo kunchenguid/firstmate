@@ -363,6 +363,41 @@ test_uncovered_event_surfaces_on_first_drain_without_index() {
   pass "a fresh home with a status log and no index surfaces the backstop on its first drain"
 }
 
+test_legacy_endpoint_key_does_not_abort_index_rebuild() {
+  local dir state out body old
+  dir=$(make_case legacy-endpoint-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+
+  printf 'done: uncovered completion with no index\n' > "$state/fresh.status"
+  printf 'done: handled before cache interruption\n' > "$state/recovered.status"
+  old=$(( $(date +%s) - 20 ))
+  set_mtime "$old" "$state/recovered.status"
+  {
+    printf '%s\n' '{"seq":1,"epoch":1,"task":"default:w0:p2","wake":"","verdict":"captain","summary":"legacy endpoint-keyed outcome"}'
+    printf '%s\n' '{"seq":2,"epoch":'"$((old + 10))"',"task":"recovered","wake":"","verdict":"captain","summary":"handled outcome"}'
+  } > "$state/branch-outcomes.jsonl"
+  printf '2\n' > "$state/.branch-outcomes-cursor"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed with a legacy endpoint-shaped outcome key"
+  if grep -F 'STATUS OUTCOME BACKSTOP SKIPPED' "$out" >/dev/null; then
+    fail "a legacy endpoint-shaped key aborted the outcome-index rebuild: $(cat "$out")"
+  fi
+  body=$(backstop_body "$out")
+  case "$body" in *'fresh done: uncovered completion with no index'*) ;; *)
+    fail "missed-status recovery did not run past a legacy key: $body"
+    ;;
+  esac
+  case "$body" in *'recovered done:'*)
+    fail "a legacy key stopped the rebuild before a valid task's index: $body"
+    ;;
+  esac
+  [ -f "$state/.branch-outcome-index-ready" ] \
+    || fail "rebuild did not publish the outcome-index ready marker"
+  pass "a legacy endpoint-shaped outcome key is skipped, valid tasks stay indexed, and recovery still runs"
+}
+
 test_malformed_outcome_store_fails_closed_without_pi_advice() {
   local dir state out
   dir=$(make_case index-selfheal-store-fault)
@@ -525,6 +560,7 @@ test_receipt_commit_failure_repeats_the_already_presented_backstop
 test_rejected_decision_line_surfaces_once_through_backstop
 test_missing_index_self_heals_on_first_drain
 test_uncovered_event_surfaces_on_first_drain_without_index
+test_legacy_endpoint_key_does_not_abort_index_rebuild
 test_malformed_outcome_store_fails_closed_without_pi_advice
 test_held_lock_mode_rejects_an_unlocked_caller
 test_held_lock_mode_accepts_a_lock_owner_descendant
