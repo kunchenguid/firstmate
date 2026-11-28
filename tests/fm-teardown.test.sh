@@ -2243,6 +2243,102 @@ test_forced_secondmate_child_scout_nested_clone_returns_clean() {
   pass "a forced secondmate teardown returns a child scout copy with a nested clone clean"
 }
 
+# Return succeeds (via the clean-fd behavior); `destroy <slot> --yes` calls are
+# logged instead of actually removing anything, so a case can assert on the
+# exact invocation and control its exit code with FM_TEST_DESTROY_EXIT.
+add_treehouse_log_destroy() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ]; then
+  shift
+  wt=
+  for a in "\$@"; do
+    case "\$a" in
+      --force) ;;
+      *) wt=\$a ;;
+    esac
+  done
+  if [ -n "\$wt" ]; then
+    git -C "\$wt" clean -fdq || true
+  fi
+  exit 0
+fi
+if [ "\${1:-}" = destroy ]; then
+  shift
+  printf 'destroy %s\n' "\$*" >> "$case_dir/treehouse-destroy.log"
+  exit "\${FM_TEST_DESTROY_EXIT:-0}"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_returned_pool_slot_is_destroyed_when_opted_in() {
+  local case_dir wt rc
+  case_dir=$(make_case pool-slot-destroyed)
+  wt=$(move_case_to_pool_slot "$case_dir" 5)
+  write_meta "$case_dir" no-mistakes scout "$wt"
+  prepare_scout_teardown "$case_dir"
+  add_treehouse_log_destroy "$case_dir"
+  : > "$case_dir/config/reclaim-pool-slots"
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pool-slot-destroyed: a cleanly returned slot's teardown should succeed"
+  assert_present "$case_dir/treehouse-destroy.log" "pool-slot-destroyed: destroy was never invoked"
+  assert_grep "destroy $wt --yes" "$case_dir/treehouse-destroy.log" \
+    "pool-slot-destroyed: destroy did not target the returned slot"
+  assert_no_grep "include-" "$case_dir/treehouse-destroy.log" \
+    "pool-slot-destroyed: destroy must stay safe-by-default, never pass an --include-* override"
+  pass "config/reclaim-pool-slots opts a home into destroying a cleanly returned pool slot"
+}
+
+test_unmerged_pool_slot_is_kept_after_destroy_skip() {
+  local case_dir wt rc
+  case_dir=$(make_case pool-slot-kept)
+  wt=$(move_case_to_pool_slot "$case_dir" 6)
+  write_meta "$case_dir" no-mistakes scout "$wt"
+  prepare_scout_teardown "$case_dir"
+  add_treehouse_log_destroy "$case_dir"
+  : > "$case_dir/config/reclaim-pool-slots"
+
+  set +e
+  FM_HOME="$case_dir" FM_TEST_DESTROY_EXIT=1 run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pool-slot-kept: a destroy skip must not fail an otherwise-successful teardown"
+  assert_present "$wt" "pool-slot-kept: the kept slot's worktree should still exist"
+  assert_grep "destroy $wt --yes" "$case_dir/treehouse-destroy.log" \
+    "pool-slot-kept: destroy was never attempted"
+  assert_grep "slot not removed" "$case_dir/stderr" \
+    "pool-slot-kept: no warning was printed for the skipped destroy"
+  pass "an opted-in destroy that skips a dirty or unmerged slot only warns, never fails teardown"
+}
+
+test_pool_slot_is_kept_by_default_without_opt_in() {
+  local case_dir wt rc
+  case_dir=$(make_case pool-slot-keep-flag)
+  wt=$(move_case_to_pool_slot "$case_dir" 7)
+  write_meta "$case_dir" no-mistakes scout "$wt"
+  prepare_scout_teardown "$case_dir"
+  add_treehouse_log_destroy "$case_dir"
+
+  set +e
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "pool-slot-keep-flag: teardown should still succeed"
+  assert_absent "$case_dir/treehouse-destroy.log" \
+    "pool-slot-keep-flag: destroy ran without the config/reclaim-pool-slots opt-in"
+  pass "an unconfigured home never destroys a returned pool slot (opt-in required)"
+}
+
 # Return succeeds but leaves no readable worktree behind to verify.
 add_treehouse_that_removes_copy() {
   local case_dir=$1
@@ -6704,6 +6800,9 @@ test_ship_nested_clone_is_refused_and_bytes_stay
 test_dirty_return_warns_which_slot_was_lost
 test_dirty_return_warns_even_when_a_later_step_refuses
 test_forced_secondmate_child_scout_nested_clone_returns_clean
+test_returned_pool_slot_is_destroyed_when_opted_in
+test_unmerged_pool_slot_is_kept_after_destroy_skip
+test_pool_slot_is_kept_by_default_without_opt_in
 test_forced_secondmate_dirty_child_return_warns_and_completes
 test_secondmate_teardown_removes_its_pool_root_and_leaves_a_sibling
 test_return_that_removes_copy_warns_cannot_verify
