@@ -773,12 +773,16 @@ cmd_silent() {
 # The question cap is 128 so any task id fits, including the long legacy
 # `<origin>-decision-<key>` identities pre-collapse decks still carry; the
 # security property is the slug SHAPE, which is unchanged.
+# decode_json returns character strings, so the element label is decoded from
+# UTF-8 as well and every row is written back as UTF-8; printing those
+# characters raw emitted Latin-1 bytes, which corrupted accented answers.
 cmd_choice_rows() {
   local selection=$1 file=${2-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -MJSON::PP -e "$(lavish_result_parser)"'
+  perl -MJSON::PP -MEncode=decode -e "$(lavish_result_parser)"'
     use strict; use warnings;
+    binmode STDOUT, ":encoding(UTF-8)";
     my ($selection, $path) = @ARGV;
     my ($form, $want, $items, $malformed) = lavish_result($path, "prompts");
     defined $form or exit 1;
@@ -827,7 +831,7 @@ cmd_choice_rows() {
           || ($data->{close} ne "done" && $data->{close} ne "release");
         $mode = $data->{close};
       }
-      my $label = defined $f{text} ? $f{text} : "";
+      my $label = defined $f{text} ? decode("UTF-8", $f{text}) : "";
       s/[\x00-\x1f\x7f]/ /g for ($answer, $note, $label);
       $label = substr($label, 0, 512);
       if (defined $seen{$key}) { $choices[$seen{$key}] = undef }
