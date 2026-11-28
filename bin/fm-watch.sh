@@ -3158,6 +3158,11 @@ surface_nonterminal_stale() {  # <window> <hash> [dialog-name]
   fi
   if [ "$throttled" -ne 0 ]; then
     reason=$(stale_reason_naming_dialog "stale: $win" "$dialog")
+    # The task's own declared wait rides the alarm, so the inspection it asks
+    # for starts from evidence: a paused line naming its own background job is
+    # the common self-answering case, and an empty or stale declaration is
+    # exactly what makes the stale worth escalating.
+    [ -n "$last" ] && reason="$reason [$last]"
     fm_wake_append stale "$win" "$reason" || exit 1
     stale_wait_record "$key"
   fi
@@ -4658,6 +4663,7 @@ EOF
             triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $w"
           elif [ "$(cat "$sf" 2>/dev/null || true)" != "$h" ]; then
             stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
+            [ -n "$last" ] && stale_reason="$stale_reason [$last]"
             fm_wake_append stale "$w" "$stale_reason" || exit 1
             printf '%s' "$h" > "$sf"
             _wedge_cap_markers_clear "$key"
@@ -4703,6 +4709,7 @@ EOF
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
               stale_reason=$(stale_reason_naming_dialog "stale: $w" "$dialog")
+              [ -n "$last" ] && stale_reason="$stale_reason [$last]"
               fm_wake_append stale "$w" "$stale_reason" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
