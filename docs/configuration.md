@@ -865,6 +865,9 @@ The author must act only on an explicit signal: a `CHANGES_REQUESTED` review dec
 Only author-actionable states, conflicts, and failing checks print; the maintainer and approval states remain recorded without waking the owning task.
 Reads are driven by the GitHub notifications feed: each pass makes one conditional read of it, which GitHub answers with an uncounted 304 while nothing changed, and reads only the owned PRs with new notification activity, PRs not yet read, and PRs whose last read did not settle.
 Every owned PR is still read when the feed is unavailable or returns a full page of notifications newer than the saved position, and at least every 15 minutes as the fallback sweep, because some conditions, such as a base branch moving into conflict or a check from another app failing, raise no notification.
+A pass reads owned PRs in waves of four, in listed order, and gives each read the time left before the check timeout.
+A PR the timeout leaves unreached stays pending for the next pass.
+When a pass selects PRs and none of their reads completes, the monitor prints one line per cause for the PRs that newly fail: a read that did not finish in time, or one that returned no usable answer. A PR prints again only after one of its own reads completes and later fails again. A PR whose read failed is listed after the PRs not tried, so one stuck PR cannot hold the others back.
 GitLab merge requests are not monitored yet.
 Forgejo pull requests are not monitored.
 When no reported check is marked required, a failing reported check still counts, matching `bin/fm-pr-state.sh` for unprotected stacked bases.
