@@ -150,17 +150,21 @@ The current exact marker and the narrow bare-U+2063 `Supervisor escalate (` comp
 
 ## Calm working presentation
 
-Calm replaces Pi's stock working row with a small animated boat while Calm is on and one logical agent run is active.
+Calm replaces Pi's stock working row with a small animated working presentation while Calm is on.
+The default boat appears while one logical agent run is active; the optional spaceship selected by `config/calm-ship` is ambient.
+[`calm.md`](calm.md#spaceship-variant-configcalm-ship) owns the two presentations, when each is on screen, and how `config/calm-ship` selects one; the default boat's geometry, cadences, and colors are the ones recorded below.
 This path uses only public extension API and patches nothing: `ExtensionUIContext.setWorkingVisible(false)` hides the stock row, and `setWidget()` installs a temporary component factory above the editor.
 Pi's documented custom working-indicator frames are static and width-blind, so they cannot own responsive geometry; a widget component receives `render(width)` and can.
 
-Within Firstmate Calm, `.pi/extensions/fm-calm.ts` remains the sole owner of its presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
-Visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
-Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the boat, while settle, abort, and failure all reach the same cleanup.
+Within Firstmate Calm, `.pi/extensions/fm-calm.ts` remains the sole owner of its presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns the default boat's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
+`.pi/extensions/lib/fm-calm-working-spaceship.ts` owns the same painting and widget duties for the selectable saucer, over its own warp geometry rather than that shared core.
+The default boat's visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
+Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the default boat, while settle, abort, and failure all reach the same cleanup.
+The selected spaceship is installed for the session instead, and its settle only eases it back into the idle drift.
 Repeated `agent_start` events inside one run are idempotent, and both Calm extensions use the shared `calm-working-ship` widget key, so Pi disposes the previous component before installing a replacement under that key and when it clears extension widgets, while Firstmate Calm's disposal signal prevents its cleanup from clearing a standalone Calm widget that replaced its own widget.
-Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
+Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the working presentation leaves no residual blank row.
 
-The sprite is two rows when the usable width admits the complete hull: an asymmetric three-cell `◿│◣` sail centered over a five-cell `╲▁▁▁╱` hull that sits inside the water row rather than adding a third row.
+The boat's sprite is two rows when the usable width admits the complete hull: an asymmetric three-cell `◿│◣` sail centered over a five-cell `╲▁▁▁╱` hull that sits inside the water row rather than adding a third row.
 The sail is the same in both travel directions, and its one-cell quarter triangle keeps the left sail visibly smaller than the full right sail.
 The hull's three inner cells are zero-height water glyphs, so the swell reads as continuous beneath the boat instead of being interrupted by it.
 Direction reverses the moment the boat lands on an endpoint, so the endpoint frame itself already carries the new heading and the trough follows the next boat movement without a discontinuity.
@@ -235,7 +239,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `custom-entry` | `CustomEntryComponent` with a registered renderer | Legacy Calm presentation entries rebuild to zero children without a residual spacer and restore through ordinary expansion redraw when mounted; arbitrary extension entries remain an unsupported boundary. |
 | `compaction-summary` | `CompactionSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `branch-summary` | `BranchSummaryMessageComponent` | Unsupported boundary; remains visible. |
-| `working-status` | `WorkingStatusIndicator`, or the Calm working-ship widget while Calm is active | Always visible. Calm off leaves Pi's stock row untouched; Calm on hides that row for the duration of one logical agent run and renders the working ship instead. |
+| `working-status` | `WorkingStatusIndicator`, or the Calm working-presentation widget while Calm is active | Always visible. Calm off leaves Pi's stock row untouched; Calm on renders the selected working presentation instead of that row - the default boat for the duration of one logical agent run, or the ambient spaceship when `config/calm-ship` selects it. |
 | `command-status` | Interactive command result and status rows | Calm emits no enable notice, but generic Pi command rows remain an unsupported boundary. |
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |

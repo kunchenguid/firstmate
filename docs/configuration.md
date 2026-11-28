@@ -181,6 +181,15 @@ The Claude Code mod reloads it on every `session.start`, including same-process 
 It also loads the preference lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+### Working-presentation variant (config/calm-ship)
+
+The optional gitignored `config/calm-ship` file selects Calm's animated working-presentation variant, resolved from the same effective Firstmate home and `FM_CONFIG_OVERRIDE` rules as `config/calm`.
+Only the Pi Calm extension reads this file; the Claude Code Calm mod keeps its sailboat working row regardless of it.
+The file's contents are trimmed of surrounding whitespace, so `spaceship` with or without surrounding whitespace or newlines selects the spaceship; an absent, unreadable, or unrecognized value keeps the default boat.
+The extension reads this file at load and re-reads it on every `session_start`, so a mid-session change takes effect at the next session rather than mid-run.
+[`calm.md`](calm.md#spaceship-variant-configcalm-ship) owns what each presentation renders and how long it stays on screen.
+This file is local to each Firstmate home and is not part of secondmate inherited configuration.
+
 ## Pi bash timeout cap
 
 Pi and Pi-signed sessions loading [the primary extension](../.pi/extensions/fm-primary-turnend-guard.ts) can opt in by setting `FM_PI_BASH_TIMEOUT_MAX_MS` in their launch environment.

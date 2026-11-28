@@ -1491,10 +1491,12 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       ;;
     .claude/mods/firstmate-calm/*|.pi/extensions/lib/fm-calm-working-ship.ts|\
-    .pi/extensions/lib/fm-calm-working-ship-sprite.ts)
-      # The Claude Code Calm mod and the sprite core it shares with the Pi Calm
-      # extension: the portable Node checks, the Pi suites that draw the shared
-      # sprite, the Pi typecheck, and the Claude-dependent guards.
+    .pi/extensions/lib/fm-calm-working-ship-sprite.ts|\
+    .pi/extensions/lib/fm-calm-working-spaceship.ts)
+      # The Claude Code Calm mod, the sprite core it shares with the Pi Calm
+      # extension, and the Pi-only spaceship variant: the portable Node checks, the
+      # Pi suites that draw the shared sprite and the banner, the Pi typecheck, and
+      # the Claude-dependent guards.
       printf '%s\n' __script__:fm-calm-claude-mod.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
