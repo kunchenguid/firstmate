@@ -186,7 +186,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 
 ### Antigravity, verified and wired
 
-Antigravity CLI exposes multi-agent and task delegation tools, including `invoke_subagent` and `define_subagent`.
+Antigravity CLI exposes multi-agent and task delegation tools, including `invoke_subagent`, `define_subagent`, and `swarm`.
 In `.agents/hooks.json`, a PreToolUse hook matching `.*` invokes `bin/fm-subagent-pretool-check.sh --agy`.
 In primary and secondmate homes, delegation creation is denied with `{"decision":"deny","reason":"[subagent-dispatch] ..."}` while observation tools `manage_subagents` and `manage_task` remain permitted.
 Linked crewmate worktrees and foreign checkouts stand down cleanly.
