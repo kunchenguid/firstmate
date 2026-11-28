@@ -298,6 +298,50 @@ test_evidence_publication_failure_preserves_wake_for_redrain() {
   pass "AFK return re-drains published wakes until handling acknowledges"
 }
 
+test_failed_brief_write_keeps_catchup_gated() {
+  local dir out rc gate
+  dir="$TMP_ROOT/brief-write-failure"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  printf '1784074271\t7\tsignal\trecovery-task.status\tsignal: recover after brief failure\n' \
+    > "$dir/home/state/.fake-drain"
+  printf 'retained escalation\n' > "$dir/home/state/.subsuper-escalations"
+  : > "$dir/read-only-output"
+  # Fail an intermediate render write after the heading has been written.
+  # Later writes still work, so checking only the final printf misses this.
+  cat > "$dir/fail-write.sh" <<'SH'
+printf() {
+  if [ "${1:-}" = 'Supervisor health:\n' ]; then
+    bash -c 'printf "%s" "failed brief write"' >&3
+  else
+    builtin printf "$@"
+  fi
+}
+SH
+  set +e
+  out=$(BASH_ENV="$dir/fail-write.sh" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$dir/bin/fm-afk-return.sh" begin 3< "$dir/read-only-output" 2> "$dir/failed.err")
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "failed brief write should retain catch-up (rc=$rc): $out"
+  [ -z "$out" ] || fail "failed render published a partial brief: $out"
+  assert_contains "$(cat "$dir/failed.err")" 'return brief could not be rendered' "failed render lacked a diagnostic"
+  [ -s "$gate" ] || fail "failed render cleared the catch-up gate"
+  [ -s "$dir/home/state/.subsuper-escalations" ] || fail "failed render cleared delivery artifacts"
+  [ -s "$dir/home/state/.fake-drain" ] || fail "failed render consumed its durable wake"
+  [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "failed render acknowledged its wake"
+  set +e
+  run_return "$dir" guard >/dev/null
+  rc=$?
+  set -e
+  [ "$rc" -eq 4 ] || fail "failed render allowed ordinary work (rc=$rc)"
+  out=$(run_return "$dir" check) || fail "brief render retry failed: $out"
+  assert_contains "$out" 'Cost:' "retry did not publish the complete brief"
+  assert_contains "$out" 'catch-up wake: 1784074271' "retry lost recovery evidence"
+  [ ! -e "$gate" ] || fail "successful render retry left catch-up gated"
+  pass "an intermediate brief write failure publishes nothing and keeps catch-up gated until retry"
+}
+
 test_away_reentry_refuses_pending_return_gate() {
   local dir out rc
   dir="$TMP_ROOT/reentry"
@@ -1357,6 +1401,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings
 test_explicit_reclassification_requires_durable_reason
 test_captain_decision_does_not_masquerade_as_firstmate_blocker
 test_evidence_publication_failure_preserves_wake_for_redrain
+test_failed_brief_write_keeps_catchup_gated
 test_away_reentry_refuses_pending_return_gate
 test_return_is_mode_agnostic_for_quiet_mode
 test_check_retries_recorded_terminal_teardown
