@@ -89,6 +89,8 @@ The other owners read the file at every arm.
 A non-silent row an away turn records after the captain returned is also queued for main as a durable check wake.
 Silent outcomes remain in the store but are not queued or relayed as notes.
 An attended turn queues nothing: its captain rows reach main through the host's `branch-outcome` exit and the drain, and its routine rows stay in the store.
+`--task` may be omitted when the turn claims exactly one task: the report goes to that task and the `recorded seq` line names it.
+An unscoped turn or a turn that claims several tasks needs `--task`, one report per task.
 
 ### Leases and authority
 
