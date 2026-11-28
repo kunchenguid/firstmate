@@ -122,7 +122,17 @@ test_agy_claims_no_inherited_launcher_marker() {
   local fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-agent")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' "${FAKE_PS_COMM:-bash}"; exit 0 ;;
+  *"args="*) printf '%s\n' "${FAKE_PS_ARGS:-bash}"; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(AGENT=1 PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -433,6 +443,72 @@ test_agy_trust_refuses_out_of_scope_paths() {
   pass "fm-agy-trust.sh: refuses every out-of-scope path and never rewrites a broken store"
 }
 
+test_agy_trust_relaunch_copy_accepts_standalone_clone_and_is_trusted() {
+  local rec store clone out rc link
+  rec=$(make_agy_trust_case relaunch-clone)
+  read_agy_trust_case "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  mkdir -p "$(dirname "$store")"
+  printf '%s\n' '{"trustedWorkspaces":[]}' > "$store"
+  clone="$CASE_DIR/standalone-clone"
+  git clone -q "$PROJ_DIR" "$clone"
+
+  # Fresh worktree mode must keep refusing a standalone clone.
+  rc=0; out=$(run_agy_trust "$HOME_DIR" "$clone" "$PROJ_DIR") || rc=$?
+  [ "$rc" -ne 0 ] || fail "ordinary worktree mode must refuse a standalone clone"
+
+  # --is-trusted returns 1 before registration.
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$clone" >/dev/null 2>&1 \
+    && fail "--is-trusted reported an unregistered clone as trusted" || true
+
+  # --relaunch-copy registers the standalone clone, while still refusing the primary checkout.
+  out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$clone" "$PROJ_DIR" 2>&1) \
+    || fail "--relaunch-copy must trust a standalone clone: $out"
+  assert_agy_trusted "$store" "$clone" "--relaunch-copy did not record the standalone clone"
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$clone" >/dev/null 2>&1 \
+    || fail "--is-trusted did not confirm the newly registered standalone clone"
+
+  link="$CASE_DIR/clone-link"
+  ln -s "$clone" "$link"
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$link" >/dev/null 2>&1 \
+    && fail "resolved path alone must not trust a symlinked workspace" || true
+  node - "$store" "$link" <<'NODE'
+const fs = require("node:fs");
+fs.writeFileSync(process.argv[2], JSON.stringify({trustedWorkspaces: [process.argv[3]]}));
+NODE
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$link" >/dev/null 2>&1 \
+    || fail "logical path alone must trust a symlinked workspace"
+  HOME="$HOME_DIR" "$TRUST" --is-trusted "$clone" >/dev/null 2>&1 \
+    && fail "symlink trust must not imply trust in the resolved path" || true
+
+  rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$PROJ_DIR" "$PROJ_DIR" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--relaunch-copy must still refuse the project primary checkout"
+  assert_agy_not_trusted "$store" "$PROJ_DIR" "--relaunch-copy registered the project primary checkout"
+
+  # --relaunch-copy must refuse an unrelated git repository and any linked
+  # worktree of a different repository.
+  local other_repo other_wt
+  other_repo="$CASE_DIR/unrelated-repo"
+  other_wt="$CASE_DIR/unrelated-wt"
+  mkdir -p "$other_repo"
+  git -C "$other_repo" init -q -b main
+  git -C "$other_repo" config user.email t@example.com
+  git -C "$other_repo" config user.name t
+  printf 'other\n' > "$other_repo/other.txt"
+  git -C "$other_repo" add other.txt && git -C "$other_repo" commit -q -m "unrelated root"
+  git -C "$other_repo" worktree add -q -b other-branch "$other_wt"
+
+  rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$other_repo" "$PROJ_DIR" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--relaunch-copy must refuse an unrelated git repository"
+  assert_agy_not_trusted "$store" "$other_repo" "--relaunch-copy registered an unrelated git repository"
+
+  rc=0; out=$(HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$other_wt" "$PROJ_DIR" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "--relaunch-copy must refuse a linked worktree of a different repository"
+  assert_agy_not_trusted "$store" "$other_wt" "--relaunch-copy registered a linked worktree of a different repository"
+
+  pass "fm-agy-trust.sh: --relaunch-copy trusts standalone clones of the project, refuses primary checkouts and unrelated repos, and --is-trusted probes read-only"
+}
+
 # The fake tmux renders an agy-shaped screen that advances through
 # launched -> (trust dialog ->) busy as the real spawn drives it, so the launch
 # command, the pre-registration, the single Enter that answers a dialog, and
@@ -478,6 +554,8 @@ fake_path_trusted() {
     "$FM_FAKE_AGY_SETTINGS" "$FM_FAKE_PANE_PATH"
 }
 case "$*" in
+  *"#{pane_current_command}"*) printf 'bash\n'; exit 0 ;;
+  *"#{pane_tty}"*) exit 0 ;;
   *"#{pane_current_path}"*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
   *"#{cursor_y}"*) printf '1\n'; exit 0 ;;
 esac
@@ -606,6 +684,8 @@ BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
+  local args=("$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@")
+  if [ "${1:-}" = --relaunch ]; then args=("$id" --relaunch); fi
   HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
@@ -622,7 +702,7 @@ run_agy_spawn() {
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
     FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
-    "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
+    "$SPAWN" "${args[@]}" 2>&1
 }
 
 test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
@@ -764,6 +844,46 @@ test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog() {
   assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a successful agy spawn must never tear down the endpoint it just launched"
   pass "fm-spawn: agy pre-registers the worktree and launches straight into a busy turn"
+}
+
+test_agy_relaunch_trusts_standalone_clone_and_reuses_existing_trust() {
+  local id rec out rc clone store mode enters
+  for mode in register already-trusted; do
+    id="agy-relaunch-$mode-$$"
+    rec=$(make_agy_spawn_case "relaunch-$mode" "$id")
+    read_agy_spawn_record "$rec"
+    out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+    rc=$?
+    expect_code 0 "$rc" "initial spawn must succeed: $out"
+    clone="$CASE_DIR/clone"
+    git clone -q "$PROJ_DIR" "$clone" || fail "could not create standalone clone"
+    sed "s|^worktree=.*|worktree=$clone|" "$HOME_DIR/state/$id.meta" > "$CASE_DIR/meta"
+    mv "$CASE_DIR/meta" "$HOME_DIR/state/$id.meta"
+    store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+    if [ "$mode" = already-trusted ]; then
+      HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$clone" "$PROJ_DIR" >/dev/null || fail "could not seed trust"
+      chmod a-w "$store"
+      if [ -w "$store" ]; then
+        chmod u+w "$store"
+        echo "skip: read-only trust store cannot be enforced under current user (e.g. root)"
+        continue
+      fi
+      HOME="$HOME_DIR" "$TRUST" --relaunch-copy "$clone" "$PROJ_DIR" >/dev/null 2>&1 && fail "registration should fail on read-only store"
+    fi
+    : > "$CASE_DIR/tmux-calls.log"
+    : > "$CASE_DIR/agy.state"
+    rc=0
+    out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$clone" "$FAKEBIN_DIR" "$id" --relaunch) || rc=$?
+    [ "$mode" != already-trusted ] || chmod u+w "$store"
+    expect_code 0 "$rc" "standalone clone relaunch ($mode) must succeed: $out"
+    assert_agy_trusted "$store" "$clone" "relaunch did not retain clone trust"
+    assert_not_contains "$out" "could not pre-register" "trusted relaunch warned of missing trust"
+    [ "$(cat "$CASE_DIR/agy.state")" = busy ] || fail "relaunch did not reach busy ($mode)"
+    enters=$(count_enter_sends "$CASE_DIR/tmux-calls.log")
+    [ "$enters" -eq 1 ] || fail "relaunch ($mode) must submit once without answering a dialog, got $enters Enter sends"
+    assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" "successful relaunch closed its endpoint"
+  done
+  pass "fm-spawn: standalone relaunch registers trust or uses existing trust after registration fails"
 }
 
 test_agy_dialog_despite_registration_is_answered_once() {
@@ -936,7 +1056,9 @@ test_agy_zero_model_timeout_is_clamped_to_the_default_bound
 test_agy_trust_registers_the_logical_and_resolved_worktree_paths
 test_agy_trust_creates_a_missing_store
 test_agy_trust_refuses_out_of_scope_paths
+test_agy_trust_relaunch_copy_accepts_standalone_clone_and_is_trusted
 test_agy_fresh_worktree_is_pre_trusted_and_launches_without_a_dialog
+test_agy_relaunch_trusts_standalone_clone_and_reuses_existing_trust
 test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn

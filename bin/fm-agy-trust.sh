@@ -5,11 +5,17 @@
 # dialog and running its turn in agy's own scratch directory.
 #
 # Usage: fm-agy-trust.sh <worktree> <project>
+#        fm-agy-trust.sh --relaunch-copy <worktree> <project>
 #        fm-agy-trust.sh --secondmate-home <home> <id>
-#   <worktree>  the isolated task worktree this spawn launches into
+#        fm-agy-trust.sh --is-trusted <worktree>
+#   <worktree>  the isolated task worktree this spawn launches into (or, under
+#               --relaunch-copy, either a linked worktree of <project> or a
+#               standalone clone sharing a root commit with <project>)
 #   <project>   the primary checkout that worktree belongs to
 #   <home>      the seeded secondmate home a --secondmate launch starts in
 #   <id>        the secondmate's task id, matched against <home>/.fm-secondmate-home
+#   --is-trusted read-only probe: exits 0 iff the logical path of <worktree>
+#               is already recorded in trustedWorkspaces.
 # Prints one line naming what it registered; refuses loudly on anything else.
 #
 # WHY THIS EXISTS. agy 1.2.0 gates a folder it has never seen behind
@@ -44,11 +50,21 @@ unset CDPATH \
 
 usage() {
   echo "usage: fm-agy-trust.sh <worktree> <project>" >&2
+  echo "       fm-agy-trust.sh --relaunch-copy <worktree> <project>" >&2
   echo "       fm-agy-trust.sh --secondmate-home <home> <id>" >&2
+  echo "       fm-agy-trust.sh --is-trusted <worktree>" >&2
   exit 2
 }
 
 case "${1:-}" in
+  --relaunch-copy)
+    [ "$#" -eq 3 ] || usage
+    MODE=relaunch-copy
+    WT_ARG=$2
+    SUB_ID=
+    PROJ_ARG=$3
+    SCOPE_NOUN="relaunch copy"
+    ;;
   --secondmate-home)
     [ "$#" -eq 3 ] || usage
     MODE=secondmate-home
@@ -56,6 +72,14 @@ case "${1:-}" in
     SUB_ID=$3
     PROJ_ARG=
     SCOPE_NOUN="secondmate home"
+    ;;
+  --is-trusted)
+    [ "$#" -eq 2 ] || usage
+    MODE=is-trusted
+    WT_ARG=$2
+    SUB_ID=
+    PROJ_ARG=
+    SCOPE_NOUN="worktree"
     ;;
   '' | -h | --help)
     usage
@@ -86,7 +110,7 @@ WT_REAL=$(real_dir "$WT_ARG") || true
 [ -n "$WT_REAL" ] || refuse "$SCOPE_NOUN '$WT_ARG' is not an accessible directory"
 WT_LOGICAL=$(logical_dir "$WT_ARG") || true
 [ -n "$WT_LOGICAL" ] || WT_LOGICAL=$WT_REAL
-if [ "$MODE" = worktree ]; then
+if [ "$MODE" = worktree ] || [ "$MODE" = relaunch-copy ]; then
   PROJ_REAL=$(real_dir "$PROJ_ARG") || true
   [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 fi
@@ -94,10 +118,32 @@ fi
 [ -n "${HOME:-}" ] || refuse "HOME is not set, so agy's settings store cannot be located"
 HOME_REAL=$(real_dir "$HOME") || true
 [ -n "$HOME_REAL" ] || refuse "HOME '$HOME' is not an accessible directory"
+
+if [ "$MODE" = is-trusted ]; then
+  command -v node >/dev/null 2>&1 || exit 1
+  STORE_DIR_REAL=$(real_dir "$HOME_REAL/.gemini/antigravity-cli") || exit 1
+  STORE="$STORE_DIR_REAL/settings.json"
+  if [ -L "$STORE" ]; then
+    STORE=$(real_file "$STORE") || exit 1
+  fi
+  [ -f "$STORE" ] && [ -r "$STORE" ] || exit 1
+  node - "$STORE" "$WT_LOGICAL" <<'NODE'
+const fs = require("node:fs");
+const [store, wanted] = process.argv.slice(2);
+try {
+  const root = JSON.parse(fs.readFileSync(store, "utf8"));
+  process.exit(Array.isArray(root.trustedWorkspaces) && root.trustedWorkspaces.includes(wanted) ? 0 : 1);
+} catch (_) {
+  process.exit(1);
+}
+NODE
+  exit $?
+fi
+
 [ "$WT_REAL" != / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
 [ "$WT_REAL" != "$HOME_REAL" ] || refuse "'$WT_REAL' is the home directory, not a $SCOPE_NOUN"
 
-if [ "$MODE" = worktree ]; then
+if [ "$MODE" = worktree ] || [ "$MODE" = relaunch-copy ]; then
   WT_TOP=$(git -C "$WT_REAL" rev-parse --show-toplevel 2>/dev/null) || true
   [ -n "$WT_TOP" ] || refuse "'$WT_REAL' is not inside a git repository"
   WT_TOP_REAL=$(real_dir "$WT_TOP") || true
@@ -109,11 +155,36 @@ if [ "$MODE" = worktree ]; then
   [ -n "$WT_GIT_DIR" ] || refuse "'$WT_REAL' has an unresolvable git directory"
   WT_COMMON=$(common_dir_of "$WT_REAL") || true
   [ -n "$WT_COMMON" ] || refuse "'$WT_REAL' has no resolvable git common directory"
-  [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
-
   PROJ_COMMON=$(common_dir_of "$PROJ_REAL") || true
   [ -n "$PROJ_COMMON" ] || refuse "project '$PROJ_REAL' is not inside a git repository"
-  [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+
+  if [ "$MODE" = worktree ]; then
+    [ "$WT_GIT_DIR" != "$WT_COMMON" ] || refuse "'$WT_REAL' is a primary checkout, not an isolated worktree"
+    [ "$WT_COMMON" = "$PROJ_COMMON" ] || refuse "'$WT_REAL' is not a worktree of project '$PROJ_REAL'"
+  else
+    [ "$WT_REAL" != "$PROJ_REAL" ] || refuse "'$WT_REAL' is the project primary checkout, not an isolated relaunch copy"
+    [ "$WT_GIT_DIR" != "$PROJ_COMMON" ] || refuse "'$WT_REAL' shares the project primary checkout git directory"
+    if [ "$WT_COMMON" != "$PROJ_COMMON" ]; then
+      # Outside the project's common git dir, accept only a standalone clone
+      # (not a linked worktree of a different project) that proves shared git
+      # lineage with <project> via at least one common root commit.
+      [ "$WT_GIT_DIR" = "$WT_COMMON" ] || refuse "'$WT_REAL' is a linked worktree of a different repository, not a relaunch copy of '$PROJ_REAL'"
+      WT_ROOTS=$(git -C "$WT_REAL" rev-list --max-parents=0 HEAD 2>/dev/null) || WT_ROOTS=
+      PROJ_ROOTS=$(git -C "$PROJ_REAL" rev-list --max-parents=0 HEAD 2>/dev/null) || PROJ_ROOTS=
+      [ -n "$WT_ROOTS" ] && [ -n "$PROJ_ROOTS" ] || refuse "cannot verify shared git history between '$WT_REAL' and project '$PROJ_REAL'"
+      NL=$'\n'
+      SHARED_ROOT=0
+      while IFS= read -r wt_root; do
+        [ -n "$wt_root" ] || continue
+        case "$NL$PROJ_ROOTS$NL" in
+          *"$NL$wt_root$NL"*) SHARED_ROOT=1; break ;;
+        esac
+      done <<EOF
+$WT_ROOTS
+EOF
+      [ "$SHARED_ROOT" -eq 1 ] || refuse "'$WT_REAL' does not share git history with project '$PROJ_REAL'"
+    fi
+  fi
 else
   [ -n "$SUB_ID" ] || refuse "no secondmate id was supplied, so '$WT_REAL' cannot be matched against its seed marker"
   SUB_MARKER="$WT_REAL/.fm-secondmate-home"
