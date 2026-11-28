@@ -42,6 +42,7 @@ RECOVERY_MARKER="$STATE/.watcher-down"
 RECOVERY_MARKER_TOKEN=
 RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
+RECOVERY_ACK_RETIRED=false
 ACK_THROUGH=
 ACK_GENERATION=
 ACK_REMOVED=0
@@ -941,7 +942,7 @@ if [ -n "$ACK_THROUGH" ]; then
     fm_recovery_marker_ack "$RECOVERY_MARKER" "$ACK_GENERATION"
     RECOVERY_ACK_STATUS=$?
     case "$RECOVERY_ACK_STATUS" in
-      0) ;;
+      0) RECOVERY_ACK_RETIRED=true ;;
       3) RECOVERY_ACK_MOVED=true ;;
       *)
         echo "wake drain: recovery episode could not be retired safely; re-run bin/fm-wake-drain.sh and use the new WAKE_ACK_REQUIRED command" >&2
@@ -970,6 +971,13 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  # A successful acknowledgement - rows consumed or the episode retired -
+  # restarts the unacknowledged recovery re-wake count
+  # (docs/watcher-continuity.md "Unacknowledged re-wake bound").
+  if { [ "$ACK_REMOVED" -gt 0 ] || [ "$RECOVERY_ACK_RETIRED" = true ]; } \
+    && ! fm_recovery_resurface_reset "$RECOVERY_MARKER"; then
+    echo "wake drain: acknowledged, but the recovery re-wake count could not be reset; check that $STATE is writable" >&2
+  fi
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
     # Nothing at or below the cutoff was this actor's to consume, while a
     # presented row above it is still waiting: the caller acknowledged an

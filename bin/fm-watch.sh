@@ -3881,9 +3881,10 @@ watcher_cleanup() {
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
-    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
-      && [ "${FM_WATCH_DELIVERED_REASON:-}" = "check: rearm-resurface" ]; then
-      transition=release-lock-existing
+    if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ]; then
+      case "${FM_WATCH_DELIVERED_REASON:-}" in
+        'check: rearm-resurface'|'check: rearm-resurface paused - '*) transition=release-lock-existing ;;
+      esac
     fi
   fi
   # Quietly: a stop usually lands inside the waited event wait, and bash would
@@ -4051,6 +4052,26 @@ rerecord_device_shifted_pr_poll() {  # <id>
   return 0
 }
 
+# Deliver one recovery wake under the unacknowledged re-wake bound
+# (docs/watcher-continuity.md "Unacknowledged re-wake bound"). Past the bound
+# this returns without waking and the watcher keeps supervising; the marker and
+# the queued rows are left exactly as the arm check published them.
+RESURFACE_SILENCE_LOGGED=0
+resurface_wake() {
+  fm_recovery_resurface_admit "$WATCHER_DOWNTIME_MARKER"
+  case "$FM_RECOVERY_RESURFACE_VERDICT" in
+    wake) wake "check: rearm-resurface" ;;
+    notice)
+      wake "check: rearm-resurface paused - $FM_RECOVERY_RESURFACE_COUNT consecutive recovery wakes ended without a successful wake drain acknowledgement, so bin/fm-wake-drain.sh cannot run or its WAKE_ACK_REQUIRED command never ran (for example a full temp disk); recovery re-wakes stay paused until an acknowledgement succeeds, while the recovery episode and its queued wakes stay pending"
+      ;;
+  esac
+  WATCHER_RECOVERY_PENDING=0
+  if [ "$RESURFACE_SILENCE_LOGGED" -eq 0 ]; then
+    triage_log "recovery re-wake withheld: $FM_RECOVERY_RESURFACE_COUNT consecutive recovery wakes without a wake drain acknowledgement"
+    RESURFACE_SILENCE_LOGGED=1
+  fi
+}
+
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -4064,7 +4085,8 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
     [ "$FM_RECOVERY_MARKER_QUEUED" = 1 ] || return 0
-    wake "check: rearm-resurface"
+    resurface_wake
+    return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -4073,7 +4095,7 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  wake "check: rearm-resurface"
+  resurface_wake
 }
 
 while :; do
