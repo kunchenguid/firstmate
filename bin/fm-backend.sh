@@ -1534,8 +1534,10 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # Tern answers through the same process classifier from `tern process`, but
 # bin/fm-control-lib.sh's fm_control_backend_state_verified does not list it, so
 # no control-plane verb treats a Tern verdict as proof that an agent stopped.
-# hc classifies the one foreground process `hc get` reports through the same
-# classifier and is likewise absent from fm_control_backend_state_verified.
+# The hc adapter classifies the foreground process `hc get` reports, then the
+# local process table under the terminal's root program, so a harness anywhere
+# in the terminal reads `alive` and only a bare shell reads `dead`; a not-found
+# or finished terminal is `missing`.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }

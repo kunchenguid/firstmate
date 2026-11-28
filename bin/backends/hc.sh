@@ -297,6 +297,36 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   printf '%s\n' "$address"
 }
 
+# fm_backend_hc_core_id: the id of the core answering <session>
+# (`hc server status`'s core.id), or failure. The id is persisted with the
+# core's state (measured on hc 0.1.20: the core's core.json and its terminals
+# kept the same id through a machine restart), so the id a task was created on
+# names the core its terminal lives in. fm-spawn records it as hc_core=.
+fm_backend_hc_core_id() {  # <session>
+  local core
+  core=$(fm_backend_hc_cli "$1" server status --json 2>/dev/null | jq -r '.core.id // empty' 2>/dev/null)
+  [ -n "$core" ] || return 1
+  printf '%s' "$core"
+}
+
+# fm_backend_hc_endpoint_absence_recheck: re-read <target> for the control
+# plane's absence proof (bin/fm-control-lib.sh's
+# fm_control_endpoint_absence_verdict), printing the agent_state vocabulary. A
+# not_found or finished terminal means something only when it comes from the
+# core the task was created on: a different core can answer for the same
+# session name (another state or runtime directory, a wiped core), and its
+# not_found is about an id space the task never lived in. So the answer is
+# `unreadable` unless the core answering the recorded session is
+# <recorded-core-id>; a task recorded with no hc_core proves nothing.
+fm_backend_hc_endpoint_absence_recheck() {  # <target> <recorded-core-id>
+  local target=${1:-} recorded=${2:-} core
+  fm_backend_hc_parse_target "$target" || { printf 'unreadable'; return 0; }
+  [ -n "$recorded" ] || { printf 'unreadable'; return 0; }
+  core=$(fm_backend_hc_core_id "$FM_BACKEND_HC_SESSION") || { printf 'unreadable'; return 0; }
+  [ "$core" = "$recorded" ] || { printf 'unreadable'; return 0; }
+  fm_backend_hc_agent_state "$target"
+}
+
 # fm_backend_hc_capture: the screen plus <lines> of history, the same window
 # tmux's `capture-pane -S -<lines>` returns.
 fm_backend_hc_capture() {  # <target> <lines> [expected-label]
@@ -448,20 +478,39 @@ fm_backend_hc_kill() {  # <target> [unused] [expected-label]
 # bin/fm-backend.sh's fm_backend_agent_state). A structured not_found or a
 # finished terminal is `missing`: an hc terminal whose program ended can never
 # host the agent again, exactly like a closed tmux window. A live terminal is
-# classified from hc's foreground process through the shared classifier.
+# classified through the shared classifier from what `hc get` reports - its
+# foreground process, which is the terminal's foreground process group
+# (pid == tpgid), and its root program `.pid` - and from the local process
+# table under that root (fm_backend_hc_process_tree_state).
+#
+# `alive` needs one harness anywhere: the foreground, its process group (a
+# launcher or shell wrapper waiting on the harness), or any process descended
+# from the root. The descendant read is what keeps a harness that is not in the
+# foreground alive: an agent started from the login shell that has handed the
+# terminal to a nested shell or tool is the foreground's ancestor, and hc then
+# names only that child (measured on hc 0.1.20: an interactive zsh under a
+# harness reads as the foreground `zsh`).
+# `dead` needs the opposite proof from both sources: hc names a shell, the
+# local table places that pid inside the terminal's root tree, every member of
+# its process group is a shell, and nothing under the root is a harness. A
+# table that cannot be read, or that does not place hc's pid under hc's root
+# (a core on another machine, or a pid that changed hands), is `unreadable`.
 fm_backend_hc_agent_state() {  # <target>
-  local json rc fields state name argv0 args pid class
+  local json rc fields state name argv0 args pid root class
   fm_backend_hc_parse_target "${1:-}" || { printf 'unreadable'; return 0; }
   json=$(fm_backend_hc_get "$1")
   rc=$?
   if [ "$rc" -eq 3 ]; then printf 'missing'; return 0; fi
   [ "$rc" -eq 0 ] || { printf 'unreadable'; return 0; }
+  # A unit separator rather than a tab: tab is IFS whitespace, so an empty
+  # field would collapse and shift every field after it.
   fields=$(printf '%s' "$json" | jq -r '[.state // "", .foreground.name // "", .foreground.argv[0] // "",
-    ((.foreground.argv // []) | join(" ")), (.foreground.pid // "" | tostring)] | @tsv' 2>/dev/null) || {
+    ((.foreground.argv // []) | join(" ")), (.foreground.pid // "" | tostring), (.pid // "" | tostring)]
+    | join("\u001f")' 2>/dev/null) || {
     printf 'unreadable'
     return 0
   }
-  IFS=$'\t' read -r state name argv0 args pid <<EOF
+  IFS=$'\x1f' read -r state name argv0 args pid root <<EOF
 $fields
 EOF
   case "$state" in
@@ -472,29 +521,89 @@ EOF
   [ -n "$name$argv0" ] || { printf 'unreadable'; return 0; }
   class=$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")
   [ "$class" != agent ] || { printf 'alive'; return 0; }
-  # A launcher (a wrapper script, or a tool that runs the harness as a child)
-  # is what hc names as the foreground; the harness itself is another member
-  # of the same foreground process group, which is what tmux reads too. A shell
-  # wrapper waiting on the harness is such a launcher, so a shell is only dead
-  # once its group holds no harness.
-  fm_backend_hc_group_has_agent "$pid" && { printf 'alive'; return 0; }
-  [ "$class" != shell ] || { printf 'dead'; return 0; }
-  printf 'ambiguous'
+  case "$(fm_backend_hc_process_tree_state "$root" "$pid")" in
+    agent) printf 'alive' ;;
+    shells)
+      if [ "$class" = shell ]; then
+        printf 'dead'
+      else
+        printf 'ambiguous'
+      fi
+      ;;
+    other) printf 'ambiguous' ;;
+    *) printf 'unreadable' ;;
+  esac
 }
 
-# fm_backend_hc_group_has_agent: whether any other process in <pid>'s process
-# group classifies as a harness. Positive evidence only.
-fm_backend_hc_group_has_agent() {  # <pid>
-  local pid=$1 pgid member mpgid comm args
-  case "$pid" in ''|*[!0123456789]*) return 1 ;; esac
-  pgid=$(LC_ALL=C ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
-  [ -n "$pgid" ] || return 1
-  while read -r member mpgid comm; do
-    [ "$mpgid" = "$pgid" ] && [ "$member" != "$pid" ] || continue
-    args=$(LC_ALL=C ps -o args= -p "$member" 2>/dev/null) || continue
-    [ "$(fm_agent_process_classify "$comm" "${args%% *}" "$args" "$member")" = agent ] && return 0
+# fm_backend_hc_process_tree_state: what the local process table says about
+# the hc terminal whose root program is <root-pid> and whose foreground process
+# is <fg-pid>. Prints exactly one of:
+#   agent      - a member of the foreground's process group, or any process
+#                descended from the root, classifies as a harness.
+#   shells     - no harness, and every member of the foreground's process
+#                group is a shell.
+#   other      - no harness, but the foreground's group holds a non-shell, or
+#                a member that could not be read.
+#   unreadable - the table could not be read, or it does not hold both pids
+#                with <fg-pid> inside <root-pid>'s tree.
+# The table is read once (pid, parent, group, command name); each candidate's
+# command line is read on its own, the foreground group first and then the
+# root's tree breadth-first, stopping at the first harness.
+fm_backend_hc_process_tree_state() {  # <root-pid> <fg-pid>
+  local root=${1:-} fg=${2:-} table candidates role pid comm args class other=0
+  case "$root" in ''|*[!0123456789]*) printf 'unreadable'; return 0 ;; esac
+  case "$fg" in ''|*[!0123456789]*) printf 'unreadable'; return 0 ;; esac
+  table=$(LC_ALL=C ps -A -o pid=,ppid=,pgid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
+  candidates=$(printf '%s\n' "$table" | awk -v root="$root" -v fg="$fg" '
+    NF >= 4 {
+      p = $1; parent[p] = $2; group[p] = $3
+      c = $0
+      sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[0-9]+[ \t]+/, "", c)
+      comm[p] = c
+      kids[$2] = kids[$2] " " p
+      order[++n] = p
+    }
+    END {
+      if (!(root in parent) || !(fg in parent)) { print "unreadable"; exit }
+      p = fg
+      for (hops = 0; p != root; hops++) {
+        if (hops > 4096 || !(p in parent) || parent[p] == p) { print "unreadable"; exit }
+        p = parent[p]
+      }
+      for (i = 1; i <= n; i++) {
+        p = order[i]
+        if (group[p] == group[fg]) { print "g\t" p "\t" comm[p]; seen[p] = 1 }
+      }
+      queue[1] = root; head = 1; tail = 1
+      while (head <= tail) {
+        p = queue[head++]
+        if (p in walked) continue
+        walked[p] = 1
+        if (!(p in seen)) { print "d\t" p "\t" comm[p]; seen[p] = 1 }
+        m = split(kids[p], ks, " ")
+        for (j = 1; j <= m; j++) queue[++tail] = ks[j]
+      }
+    }')
+  case "$candidates" in unreadable|'') printf 'unreadable'; return 0 ;; esac
+  while IFS=$'\t' read -r role pid comm; do
+    [ -n "$pid" ] || continue
+    args=$(LC_ALL=C ps -o args= -p "$pid" 2>/dev/null) || args=
+    args=${args#"${args%%[![:space:]]*}"}
+    if [ -z "$args" ]; then
+      # Gone since the table was read. A descendant that ended holds no agent;
+      # a foreground member that cannot be read cannot be called a shell.
+      [ "$role" != g ] || other=1
+      continue
+    fi
+    class=$(fm_agent_process_classify "$comm" "${args%%[[:space:]]*}" "$args" "$pid")
+    [ "$class" != agent ] || { printf 'agent'; return 0; }
+    [ "$role" != g ] || [ "$class" = shell ] || other=1
   done <<EOF
-$(LC_ALL=C ps -A -o pid=,pgid=,comm= 2>/dev/null)
+$candidates
 EOF
-  return 1
+  if [ "$other" -eq 1 ]; then
+    printf 'other'
+  else
+    printf 'shells'
+  fi
 }

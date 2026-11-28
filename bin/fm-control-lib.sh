@@ -356,14 +356,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
-# rex, and t3code implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
+# rex, t3code, and hc implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
 # `unverified`, and tern's `tern process` classifier answers for display but is
 # not promoted to this list, so no reading of theirs can prove an agent stopped.
 # The control plane refuses a stop-proving verb there instead of reporting an
 # unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr|rex|t3code) return 0 ;;
+    tmux|herdr|rex|t3code|hc) return 0 ;;
   esac
   return 1
 }
@@ -391,7 +391,7 @@ fm_control_backend_exit_supported() {  # <backend>
 # fm_control_backend_state_verified first.
 fm_control_backend_relaunch_supported() {  # <backend>
   case "${1-}" in
-    tmux|herdr|rex) return 0 ;;
+    tmux|herdr|rex|hc) return 0 ;;
   esac
   return 1
 }
@@ -453,6 +453,14 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
+#   hc CAN prove it for a task that recorded its core. Every read pins the
+#     recorded session, but a session name alone does not name one core: a
+#     seat with other state or runtime directories reaches a different core
+#     under the same name, whose not_found says nothing about the task's
+#     terminal. The record names the core the task was created on (hc_core,
+#     its persisted core.id), and the recheck refuses unless the core
+#     answering the recorded session now is that one; a task recorded before
+#     hc_core existed stays unproven.
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -488,6 +496,14 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe Rex server the task was created on could not be reached from here, or its block could not be classified' ;;
+      esac
+      ;;
+    hc)
+      case "$(fm_backend_hc_endpoint_absence_recheck "$target" "$(fm_meta_get "$meta" hc_core)")" in
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        missing) printf 'gone\t' ;;
+        *) printf 'unproven\tthe hc core answering the recorded session is not the one the task record names (hc_core, absent from a task started before it was recorded), or its terminal could not be classified' ;;
       esac
       ;;
     t3code)

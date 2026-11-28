@@ -78,14 +78,34 @@ backend_detect=app-terminal
 window=<session>:<address>
 hc_session=<session>
 hc_terminal=<address>
+hc_core=<core id>
 ```
 
 `backend_detect=` is `app-terminal` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
+
+`hc_core` records the id `hc server status` reported for the session's core when the task was created; it is written only when that read succeeds.
+The id is persisted with the core's state, so it names the core the terminal lives in across core and machine restarts, and only a relaunch's absence proof reads it.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
 `FM_HC_SOCKET` is the deliberate socket pin tests and labs use instead of an inherited `HC_SOCKET`.
 An input, capture, or close that carries the task label refuses a terminal whose `firstmate.task` or `firstmate.home` label does not match, and a close without a label still refuses a terminal that lacks this home's labels.
+
+## Agent state and relaunch
+
+`hc get` reports the terminal's foreground process, which is its foreground process group leader, and its root program `pid`, which for a task is the login shell.
+The agent state the control plane trusts reads both, then the local process table under the root:
+
+- `alive` when the foreground, any member of its process group, or any process descended from the root is a harness.
+  This keeps an agent that started from the shell alive when hc names something else, such as a nested shell the agent opened or a wrapper waiting on it.
+- `dead` only when hc names a shell, the process table places it inside the terminal's root, every member of its process group is a shell, and nothing under the root is a harness: the bare shell a terminal shows once its agent has exited, including after a machine restart.
+- `ambiguous` when the foreground group runs something that is neither, and `unreadable` when the table cannot be read or does not place hc's pid under hc's root.
+- `missing` for a terminal hc reports not found or finished.
+
+`bin/fm-control.sh` `exit` and `relaunch` use this state ([`agent-control.md`](agent-control.md)).
+A relaunch adopts a `dead` terminal: the replacement starts in the same terminal and the task keeps its record.
+A terminal reading `missing` is re-created only when the core answering the recorded session is the one `hc_core` names, so the not-found came from the core the terminal lived in; the new terminal is created on the recorded session in the recorded worktree, and the record is rebound to its address.
+A task recorded without `hc_core` refuses that rebind, and a finished terminal stays in hc's hidden finished list.
 
 ## Operations
 
@@ -100,7 +120,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
-| Agent state | `hc get`, the foreground process and its process group, through the shared classifier |
+| Agent state | `hc get`'s foreground process and root program, then the local process table under that root, through the shared classifier; see "Agent state and relaunch" |
 | Close | `hc kill`, then `hc rm`, then `hc get` must answer not found |
 
 ## Limits
@@ -111,7 +131,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
   A started turn or a still-working wait confirms it natively; otherwise the adapter falls back to the composer screen, with Enter retries only for a proven pending composer.
   A blocked terminal (exit 9) returns `unknown` without typing or retrying and is never forced.
 - hc reports one foreground process per terminal.
-  When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
+  The adapter reads the rest of the terminal from the local `ps`, so agent state is only provable for terminals on the local machine; a pid the local table does not place under the terminal's root reads `unreadable`.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.
 - `--secondmate` spawns are refused.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
