@@ -145,6 +145,51 @@ assert_grep "recover me" "$home/state/inbox/$crash_id.note" \
   "the completed note carries the caller's body"
 pass "a crash between recording the request id and publishing the note reuses the original id"
 
+# --- crash window retry whose note write fails is not a replay ---------------
+
+# The replay above must succeed only when the reserved note now exists. A
+# failed write (here the staging file cannot be allocated) must not report the
+# note as saved or acknowledged, and a later healthy retry must still publish
+# and announce it exactly once.
+home=$(make_home crash-reserve-write-fail)
+mkdir -p "$home/state/inbox/.requests"
+lost_id="1700000000-writefail"
+printf '%s\n' "$lost_id" > "$home/state/inbox/.requests/lost-rid"
+no_staging="$TMP_ROOT/no-staging-bin"
+mkdir -p "$no_staging"
+real_mktemp=$(command -v mktemp)
+cat > "$no_staging/mktemp" <<SH
+#!/bin/sh
+case "\$*" in *.staging-*) exit 1 ;; esac
+exec "$real_mktemp" "\$@"
+SH
+chmod +x "$no_staging/mktemp"
+set +e
+lost_out=$(PATH="$no_staging:$PATH" run_inbox "$home" note --request-id lost-rid --json "answer text" </dev/null 2>&1)
+lost_code=$?
+set -e
+expect_code 1 "$lost_code" "a replay whose note write fails exits 1"
+assert_not_contains "$lost_out" '"outcome":"replay"' \
+  "a failed note write must not print a replay receipt"
+assert_contains "$lost_out" "could not be read or written" \
+  "the refusal names the failed note write"
+assert_absent "$home/state/inbox/$lost_id.note" "no pending note was published"
+assert_absent "$home/state/inbox/handled/$lost_id.note" "no handled note appeared"
+assert_equals "0" "$(count_wakes "$home")" "a failed note write appends no wake"
+assert_present "$home/state/inbox/.requests/lost-rid" \
+  "the reservation stays so a retry reuses the same note id"
+lost_retry=$(run_inbox "$home" note --request-id lost-rid --json "answer text" </dev/null) \
+  || fail "a healthy retry after a failed note write should publish the note"
+assert_equals "$lost_id" "$(printf '%s' "$lost_retry" | json_get id)" \
+  "the retry publishes the reserved note id"
+assert_equals "True" "$(printf '%s' "$lost_retry" | json_get announced)" \
+  "the retry announces the note"
+assert_equals "False" "$(printf '%s' "$lost_retry" | json_get acknowledged)" \
+  "the retry does not claim an acknowledgement"
+assert_present "$home/state/inbox/$lost_id.note" "the retry published the note"
+assert_equals "1" "$(count_wakes "$home")" "the retry appends exactly one wake"
+pass "a request-id replay succeeds only once the reserved note exists"
+
 # --- saved-but-unannounced, then repair without a second note ---------------
 
 home=$(make_home announce-fail)
