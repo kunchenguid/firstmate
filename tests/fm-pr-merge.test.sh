@@ -5766,3 +5766,255 @@ test_squash_summary_falls_back_to_repository_default
 test_squash_summary_caller_commit_text_wins
 test_squash_summary_leaves_gitlab_and_forgejo_untouched
 test_squash_summary_ignores_headings_inside_code_fences
+
+# --routed-review: a reviewing home merges a PR whose ship task another home
+# dispatched. It holds no task record for that PR; its own review report is the
+# gate. ROUTED_ID names that review record, never a task of this home.
+ROUTED_ID='repo-pr71-review'
+ROUTED_URL=https://github.com/example/repo/pull/71
+ROUTED_HEAD=7171717171717171717171717171717171717171
+
+# write_routed_report <case_dir> <id> <line>...: the home's own review report.
+write_routed_report() {
+  local case_dir=$1 id=$2
+  shift 2
+  mkdir -p "$case_dir/home/data/$id"
+  printf '%s\n' "$@" > "$case_dir/home/data/$id/report.md"
+}
+
+# Every record under state/ that names a task or review id, so a case can prove
+# a routed merge left the home's task bookkeeping exactly as it found it.
+routed_state_records() {  # <case_dir>
+  (cd "$1/state" && find . -maxdepth 1 -type f ! -name '.*' | LC_ALL=C sort)
+}
+
+test_routed_review_merges_without_a_task_record() {
+  local case_dir replies meta_before backlog_before records
+  case_dir=$(make_home_case routed-review-merges remote)
+  add_gh_mocks "$case_dir" "$ROUTED_HEAD"
+  : > "$case_dir/gh-axi.log"
+  write_routed_report "$case_dir" "$ROUTED_ID" \
+    "# Review: example/repo PR #71" "" "PR: $ROUTED_URL" \
+    "Reviewed head: $ROUTED_HEAD (4 files, +11 -6)." "" "## Verdict" "Clean."
+  meta_before=$(cat "$case_dir/state/task-x1.meta")
+  backlog_before=$(cat "$case_dir/home/data/backlog.md")
+  replies="$case_dir/state/parent-replies.status"
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$ROUTED_ID" "$ROUTED_URL" \
+    --routed-review --expected-head "$ROUTED_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "routed-review-merges: a reviewed routed PR should merge: $(cat "$case_dir/stderr")"
+
+  assert_logged_gh_merge "$case_dir" 71 example/repo --squash
+  assert_grep "verified: $ROUTED_URL is merged" "$case_dir/stdout" \
+    "routed-review-merges: the merge was not confirmed landed"
+  assert_grep "done [key=merged-$ROUTED_ID]: merged $ROUTED_ID $ROUTED_URL" \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
+    "routed-review-merges: the landed PR was not reported upward"
+  assert_no_grep 'child-pr-' "$replies" \
+    "routed-review-merges: a routed PR was announced as this home's own ready PR"
+  records=$(routed_state_records "$case_dir")
+  [ "$records" = "./parent-replies.status"$'\n'"./$ROUTED_ID.pr-poll-merge-notified"$'\n'"./task-x1.meta" ] \
+    || fail "routed-review-merges: a routed merge left task bookkeeping behind: $records"
+  [ "$(cat "$case_dir/state/task-x1.meta")" = "$meta_before" ] \
+    || fail "routed-review-merges: this home's own task record changed"
+  [ "$(cat "$case_dir/home/data/backlog.md")" = "$backlog_before" ] \
+    || fail "routed-review-merges: this home's backlog changed"
+  pass "fm-pr-merge --routed-review merges a PR this home reviewed without creating a task record, poll, or backlog item"
+}
+
+test_routed_review_gate_refuses_an_unreviewed_pr() {
+  local case_dir label rc want_rc want id
+  for label in no-report other-pr-number other-head own-task symlinked-report \
+    no-expected-head attended-override update-branch queue-base; do
+    case_dir=$(make_home_case "routed-review-refuses-$label" remote)
+    add_gh_mocks "$case_dir" "$ROUTED_HEAD"
+    : > "$case_dir/gh-axi.log"
+    id=$ROUTED_ID
+    want_rc=1
+    set -- --routed-review --expected-head "$ROUTED_HEAD"
+    write_routed_report "$case_dir" "$ROUTED_ID" "PR: $ROUTED_URL" "Reviewed head: $ROUTED_HEAD"
+    case "$label" in
+      no-report)
+        rm -f "$case_dir/home/data/$ROUTED_ID/report.md"
+        want='has no review report'
+        ;;
+      other-pr-number)
+        # pull/7 and pull/711 share text with pull/71 but are other PRs.
+        write_routed_report "$case_dir" "$ROUTED_ID" \
+          "PR: https://github.com/example/repo/pull/7" "Also ${ROUTED_URL}1" "Reviewed head: $ROUTED_HEAD"
+        want="does not name $ROUTED_URL"
+        ;;
+      other-head)
+        write_routed_report "$case_dir" "$ROUTED_ID" "PR: $ROUTED_URL" "Reviewed head: ${ROUTED_HEAD}ab"
+        want="does not record the commit $ROUTED_HEAD"
+        ;;
+      own-task)
+        id=task-x1
+        write_routed_report "$case_dir" task-x1 "PR: $ROUTED_URL" "Reviewed head: $ROUTED_HEAD"
+        want="task-x1 is one of this home's own tasks"
+        ;;
+      symlinked-report)
+        mv "$case_dir/home/data/$ROUTED_ID/report.md" "$case_dir/elsewhere.md"
+        ln -s "$case_dir/elsewhere.md" "$case_dir/home/data/$ROUTED_ID/report.md"
+        want='has no review report'
+        ;;
+      no-expected-head)
+        set -- --routed-review
+        want_rc=2
+        want='--routed-review requires --expected-head'
+        ;;
+      attended-override)
+        set -- --routed-review --expected-head "$ROUTED_HEAD" --attended-override -- --auto
+        want_rc=2
+        want='--attended-override does not apply to --routed-review'
+        ;;
+      update-branch)
+        set -- --routed-review --expected-head "$ROUTED_HEAD" --update-branch
+        want_rc=2
+        want='--update-branch does not apply to --routed-review'
+        ;;
+      queue-base)
+        printf 'merge_method=SQUASH\n' > "$case_dir/github-rules"
+        want_rc=2
+        want='refused for --routed-review because the base branch'
+        ;;
+    esac
+    set +e
+    FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$id" "$ROUTED_URL" "$@" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    expect_code "$want_rc" "$rc" "routed-review-refuses-$label: fm-pr-merge should refuse"
+    assert_grep "$want" "$case_dir/stderr" \
+      "routed-review-refuses-$label: the refusal did not name its reason: $(cat "$case_dir/stderr")"
+    assert_no_regex '^pr merge ' "$case_dir/gh.log" \
+      "routed-review-refuses-$label: the forge merge was invoked"
+    assert_absent "$case_dir/state/parent-replies.status" \
+      "routed-review-refuses-$label: a refused merge was reported upward"
+    assert_absent "$case_dir/state/$ROUTED_ID.meta" \
+      "routed-review-refuses-$label: a task record was created"
+  done
+  pass "fm-pr-merge --routed-review refuses a PR or commit this home's review report does not record, an id that is its own task, a merge-queue base, and options that outlive the run"
+}
+
+test_routed_review_binds_the_merge_to_the_reviewed_head() {
+  local case_dir rc pushed=9999999999999999999999999999999999999999
+  case_dir=$(make_home_case routed-review-moved-head remote)
+  add_gh_mocks "$case_dir" "$pushed"
+  : > "$case_dir/gh-axi.log"
+  write_routed_report "$case_dir" "$ROUTED_ID" "PR: $ROUTED_URL" "Reviewed head: $ROUTED_HEAD"
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$ROUTED_ID" "$ROUTED_URL" \
+    --routed-review --expected-head "$ROUTED_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "routed-review-moved-head: a head pushed after the review should refuse"
+  assert_grep "not the expected head $ROUTED_HEAD" "$case_dir/stderr" \
+    "routed-review-moved-head: the refusal did not name the moved head"
+  assert_no_regex '^pr merge ' "$case_dir/gh.log" \
+    "routed-review-moved-head: an unreviewed head reached the forge merge"
+  pass "fm-pr-merge --routed-review refuses a PR whose head moved past the reviewed commit"
+}
+
+test_routed_review_accepts_a_live_scout_record() {
+  local case_dir meta_before records_before
+  case_dir=$(make_home_case routed-review-scout remote)
+  add_gh_mocks "$case_dir" "$ROUTED_HEAD"
+  : > "$case_dir/gh-axi.log"
+  fm_write_meta "$case_dir/state/$ROUTED_ID.meta" \
+    "window=fm-$ROUTED_ID" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=scout"
+  write_routed_report "$case_dir" "$ROUTED_ID" "PR: $ROUTED_URL" "Reviewed head: $ROUTED_HEAD"
+  meta_before=$(cat "$case_dir/state/$ROUTED_ID.meta")
+
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$ROUTED_ID" "$ROUTED_URL" \
+    --routed-review --expected-head "$ROUTED_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "routed-review-scout: a review held by a live scout record should merge: $(cat "$case_dir/stderr")"
+  assert_grep "verified: $ROUTED_URL is merged" "$case_dir/stdout" \
+    "routed-review-scout: the merge was not confirmed landed"
+  [ "$(cat "$case_dir/state/$ROUTED_ID.meta")" = "$meta_before" ] \
+    || fail "routed-review-scout: the scout record was rewritten"
+  assert_absent "$case_dir/state/$ROUTED_ID.check.sh" "routed-review-scout: a merge poll was armed on a scout"
+
+  case_dir=$(make_home_case routed-review-scout-ordinary remote)
+  add_gh_mocks "$case_dir" "$ROUTED_HEAD"
+  : > "$case_dir/gh-axi.log"
+  fm_write_meta "$case_dir/state/$ROUTED_ID.meta" \
+    "window=fm-$ROUTED_ID" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project" \
+    "kind=scout"
+  meta_before=$(cat "$case_dir/state/$ROUTED_ID.meta")
+  if FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$ROUTED_ID" "$ROUTED_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+    fail "routed-review-scout-ordinary: the ordinary path merged on a scout record"
+  fi
+  assert_grep 'is a scout, not a delivery lane' "$case_dir/stderr" \
+    "routed-review-scout-ordinary: the refusal did not name the record's kind: $(cat "$case_dir/stderr")"
+  [ "$(cat "$case_dir/state/$ROUTED_ID.meta")" = "$meta_before" ] \
+    || fail "routed-review-scout-ordinary: the ordinary path wrote to a scout record"
+  assert_absent "$case_dir/state/$ROUTED_ID.check.sh" \
+    "routed-review-scout-ordinary: a merge poll was armed on a scout"
+  assert_no_regex '^pr merge ' "$case_dir/gh.log" \
+    "routed-review-scout-ordinary: the forge merge was invoked"
+  pass "fm-pr-merge --routed-review accepts a live scout record untouched, and the ordinary path refuses one"
+}
+
+test_routed_review_gitlab_merges_only_immediately() {
+  local case_dir rc merge_line id=project-mr7-review
+  case_dir=$(make_gitlab_case routed-review-gitlab)
+  mkdir -p "$case_dir/home"
+  write_routed_report "$case_dir" "$id" "MR: $MR_URL" "Reviewed head: $MR_HEAD"
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$id" "$MR_URL" \
+    --routed-review --expected-head "$MR_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "routed-review-gitlab: a reviewed routed merge request should merge: $(cat "$case_dir/stderr")"
+  merge_line=$(glab_merge_line "$case_dir/glab.log")
+  [ "$merge_line" = "GITLAB_HOST=$MR_HOST mr merge 7 -R $MR_PROJECT_URL --sha $MR_HEAD --yes --auto-merge=false" ] \
+    || fail "routed-review-gitlab: the merge was not immediate and head-bound: '$merge_line'"
+  assert_absent "$case_dir/state/$id.check.sh" "routed-review-gitlab: a merge poll was armed"
+  assert_absent "$case_dir/state/$id.meta" "routed-review-gitlab: a task record was created"
+
+  case_dir=$(make_gitlab_case routed-review-gitlab-async merge_when_pipeline_succeeds=true)
+  mkdir -p "$case_dir/home"
+  write_routed_report "$case_dir" "$id" "MR: $MR_URL" "Reviewed head: $MR_HEAD"
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$id" "$MR_URL" \
+    --routed-review --expected-head "$MR_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "routed-review-gitlab-async: configured auto-merge should refuse"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "routed-review-gitlab-async: the forge merge was invoked"
+
+  case_dir=$(make_gitlab_case routed-review-gitlab-unconfirmed)
+  mkdir -p "$case_dir/home"
+  : > "$case_dir/glab-stays-open"
+  write_routed_report "$case_dir" "$id" "MR: $MR_URL" "Reviewed head: $MR_HEAD"
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" "$id" "$MR_URL" \
+    --routed-review --expected-head "$MR_HEAD" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "routed-review-gitlab-unconfirmed: an unproved merge should fail the run"
+  assert_grep 'a routed review has no merge poll in this home' "$case_dir/stderr" \
+    "routed-review-gitlab-unconfirmed: the unproved merge was not reported"
+  assert_no_grep 'the merge poll remains armed' "$case_dir/stderr" \
+    "routed-review-gitlab-unconfirmed: a poll that does not exist was reported armed"
+  assert_absent "$case_dir/state/$id.pr-poll-merge-notified" \
+    "routed-review-gitlab-unconfirmed: an unproved merge was recorded as landed"
+  pass "fm-pr-merge --routed-review merges a GitLab merge request only immediately and fails an unproved one"
+}
+
+test_routed_review_merges_without_a_task_record
+test_routed_review_gate_refuses_an_unreviewed_pr
+test_routed_review_binds_the_merge_to_the_reviewed_head
+test_routed_review_accepts_a_live_scout_record
+test_routed_review_gitlab_merges_only_immediately

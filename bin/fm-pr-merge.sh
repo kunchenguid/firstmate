@@ -17,6 +17,9 @@
 #     [--expected-head <full-sha>]
 #     [--allow-red <check>] [--allow-missing <check>] [--allow-no-pipeline]
 #     [-- <forge merge flags>]
+#   fm-pr-merge.sh <review-id> <pr-url> --routed-review --expected-head <full-sha>
+#     [--allow-red <check>] [--allow-missing <check>] [--allow-no-pipeline]
+#     [-- <forge merge flags>]
 #   fm-pr-merge.sh -h | --help
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
@@ -221,7 +224,39 @@
 # explicit captain instruction and never skips the live green check, the
 # away-record read, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--update-branch] [--expected-head <full-sha>] [--allow-red <check-name>] [--allow-missing <check-name>] [--allow-no-pipeline] [-- <extra forge merge args>]
+# Routed review (--routed-review): the one supported way a home merges a pull
+# request whose ship task another home dispatched, for a reviewing home such as
+# a review-and-merge secondmate. That home has no task record for the PR, and
+# none is created: the first argument names this home's own review record, the
+# regular file data/<review-id>/report.md, and that report is the gate. It must
+# name the canonical PR URL and the full --expected-head commit, each as a
+# whole token, so the home merges only a PR it reviewed, at the commit it
+# reviewed; a later push to the PR needs a new review that records the new
+# head. The flag is refused when state/<review-id>.meta is a record of any kind
+# but scout, because that id is one of this home's own delivery tasks and
+# merges the ordinary way. A scout record is accepted and left untouched: a
+# scout delivers exactly that report and never owns a pull request, so a
+# review this home ran as a scout task merges here while the task is live.
+# Every merge gate above still applies unchanged: the role partition, the
+# away-posture record and its lock, a captain hold on a backlog item of that
+# id, the live pre-merge conditions, and the head match. What differs is only
+# the bookkeeping a task record would carry. Nothing is written under the
+# task-record namespace, so no pr= is recorded, no merge poll is armed, no
+# merge authority is persisted, and this home gains no backlog item: its
+# fleet views, capacity, heartbeat review, and cleanup never see a routed PR
+# as work under way here. The dispatching home keeps its own task record and
+# poll for the PR, so its lifecycle completes there when the merge lands. The
+# durable trace in the reviewing home is the review report plus the confirmed
+# merge's outcome, published as for any merge under the review id
+# (bin/fm-merge-outcome-lib.sh), whose merge-notification marker is the one
+# state file a routed merge leaves.
+# With no poll to follow up, a routed merge must be proved landed in this run:
+# --attended-override and --update-branch are refused, a GitHub base branch
+# whose rules do not prove it has no merge queue is refused before anything is
+# handed to the forge, a GitLab merge request
+# with auto-merge requested or configured is refused and merges with
+# --auto-merge=false, and an accepted request that reads back queued or
+# unconfirmed exits nonzero naming that nothing here will watch it.
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -301,6 +336,7 @@ shift 2
 ATTENDED_OVERRIDE=false
 UPDATE_BRANCH=false
 ALLOW_NO_PIPELINE=false
+ROUTED_REVIEW=false
 ALLOW_RED=()
 ALLOW_MISSING=()
 EXPECTED_HEAD=
@@ -320,6 +356,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --attended-override=*)
       echo "error: --attended-override takes no value" >&2
+      exit 2
+      ;;
+    --routed-review)
+      ROUTED_REVIEW=true
+      shift
+      ;;
+    --routed-review=*)
+      echo "error: --routed-review takes no value" >&2
       exit 2
       ;;
     --allow-red)
@@ -379,6 +423,23 @@ fi
 if [ -n "$EXPECTED_HEAD" ] && ! fm_pr_head_valid "$EXPECTED_HEAD"; then
   echo "error: --expected-head requires a full lowercase commit sha" >&2
   exit 2
+fi
+# A routed review has no task record and so no merge poll: every option that
+# can leave a merge to land after this run, or move the head off the reviewed
+# commit, is refused here rather than accepted with nothing to follow it up.
+if [ "$ROUTED_REVIEW" = true ]; then
+  if [ -z "$EXPECTED_HEAD" ]; then
+    echo "error: --routed-review requires --expected-head <full-sha>, the commit this home's review report records" >&2
+    exit 2
+  fi
+  if [ "$ATTENDED_OVERRIDE" = true ]; then
+    echo "error: --attended-override does not apply to --routed-review; an auto-merge, protection bypass, or branch deletion belongs to the home that dispatched the task" >&2
+    exit 2
+  fi
+  if [ "$UPDATE_BRANCH" = true ]; then
+    echo "error: --update-branch does not apply to --routed-review; an updated source branch is a new head that needs a new review" >&2
+    exit 2
+  fi
 fi
 # --allow-red names one check run to waive, which only GitHub's per-check
 # reading can match. GitLab and Forgejo each collapse their checks into a
@@ -652,15 +713,70 @@ META="$STATE/$ID.meta"
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
 
-if [ ! -f "$META" ] || [ -L "$META" ]; then
-  echo "error: task metadata is unavailable" >&2
-  exit 1
+# 0 when <token> appears in <report> as a whole token: not directly preceded
+# or followed by a letter or digit, so pull/2 never matches pull/27 and a
+# commit never matches inside a longer hex run.
+routed_report_names() {  # <report> <token>
+  FM_ROUTED_TOKEN=$2 LC_ALL=C awk '
+    BEGIN { token = ENVIRON["FM_ROUTED_TOKEN"]; n = length(token) }
+    {
+      rest = $0
+      while ((i = index(rest, token)) > 0) {
+        before = (i > 1) ? substr(rest, i - 1, 1) : ""
+        after = substr(rest, i + n, 1)
+        if (before !~ /[A-Za-z0-9]/ && after !~ /[A-Za-z0-9]/) { found = 1; exit }
+        rest = substr(rest, i + 1)
+      }
+    }
+    END { exit found ? 0 : 1 }' "$1" 2>/dev/null
+}
+
+# The --routed-review gate (the header's "Routed review" paragraph owns the
+# contract). Run before the control lock and again under it.
+require_routed_review_record() {
+  local data report kind
+  data="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+  report="$data/$ID/report.md"
+  if [ -e "$META" ] || [ -L "$META" ]; then
+    kind=
+    if [ -f "$META" ] && [ ! -L "$META" ]; then
+      kind=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
+    fi
+  else
+    kind=scout
+  fi
+  if [ "$kind" != scout ]; then
+    echo "error: $ID is one of this home's own tasks, not a routed review; merge it without --routed-review" >&2
+    return 1
+  fi
+  if [ -L "$data/$ID" ] || [ -L "$report" ] || [ ! -f "$report" ]; then
+    echo "error: PR merge refused - routed review $ID has no review report at $report; this home merges a routed PR only after its own review recorded it there" >&2
+    return 1
+  fi
+  if ! routed_report_names "$report" "$URL"; then
+    echo "error: PR merge refused - review report $report does not name $URL; this home merges only a routed PR its own review covers" >&2
+    return 1
+  fi
+  if ! routed_report_names "$report" "$EXPECTED_HEAD"; then
+    echo "error: PR merge refused - review report $report does not record the commit $EXPECTED_HEAD; a head the review did not cover needs a new review" >&2
+    return 1
+  fi
+}
+
+MERGE_EXPECTED_SPAWN_GEN=
+if [ "$ROUTED_REVIEW" = true ]; then
+  require_routed_review_record || exit 1
+else
+  if [ ! -f "$META" ] || [ -L "$META" ]; then
+    echo "error: task metadata is unavailable" >&2
+    exit 1
+  fi
+  if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
+    echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  fi
+  MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 fi
-if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
-  echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  exit 1
-fi
-MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=
@@ -672,13 +788,17 @@ merge_control_cleanup() {
 trap merge_control_cleanup EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
 fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
-if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
-  echo "error: task $ID changed while waiting to merge; refusing: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  exit 1
-fi
-if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
-  echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
-  exit 1
+if [ "$ROUTED_REVIEW" = true ]; then
+  require_routed_review_record || exit 1
+else
+  if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
+    echo "error: task $ID changed while waiting to merge; refusing: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  fi
+  if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
+    echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
+    exit 1
+  fi
 fi
 
 # Reading the merge request state needs both tools. Report them together and
@@ -731,7 +851,7 @@ fi
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; then
+if [ "$ROUTED_REVIEW" != true ] && { [ "$PROVIDER" = gitlab ] || [ "$PROVIDER" = forgejo ]; }; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
 
@@ -1633,6 +1753,9 @@ require_current_away_authority() {
 
 persist_accepted_merge_authority() {
   local status=0
+  # A routed review has no task record and no poll to consume the authority;
+  # the outcome report below receives it directly.
+  [ "$ROUTED_REVIEW" != true ] || return 0
   MERGE_META_LOCK=$(fm_meta_lock_path "$META") || return 1
   fm_lock_acquire_wait "$MERGE_META_LOCK" || return 1
   fm_merge_authority_persist "$STATE" "$ID" "$META" \
@@ -1648,9 +1771,10 @@ persist_accepted_merge_authority() {
   return 1
 }
 
-# While away, a merge proceeds only when the base branch's rules prove no
-# merge queue, because a queued merge can land after its away authority
-# lapses with the record's archive. A repository whose
+# While away, and for a routed review, a merge proceeds only when the base
+# branch's rules prove no merge queue: a queued merge can land after its away
+# authority lapses with the record's archive, and a routed review has no poll
+# in this home to watch one. A repository whose
 # plan does not expose branch rules at all (GitHub's "Upgrade to GitHub Pro or
 # make this repository public" 403) proves that on its own, since such a
 # repository cannot have a merge_queue rule either; see
@@ -1659,14 +1783,20 @@ persist_accepted_merge_authority() {
 # 404, or an unrelated 403) stays unreadable and refuses the merge. The merge
 # stays synchronous (--auto is refused earlier) and every other gate still
 # applies.
-refuse_github_queue_while_away() {
-  [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
+refuse_github_unprovable_immediate_merge() {
+  [ "$FM_PR_AWAY_POSTURE" = true ] || [ "$ROUTED_REVIEW" = true ] || return 0
   # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
   # oversight: a queue rule or PR base change after this preflight can still
-  # enqueue the merge, which can land after its away authority lapses.
+  # enqueue the merge, which can land after its away authority lapses or with
+  # no poll in this home watching it.
   github_read_queue_method
   [ "$FM_PR_GITHUB_QUEUE_STATUS" = none ] && return 0
-  echo "error: GitHub merge refused while away because the base branch's merge-queue state does not prove an immediate merge; nothing was handed to the forge" >&2
+  if [ "$FM_PR_AWAY_POSTURE" = true ]; then
+    echo "error: GitHub merge refused while away because the base branch's merge-queue state does not prove an immediate merge; nothing was handed to the forge" >&2
+  else
+    printf 'error: GitHub merge refused for --routed-review because the base branch'"'"'s merge-queue state does not prove an immediate merge and nothing in this home would watch a queued one; nothing was handed to the forge - merge %s from the home that dispatched the task\n' \
+      "$URL" >&2
+  fi
   return 2
 }
 
@@ -1741,7 +1871,10 @@ github_report_queue_rules() {
         SQUASH) queue_method=squash ;;
         REBASE) queue_method=rebase ;;
       esac
-      if github_merge_command_succeeded \
+      if [ "$ROUTED_REVIEW" = true ]; then
+        printf 'error: base branch %s requires the merge queue, which --routed-review cannot use because nothing in this home would watch the queued merge; merge %s from the home that dispatched the task\n' \
+          "$FM_PR_GITHUB_BASE" "$URL" >&2
+      elif github_merge_command_succeeded \
         && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ] \
         && github_caller_method_is "$queue_method"; then
         printf 'error: this run refuses even though the request for %s was accepted with the exact flags base branch %s requires (--auto --%s): the pull request has still not entered the merge queue, so no landed or queued outcome is proven; re-check the pull request'"'"'s merge queue state before retrying\n' \
@@ -1796,19 +1929,25 @@ github_report_unmerged_outcome() {
   github_report_queue_rules
 }
 
+# A routed review arms no poll, so its caller reports the unconfirmed state
+# through routed_refuse_unproved instead of this line.
+gitlab_report_unconfirmed() {
+  [ "$ROUTED_REVIEW" != true ] || return 0
+  printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
+    "$URL" >&2
+}
+
 gitlab_confirm_merged() {
   local json state
   if ! json=$(GITLAB_HOST="$FM_PR_HOST" glab mr view "$PR_NUMBER" \
     -R "$PROJECT_URL" -F json 2>/dev/null) || [ -z "$json" ]; then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
+    gitlab_report_unconfirmed
     return 2
   fi
   if ! state=$(printf '%s' "$json" | jq -r \
     'if type == "object" and (.state | type == "string") then .state else error("invalid state") end' \
     2>/dev/null); then
-    printf 'actionable: GitLab accepted the merge request for %s but its landed state could not be confirmed; the merge poll remains armed\n' \
-      "$URL" >&2
+    gitlab_report_unconfirmed
     return 2
   fi
   [ "$state" = merged ]
@@ -1840,9 +1979,20 @@ forgejo_confirm_merged() {
 away_status=0
 require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
-require_recorded_pr_identity || exit 1
-record_pr_metadata || exit 1
+if [ "$ROUTED_REVIEW" != true ]; then
+  require_recorded_pr_identity || exit 1
+  record_pr_metadata || exit 1
+fi
 require_released_captain_hold || exit 1
+
+# No poll follows a routed review's merge, so an accepted request this run
+# cannot prove landed is reported as a failure of the run, never as a wait.
+routed_refuse_unproved() {  # <what was read back>
+  [ "$ROUTED_REVIEW" = true ] || return 0
+  printf 'actionable: the forge accepted the merge request for %s but %s, and a routed review has no merge poll in this home; confirm its state on the forge or from the home that dispatched it\n' \
+    "$URL" "$1" >&2
+  exit 1
+}
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its gh or glab child lives,
@@ -1892,7 +2042,7 @@ case "$PROVIDER" in
     away_status=0
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
-    refuse_github_queue_while_away || exit 2
+    refuse_github_unprovable_immediate_merge || exit 2
     if [ "$FM_PR_GITHUB_BEHIND" = true ]; then
       if [ "$UPDATE_BRANCH" != true ]; then
         echo "error: $URL is behind its base; updating its source branch requires explicit --update-branch consent on this authorized merge request (the update remains if new checks prevent merging)" >&2
@@ -1933,6 +2083,7 @@ case "$PROVIDER" in
       printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
     elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
+      routed_refuse_unproved "it reads back queued, not merged"
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
       exit 0
@@ -1944,6 +2095,11 @@ case "$PROVIDER" in
     ;;
   gitlab)
     gitlab_verify_mergeable || exit 1
+    if [ "$ROUTED_REVIEW" = true ] \
+      && { [ "$FM_PR_GITLAB_ASYNC_REQUESTED" = true ] || [ "$FM_PR_GITLAB_ASYNC_CONFIGURED" = true ]; }; then
+      echo "error: GitLab auto-merge does not apply to --routed-review; only an immediate merge this run can confirm may land a routed PR" >&2
+      exit 2
+    fi
     # --sha binds the merge to the head this run verified, so a push that lands
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
@@ -1956,7 +2112,7 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     gitlab_merge_args=()
-    if [ "$FM_PR_AWAY_POSTURE" = true ]; then
+    if [ "$FM_PR_AWAY_POSTURE" = true ] || [ "$ROUTED_REVIEW" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
@@ -1973,6 +2129,7 @@ case "$PROVIDER" in
     MERGE_CONTROL_LOCK=
     gitlab_confirm_rc=0
     gitlab_confirm_merged || gitlab_confirm_rc=$?
+    [ "$gitlab_confirm_rc" -eq 0 ] || routed_refuse_unproved "it does not read back as merged"
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
   forgejo)
