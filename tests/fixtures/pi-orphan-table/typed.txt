@@ -1,0 +1,18 @@
+ ├─────────────────────────────────────────┼───────────────────────────────────────────┤
+ │ Additional tests                        │ No, unless they expose a genuinely        │
+ │                                         │ missing contract                          │
+ ├─────────────────────────────────────────┼───────────────────────────────────────────┤
+ │ Ambiguous wording                       │ Clarify it. If the clarification changes  │
+ │                                         │ meaning, treat it as a behavior decision  │
+ └─────────────────────────────────────────┴───────────────────────────────────────────┘
+
+ Never rewrite the spec just to match buggy code.
+
+ Copied last agent message to clipboard
+
+────────────────────────────────────────────────────────────────────────────────────────────────
+fix the flaky test
+────────────────────────────────────────────────────────────────────────────────────────────────
+~/example/project (main)
+↑53k ↓1.8k R95k CH99.4% $0.133 (sub) 7.9%/500k (auto)   (provider) model-x • high
+otel active
