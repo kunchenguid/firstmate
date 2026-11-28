@@ -234,7 +234,11 @@ Confirmed busy activity, a missing thread, or an idle verdict after the unknown 
 Declared external-wait rechecks also survive native uncertainty; the worker's declaration still controls their cadence.
 `stale_window_is_busy` and `housekeeping` in `bin/fm-supervise-daemon.sh` own stale tracking; `fm_afk_clear_stale_artifacts` in `bin/fm-afk-start.sh` and the launcher in `bin/fm-afk-launch.sh` own queue discard and startup rollback.
 `tests/fm-backend-t3code.test.sh` covers retention, deduplication, and re-arming across native restart.
-Only `bin/fm-afk-launch.sh start-native` launches the daemon here, as the captain's own tracked background job; `start` refuses because T3 hosts no terminal to create.
+The launcher supports a harness-tracked native job and, for a Codex primary, an operator-owned foreground job in a separate terminal; `start` still refuses because T3 hosts no terminal to create.
+For a Codex primary, prepare the external entry during its active turn, then run the command it prints in the operator terminal and keep that terminal open.
+Preparation records the primary's T3 thread id and harness in the no-terminal lifecycle record, so external startup and restart use that exact target after the primary becomes idle, regardless of the operator terminal's pane variables.
+`bin/fm-afk-launch.sh --help` owns both entry commands, their supervisor overrides, and the ordinary stop/return lifecycle.
+Until the external daemon is running, the primary continues its ordinary supervision protocol.
 A secondmate spawned on this backend carries its supervisor identity in its environment, so its own daemon needs no discovery.
 
 ## Switching back to Herdr
@@ -272,7 +276,7 @@ If a task's thread no longer reads back, release the task by hand:
 - A tracked `.codex/config.toml` that already defines `[shell_environment_policy]` is refused by file and table name before a slot is leased.
 - While a tracked Codex overlay is installed, do not edit that file or clear its `skip-worktree` flag; configuration changes require cleanup first.
 - Shell typing and Ctrl-U are unsupported; runtime Escape and Ctrl-C still interrupt the turn.
-- A Codex supervisor has no away mode on this backend because it has no tracked background tool for `start-native`, and T3 has no terminal for `start` to create.
+- A Codex supervisor needs the [operator-owned foreground entry](#away-mode-supervisor-support) for its away daemon because T3 has no terminal for `start` to create.
 - T3 checkpoints each turn as hidden refs under `refs/t3/orchestration-v2/checkpoints/` in the project clone; they are never pushed and do not affect the landed-work test.
 
 ## Regression entry points
