@@ -68,7 +68,7 @@ watch_window_key() {  # <window> [<watcher>]
 
 make_case() {
   local name=$1 dir fakebin
-  dir="$TMP_ROOT/$name"
+  dir="$TMP_ROOT/$name${FM_TEST_CASE_SUFFIX:-}"
   fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
   fm_test_track_watcher_state "$dir/state"

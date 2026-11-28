@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+# Locks use symlinks when a private capability probe produces a real link, and
+# that link mode is the only path where it does. Without real symlinks (Git
+# Bash without symlink privilege copies on ln -s), a private staging directory
+# holding pid and one generation directory .owner.<nonce> is published complete
+# by one rename onto the lock; the _fm_lock_dir_* helpers own that directory
+# mode, and each shared lock function routes only directory records to them.
+# Retirement renames the known files into that generation, then deletes it, so
+# every late child mutation is addressed to a name no successor can carry.
+# Both modes expose metadata at <lock>/pid.
 # docs/watcher-continuity.md owns the recovery-episode state contract.
 
 FM_WAKE_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -651,6 +660,10 @@ _fm_lock_record_matches() {
 
 fm_lock_link_owner() {
   local lockdir=$1 owner
+  if _fm_lock_is_directory_record "$lockdir"; then
+    _fm_lock_dir_owner "$lockdir"
+    return
+  fi
   owner=$(readlink "$lockdir" 2>/dev/null) || return 1
   [ -n "$owner" ] || return 1
   case "$owner" in
@@ -661,6 +674,11 @@ fm_lock_link_owner() {
 
 fm_lock_points_to_owner() {
   local lockdir=$1 ownerdir=$2 actual
+  if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    actual=$(_fm_lock_dir_owner "$lockdir") || return 1
+    [ "$actual" = "$ownerdir" ]
+    return
+  fi
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
   [ "$actual" = "$ownerdir" ]
 }
@@ -793,6 +811,10 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
+  _fm_lock_symlinks_supported "$ownerdir" || {
+    _fm_lock_dir_try_create "$lockdir" "$ownerdir" "$allowed_steal_owner" "$?"
+    return
+  }
   ln -s "$ownerdir" "$lockdir" 2>/dev/null &
   FM_LOCK_PENDING_PID=$!
   if wait "$FM_LOCK_PENDING_PID" && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
@@ -812,6 +834,10 @@ fm_lock_try_create() {
 
 fm_lock_remove_path() {
   local lockdir=$1 ownerdir
+  if _fm_lock_is_directory_record "$lockdir"; then
+    _fm_lock_dir_remove_path "$lockdir"
+    return
+  fi
   if [ "${2:-}" = stale ] && [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
     fm_lock_reap_dead_directory "$lockdir"
     return
@@ -828,6 +854,10 @@ fm_lock_remove_path() {
 
 fm_lock_mid_acquire_is_fresh() {
   local lockdir=$1 pid=$2 mid_acquire_stale
+  if [ -z "$pid" ] && [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    _fm_lock_dir_pidless_is_fresh "$lockdir"
+    case $? in 0) return 0 ;; 1) return 1 ;; esac
+  fi
   case "$pid" in
     ''|*[!0-9]*)
       mid_acquire_stale=$FM_LOCK_STALE_AFTER
@@ -916,6 +946,242 @@ fm_lock_recheck_stale_owner() {
     fm_lock_nested_owners_stale "$lockdir" || return 1
   fi
   return 0
+}
+
+# Directory mode (header). Link mode never reaches these helpers: a symlink or
+# an absent lock is never a directory record, and on a filesystem with real
+# symlinks a raw directory stays with the shared functions' own raw branches.
+
+# Probe inside a private directory holding pid; cached per shell and parent.
+# Returns 0 for real symlinks, 1 without them, 2 when the probe cannot be undone.
+_fm_lock_symlinks_supported() {  # <private-dir>
+  local private=$1 parent probe
+  parent=${private%/*}
+  if [ "${_FM_LOCK_PROBE_PARENT:-}" != "$parent" ]; then
+    probe="$private/.symlink-probe"
+    _FM_LOCK_PROBE_SUPPORTED=false
+    if ln -s "$private/pid" "$probe" 2>/dev/null && [ -L "$probe" ]; then
+      _FM_LOCK_PROBE_SUPPORTED=true
+    fi
+    rm -f "$probe" 2>/dev/null || return 2
+    _FM_LOCK_PROBE_PARENT=$parent
+  fi
+  [ "$_FM_LOCK_PROBE_SUPPORTED" = true ]
+}
+
+# A non-symlink directory is a directory record when it holds a generation or
+# its parent cannot hold symlinks.
+_fm_lock_is_directory_record() {  # <lockdir>
+  local lockdir=$1 entry lock_abs private rc
+  [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+  for entry in "$lockdir"/.owner.*; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      return 0
+    fi
+  done
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  if [ "${_FM_LOCK_PROBE_PARENT:-}" != "${lock_abs%/*}" ]; then
+    private=$(mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null) || return 1
+    if { printf 'probe\n' > "$private/pid"; } 2>/dev/null; then
+      _fm_lock_symlinks_supported "$private"
+      rc=$?
+    else
+      rc=2
+    fi
+    rm -rf "$private" 2>/dev/null || true
+    [ "$rc" -eq 1 ]
+    return
+  fi
+  [ "$_FM_LOCK_PROBE_SUPPORTED" != true ]
+}
+
+# Prints a directory record's one generation, or the record itself when it has
+# none (a raw record or a husk); more than one generation is invalid.
+_fm_lock_dir_owner() {  # <lockdir>
+  local lockdir=$1 lock_abs owner='' generation
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  for generation in "$lock_abs"/.owner.*; do
+    [ -e "$generation" ] || [ -L "$generation" ] || continue
+    [ -z "$owner" ] && [ -d "$generation" ] && [ ! -L "$generation" ] || return 1
+    owner=$generation
+  done
+  printf '%s\n' "${owner:-$lockdir}"
+}
+
+# Stage the complete record, then publish it with one rename that fails onto a
+# non-empty held lock. A late rename from a dead publisher can only create a
+# record holding that dead pid, which ordinary recovery clears.
+_fm_lock_dir_try_create() {  # <lockdir> <staging> <allowed-steal-owner> <probe-status>
+  local lockdir=$1 staging=$2 allowed_steal_owner=$3 generation
+  generation="$staging/.owner.${staging##*.owner.}"
+  if [ "$4" -ne 1 ] || ! mkdir "$generation" 2>/dev/null \
+    || ! cp "$staging/pid" "$generation/pid" 2>/dev/null \
+    || ! perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' -- "$staging" "$lockdir" 2>/dev/null; then
+    rm -rf "$staging" 2>/dev/null || true
+    return 1
+  fi
+  generation="${staging%.owner.*}/.owner.${staging##*.owner.}"
+  if fm_lock_points_to_owner "$lockdir" "$generation"; then
+    if ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+      FM_LOCK_OWNER_DIR=$generation
+      return 0
+    fi
+    _fm_lock_retire_generation "$lockdir" "$generation" || true
+  fi
+  # Retirement is repeatable after its commit point, so finish once more any
+  # step that failed rather than leave the refused generation behind.
+  if fm_lock_points_to_owner "$lockdir" "$generation"; then
+    _fm_lock_retire_generation "$lockdir" "$generation" || true
+  fi
+  return 1
+}
+
+# Retire one directory-record generation. Moving pid into the generation is
+# the commit point: after it the generation can never be held again, so any
+# process may repeat or finish these steps, and every step is addressed to the
+# generation or fails against a successor's complete record. The file list is
+# fm_lock_clean_known_files' known files.
+_fm_lock_retire_generation() {  # <lockdir> <generation>
+  local lockdir=$1 generation=$2 file
+  perl -e 'my $g = shift; for my $f (@ARGV) { my ($b) = $f =~ m{([^/]+)$}; rename $f, "$g/$b.retired" }' \
+    -- "$generation" "$lockdir/pid" "$lockdir/role" "$lockdir/fm-home" "$lockdir/pid-identity" "$lockdir/pid-start" "$lockdir/watcher-path" "$lockdir"/pid.tmp.* \
+    2>/dev/null
+  [ ! -e "$lockdir/pid" ] || return 1
+  for file in "$lockdir/role" "$lockdir/fm-home" "$lockdir/pid-identity" "$lockdir/pid-start" "$lockdir/watcher-path" "$lockdir"/pid.tmp.*; do
+    { [ ! -e "$file" ] && [ ! -L "$file" ]; } || return 1
+  done
+  rm -rf "$generation" 2>/dev/null
+  rmdir "$lockdir" 2>/dev/null || return 2
+}
+
+_fm_lock_dir_identity() {
+  [ ! -L "$1" ] && [ -d "$1" ] || return 1
+  if [ "$_FM_UNAME" = Darwin ]; then
+    /usr/bin/stat -f '%d:%i' "$1" 2>/dev/null
+  else
+    stat -c '%d:%i' "$1" 2>/dev/null
+  fi
+}
+
+# Remove a directory record. A caller that captured the owner and pid before
+# deciding passes both, so a successor published since is never reclassified:
+# a captured pid-less husk is removed only by rmdir, which fails on any
+# successor (regression: test_dirlock_d4c_orphan_husk_cleanup_preserves_successor
+# in tests/fm-watcher-lock.test.sh).
+_fm_lock_dir_remove_path() {
+  local lockdir=$1 ownerdir=${2:-} pid=${3:-} directory_identity=${4:-} rc
+  if [ -z "$ownerdir" ]; then
+    directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
+    ownerdir=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 1
+    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fi
+  if [ "$ownerdir" != "$lockdir" ]; then
+    if _fm_lock_retire_generation "$lockdir" "$ownerdir"; then
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 2 ] || return 1
+  else
+    if [ -n "$pid" ]; then
+      fm_lock_clean_known_files "$lockdir"
+    fi
+    rmdir "$lockdir" 2>/dev/null && return 0
+  fi
+  if [ -n "$directory_identity" ] \
+    && [ "$directory_identity" = "$(_fm_lock_dir_identity "$lockdir")" ]; then
+    FM_LOCK_RECLAIM_FAILED_PATH=$lockdir
+  fi
+  return 1
+}
+
+# A directory record with a generation classifies a missing pid without the
+# clock: absent is a committed retirement; empty is the bounded handoff's
+# rewrite, held while the generation's private pid copy is live. Returns 2
+# without a generation, leaving the record to the shared age grace.
+_fm_lock_dir_pidless_is_fresh() {  # <lockdir>
+  local lockdir=$1 generation
+  generation=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 2
+  [ "$generation" != "$lockdir" ] || return 2
+  [ -e "$lockdir/pid" ] || return 1
+  fm_pid_alive "$(cat "$generation/pid" 2>/dev/null || true)"
+}
+
+# A directory record needs no reaper election: its retirement is addressed to
+# the dead generation, so concurrent reapers compose and cannot touch a
+# successor. Raw records with a pid stay with fm_lock_try_acquire's steal path;
+# an empty directory is reaped only after the bounded grace.
+_fm_lock_dir_reap() {  # <lockdir>
+  local lockdir=$1 owner pid directory_identity
+  directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
+  owner=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 1
+  if [ "$owner" != "$lockdir" ]; then
+    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    fm_lock_recheck_stale_owner "$lockdir" "$owner" "$pid" || return 1
+    _fm_lock_dir_remove_path "$lockdir" "$owner" "$pid" "$directory_identity"
+    return
+  fi
+  if [ -e "$lockdir/pid" ] || fm_lock_mid_acquire_is_fresh "$lockdir" ""; then
+    return 1
+  fi
+  _fm_lock_dir_remove_path "$lockdir" "$lockdir" "" "$directory_identity"
+}
+
+_fm_lock_dir_release() {  # <lockdir> <current-pid>
+  local lockdir=$1 current=$2 ownerdir pid directory_identity
+  directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
+  ownerdir=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null) || return 0
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$pid" = "$current" ] || return 0
+  _fm_lock_dir_remove_path "$lockdir" "$ownerdir" "$pid" "$directory_identity" || true
+}
+
+# fm_lock_try_acquire's steal-mutex-held recovery for a directory record. The
+# owner and pid are captured once under the mutex and every later step is
+# addressed to them; a lock that vanished since has no owner to retire, and a
+# present record whose owner cannot be read is refused.
+_fm_lock_dir_steal() {  # <lockdir> <steal> <steal-owner>
+  local lockdir=$1 steal=$2 steal_owner=$3 marker_publish_bound=${4:-} owner='' cur recovered readable=true directory_identity
+  directory_identity=$(_fm_lock_dir_identity "$lockdir") || directory_identity=
+  if { [ -e "$lockdir" ] || [ -L "$lockdir" ]; } \
+    && ! owner=$(_fm_lock_dir_owner "$lockdir" 2>/dev/null); then
+    readable=false
+  fi
+  cur=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if [ "$readable" != true ] || ! fm_lock_recheck_stale_owner "$lockdir" "$owner" "$cur"; then
+    fm_lock_release "$steal"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  recovered=$cur
+  if [ -z "$recovered" ] && [ -n "$owner" ] && [ "$owner" != "$lockdir" ]; then
+    recovered=$(cat "$owner/pid.retired" 2>/dev/null || true)
+    [ -n "$recovered" ] || recovered=$(cat "$owner/pid" 2>/dev/null || true)
+  fi
+  if [ "$lockdir" = "$STATE/.watch.lock" ] \
+    && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime "$marker_publish_bound"; then
+    fm_lock_release "$steal"
+    if [ -n "$marker_publish_bound" ]; then
+      FM_LOCK_HELD_PATH="$STATE/.watcher-down.lock"
+    else
+      FM_LOCK_HELD_PID=$cur
+    fi
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  [ -z "$owner" ] || _fm_lock_dir_remove_path "$lockdir" "$owner" "$cur" "$directory_identity" || true
+  if fm_lock_try_create "$lockdir" "$steal_owner"; then
+    # shellcheck disable=SC2034 # Read by sourcing callers after lock acquisition.
+    FM_LOCK_RECOVERED_PID=$recovered
+    fm_lock_release "$steal"
+    return 0
+  fi
+  # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
+  FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+  FM_LOCK_OWNER_DIR=
+  fm_lock_release "$steal"
+  return 1
 }
 
 FM_RECOVERY_MARKER_TOKEN=
@@ -1466,6 +1732,10 @@ fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-s
 # probes keep the PID-only answer; only a proven mismatch permits takeover.
 fm_lock_reap_dead_link() {
   local lockdir=$1 owner pid token tomb current reaper recorded start
+  if _fm_lock_is_directory_record "$lockdir"; then
+    _fm_lock_dir_reap "$lockdir"
+    return
+  fi
   if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
     fm_lock_remove_path "$lockdir" stale
     return
@@ -1599,6 +1869,10 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  if _fm_lock_is_directory_record "$lockdir"; then
+    _fm_lock_dir_steal "$lockdir" "$steal" "$steal_owner" "$marker_publish_bound"
+    return
+  fi
   primary_owner=
   if [ -L "$lockdir" ]; then
     primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
@@ -1827,6 +2101,10 @@ fm_lock_release() {
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
     fm_lock_discard_owner "$ownerdir"
+    return 0
+  fi
+  if _fm_lock_is_directory_record "$lockdir"; then
+    _fm_lock_dir_release "$lockdir" "$current"
     return 0
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
