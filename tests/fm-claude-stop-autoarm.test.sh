@@ -124,6 +124,24 @@ printf 'stale: fixture-win actionable\n'
 exit 0
 SH
       ;;
+    handling-actionable)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+printf 'pending:handling:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'stale: fixture-win actionable\n'
+exit 0
+SH
+      ;;
+    markerless-actionable)
+      cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
+rm -f "$FM_HOME/state/.watcher-down"
+touch "$FM_HOME/state/.last-watcher-beat"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+printf 'check: inactive-outcome\n'
+exit 0
+SH
+      ;;
     failed)
       cat >> "$dir/bin/fm-watch-arm.sh" <<'SH'
 printf 'watcher: FAILED - no live watcher with a fresh beacon\n'
@@ -498,6 +516,38 @@ test_stands_down_only_on_pi_code_transcript_path() {
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm without a transcript_path"
 
   pass "auto-arm: stands down only on a pi-code-delivered transcript_path (/.pi/)"
+}
+
+test_unacked_handling_wake_still_rewakes() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-handling")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" handling-actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a re-presented unacked handling wake must still exit 2 so Claude rewakes"
+  assert_contains "$out" "firstmate watcher wake" "the handling rewake must carry the wake banner"
+  assert_contains "$out" "stale: fixture-win actionable" "the handling rewake must carry the arm's reason line"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "handling marker must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" recovery_generation)" = fixture-generation ] \
+    || fail "handling rewake epoch must bind the watcher recovery generation"
+  pass "auto-arm: an unacked handling-phase wake is still rewake-eligible"
+}
+
+test_markerless_wake_rewakes_unbound() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/actionable-markerless")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" markerless-actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an actionable wake with no recovery marker must still exit 2 so Claude rewakes"
+  assert_contains "$out" "firstmate watcher wake" "the markerless rewake must carry the wake banner"
+  assert_contains "$out" "check: inactive-outcome" "the markerless rewake must carry the arm's reason line"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "markerless wake must record outcome=rewake, got: $(epoch_outcome "$dir")"
+  [ "$(epoch_field "$dir" session_pid)" = "$(cat "$dir/state/.lock")" ] \
+    || fail "the markerless rewake must still bind the lock-owning Claude session"
+  [ -z "$(epoch_field "$dir" recovery_generation)" ] \
+    || fail "a markerless wake publishes no recovery generation, so none may be recorded"
+  pass "auto-arm: a wake with no recovery marker still rewakes, unbound"
 }
 
 test_actionable_close_with_live_successor_rewakes_once() {
@@ -2399,6 +2449,8 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_actionable_close_with_live_successor_rewakes_once
+test_unacked_handling_wake_still_rewakes
+test_markerless_wake_rewakes_unbound
 test_stopfailure_close_rewakes_paced_per_cooldown
 test_stopfailure_failure_continuations_are_paced
 test_stopfailure_paced_rewake_honors_afk_and_need_after_wait
