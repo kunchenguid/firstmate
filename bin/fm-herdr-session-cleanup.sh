@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Retire stale restored-shell Herdr presentation children at locked session start.
+# Retire stale restored Herdr presentation children at locked session start.
 #
 # Usage: fm-herdr-session-cleanup.sh
 #
@@ -9,18 +9,11 @@
 # is additionally serialized by the existing state/.spawn-<task>.lock and the
 # shared named-session Herdr presentation lock, in that order.
 #
-# A visible title is discovery only. Cleanup requires the exact current
-# "└ <concise-task> · p:<22-char-token>" grammar, one token occurrence across
-# the named-session snapshot, exactly one matching home-local journal, one tab,
-# one pane, absent task metadata, no registered agent, and a process proof that
-# the pane contains only one idle recognized shell with no child process. A
-# version 2 journal must also bind the exact workspace, tab, and pane.
-# Topology is first checked from one locked API snapshot, then every mutation
-# prerequisite is immediately rechecked before the existing exact-pane
-# focus-preserving close helper is called.
-# The script never closes a workspace. It removes only the matching journal,
-# and only after the exact pane is confirmed gone. Every error warns and returns
-# success so session startup continues conservatively.
+# Candidate eligibility, process proof, focus safety, and journal retirement
+# are owned by docs/herdr-backend.md "Startup cleanup of restored projections".
+# This script never calls workspace close: it targets only a proven idle-shell
+# pane or the exact bound empty tab, then confirms absence before retiring its
+# matching journal. Errors return success so session startup can continue.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -92,6 +85,7 @@ fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
   FM_HERDR_CLEANUP_BOUND_WORKSPACE=
   FM_HERDR_CLEANUP_BOUND_TAB=
   FM_HERDR_CLEANUP_BOUND_PANE=
+  FM_HERDR_CLEANUP_EMPTY_TAB=0
   matches=$(fm_herdr_cleanup_journal_matches "$title" "$session" "$home_real") || return 1
   count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n+0 }')
   [ "$count" -eq 1 ] || return 1
@@ -119,6 +113,7 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
   local bound_workspace=$5 bound_tab=$6 bound_pane=$7 record
   FM_HERDR_CLEANUP_TAB=
   FM_HERDR_CLEANUP_PANE=
+  FM_HERDR_CLEANUP_EMPTY_TAB=0
   record=$(printf '%s' "$snapshot" | jq -er \
     --arg workspace "$workspace" --arg title "$title" --arg token "$token" \
     --arg bound_workspace "$bound_workspace" --arg bound_tab "$bound_tab" \
@@ -131,24 +126,35 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
          ((split("p:" + $token) | length) - 1) ] | add // 0) as $token_count
     | select($workspaces | length == 1)
     | select($workspaces[0].label == $title)
-    | select($workspaces[0].tab_count == 1 and $workspaces[0].pane_count == 1)
+    | select($workspaces[0].tab_count == 1 and ($workspaces[0].pane_count == 1 or $workspaces[0].pane_count == 0))
     | select($tabs | length == 1)
-    | select($panes | length == 1)
-    | select($panes[0].tab_id == $tabs[0].tab_id)
+    | select(($panes | length == 1 and $workspaces[0].pane_count == 1)
+            or ($panes | length == 0 and $workspaces[0].pane_count == 0
+                and $bound_workspace != "" and $bound_tab != ""))
+    | select($panes | length == 0 or $panes[0].tab_id == $tabs[0].tab_id)
     | select($bound_workspace == "" or $workspace == $bound_workspace)
     | select($bound_tab == "" or $tabs[0].tab_id == $bound_tab)
-    | select($bound_pane == "" or $panes[0].pane_id == $bound_pane)
+    | select($bound_pane == "" or ($panes | length == 0) or $panes[0].pane_id == $bound_pane)
     | select($token_count == 1)
     | select(($s.focused_workspace_id | type) == "string")
     | select(($s.focused_tab_id | type) == "string")
     | select(($s.focused_pane_id | type) == "string")
     | select($s.focused_tab_id != $tabs[0].tab_id)
-    | [$tabs[0].tab_id, $panes[0].pane_id] | @tsv
+    | [$tabs[0].tab_id, ($panes[0].pane_id // "")] | @tsv
   ' 2>/dev/null) || return 1
+  [ -n "$record" ] || return 1
   [ -n "$record" ] && [ "${record#*$'\t'}" != "$record" ] || return 1
   FM_HERDR_CLEANUP_TAB=${record%%$'\t'*}
   FM_HERDR_CLEANUP_PANE=${record#*$'\t'}
-  [ -n "$FM_HERDR_CLEANUP_TAB" ] && [ -n "$FM_HERDR_CLEANUP_PANE" ]
+  [ -n "$FM_HERDR_CLEANUP_TAB" ] || return 1
+  if [ -z "$FM_HERDR_CLEANUP_PANE" ]; then
+    # Empty-tab cleanup needs an exact workspace+tab binding. A version-1
+    # journal has none, and a failed binding publish can leave a version-2
+    # journal without them; either way, matching by title/token alone could
+    # close another empty tab in the same workspace.
+    [ -n "$bound_workspace" ] && [ -n "$bound_tab" ] || return 1
+    FM_HERDR_CLEANUP_EMPTY_TAB=1
+  fi
 }
 
 fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <token> <home-real> <journal> <task-id> <version> <bound-workspace> <bound-tab> <bound-pane>
@@ -172,11 +178,11 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
           ((split("p:" + $token) | length) - 1)] | add // 0) == 1
   ' >/dev/null 2>&1 || return 1
   workspace_info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
-  printf '%s' "$workspace_info" | jq -e --arg workspace "$workspace" --arg title "$title" '
+  printf '%s' "$workspace_info" | jq -e --arg workspace "$workspace" --arg title "$title" --arg pane "$pane" '
     .result.workspace.workspace_id == $workspace
     and .result.workspace.label == $title
     and .result.workspace.tab_count == 1
-    and .result.workspace.pane_count == 1
+    and (.result.workspace.pane_count == 1 or ($pane == "" and .result.workspace.pane_count == 0))
   ' >/dev/null 2>&1 || return 1
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e --arg workspace "$workspace" --arg tab "$tab" '
@@ -186,15 +192,22 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
     and .result.tabs[0].tab_id == $tab
   ' >/dev/null 2>&1 || return 1
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
-    (.result.panes | type) == "array"
-    and (.result.panes | length) == 1
-    and .result.panes[0].workspace_id == $workspace
-    and .result.panes[0].tab_id == $tab
-    and .result.panes[0].pane_id == $pane
-  ' >/dev/null 2>&1 || return 1
-  [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = no-agent ] || return 1
-  fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null || return 1
+  if [ -n "$pane" ]; then
+    printf '%s' "$panes" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+      (.result.panes | type) == "array"
+      and (.result.panes | length) == 1
+      and .result.panes[0].workspace_id == $workspace
+      and .result.panes[0].tab_id == $tab
+      and .result.panes[0].pane_id == $pane
+    ' >/dev/null 2>&1 || return 1
+    [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = no-agent ] || return 1
+    fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null || return 1
+  else
+    printf '%s' "$panes" | jq -e --arg workspace "$workspace" '
+      (.result.panes | type) == "array"
+      and (.result.panes | length) == 0
+    ' >/dev/null 2>&1 || return 1
+  fi
   focus=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
   [ "${focus#*$'\t'}" != "$tab" ]
 }
@@ -202,7 +215,8 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
 fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
-  local tab pane state close_status=0
+  local journal_session journal_home journal_projection journal_task journal_workspace journal_tab journal_pane
+  local tab pane empty_tab state close_kind close_status=0
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
   if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
     return 0
@@ -213,6 +227,13 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   bound_workspace=$FM_HERDR_CLEANUP_BOUND_WORKSPACE
   bound_tab=$FM_HERDR_CLEANUP_BOUND_TAB
   bound_pane=$FM_HERDR_CLEANUP_BOUND_PANE
+  journal_session=$FM_BACKEND_HERDR_JOURNAL_SESSION
+  journal_home=$FM_BACKEND_HERDR_JOURNAL_HOME
+  journal_projection=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+  journal_task=$FM_BACKEND_HERDR_JOURNAL_TASK_ID
+  journal_workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+  journal_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+  journal_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
   [ "$FM_HERDR_CLEANUP_TOKEN" = "$token" ] || return 0
   task_lock="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$task_lock"; then
@@ -247,8 +268,10 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   fi
   tab=$FM_HERDR_CLEANUP_TAB
   pane=$FM_HERDR_CLEANUP_PANE
-  if [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" != no-agent ] \
-    || ! fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null; then
+  empty_tab=$FM_HERDR_CLEANUP_EMPTY_TAB
+  if [ "$empty_tab" = 0 ] \
+    && { [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" != no-agent ] \
+      || ! fm_backend_herdr_pane_idle_shell_pid "$session" "$pane" >/dev/null; }; then
     fm_herdr_cleanup_warn "$id preserved because its pane is not a provably idle childless shell"
     fm_lock_release "$presentation_lock" || true
     fm_lock_release "$task_lock" || true
@@ -265,27 +288,53 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
 
   # This unconditional retirement is the authorized containment documented
   # with the presentation floor ownership in bin/backends/herdr.sh.
-  fm_backend_herdr_projection_close_pane_focus_preserving \
-    "$session" "$pane" no-agent || close_status=$?
-  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  if [ "$empty_tab" = 1 ]; then
+    fm_backend_herdr_projection_close_empty_tab_focus_preserving \
+      "$session" "$workspace" "$tab" || close_status=$?
+    state=$(fm_backend_herdr_tab_presence_state "$session" "$tab")
+    close_kind='empty tab'
+  else
+    fm_backend_herdr_projection_close_pane_focus_preserving \
+      "$session" "$pane" no-agent || close_status=$?
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+    close_kind='pane'
+  fi
   if [ "$state" = dead ]; then
     if [ -f "$journal" ] && [ ! -L "$journal" ] \
-      && fm_herdr_cleanup_unique_match "$title" "$session" "$home_real" \
-      && [ "$FM_HERDR_CLEANUP_JOURNAL" = "$journal" ] \
-      && [ "$FM_HERDR_CLEANUP_ID" = "$id" ] \
-      && [ "$FM_HERDR_CLEANUP_VERSION" = "$version" ] \
-      && [ "$FM_HERDR_CLEANUP_BOUND_WORKSPACE" = "$bound_workspace" ] \
-      && [ "$FM_HERDR_CLEANUP_BOUND_TAB" = "$bound_tab" ] \
-      && [ "$FM_HERDR_CLEANUP_BOUND_PANE" = "$bound_pane" ] \
+      && { [ "$empty_tab" = 1 ] \
+        && fm_backend_herdr_projection_journal_snapshot "$journal" "$id" \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$journal_session" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$journal_home" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$journal_projection" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_ID" = "$journal_task" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$journal_workspace" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$journal_tab" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$journal_pane" ]; } \
+      || { [ "$empty_tab" = 0 ] \
+        && fm_herdr_cleanup_unique_match "$title" "$session" "$home_real" \
+        && [ "$FM_HERDR_CLEANUP_JOURNAL" = "$journal" ] \
+        && [ "$FM_HERDR_CLEANUP_ID" = "$id" ] \
+        && [ "$FM_HERDR_CLEANUP_VERSION" = "$version" ] \
+        && [ "$FM_HERDR_CLEANUP_BOUND_WORKSPACE" = "$bound_workspace" ] \
+        && [ "$FM_HERDR_CLEANUP_BOUND_TAB" = "$bound_tab" ] \
+        && [ "$FM_HERDR_CLEANUP_BOUND_PANE" = "$bound_pane" ]; } \
       && [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ]; then
-      rm -f -- "$journal" || fm_herdr_cleanup_warn "$id pane closed but its journal could not be retired"
+      if rm -f -- "$journal"; then
+        if [ "$empty_tab" = 1 ] && [ "$close_status" -eq 2 ]; then
+          fm_herdr_cleanup_warn "$id empty tab is gone but focus restoration is unresolved; retired its journal without changing focus"
+        fi
+      else
+        fm_herdr_cleanup_warn "$id $close_kind closed but its journal could not be retired"
+      fi
     else
-      fm_herdr_cleanup_warn "$id pane closed but its journal changed and was preserved"
+      fm_herdr_cleanup_warn "$id $close_kind closed but its journal changed and was preserved"
     fi
+  elif [ "$empty_tab" = 1 ] && [ "$close_status" -eq 2 ]; then
+    fm_herdr_cleanup_warn "$id journal preserved because empty tab closure is not confirmed gone and focus is unresolved"
   elif [ "$close_status" -ne 0 ]; then
-    fm_herdr_cleanup_warn "$id preserved because exact focus-safe pane closure was refused or unconfirmed"
+    fm_herdr_cleanup_warn "$id preserved because exact focus-safe $close_kind closure was refused or unconfirmed"
   else
-    fm_herdr_cleanup_warn "$id preserved because exact pane closure could not be confirmed"
+    fm_herdr_cleanup_warn "$id preserved because exact $close_kind closure could not be confirmed"
   fi
   fm_lock_release "$presentation_lock" || true
   fm_lock_release "$task_lock" || true
