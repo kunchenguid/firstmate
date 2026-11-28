@@ -45,7 +45,7 @@ if [ ! -e "$SOURCE" ] && [ ! -L "$SOURCE" ]; then SOURCE=/dev/null; fi
 umask 077
 temp=$(mktemp "$STATE/.$ID.devin-config.XXXXXX")
 trap 'rm -f "$temp"' EXIT
-jq -s --arg keep "$KEEP" --arg submit "$submit" --arg stop "$stop" --arg end "$end" '
+jq -s --arg keep "$KEEP" --arg submit "$submit" --arg stop "$stop" --arg session_end "$end" '
   (if length == 0 then {} elif length == 1 then .[0] else error("expected one config object") end) |
   if type != "object" then error("expected config object") else . end |
   (if $keep == "1" then . else .attribution = false end) |
@@ -54,6 +54,6 @@ jq -s --arg keep "$KEEP" --arg submit "$submit" --arg stop "$stop" --arg end "$e
   def hook($cmd): {hooks: [{type: "command", command: $cmd, timeout: 10}]};
   .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [hook($submit)]) |
   .hooks.Stop = ((.hooks.Stop // []) + [hook($stop)]) |
-  .hooks.SessionEnd = ((.hooks.SessionEnd // []) + [hook($end)])
+  .hooks.SessionEnd = ((.hooks.SessionEnd // []) + [hook($session_end)])
 ' "$SOURCE" > "$temp"
 mv "$temp" "$STATE/$ID.devin-config.json"
