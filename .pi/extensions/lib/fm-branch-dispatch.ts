@@ -78,10 +78,36 @@ export const MAIN_DIALOG_MIRROR_HEADER =
 // fm_branch_report tool on Pi, the bin/fm-branch-report.sh command elsewhere.
 // `mirror` is the host's dialog-mirror feed, empty on Pi and whenever nothing
 // new was said.
-export function branchWakePrompt(message: string, reportSurface: string, postureTail: string, mirror = ""): string {
+// `taskLine` is wakeTaskLine's output: the task a signal or stale wake resolves
+// to, so the branch never has to match the endpoint string to a task itself.
+export function branchWakePrompt(message: string, reportSurface: string, postureTail: string, mirror = "", taskLine = ""): string {
   const feed = mirror.replace(/\n+$/, "");
   const head = feed ? `${MAIN_DIALOG_MIRROR_HEADER}\n${feed}\n\n` : "";
-  return `${head}FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with ${reportSurface}.${postureTail}`;
+  const task = taskLine ? `\n${taskLine}` : "";
+  return `${head}FIRSTMATE SUPERVISION WAKE: ${message}${task}\n\nHandle this per your operating procedure and finish with ${reportSurface}.${postureTail}`;
+}
+
+// The keys a signal or stale wake names: a status-file name for signal, the
+// endpoint for stale.
+export function wakeTriggerKeys(message: string): string[] {
+  return /^signal:/.test(message)
+    ? message
+      .slice("signal:".length)
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((path) => path.split("/").pop() ?? path)
+    : /^stale:/.test(message)
+      ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
+      : [];
+}
+
+// The task id a wake's trigger keys resolve to, as one prompt line; empty when
+// none resolves through the scope's own task index.
+export function wakeTaskLine(scope: UnreadWakeScope, message: string): string {
+  const ids = [...new Set(wakeTriggerKeys(message)
+    .map((key) => scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")])
+    .filter((id): id is string => Boolean(id)))];
+  return ids.length > 0 ? `Task for this wake: ${ids.join(" ")}` : "";
 }
 
 export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
@@ -612,15 +638,7 @@ export function branchOfferForWake(state: string, message: string, afk: boolean,
   const heartbeat = /^heartbeat($|:)/.test(message);
   const isCheckTrigger = /^check:/.test(message);
   const scope = scopeForUnreadWake(state, heartbeat, afk, attendedHost && !afk);
-  const triggerKeys = /^signal:/.test(message)
-    ? message
-      .slice("signal:".length)
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((path) => path.split("/").pop() ?? path)
-    : /^stale:/.test(message)
-      ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
-      : [];
+  const triggerKeys = wakeTriggerKeys(message);
   const taskIdentity = (key: string): string =>
     scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
   const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
