@@ -213,6 +213,8 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
     assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
+    assert_grep '.fm-scratch/' "$brief" "$id: brief must name the excluded worker scratch root"
+    assert_grep 'lab homes and test output' "$brief" "$id: brief must route lab and test scratch"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
@@ -1173,6 +1175,7 @@ test_scout_and_secondmate_scaffold() {
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
   assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
+  assert_grep '.fm-scratch/' "$brief" "scout brief must name the excluded worker scratch root"
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
