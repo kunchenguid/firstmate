@@ -6,10 +6,15 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<forge-cli>]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
-# contract.
+# contract. The optional eighth argument is the Forgejo CLI the project resolved
+# to (tea|fgj), never `auto`: the callers resolve `auto` to tea, the same value
+# bin/fm-pr-lib.sh's fm_pr_forgejo_resolve produces for it, before rendering, so
+# `tea` renders the tea contract, `fgj` renders the fgj api read-back, and any
+# other value, forgejo-cli's `fj` included, is refused because it cannot read
+# the pull request record the contract needs.
 # For local-only tasks, the first accepted done head is latched as exactly one
 # local_done_head= full commit id in the live task metadata. Observing done again
 # never changes that identity. Revised work needs a new task/approval record.
@@ -511,6 +516,12 @@ EOF
 # block, then what to do once the run passes. Callers are fm_dod_block only.
 fm_dod_manual_pr_block() {  # <branch> <forge-cli> <draft-check> <contract-suffix> <nm-base> <pr-base>
   local branch=$1 forge_cli=$2 draft_check=$3 suffix=$4 nm_base=$5 pr_base=$6
+  local find_line="2. Find the PR for your branch first (\`$forge_cli pr list --head <branch>\`). If one exists, update its title and body with \`$forge_cli pr edit <number> --title '<title>' --body-file <path>\`. Otherwise open it with \`$forge_cli pr create\` from the branch the run pushed, ready for review, not a draft$pr_base."
+  local wait_line="4. Wait for the PR's checks with \`$forge_cli pr checks <number> --watch\`, under the ten-minute command limit as the driving block bounds its waits, and run the same command again whenever it returns with checks still pending. \`$forge_cli pr checks\` exits 1 when the project reports no checks at all: that is not a failed check and needs no fix. If a check fails, commit the fix, drive a new run with the same \`--skip pr,ci\`, and update the PR text if the change affects it."
+  if [ "$forge_cli" = fgj ]; then
+    find_line="2. Find the PR for your branch first with \`$forge_cli pr list\`, which lists the repository's open pull requests, and take the one for your branch. If one exists, update its title and body with \`$forge_cli pr edit <number> --title '<title>' --body-file <path>\`. Otherwise open it with \`$forge_cli pr create\` from the branch the run pushed, ready for review, not a draft$pr_base."
+    wait_line="4. Wait for the PR's checks to finish by reading them from the pull request's page on the forge, under the ten-minute command limit as the driving block bounds its waits, and read the pull request again whenever its checks are still pending. A project that reports no checks at all is not a failed check and needs no fix. If a check fails, commit the fix, drive a new run with the same \`--skip pr,ci\`, and update the PR text if the change affects it."
+  fi
   cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes$suffix pr=manual
@@ -528,9 +539,9 @@ EOF
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override, write the PR title and body yourself and publish them with \`$forge_cli\`:
 1. Write the PR body to a file of your own under the scratch location rule 2 names, and verify it with \`head\` before using it. Match the title and body style of the project's recent merged PRs and its contribution guide, in plain English for a reviewer who lacks your context, with no direct address, and keep any issue reference the captain's intent names.
-2. Find the PR for your branch first (\`$forge_cli pr list --head <branch>\`). If one exists, update its title and body with \`$forge_cli pr edit <number> --title '<title>' --body-file <path>\`. Otherwise open it with \`$forge_cli pr create\` from the branch the run pushed, ready for review, not a draft$pr_base.
+$find_line
 3. Never post a comment or review on the PR or on any other thread, and never rely on the pipeline for the PR text: it is yours on every push.
-4. Wait for the PR's checks with \`$forge_cli pr checks <number> --watch\`, under the ten-minute command limit as the driving block bounds its waits, and run the same command again whenever it returns with checks still pending. \`$forge_cli pr checks\` exits 1 when the project reports no checks at all: that is not a failed check and needs no fix. If a check fails, commit the fix, drive a new run with the same \`--skip pr,ci\`, and update the PR text if the change affects it.
+$wait_line
 Then read the PR back from the forge and confirm it is not a draft $draft_check
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
@@ -539,8 +550,8 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<forge-cli>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto} forgejo_cli=${8:-auto}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
@@ -555,8 +566,19 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<p
   draft_check="(\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`."
   if [ "$forge" = forgejo ]; then
     contract_forge=' forge=forgejo'
-    forge_cli=tea
-    draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+    case "$forgejo_cli" in
+      tea)
+        forge_cli=tea
+        draft_check="(\`tea api --repo <owner>/<repo> /repos/{owner}/{repo}/pulls/<number>\` must show \`draft\` as false, where <owner>/<repo> and <number> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`tea pulls edit <number> --repo <owner>/<repo> --title '<title without the prefix>'\`."
+        ;;
+      fgj)
+        forge_cli=fgj
+        draft_check="(\`fgj api repos/<owner>/<repo>/pulls/<number> --hostname <host>\` must show \`draft\` as false, where <owner>/<repo>, <number>, and <host> come from your PR URL); Forgejo marks a draft by a work-in-progress title prefix such as \`WIP:\`, so if it is a draft, remove that prefix with \`fgj api repos/<owner>/<repo>/pulls/<number> --hostname <host> -X PATCH -f title='<title without the prefix>'\`."
+        ;;
+      *)
+        echo "error: fm_dod_block: unknown Forgejo CLI '$forgejo_cli' (expected tea or fgj; 'auto' resolves to tea, and forgejo-cli's fj cannot read the pull request record and is refused by bin/fm-pr-check.sh and bin/fm-pr-merge.sh)" >&2
+        return 1 ;;
+    esac
   fi
   if [ -n "$base" ]; then
     printf -v base_q '%q' "$base"

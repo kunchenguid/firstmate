@@ -702,6 +702,61 @@ test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
 test_promotion_keeps_the_recorded_base_branch
 
+# The manual-PR Definition of done names a Forgejo CLI's subcommands only where
+# the installed generation's own --help verified them. fm_pr_text_valid still
+# gates pr=manual to an unbound GitHub-style forge, so the block is exercised
+# directly: for fgj it must name only `fgj pr list`, `fgj pr edit <number>
+# --title ... --body-file <path>`, and `fgj pr create` (all verified via
+# `fgj pr <subcommand> --help`), must drop the `--head` filter `fgj pr list`
+# does not ship and every `fgj pr checks` spelling and exit-status claim for a
+# subcommand that generation does not ship, and must describe the checks wait in
+# words. tea and the unbound gh-axi default keep their existing wording exactly.
+test_manual_pr_dod_names_only_verified_fgj_subcommands() {
+  local block out rc
+  out=$(fm_dod_block no-mistakes t-gate fm/t-gate forgejo '' '' manual fgj 2>&1); rc=$?
+  expect_code 1 "$rc" "fm_dod_block must keep refusing pr=manual on a bound forge"
+  assert_contains "$out" "pr=manual ships on a GitHub-style forge with no forge binding only" \
+    "the pr=manual gate refusal changed shape"
+
+  block="$TMP_ROOT/manual-pr-fgj.txt"
+  fm_dod_manual_pr_block fm/t-gate fgj 'draft-check-text' ' pr=manual' '' '' > "$block"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_grep 'Find the PR for your branch first with `fgj pr list`' "$block" \
+    "the fgj manual-PR DOD must name the verified list command"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_grep 'fgj pr edit <number> --title' "$block" \
+    "the fgj manual-PR DOD must keep the verified edit spelling"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_grep 'open it with `fgj pr create`' "$block" \
+    "the fgj manual-PR DOD must keep the verified create spelling"
+  assert_grep 'checks to finish by reading them' "$block" \
+    "the fgj manual-PR DOD must describe the checks wait in words"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_no_grep 'fgj pr list --head' "$block" \
+    "the fgj manual-PR DOD named a --head filter fgj pr list does not ship"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_no_grep 'fgj pr checks' "$block" \
+    "the fgj manual-PR DOD named a checks subcommand fgj does not ship"
+  assert_no_grep 'exits 1 when the project reports no checks' "$block" \
+    "the fgj manual-PR DOD kept an exit-status claim for a command fgj does not ship"
+
+  block="$TMP_ROOT/manual-pr-tea.txt"
+  fm_dod_manual_pr_block fm/t-gate tea 'draft-check-text' ' pr=manual' '' '' > "$block"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_grep 'tea pr list --head <branch>' "$block" \
+    "the tea manual-PR DOD must keep its existing list wording"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_grep 'tea pr checks <number> --watch' "$block" \
+    "the tea manual-PR DOD must keep its existing checks wording"
+
+  block="$TMP_ROOT/manual-pr-gh.txt"
+  fm_dod_manual_pr_block fm/t-gate gh-axi 'draft-check-text' ' pr=manual' '' '' > "$block"
+  # shellcheck disable=SC2016 # Backticks are literal generated DOD text.
+  assert_grep 'gh-axi pr checks <number> --watch' "$block" \
+    "the unbound GitHub manual-PR DOD must keep its existing checks wording"
+  pass "fm-dod-lib: the manual-PR DOD names only verified fgj subcommands"
+}
+
 # The launch role is the generated text a worker receives. It must keep the
 # skill name, so a session that registers the skill loads it by name, and must
 # name the skill file as the fallback for a session where the name does not
@@ -831,5 +886,5 @@ test_external_review_done_without_backup_is_accepted_on_the_url
 test_external_review_done_with_backup_needs_the_copy
 
 test_worker_role_names_skill_and_fallback_file
-
+test_manual_pr_dod_names_only_verified_fgj_subcommands
 echo "all fm-dod-lib tests passed"

@@ -40,6 +40,12 @@ cat > "$DATA/projects.md" <<'EOF'
 - hand-forgejo [no-mistakes forge=forgejo pr=manual] - a bound forge (added 2026-01-01)
 - hand-empty [no-mistakes pr=] - an empty value (added 2026-01-01)
 - hand-auto [no-mistakes pr=auto] - auto is the absence of the token, not a value (added 2026-01-01)
+- cli-tea [no-mistakes forge=forgejo:tea] - a Forgejo binding may name its CLI (added 2026-01-01)
+- cli-fgj [forge=forgejo:fgj direct-PR +yolo] - CLI suffix first, order must not matter (added 2026-01-01)
+- cli-fj [no-mistakes forge=forgejo:fj] - forgejo-cli by name (added 2026-01-01)
+- cli-empty [direct-PR forge=forgejo:] - an empty CLI suffix (added 2026-01-01)
+- cli-unknown [direct-PR forge=forgejo:glab] - an unknown CLI suffix (added 2026-01-01)
+- cli-gerrit [no-mistakes forge=gerrit:tea] - a CLI suffix on another provider (added 2026-01-01)
 EOF
 
 run_mode() {
@@ -47,6 +53,9 @@ run_mode() {
 }
 run_forge() {
   FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge "$1" 2>/dev/null
+}
+run_forge_cli() {
+  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge-cli "$1" 2>/dev/null
 }
 
 [ "$(run_mode legacy)" = "no-mistakes off" ] || fail "legacy entry's default output changed: $(run_mode legacy)"
@@ -160,5 +169,60 @@ assert_contains "$err" "pr=manual" "the unknown pr value refusal did not name th
 err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --pr hand-direct 2>&1 >/dev/null)
 assert_contains "$err" "only a no-mistakes ship takes it" "the direct-PR refusal did not say why"
 pass "fm-project-mode: pr=manual refuses another mode, a bound forge, an empty value, and an unknown value, but leaves --forge answerable"
+
+[ "$(run_forge_cli lab)" = "auto" ] \
+  || fail "forge=forgejo with no CLI named must report auto: $(run_forge_cli lab)"
+[ "$(run_forge_cli legacy)" = "auto" ] \
+  || fail "an entry with no forge token must report CLI auto: $(run_forge_cli legacy)"
+[ "$(FM_DATA_OVERRIDE="$TMP_ROOT/no-such-dir" "$PROJECT_MODE" --forge-cli legacy 2>/dev/null)" = "auto" ] \
+  || fail "an absent registry file must default --forge-cli to auto"
+pass "fm-project-mode: --forge-cli reports auto for a project that names no CLI and for an absent registry"
+
+for spec in "cli-tea tea" "cli-fgj fgj" "cli-fj fj"; do
+  name=${spec%% *}
+  want=${spec#* }
+  [ "$(run_forge_cli "$name")" = "$want" ] \
+    || fail "$name did not report --forge-cli $want: $(run_forge_cli "$name")"
+  [ "$(run_forge "$name")" = "forgejo" ] \
+    || fail "$name changed the --forge provider word: $(run_forge "$name")"
+  err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" "$name" 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered $name warned: $err"
+done
+[ "$(run_mode cli-fgj)" = "direct-PR on" ] \
+  || fail "the CLI suffix must not displace the mode or +yolo: $(run_mode cli-fgj)"
+pass "fm-project-mode: forge=forgejo:<cli> names the CLI in any token order and never changes --forge"
+
+# The suffix is part of the binding grammar, so a malformed one is refused
+# exactly like an unknown forge: nothing on stdout, exit 3, and the accepted
+# CLI values named. A CLI suffix on any other provider is refused too, because
+# only Forgejo has more than one supported CLI.
+for name in cli-empty cli-unknown cli-gerrit; do
+  out=$(run_forge_cli "$name" 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "$name did not refuse --forge-cli (status $status, got '$out')"
+  [ -z "$out" ] || fail "a refused $name still handed the caller a CLI: '$out'"
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" "$name" 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "$name did not refuse the default output (status $status, got '$out')"
+done
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge-cli cli-empty 2>&1 >/dev/null)
+assert_contains "$err" 'forge=forgejo:tea' "the empty CLI refusal did not name the accepted CLI values"
+assert_contains "$err" 'forge=forgejo:fj' "the empty CLI refusal did not name forgejo-cli"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge-cli cli-unknown 2>&1 >/dev/null)
+assert_contains "$err" 'forge=forgejo:fgj' "the unknown CLI refusal did not name the accepted CLI values"
+err=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge-cli cli-gerrit 2>&1 >/dev/null)
+assert_contains "$err" 'unknown forge' "a CLI suffix on gerrit was not refused as an unknown forge"
+pass "fm-project-mode: a malformed Forgejo CLI suffix is refused like any other malformed forge binding"
+
+# local-only publishes nothing, so a Forgejo CLI binding is refused there for
+# the same reason the forge itself is, and --forge-cli must not become a way
+# around that check.
+for flag in "" --forge --forge-cli; do
+  # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+  out=$(FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" $flag kept 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] || fail "local-only with forge=forgejo did not refuse${flag:+ under $flag} (status $status, got '$out')"
+done
+pass "fm-project-mode: --forge-cli does not answer for a local-only project that refuses its forge"
 
 echo "# fm-project-mode.test.sh: all assertions passed"
