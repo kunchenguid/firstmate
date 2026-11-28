@@ -181,7 +181,7 @@ state/               runtime records and signals; gitignored
   lane-footprint.json  auto lane budget's per-lane footprint ledger, written only by bin/fm-capacity.sh --publish in auto mode, whose header owns the format
   .lane-vitals-host  cached Windows host view for the auto budget under WSL2 and on native Windows, written only by bin/fm-capacity.sh --publish; safe to delete
   .lane-admission.lock  bin/fm-spawn.sh's machine-wide lane admission lock in the local root home, taken only with admit-spawns; never touch
-  .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .last-watcher-beat watcher liveness beacon, touched at cycle start and bounded step boundaries; guard scripts read it (see docs/turnend-guard.md)
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```

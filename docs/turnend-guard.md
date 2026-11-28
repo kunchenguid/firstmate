@@ -38,7 +38,7 @@ The guard acts at that boundary when both of these hold:
 - Work, a process-event source, a registered custom check, or Relay polling needs supervision.
 - No identity-matched watcher has a fresh beacon.
 
-The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches every cycle, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
+The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches at cycle start and at bounded step boundaries, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
 When the guard acts, the harness integration must do one of two things:
 
 - Block the turn end.
