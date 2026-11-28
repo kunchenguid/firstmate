@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop after `treehouse get` in bin/fm-spawn.sh.
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -72,6 +72,18 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # Count the discovery window without sleeping in the fixture. Fractional
+  # sleeps elsewhere in spawn are unrelated to this one-second poll budget.
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = 1 ]; then
+  countfile="${FM_FAKE_PANE_COUNTFILE:?}.sleeps"
+  n=0
+  [ ! -f "$countfile" ] || n=$(cat "$countfile")
+  printf '%s\n' "$((n + 1))" > "$countfile"
+fi
+SH
+  chmod +x "$fakebin/sleep"
   fm_fake_exit0 "$fakebin" treehouse
   printf '%s\n' "$fakebin"
 }
@@ -232,6 +244,47 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# The last sleep belongs to the observation window too: a slot first seen on
+# read 60 still needs the observation after that sleep, rather than a timeout
+# without another read.
+test_late_worktree_gets_a_confirmation_read() {
+  local rec id out status reads sleeps
+  id=settle-late-worktree-z6
+  rec=$(make_settle_case settle-late-worktree "$id" 59)
+  read_settle_record "$rec"
+  STALE_DIR="$PROJ_DIR"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "a worktree reached before the final sleep needs a confirmation read"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the late isolated worktree"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -eq 62 ] || fail "late worktree took $reads reads; expected 61 discovery reads and the launch-boundary check"
+  sleeps=$(cat "$COUNTFILE.sleeps")
+  [ "$sleeps" -eq 60 ] || fail "discovery used $sleeps sleeps instead of the existing 60-sleep budget"
+  pass "the final wait ends with an observation and confirms a late isolated worktree"
+}
+
+# A first isolated observation at the deadline is still insufficient. The
+# additional observation must not turn the two-read rule into single-read trust.
+test_single_isolated_read_at_deadline_is_refused() {
+  local rec id out status reads
+  id=settle-unconfirmed-deadline-z7
+  rec=$(make_settle_case settle-unconfirmed-deadline "$id" 60)
+  read_settle_record "$rec"
+  STALE_DIR="$PROJ_DIR"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "a single isolated observation must still be refused"
+  assert_contains "$out" "no second read agreed" "refusal did not name the missing confirmation"
+  reads=$(cat "$COUNTFILE")
+  [ "$reads" -eq 61 ] || fail "unconfirmed pane used $reads reads instead of the bounded 61"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "unconfirmed worktree published metadata"
+  pass "an isolated path seen only at the deadline is refused without confirmation"
+}
+
 test_unborn_head_project_is_refused_at_once() {
   local rec id out status started elapsed
   id=settle-unborn-head-z5
@@ -257,6 +310,8 @@ test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_late_worktree_gets_a_confirmation_read
+test_single_isolated_read_at_deadline_is_refused
 test_unborn_head_project_is_refused_at_once
 
 echo "# all fm-spawn-worktree-settle tests passed"
