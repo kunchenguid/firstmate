@@ -400,6 +400,31 @@ assert_equals "False" "$(printf '%s' "$ready" | python3 -c 'import json,sys; pri
   "a free lock cannot receive work"
 assert_equals "present" "$(printf '%s' "$ready" | python3 -c 'import json,sys; print(json.load(sys.stdin)["posture"]["state"])')" \
   "no away flag is present posture"
+assert_equals "None" "$(printf '%s' "$ready" | json_get oldest_pending_note_age_seconds)" \
+  "an empty inbox has no oldest pending note age"
+
+# The readiness projection reports the exact age of the oldest durable pending
+# note without waking, draining, or otherwise mutating the inbox.
+home=$(make_home ready-pending-age)
+mkdir -p "$home/state/inbox"
+printf 'id=oldest\nat=2020-01-01T00:00:00Z\nsource=text\n--\nold\n' \
+  > "$home/state/inbox/oldest.note"
+printf 'id=newer\nat=2025-01-01T00:00:00Z\nsource=text\n--\nnew\n' \
+  > "$home/state/inbox/newer.note"
+before_wakes=$(count_wakes "$home")
+ready=$(run_inbox "$home" ready) || fail "ready should report pending note age"
+age=$(printf '%s' "$ready" | json_get oldest_pending_note_age_seconds)
+case "$age" in
+  ''|*[!0-9]*) fail "oldest pending note age must be a non-negative integer: $age" ;;
+esac
+expected_age=$(($(date +%s) - 1577836800))
+[ "$age" -ge $((expected_age - 3)) ] && [ "$age" -le $((expected_age + 3)) ] \
+  || fail "oldest pending note age must use the oldest note: $age (expected $expected_age)"
+assert_equals "$before_wakes" "$(count_wakes "$home")" \
+  "ready must not wake the primary while reading pending note age"
+assert_equals "2" "$(count_notes "$home")" \
+  "ready must not drain or alter pending notes while reading their age"
+pass "readiness includes a read-only oldest pending note age"
 
 # A live non-harness pid in the lock file must not be treated as a live primary.
 home=$(make_home ready-unknown)
