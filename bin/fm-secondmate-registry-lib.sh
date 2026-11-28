@@ -75,12 +75,31 @@ secondmate_registry_parse_line() {
   return 0
 }
 
+# The record for an id is the line "- <id>" or one starting "- <id> ".
+# The id is compared literally, so "." or any other character in it never
+# matches a different id the way an interpolated regex would.
+secondmate_registry_line_names_id() {
+  local line=$1 id=$2
+  [ "$line" = "- $id" ] && return 0
+  case "$line" in "- $id "*) return 0 ;; esac
+  return 1
+}
+
+# Print every line of the registry except the records for id, for rewriting
+# the registry without that route.
+secondmate_registry_lines_without_id() {
+  local reg=$1 id=$2 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    secondmate_registry_line_names_id "$line" "$id" || printf '%s\n' "$line"
+  done < "$reg"
+}
+
 secondmate_registry_line_for_id() {
   local reg=$1 id=$2 line count=0
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
-    [ "$line" = "- $id" ] || case "$line" in "- $id "*) ;; *) continue ;; esac
+    secondmate_registry_line_names_id "$line" "$id" || continue
     count=$((count + 1))
     [ "$count" -eq 1 ] || return 1
     SECONDMATE_REGISTRY_LINE=$line
