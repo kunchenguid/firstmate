@@ -2,10 +2,14 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html>
+// Usage: node board-render-harness.mjs <built-board.html> [<card-index> <question>]
+// With a card index and question, it clicks that card's Ask for more button,
+// types the question, and sends it, recording every Lavish prompt queued.
 // Prints one JSON document:
 //   { stats:[{n,label}], captains_call:[text], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable}], empty, more, error,
+//     cards:[{detail, more:[{asked,answer,view,open}], refs:[{text,href,target,rel}],
+//       ask_button, ask_button_type, ask_open, asked_shown, queued}], prompts:[{prompt,tag,queueKey,data}] }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -24,8 +28,10 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.listeners = {};
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x && x !== c).join(" "); },
       contains: (c) => this.className.split(/\s+/).includes(c),
       toggle: (c, force) => {
         const classes = new Set(this.className.split(/\s+/).filter(Boolean));
@@ -44,7 +50,9 @@ class Node {
   set textContent(v) { this._text = String(v); this.children = []; }
   appendChild(n) { n.parentNode = this; this.children.push(n); return n; }
   setAttribute(k, v) { this.attributes[k] = v; }
-  addEventListener() {}
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  dispatch(type) { for (const fn of this.listeners[type] || []) fn({ preventDefault() {} }); }
+  focus() {}
   querySelectorAll(sel) {
     const want = sel.replace(/^\./, "").replace(/:checked$/, "");
     const checkedOnly = sel.endsWith(":checked");
@@ -132,5 +140,50 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
+const has = (n, c) => n.className.split(/\s+/).includes(c);
+const findAll = (n, c) => {
+  const out = [];
+  const walk = (m) => { for (const k of m.children) { if (has(k, c)) out.push(k); walk(k); } };
+  walk(n);
+  return out;
+};
+const find = (n, c) => findAll(n, c)[0];
+const cardNodes = (byId.get("bb-call") || new Node("div")).children.filter((n) => has(n, "bb-decision"));
+
+const prompts = [];
+if (process.argv.length > 3) {
+  globalThis.window.lavish = {
+    queuePrompt: (prompt, o) => prompts.push({ prompt, tag: o.tag, queueKey: o.queueKey, data: o.data }),
+  };
+  const card = cardNodes[Number(process.argv[3])];
+  find(card, "bb-ask-btn").dispatch("click");
+  find(card, "bb-ask__field").value = process.argv[4];
+  find(card, "bb-ask__send").dispatch("click");
+}
+
+const cards = cardNodes.map((card) => {
+  const moreItems = findAll(card, "bb-more__item").map((it) => {
+    const view = find(it, "bb-more__frame") || find(it, "bb-more__img");
+    const open = find(it, "bb-more__open");
+    return {
+      asked: find(it, "bb-more__asked")?.textContent ?? "",
+      answer: find(it, "bb-more__answer")?.textContent ?? "",
+      view: view ? { tag: view.tagName, src: view.attributes.src, sandbox: view.attributes.sandbox ?? null } : null,
+      open: open ? open.href : null,
+    };
+  });
+  const askBox = find(card, "bb-ask");
+  return {
+    detail: findAll(card, "bb-decision__detail").map((d) => d.textContent),
+    more: moreItems,
+    refs: findAll(card, "bb-ref").map((a) => ({ text: a.textContent, href: a.href, target: a.target, rel: a.rel })),
+    ask_button: Boolean(find(card, "bb-ask-btn")),
+    ask_button_type: find(card, "bb-ask-btn")?.type ?? null,
+    ask_open: askBox ? !askBox.hidden : false,
+    asked_shown: Boolean(find(card, "bb-asked")?.classList.contains("is-visible")),
+    queued: has(card, "is-queued"),
+  };
+});
+
 process.stdout.write(
-  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, captains_call, underway, charted, empty, more, error: errorText, cards, prompts }) + "\n");

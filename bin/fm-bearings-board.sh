@@ -82,6 +82,32 @@
 # the composer fills them from the snapshot's `--fields gate-text` columns -
 # and the template wraps them rather than clipping either one.
 #
+# Any Captain's Call item MAY carry `detail` (plain text shown under its
+# context), `refs` (a list of {label, url} with a non-empty label and an https
+# url, shown as References), and `more` (a list of {asked, answer, page?}: the
+# captain's earlier Ask for more question and its answer, both non-empty text).
+# A `page` is an absolute local path to one self-contained .html, .htm, .svg,
+# .png, .jpg, .jpeg, .webp, or .gif file kept where it outlives the board,
+# because Lavish serves only files beside the board. build copies each
+# surviving card's page into bearings-board-pages/ beside the board under a
+# content-addressed name, rewrites `page` to that relative path, and removes
+# copied pages the published board no longer names. A copied page is
+# published at the board's origin, readable by anyone who can open the board,
+# so name only a page meant for the captain. That relative path is
+# also accepted as input while its copy still exists, so a rebuild can carry
+# an open card's `more` forward from the published board. A page that is not
+# a readable regular file refuses the build before any page is copied or the
+# board is touched. The board shows an html page in a frame that runs no
+# scripts and an image inline; only a raster image gets an "open full page"
+# link, because an opened html or svg page would run on the board's origin.
+# Put an interactive page in `refs` by its https URL instead.
+#
+# ASK FOR MORE. Every card's Ask for more button queues a Lavish prompt tagged
+# `ask-more` with fm-bearings-ask-more.v1 context, never a `choice` row, so
+# the keyed-answer intake never reads it and the card stays open. The first
+# mate answers by adding a `more` entry and rebuilding; Lavish live-reloads an
+# open board when the board file is replaced.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -98,6 +124,7 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
 BOARD_SCHEMA=fm-bearings-board.v1
+PAGES_NAME=bearings-board-pages
 
 usage() {
   awk '
@@ -113,6 +140,7 @@ fail() {
 }
 
 board_path() { printf '%s/.lavish/bearings-board.html\n' "$FM_HOME"; }
+pages_dir() { local board; board=$(board_path); printf '%s/%s\n' "${board%/*}" "$PAGES_NAME"; }
 
 validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
@@ -131,11 +159,20 @@ validate_payload() {  # <data.json>
     def optional_filed:
       (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
-    def optional_https_url($name):
-      (has($name) | not)
-      or (.[$name]
-        | type == "string"
-          and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def https_url:
+      type == "string"
+      and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$");
+    def optional_https_url($name): (has($name) | not) or (.[$name] | https_url);
+    def page_path:
+      type == "string"
+      and ((startswith("/") and (test("[[:cntrl:]]") | not)
+          and test("[.](html?|svg|png|jpe?g|webp|gif)$"; "i"))
+        or test("^bearings-board-pages/[0-9a-f]{16}[.](html?|svg|png|jpe?g|webp|gif)$"));
+    def more_item:
+      type == "object" and (.asked | nonempty_string) and (.answer | nonempty_string)
+      and ((has("page") | not) or (.page | page_path));
+    def ref_item: type == "object" and (.label | nonempty_string) and (.url | https_url);
+    def optional_list($name; f): (has($name) | not) or (.[$name] | type == "array" and ([.[] | f] | all));
     def version: type == "string" and test("^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$");
     def optional_subject:
       (has("subject") | not)
@@ -161,6 +198,8 @@ validate_payload() {  # <data.json>
       and (optional_string("decide"))
       and (optional_string("detail"))
       and (optional_https_url("pr_url"))
+      and optional_list("more"; more_item)
+      and optional_list("refs"; ref_item)
       and optional_subject
       and (if has("subject") then .type == "decision" else true end)
       and (optional_string("freeform_hint"))
@@ -340,6 +379,69 @@ effective_payload() {  # <data.json> <dest.json>
     ]' "$data" > "$dest" || return 1
 }
 
+file_sha256() {  # <file>
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
+}
+
+# Copy each surviving card's More page beside the board, under a
+# content-addressed name so a rebuilt page never reuses a cached URL, and
+# rewrite the payload's `page` to that served relative path. Any page that is
+# not a readable regular file refuses before the board is touched.
+stage_more_pages() {  # <payload.json>
+  local payload=$1 dir src file ext digest name tmp map='{}' sources
+  dir=$(pages_dir)
+  sources=$(jq -r '.captains_call[] | .more[]? | .page // empty' "$payload") || return 1
+  # Check every page before copying any, so a refusal leaves no new copies.
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    case "$src" in
+      /*) file=$src ;;
+      *) file=$dir/${src#*/} ;;
+    esac
+    if [ ! -f "$file" ] || [ -L "$file" ] || [ ! -r "$file" ]; then
+      printf 'fm-bearings-board: more page is not a readable regular file: %s\n' "$src" >&2
+      return 1
+    fi
+  done <<< "$sources"
+  while IFS= read -r src; do
+    [ -n "$src" ] || continue
+    case "$src" in
+      /*) ;;
+      *) map=$(jq -c --arg src "$src" '. + {($src): $src}' <<< "$map") || return 1; continue ;;
+    esac
+    (umask 077; mkdir -p "$dir") || return 1
+    tmp=$(umask 077; mktemp "$dir/.page.XXXXXX") || return 1
+    if ! { cp -- "$src" "$tmp" && digest=$(file_sha256 "$tmp") && [ "${#digest}" -eq 64 ]; }; then
+      rm -f -- "$tmp"
+      return 1
+    fi
+    ext=$(printf '%s' "${src##*.}" | tr '[:upper:]' '[:lower:]')
+    name=${digest:0:16}.$ext
+    mv -f -- "$tmp" "$dir/$name" || { rm -f -- "$tmp"; return 1; }
+    map=$(jq -c --arg src "$src" --arg rel "$PAGES_NAME/$name" '. + {($src): $rel}' <<< "$map") || return 1
+  done <<< "$sources"
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-bearings-pages.XXXXXX") || return 1
+  if ! jq --argjson map "$map" '
+    .captains_call |= map(if has("more")
+      then .more |= map(if has("page") then .page = $map[.page] else . end)
+      else . end)' "$payload" > "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -f -- "$tmp" "$payload"
+}
+
+# After the board is published, remove every copied page it no longer names.
+prune_more_pages() {  # <kept relative paths, one per line>
+  local dir keep=$1 f
+  dir=$(pages_dir)
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '%s\n' "$keep" | grep -qxF "$PAGES_NAME/${f##*/}" || rm -f -- "$f"
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name '.page.*')
+}
+
 # The OWNER column bin/fm-procevent.sh already publishes: live, none,
 # orphaned, or uncertain. Empty means the source is not registered at all.
 source_owner() {  # <source-id>
@@ -361,7 +463,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner
+  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner kept_pages
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
@@ -377,6 +479,12 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
+  if ! stage_more_pages "$effective"; then
+    rm -f -- "$effective"
+    fail "cannot copy the More pages beside the board"
+  fi
+  kept_pages=$(jq -r '.captains_call[] | .more[]? | .page // empty' "$effective") \
+    || { rm -f -- "$effective"; fail "cannot list the More pages"; }
   json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every
@@ -406,6 +514,7 @@ command_build() {
     rm -f -- "$tmp"
     fail "cannot publish the board"
   fi
+  prune_more_pages "$kept_pages"
   printf 'board: %s\n' "$board"
 
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"

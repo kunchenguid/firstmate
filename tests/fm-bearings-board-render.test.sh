@@ -295,6 +295,69 @@ EOF
   pass "the complete snapshot question and options reach rendered decision text"
 }
 
+more_calls() {  # <home>
+  printf '<p>the options as a picture</p>\n' > "$1/options.html"
+  printf '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n' > "$1/sketch.svg"
+  printf 'not really a png\n' > "$1/chart.png"
+  jq -n --arg html "$1/options.html" --arg svg "$1/sketch.svg" --arg png "$1/chart.png" '[
+    {key:"drafts-nav-call",type:"decision",repo:"sample",title:"Drafts nav",
+     about:"where drafts live",decide:"Pick a placement",detail:"Both keep the current links.",
+     options:[{value:"top",label:"Top bar"},{value:"side",label:"Side panel"}],allow_freeform:true,
+     more:[{asked:"show me the options",answer:"Two layouts, side panel picked.",page:$html},
+           {asked:"and a sketch",answer:"Here it is.",page:$svg},
+           {asked:"and a chart",answer:"Charted.",page:$png},
+           {asked:"why side",answer:"It keeps the top bar short."}],
+     refs:[{label:"Full plan",url:"https://example.com/plan"}]},
+    {key:"merge.sample-task",type:"merge",repo:"sample",title:"Merge: sample change",
+     detail:"validation green",task_id:"sample-task",pr_url:"https://github.com/example/sample/pull/1",
+     checks:"green",risk:"low",options:[{value:"merge",label:"Merge now"}],allow_freeform:true}]'
+}
+
+test_decision_cards_show_detail_more_and_refs() {
+  local home out
+  home=$(make_home more-render)
+  out=$(render_board "$home" '[]' '[]' 0 0 "$(more_calls "$home")")
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.cards | length) == 2
+    and (.cards[0] | .detail == ["Both keep the current links."]
+      and (.more | length) == 4
+      and (.more[0] | .asked == "You asked: show me the options"
+        and .answer == "Two layouts, side panel picked."
+        and .view.tag == "iframe" and .view.sandbox == ""
+        and (.view.src | test("^bearings-board-pages/[0-9a-f]{16}[.]html$"))
+        and .open == null)
+      and (.more[1] | .view.tag == "img" and (.view.src | test("^bearings-board-pages/[0-9a-f]{16}[.]svg$"))
+        and .open == null)
+      and (.more[2] | .view.tag == "img" and (.view.src | test("^bearings-board-pages/[0-9a-f]{16}[.]png$"))
+        and .open == .view.src)
+      and (.more[3] | .view == null and .open == null and .answer == "It keeps the top bar short.")
+      and .refs == [{text:"Full plan",href:"https://example.com/plan",target:"_blank",rel:"noopener noreferrer"}]
+      and .ask_button and .ask_button_type == "button" and (.ask_open | not) and (.asked_shown | not) and (.queued | not))
+    and (.cards[1] | .detail == ["validation green"] and .ask_button)
+  ' >/dev/null || fail "a decision card did not show its detail, More answers, or references: $out"
+  pass "decision cards show detail, More answers with their pages, and references, opening only raster pages"
+}
+
+test_ask_for_more_queues_a_question_and_leaves_the_card_open() {
+  local home out
+  home=$(make_home ask-more-render)
+  render_board "$home" '[]' '[]' 0 0 "$(more_calls "$home")" >/dev/null
+  out=$(node "$HARNESS" "$home/.lavish/bearings-board.html" 0 "  show the risks as a table  ") \
+    || fail "the Ask for more click could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .error == "" and (.prompts | length) == 1
+    and (.prompts[0] | .tag == "ask-more"
+      and (.queueKey | test("^ask-more\\.drafts-nav-call\\.[0-9a-z]+\\.1$"))
+      and .data == {schema:"fm-bearings-ask-more.v1",question:"drafts-nav-call",ask:"show the risks as a table"}
+      and (.prompt | contains("drafts-nav-call") and contains("show the risks as a table")))
+    and (.cards[0] | (.queued | not) and .asked_shown and (.ask_open | not))
+    and (.cards[1] | (.queued | not) and (.asked_shown | not))
+  ' >/dev/null || fail "Ask for more did not queue a plain question that leaves the card open: $out"
+  printf '%s' "$out" | jq -e '[.prompts[] | select(.tag == "choice")] | length == 0' >/dev/null \
+    || fail "Ask for more queued a choice row: $out"
+  pass "Ask for more queues a plain question, never a choice, and leaves the card open"
+}
+
 test_full_snapshot_question_reaches_the_rendered_decision
 LONG_TITLE="Make the 'Already packed with serial' pack-screen warning readable on the smallest handheld scanner we support"
 LONG_REASON="Queued, nothing blocking, waiting on the scanner vendor to confirm which firmware ships next quarter"
@@ -376,3 +439,5 @@ test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
+test_decision_cards_show_detail_more_and_refs
+test_ask_for_more_queues_a_question_and_leaves_the_card_open
