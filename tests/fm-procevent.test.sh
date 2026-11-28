@@ -1103,6 +1103,93 @@ wait_for "$HORPHAN/state/worker-4.inbox/001.msg" \
   || fail "the recovered capture did not reach its owning worker's steering inbox"
 pass "a capture interrupted before its result commit does not wedge its source"
 
+# --- end-user-aligned regression: one board, however its path is spelled ------
+# Lavish keys a session on the native realpath, which restores the on-disk
+# spelling on a case-insensitive filesystem. A board armed through another
+# spelling is still that session's one source: otherwise its listener cannot
+# find its session and exits at once while arm reports it armed, the captain's
+# answer waits with nothing collecting it, and the id derived from the on-disk
+# path names nothing registered.
+HCASE="$TMP_ROOT/hcase"; new_home "$HCASE"
+CASE_BIN=$(fm_fakebin "$TMP_ROOT/lavish-case-stub")
+CASE_TRIGGER="$TMP_ROOT/lavish-case-hold"
+CASE_DIR="$TMP_ROOT/Case-Board"
+mkdir -p "$CASE_DIR"
+CASE_DIR=$(cd -P -- "$CASE_DIR" && pwd -P)
+CASE_ART="$CASE_DIR/board.html"
+CASE_SPELLED="${CASE_DIR%/*}/case-board/board.html"
+export CASE_TRIGGER CASE_ART
+cat > "$CASE_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+while [ ! -e "$CASE_TRIGGER" ]; do sleep 0.02; done
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","spelled answer","","message",""\n'
+SH
+chmod +x "$CASE_BIN/lavish-axi"
+printf '<h1>spelled</h1>\n' > "$CASE_ART"
+lavish_session "$CASE_ART"
+if [ ! -e "$CASE_SPELLED" ]; then
+  # A case-sensitive filesystem has no second spelling, so this stand-in gives
+  # the answer the native realpath gives on one that does. The real filesystem
+  # and the real Lavish are covered by tests/fm-bearings-board-lavish-live-e2e.test.sh.
+  cat > "$CASE_BIN/node" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$CASE_ART"
+SH
+  chmod +x "$CASE_BIN/node"
+fi
+case_id=$(PATH="$CASE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_ART")
+[ "$(PATH="$CASE_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_SPELLED")" = "$case_id" ] \
+  || fail "two spellings of one board produced two source ids"
+fm_test_track_procevent_home "$HCASE"
+new_task_endpoint "$HCASE" worker-case
+out=$(PATH="$CASE_BIN:$PATH" FM_HOME="$HCASE" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$CASE_SPELLED" --for worker-case) \
+  || fail "a board armed through another spelling was refused: $out"
+assert_contains "$out" "armed: $case_id" "another spelling arms the board's one source"
+assert_contains "$out" "artifact: $CASE_ART" "the listener holds the path Lavish keys its session on"
+PATH="$CASE_BIN:$PATH" pe "$HCASE" ensure-listening "$case_id" \
+  || fail "the id derived from the on-disk path does not name the armed board"
+assert_contains "$(PATH="$CASE_BIN:$PATH" pe "$HCASE" list)" "task:worker-case/listening" \
+  "the listener stays up after another spelling arms the board"
+touch "$CASE_TRIGGER"
+wait_for "$HCASE/state/worker-case.inbox/001.msg" \
+  || fail "the answer to a board armed through another spelling never reached its worker"
+[ -f "$HCASE/state/procevent-inbox/$case_id.1.result" ] \
+  || fail "the answer to a board armed through another spelling was not captured under its one source"
+pass "a board armed through another spelling keeps one source and a live listener, and its answer arrives"
+
+# --- upgrade regression: a board registered under its old spelling is reused --
+# A registration saved before ids followed the native realpath carries the id of
+# the spelling it was armed through. That registration stays the board's one
+# source, so arming again adds no second listener and retire <artifact> reaches it.
+HUP="$TMP_ROOT/hupgrade"; new_home "$HUP"
+UP_BIN=$(fm_fakebin "$TMP_ROOT/lavish-upgrade-stub")
+cp "$CASE_BIN/node" "$UP_BIN/node" 2>/dev/null || true
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$UP_BIN/lavish-axi"
+chmod +x "$UP_BIN/lavish-axi"
+fm_test_track_procevent_home "$HUP"
+# The old id hashes the Perl-resolved spelling, which keeps the caller's case.
+# Without a second spelling (a case-sensitive filesystem) it is the native id.
+old_path=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$CASE_SPELLED" 2>/dev/null) \
+  || old_path=$CASE_ART
+old_id="lavish-$(printf '%s' "$old_path" | { shasum -a 256 2>/dev/null || sha256sum; } | awk '{print substr($1,1,16)}')"
+native_id=$(PATH="$UP_BIN:$PATH" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_ART")
+if [ -e "$CASE_SPELLED" ]; then
+  [ "$old_id" != "$native_id" ] || fail "the old spelling id equals the native-path id, so reuse is not exercised"
+fi
+pe "$HUP" register lavish "$old_id" -- "$ROOT/bin/fm-procevent-lavish.sh" poll "$CASE_SPELLED" >/dev/null
+[ "$(PATH="$UP_BIN:$PATH" FM_HOME="$HUP" "$ROOT/bin/fm-procevent-lavish.sh" source-id "$CASE_SPELLED")" = "$old_id" ] \
+  || fail "an existing registration under the old spelling was not reused"
+out=$(PATH="$UP_BIN:$PATH" FM_HOME="$HUP" "$ROOT/bin/fm-procevent-lavish.sh" arm "$CASE_SPELLED") \
+  || fail "re-arming a board with an old-spelling registration failed: $out"
+assert_contains "$out" "armed: $old_id" "the re-armed board keeps its registered id"
+list=$(PATH="$UP_BIN:$PATH" pe "$HUP" list)
+[ "$(printf '%s\n' "$list" | grep -c 'lavish-')" = 1 ] || fail "the board has more than one source: $list"
+PATH="$UP_BIN:$PATH" FM_HOME="$HUP" "$ROOT/bin/fm-procevent-lavish.sh" retire "$CASE_SPELLED" >/dev/null
+assert_contains "$(PATH="$UP_BIN:$PATH" pe "$HUP" list)" "no sources registered" \
+  "retire <artifact> left a registration owning the board"
+pass "an existing old-spelling registration stays the board's one source and retire reaches it"
+
 # --- end-user-aligned regression: confirming a launch leaves the lock free ----
 # A runner needs the source lock to claim. A confirmation loop polling that lock
 # before any claim exists starves the launch it is waiting for, which on a loaded

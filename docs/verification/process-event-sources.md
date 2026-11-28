@@ -6,6 +6,7 @@ This record holds reusable version-scoped evidence for the runner's active guara
 `docs/configuration.md` owns the operating contract, each script's header and `--help` own its mechanics, and `.agents/skills/process-event-sources/SKILL.md` owns the handling procedure.
 
 The published reply handoff was verified on 2026-09-29 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.80 installed.
+Native-realpath board identity was verified on 2026-11-07 on macOS (Darwin 25.6.0) with `lavish-axi` 0.1.82 and Node v26.0.0 by `tests/fm-bearings-board-lavish-live-e2e.test.sh`.
 The poll lifecycle was first verified on 2026-07-31 with 0.1.45; generic keyed-answer feed was verified on 2026-08-16, and cross-origin keyed-answer feed on 2026-08-19.
 Trusted external `process-event-adapter/1` binding conformance and the runnable `file-signal` example were verified on 2026-08-27 on macOS (Darwin 25.5.0) with Node v25.9.0.
 
@@ -106,7 +107,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | trusted classification boundary | Lavish lifecycle classification reads the leading response envelope, so prompt payload text that resembles a missing-session error cannot override a valid session status; exact handled-status mappings are pinned by the executable fixture table above rather than by a live vocabulary guard |
 | result identity and ordering | each wake names the committed sequence to read, and pending sequences 1, 2, and 10 publish in numeric order |
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
-| canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
+| canonical physical identity | a final-component symlink and its target produce the same Lavish source id, and a board armed through another spelling of its path keeps that one source with a live listener whose answer is captured |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
 | guarded runner startup | the source command does not launch when the detached owner guard rejects an invalid lease configuration, proving the runner waits for positive guard readiness and fails closed when initialization fails |
 | attached owner continuity | a foreground `start` with a one-second lease remains alive beyond that lease while its caller stays attached, then captures normally when the blocking source completes |
