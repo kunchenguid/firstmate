@@ -456,6 +456,70 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# The no-mistakes handoff `done: {summary}` is what firstmate reads to start the
+# pipeline, so it stays; but a worker that reads it as completion stops one wake
+# round short of its PR. Every no-mistakes shape must therefore render the shared
+# handoff notice, which says the handoff is not completion, names the shape's own
+# completing report, and forbids later stages from being reported as done. The
+# notice must stay verb-free: bin/fm-classify-lib.sh owns the status verbs, and
+# the declared-wait verb is overridable through FM_CLASSIFY_PAUSED_VERB, so a
+# rendered literal would mislead a home that aliases it.
+test_no_mistakes_dod_commit_is_not_completion() {
+  local home id flags label brief declared notice count
+  home="$TMP_ROOT/commit-not-done-home"
+  mkdir -p "$home/data"
+  for spec in \
+    'nm-plain|--mode no-mistakes|pr' \
+    'nm-manual|--mode no-mistakes --pr manual|pr' \
+    'nm-gerrit|--mode no-mistakes --forge gerrit|change'; do
+    id=${spec%%|*}
+    spec=${spec#*|}
+    flags=${spec%|*}
+    label=${spec##*|}
+    # shellcheck disable=SC2086  # the flags must word-split into brief arguments
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj $flags >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$label: brief was not scaffolded"
+    assert_no_grep "A commit on your branch does not complete this task" "$brief" \
+      "$label: DoD duplicates the notice's commit-is-not-completion semantics"
+    assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+      "$label: DoD still says the task is complete when committed"
+    assert_grep "When the work is committed, append \`done [at=<epoch>]: {summary}\` to the status file and stop." "$brief" \
+      "$label: DoD does not require the commit-time handoff"
+    assert_grep "never reports this task complete: it only hands control to the pipeline" "$brief" \
+      "$label: DoD does not say the handoff done is not completion"
+    assert_grep "Append that handoff \`done: {summary}\` when the work is committed: it is required, and it is not completion." "$brief" \
+      "$label: DoD does not state the handoff is required but not completion"
+    assert_grep "After that handoff, never report a later stage as \`done: {summary}\`: a stage short of that report is not a result." "$brief" \
+      "$label: DoD lets a later stage be reported as done"
+    assert_no_grep "a commit is not a result to report" "$brief" \
+      "$label: DoD still carries the rejected commit-is-not-a-result phrasing"
+    # The whole handoff notice must stay verb-free: bin/fm-classify-lib.sh owns
+    # the declared-wait verb through FM_CLASSIFY_PAUSED_VERB, so a literal here
+    # would drift from every home that aliases it.
+    notice="$home/$id-notice.txt"
+    sed -n '/never reports this task complete/,/stage short of that report is not a result/p' "$brief" >"$notice"
+    assert_grep "never reports this task complete" "$notice" \
+      "$label: the handoff notice was not located for the verb-free check"
+    assert_grep "stage short of that report is not a result" "$notice" \
+      "$label: the verb-free check did not cover the whole handoff notice"
+    assert_no_regex 'paused|awaiting|working|FM_CLASSIFY_PAUSED_VERB' "$notice" \
+      "$label: the handoff notice names a status verb"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    case "$label" in
+      pr) declared='The only `done:` that completes this task is `done: PR <url> checks green`' ;;
+      change) declared='The only `done:` that completes this task is `done: PR <change url> published for review`' ;;
+      *) fail "$label: test spec names no completing report" ;;
+    esac
+    assert_grep "$declared" "$brief" \
+      "$label: DoD does not name this shape's completing report"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    count=$(grep -F -c 'The only `done:` that completes this task is' "$brief") || true
+    [ "$count" = 1 ] || fail "$label: DoD defines its completing report $count times, not once"
+  done
+  pass "fm-brief.sh: no-mistakes DoDs make the pre-PR done a handoff, not completion"
+}
+
 # A PR-based ship must not report done on a draft, which cannot be merged; a
 # lane that deliberately holds a draft declares a wait instead. local-only opens
 # no PR, so it must not carry the requirement.
@@ -1703,6 +1767,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
+test_no_mistakes_dod_commit_is_not_completion
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
