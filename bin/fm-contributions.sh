@@ -71,7 +71,9 @@
 # is capped at five seconds. A first attempt killed at that bound or deadline is
 # budget refusal; a killed retry retains the genuine failure that caused it.
 # HTTP 5xx, 429, secondary-rate-limit 403, connection, DNS and TLS failures are
-# retried once when that bound still has time. Other failures are reported
+# retried once when that bound still has time. A bare EOF is a connection failure
+# only when the error is exactly `EOF` or ends in `: EOF`; unrelated `eof`
+# substrings are not connection failures. Other failures are reported
 # immediately, including a 404, which is how a lost login reads on a private
 # repository. A pull observation has three
 # dependent waves: core, six independent reads (seven when FM_CONTRIBUTIONS_REPLY_AGE
@@ -343,7 +345,7 @@ forge_error_summary() { # stderr-file
     printf 'DNS error\n'
   elif grep -Eqi 'tls: |x509: |TLS handshake|certificate (verify|signed)' "$err"; then
     printf 'TLS error\n'
-  elif grep -Eqi 'connection (reset|refused|closed|failed|error)|could not connect|failed to connect|error connecting|broken pipe|network is unreachable|dial (tcp|udp)|unexpected EOF' "$err"; then
+  elif grep -Eqi 'connection (reset|refused|closed|failed|error)|could not connect|failed to connect|error connecting|broken pipe|network is unreachable|dial (tcp|udp)|unexpected EOF|(^|: )EOF$' "$err"; then
     printf 'connection error\n'
   else
     printf 'request failed\n'
