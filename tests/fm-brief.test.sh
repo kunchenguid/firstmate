@@ -534,6 +534,9 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD still states the --yes ban as a preference"
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
+  # An approval past a failed Test step records firstmate's reason, not "no operator reason supplied".
+  assert_grep "pass firstmate's stated reason with \`--reason \"<firstmate's words>\"\` on that \`no-mistakes axi respond --step test --action approve\`" "$brief" \
+    "no-mistakes DOD must tell the worker to pass --reason on a Test approval past a failure"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
