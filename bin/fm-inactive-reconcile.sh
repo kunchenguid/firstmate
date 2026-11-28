@@ -5,6 +5,7 @@
 #   fm-inactive-reconcile.sh scan [--startup]
 #   fm-inactive-reconcile.sh report <task-id>
 #   fm-inactive-reconcile.sh acknowledge <fingerprint>
+#   fm-inactive-reconcile.sh acknowledge-status <task-id> [<status-endpoint> <status-identity>]
 #
 # This is an adjunct to the existing watcher poll loop and session-start path,
 # not a watcher, daemon, PR poll, or forge client of its own.
@@ -92,8 +93,11 @@
 # In a secondmate home, that receipt is an idempotent parent-channel append
 # through bin/fm-parent-channel-lib.sh; the ledger-first path and the inactive
 # path share the same receipt store.
-# In a main home, a presentation-stage record is acknowledged by fm-wake-drain
-# only after its corresponding inactive-outcome wake is handled.
+# In a main home, fm-wake-drain acknowledges a presentation-stage record
+# after handling its corresponding inactive-outcome wake.
+# acknowledge-status also records a receipt when main acknowledges a direct
+# signal (using the presentation cursor) or a branch outcome (using its
+# captured endpoint and identity).
 # A receipt is intentionally independent of .hb-surfaced-* bookkeeping.
 #
 # New fm-terminal-outcome.v1 receipts contain schema, fingerprint, task_id,
@@ -234,7 +238,7 @@ record_field_set() {
 }
 
 ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr> [status-head]
-  local fingerprint=$1 task=$2 incarnation=$3 state=$4 outcome_key=$5 origin=$6 phase=$7 pr=$8 status_head=${9:-} tmp
+  local fingerprint=$1
   RECORD_PENDING=$(record_path "$fingerprint" pending)
   RECORD_PRESENTED=$(record_path "$fingerprint" presented)
   RECORD_REPORTED=$(record_path "$fingerprint" reported)
@@ -245,8 +249,14 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
   if [ -f "$RECORD_PENDING" ] && [ ! -L "$RECORD_PENDING" ]; then
     return 0
   fi
+  write_record "$RECORD_PENDING" "$@"
+}
+
+write_record() { # <path> <fingerprint> <task> <incarnation> <state> <outcome-key> <origin> <phase> <pr> <status-head>
+  local path=$1 fingerprint=$2 task=$3 incarnation=$4 state=$5 outcome_key=$6
+  local origin=$7 phase=$8 pr=$9 status_head=${10:-} tmp
   mkdir -p "$OUTCOME_DIR" || return 1
-  [ ! -L "$OUTCOME_DIR" ] || return 1
+  [ ! -L "$OUTCOME_DIR" ] && [ ! -d "$path" ] || return 1
   tmp=$(mktemp "$OUTCOME_DIR/.pending.XXXXXX") || return 1
   {
     printf 'schema=fm-terminal-outcome.v1\n'
@@ -263,7 +273,7 @@ ensure_record() { # <fingerprint> <task> <incarnation> <state> <outcome-key> <or
     [ -z "$status_head" ] || printf 'status_head=%s\n' "$status_head"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$RECORD_PENDING" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
 }
 
 mark_reported() { # <record>
@@ -297,9 +307,20 @@ queue_notice_once() { # <record> <key> <payload>
   return "$rc"
 }
 
+terminal_presentation_missing() {
+  [ ! -f "$(record_path "$1" presented)" ]
+}
+
 queue_presentation() { # <record> <fingerprint> <payload>
-  local record=$1 fingerprint=$2 payload=$3
-  publish_actionable "inactive-outcome:$fingerprint" "$payload"
+  local record=$1 fingerprint=$2 payload=$3 key rc=0
+  key="inactive-outcome:$fingerprint"
+  queue_key_exists "$key" && return 0
+  fm_wake_append_guarded terminal_presentation_missing check "$key" "$payload" "$fingerprint" || rc=$?
+  case "$rc" in
+    0) printf 'actionable: %s\n' "$payload" ;;
+    3) rm -f "$record" ;;
+    *) return "$rc" ;;
+  esac
 }
 
 last_activity_age() { # <meta> <status> <turn-ended>
@@ -392,15 +413,24 @@ state_line_note() { # <state-line>
 # `PR <url> published for review`) naming a review URL bin/fm-pr-lib.sh parses,
 # so a PR a worker merely mentioned in prose is never the delivery.
 terminal_outcome_pr() { # <state-line> <kind>
-  local line=$1 kind=${2:-} value
+  local line=$1 kind=${2:-}
   [ "$kind" != scout ] || return 0
   if [ "$(state_line_source "$line")" = run-step ]; then
     clean_field "$(state_line_pr "$line")"
     return 0
   fi
-  value=$(fm_dod_ready_note_url "$(state_line_note "$line")") || return 0
+  terminal_note_pr "$(state_line_note "$line")"
+}
+
+terminal_note_pr() {
+  local value
+  value=$(fm_dod_ready_note_url "${1%%"$STATE_LINE_SEP"*}") || return 0
   fm_pr_url_parse "$value" || return 0
   clean_field "$FM_PR_URL"
+}
+
+direct_outcome_fingerprint() {
+  sha256_text "$1|$2|$3|$4"
 }
 
 # Enforce the header's independent captain-facing corroboration contract. A
@@ -688,7 +718,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   # keeps appending routine prose after one terminal outcome must not mint a
   # fresh parent event per sentence. The last line stays in the record as
   # status_head evidence.
-  fingerprint=$(sha256_text "$incarnation|$id|$state|$pr")
+  fingerprint=$(direct_outcome_fingerprint "$incarnation" "$id" "$state" "$pr")
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else
@@ -804,6 +834,73 @@ acknowledge() { # <fingerprint>
   mv -f "$pending" "$presented"
 }
 
+retire_queued_presentation() { # <fingerprint>; caller holds FM_WAKE_QUEUE_LOCK
+  local tmp
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  tmp=$(mktemp "$STATE/.wake-queue.retire.XXXXXX") || return 1
+  chmod 0600 "$tmp" 2>/dev/null || true
+  awk -F '\t' -v key="inactive-outcome:$1" '!(NF >= 5 && $3 == "check" && $4 == key)' \
+    "$FM_WAKE_QUEUE" > "$tmp" || { rm -f "$tmp"; return 1; }
+  _fm_atomic_replace "$tmp" "$FM_WAKE_QUEUE" || { rm -f "$tmp"; return 1; }
+}
+
+acknowledge_status() { # <task-id> [<status-endpoint> <status-identity>]
+  local id=$1 endpoint=${2:-} ident=${3:-} status="$STATE/$1.status" meta="$STATE/$1.meta"
+  local incarnation kind size current_ident line state state_line pr fingerprint spawn_epoch status_epoch rc=0
+  local home_rc=0 scratch event_mtime
+  home_secondmate_id >/dev/null || home_rc=$?
+  [ "$home_rc" -eq 1 ] || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  incarnation=$(meta_incarnation "$meta")
+  kind=$(meta_field "$meta" kind)
+  [ "$kind" != secondmate ] || return 0
+  [ -f "$status" ] && [ ! -L "$status" ] || return 0
+  _fm_status_read_ident_size "$status" || return 0
+  size=${_FM_STAT_SIZE//[[:space:]]/}
+  current_ident=$_FM_STAT_IDENTITY
+  if [ -z "$endpoint" ]; then
+    [ -f "$STATE/.status-presentation-cursor" ] || return 0
+    endpoint=$(status_presentation_cursor_offset "$status") || return 0
+    ident=$current_ident
+  fi
+  [ "$ident" = "$current_ident" ] || return 0
+  scratch=$(_fm_status_span_scratch "$status").ack
+  _fm_status_read_span "$status" 0 "$endpoint" > "$scratch" 2>/dev/null || { rm -f "$scratch"; return 0; }
+  line=$(last_status_line "$scratch")
+  rm -f "$scratch"
+  [ -n "$line" ] && [ "$line" = "$(last_status_line "$status")" ] || return 0
+  _fm_status_read_ident_size "$status" && [ "$_FM_STAT_IDENTITY" = "$ident" ] || return 0
+  event_mtime=$(_fm_status_file_mtime "$status") || return 0
+  state=$(status_line_verb "$line")
+  case "$state" in done|failed) ;; *) return 0 ;; esac
+  spawn_epoch=${incarnation#s}
+  spawn_epoch=${spawn_epoch%%.*}
+  status_epoch=$(status_line_at_epoch "$line") || status_epoch=$event_mtime
+  case "$spawn_epoch" in ''|*[!0-9]*) ;; *) [ "$spawn_epoch" -le "$status_epoch" ] || return 0 ;; esac
+
+  pr=
+  if [ "$kind" != scout ]; then
+    pr=$(terminal_note_pr "$(status_line_note "$line")")
+    state_line=$(fm_run_timed "$FM_INACTIVE_RECONCILE_BUDGET_SECS" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
+      "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_line=
+    if [ "$(state_line_source "$state_line")" = run-step ] && [ "${state_line#state: "$state" }" != "$state_line" ]; then
+      pr=$(terminal_outcome_pr "$state_line" "$kind")
+    fi
+  fi
+  fingerprint=$(direct_outcome_fingerprint "$incarnation" "$id" "$state" "$pr")
+  # The queue lock serializes this receipt with queue_presentation's guard.
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(meta_incarnation "$meta")" = "$incarnation" ] \
+    && _fm_status_read_ident_size "$status" && [ "$_FM_STAT_IDENTITY" = "$ident" ] \
+    && terminal_presentation_missing "$fingerprint"; then
+    write_record "$(record_path "$fingerprint" presented)" "$fingerprint" "$id" "$incarnation" "$state" \
+      "inactive-outcome-main-$id-$state" direct presentation "$pr" "$(sha256_text "$line")" || rc=$?
+    [ "$rc" -ne 0 ] || retire_queued_presentation "$fingerprint" || rc=$?
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$rc"
+}
+
 acknowledge_notice() { # <fingerprint>
   local fingerprint=$1 pending
   case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
@@ -850,6 +947,15 @@ case "$mode" in
     fm_lock_acquire_wait "$SCAN_LOCK" || exit 1
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     acknowledge "$2"
+    ;;
+  acknowledge-status)
+    case "$#" in 2|4) ;; *) exit 2 ;; esac
+    valid_id "$2" || exit 2
+    if [ "$#" -eq 4 ]; then
+      case "$3" in ''|*[!0-9]*) exit 2 ;; esac
+      [ -n "$4" ] || exit 2
+    fi
+    acknowledge_status "${@:2}"
     ;;
   acknowledge-notice)
     [ "$#" -eq 2 ] || exit 2

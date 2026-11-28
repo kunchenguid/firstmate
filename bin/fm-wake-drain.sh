@@ -273,6 +273,15 @@ inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
   done < "$FM_WAKE_QUEUE"
 }
 
+acknowledge_signal_statuses() {
+  local rows=$1 status_key mode manifest
+  manifest=$(fm_wake_annotation_manifest "$rows" | sort -u) || return 1
+  while IFS=$'\t' read -r status_key mode; do
+    [ "$mode" = direct ] || continue
+    "$SCRIPT_DIR/fm-inactive-reconcile.sh" acknowledge-status "${status_key%.status}" || return 1
+  done <<< "$manifest"
+}
+
 acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
   local mode=$1 fingerprints=$2 fingerprint
   while IFS= read -r fingerprint; do
@@ -865,6 +874,13 @@ if [ -n "$ACK_THROUGH" ]; then
     PRESENTED_MAX=$(presented_max_row "$MAIN_ROWS_FILE") || exit 1
   fi
   if [ "$ACTOR" = main ]; then
+    PRESENTED_SIGNALS=
+    if [ -f "$MAIN_ROWS_FILE" ] && [ -s "$FM_WAKE_QUEUE" ]; then
+      PRESENTED_SIGNALS=$(awk -F '\t' -v cutoff="$ACK_THROUGH" -v rows="$MAIN_ROWS_FILE" '
+        BEGIN { while ((getline seq < rows) > 0) owned[seq] = 1 }
+        $3 == "signal" && $2 <= cutoff && ($2 in owned)
+      ' "$FM_WAKE_QUEUE") || exit 1
+    fi
     # Preserve main's original whole-cutoff acknowledgement contract: a direct
     # or replayed main ack still owns every unreserved row through its cutoff,
     # so claim those again under the queue lock and none is stranded merely
@@ -896,6 +912,10 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  if [ "$ACTOR" = main ] && ! acknowledge_signal_statuses "$PRESENTED_SIGNALS"; then
+    echo "wake drain: terminal status receipt could not be recorded safely" >&2
+    exit 1
+  fi
   if ! acknowledge_inactive_outcomes acknowledge "$ACK_FINGERPRINTS" \
     || ! acknowledge_inactive_outcomes acknowledge-notice "$ACK_NOTICE_FINGERPRINTS"; then
     echo "wake drain: inactive outcome receipt could not be recorded safely" >&2

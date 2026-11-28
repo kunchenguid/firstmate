@@ -728,6 +728,18 @@ case "$CMD" in
       echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
       exit 1
     fi
+    TERMINAL_COVERAGE=$(jq -r --argjson from "$PROCESSED_SEQ" --argjson through "$THROUGH" '
+      select(.seq > $from and .seq <= $through and .verdict == "captain" and .statusEndpoint > 0)
+      | [.task, .statusEndpoint, .statusIdent] | @tsv
+    ' "$STORE") || { fm_lock_release "$LOCK"; exit 1; }
+    while IFS=$'\t' read -r TASK ENDPOINT IDENT; do
+      [ -n "$TASK" ] || continue
+      if ! "$SCRIPT_DIR/fm-inactive-reconcile.sh" acknowledge-status "$TASK" "$ENDPOINT" "$IDENT"; then
+        fm_lock_release "$LOCK"
+        echo "error: refusing processed advancement because a terminal status receipt could not be recorded safely" >&2
+        exit 1
+      fi
+    done <<< "$TERMINAL_COVERAGE"
     write_processed "$THROUGH"
     fm_lock_release "$LOCK"
     ;;
