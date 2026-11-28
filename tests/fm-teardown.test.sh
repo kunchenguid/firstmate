@@ -93,6 +93,8 @@ REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
 REAL_LSOF_FOR_TEST=$(command -v lsof)
 export REAL_LSOF_FOR_TEST
+REAL_RM_FOR_TEST=$(command -v rm)
+export REAL_RM_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
@@ -661,7 +663,7 @@ run_teardown() {
   # FM_DATA_OVERRIDE is pinned to the case dir because teardown closes this
   # home's backlog item itself; without it $DATA would resolve to the real
   # repo's own home and a test could mutate live records.
-  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_ROOT_OVERRIDE="${FM_TEST_ROOT_OVERRIDE:-$ROOT}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
@@ -2425,6 +2427,196 @@ test_secondmate_teardown_removes_its_pool_root_and_leaves_a_sibling() {
   assert_absent "$pool_root" "secondmate-pool-root: per-home pool root survived teardown"
   assert_present "$sibling_root/marker" "secondmate-pool-root: sibling home's pool root was removed"
   pass "secondmate teardown removes that home's pool root and leaves a sibling's untouched"
+}
+
+# Make the case's secondmate home a leased pool slot of a case-local firstmate
+# checkout: a registered worktree whose gitignored private content survives a
+# `treehouse return`, as it does for a real pool slot. Echoes the firstmate root,
+# which teardown must run as.
+make_leased_secondmate_home() {  # <case-dir>
+  local case_dir=$1 root="$1/firstmate-root" home="$1/pool/1/firstmate" name
+  git clone -q "$case_dir/origin.git" "$root"
+  printf '%s\n' state/ data/ config/ projects/ .env .claude/settings.local.json .fm-secondmate-home .fm-secondmate-parent \
+    > "$root/.gitignore"
+  printf 'tracked\n' > "$root/tracked.txt"
+  git -C "$root" add .gitignore tracked.txt
+  git -C "$root" -c user.email=t@t -c user.name=t commit -q -m "firstmate-shaped"
+  mkdir -p "${home%/*}"
+  git -C "$root" worktree add -q --detach "$home" HEAD
+  for name in state data config projects; do
+    mkdir -p "$home/$name/nested"
+    printf 'retired %s\n' "$name" > "$home/$name/nested/leftover"
+  done
+  printf '%s\n' task-x1 > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+    "$case_dir" > "$home/.fm-secondmate-parent"
+  printf '%s\n' "home=$home" >> "$case_dir/state/task-x1.meta"
+  printf 'FMX_PAIRING_TOKEN=retired-secret\n' > "$home/.env"
+  mkdir -p "$home/.claude" "$home/state/worker.git-hooks"
+  printf '{"permissions":{"allow":["Bash(*)"]}}\n' > "$home/.claude/settings.local.json"
+  printf 'hook\n' > "$home/state/worker.git-hooks/pre-commit"
+  chmod a-w "$home/state/worker.git-hooks"
+  git init -q "$home/projects/nested-clone"
+  touch "$case_dir/lease-held"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ "\${1:-}" = return ] || exit 0
+printf 'return\n' >> "$case_dir/return-calls"
+[ -z "\${FM_FAKE_RETURN_FAIL:-}" ] || exit 1
+for name in state data config projects .env .claude/settings.local.json .fm-secondmate-parent .fm-secondmate-home; do
+  [ ! -e "$home/\$name" ] || exit 1
+done
+rm -f "$case_dir/lease-held"
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  printf '%s\n' "$root"
+}
+
+test_secondmate_teardown_scrubs_its_returned_pool_slot() {
+  local case_dir root home name rc
+  case_dir=$(make_case leased-home-scrub)
+  write_meta "$case_dir" local-only secondmate
+  root=$(make_leased_secondmate_home "$case_dir")
+  home="$case_dir/pool/1/firstmate"
+
+  rc=0
+  FM_TEST_ROOT_OVERRIDE="$root" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "leased-home-scrub: teardown should succeed: $(cat "$case_dir/stderr")"
+  for name in state data config projects .env .claude/settings.local.json .fm-secondmate-parent .fm-secondmate-home; do
+    assert_absent "$home/$name" "leased-home-scrub: returned slot still carries the retired home's $name"
+  done
+  assert_present "$case_dir/return-calls" "leased-home-scrub: clean slot was not returned"
+  assert_absent "$case_dir/lease-held" "leased-home-scrub: clean slot remained leased"
+  assert_present "$home/tracked.txt" "leased-home-scrub: a tracked file was removed from the returned slot"
+  [ -z "$(git -C "$home" status --porcelain)" ] \
+    || fail "leased-home-scrub: the returned slot's tracked checkout changed"
+  pass "secondmate teardown scrubs the retired home's gitignored data from its returned pool slot"
+}
+
+test_secondmate_teardown_refuses_a_slot_marked_for_another_home() {
+  local case_dir root home name rc
+  case_dir=$(make_case leased-home-other-marker)
+  write_meta "$case_dir" local-only secondmate
+  root=$(make_leased_secondmate_home "$case_dir")
+  home="$case_dir/pool/1/firstmate"
+  printf '%s\n' other-mate > "$home/.fm-secondmate-home"
+
+  rc=0
+  FM_TEST_ROOT_OVERRIDE="$root" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "leased-home-other-marker: teardown accepted another home's slot"
+  assert_grep "marked for secondmate other-mate" "$case_dir/stderr" "leased-home-other-marker: missing ownership refusal"
+  for name in state/nested/leftover data/nested/leftover config/nested/leftover projects/nested/leftover .env .claude/settings.local.json .fm-secondmate-parent; do
+    assert_present "$home/$name" "leased-home-other-marker: another home's $name was scrubbed"
+  done
+  assert_absent "$case_dir/return-calls" "leased-home-other-marker: another home's slot was returned"
+  assert_present "$case_dir/lease-held" "leased-home-other-marker: another home's lease was released"
+  [ "$(cat "$home/.fm-secondmate-home")" = other-mate ] \
+    || fail "leased-home-other-marker: another home's marker was changed"
+  pass "secondmate teardown refuses a slot marked for another home without scrubbing it"
+}
+
+test_secondmate_teardown_retries_a_partial_slot_scrub() {
+  local case_dir root home name rc backup
+  case_dir=$(make_case leased-home-partial-scrub)
+  write_meta "$case_dir" local-only secondmate
+  root=$(make_leased_secondmate_home "$case_dir")
+  home="$case_dir/pool/1/firstmate"
+  mkdir -p "$home/bin" "$home/state/procevent"
+  printf 'adapter=lavish\nargc=1\nargv:\n/bin/true\n' > "$home/state/procevent/source.source"
+  cp "$home/state/procevent/source.source" "$case_dir/expected-source"
+  cat > "$home/bin/fm-procevent.sh" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  sweep-home)
+    [ "\${2:-}" != --preflight ] || exit 0
+    rm -f -- "\$FM_HOME"/state/procevent/*.source
+    ;;
+  reconcile)
+    printf 'reconcile\n' >> "$case_dir/rearm-calls"
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$home/bin/fm-procevent.sh"
+  git -C "$home" add bin/fm-procevent.sh
+  git -C "$home" -c user.email=t@t -c user.name=t commit -q -m "process-event boundary fixture"
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = clean ] && [ -n "${FM_FAKE_CLEAN_FAIL:-}" ]; then
+  "$REAL_GIT_FOR_TEST" -C "$2" clean -ffdX -- state/ || exit $?
+  echo 'git clean: simulated data/ removal failure' >&2
+  exit 1
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+
+  rc=0
+  FM_TEST_ROOT_OVERRIDE="$root" FM_FAKE_CLEAN_FAIL=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "leased-home-partial-scrub: teardown reported success with data/ left in the slot"
+  assert_grep "still holds gitignored content" "$case_dir/stderr" \
+    "leased-home-partial-scrub: the failed scrub was not named"
+  assert_absent "$home/state/nested" "leased-home-partial-scrub: failure did not exercise a partial clean"
+  cmp -s "$case_dir/expected-source" "$home/state/procevent/source.source" \
+    || fail "leased-home-partial-scrub: process-event registration was not restored"
+  assert_present "$case_dir/rearm-calls" "leased-home-partial-scrub: restored registrations were not rearmed"
+  for backup in "$home/../".fm-procevent-restore.*; do
+    assert_absent "$backup" "leased-home-partial-scrub: successful restoration stranded a backup"
+  done
+  assert_absent "$case_dir/return-calls" "leased-home-partial-scrub: dirty slot was returned"
+  assert_present "$case_dir/lease-held" "leased-home-partial-scrub: failed scrub released the lease"
+  assert_present "$case_dir/state/task-x1.meta" "leased-home-partial-scrub: task record was removed before the scrub finished"
+  assert_present "$home/data/nested/leftover" "leased-home-partial-scrub: failed removal lost data/ unexpectedly"
+  assert_present "$home/.fm-secondmate-home" "leased-home-partial-scrub: home marker was removed before the scrub finished"
+
+  rc=0
+  FM_TEST_ROOT_OVERRIDE="$root" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "leased-home-partial-scrub: retried teardown should succeed: $(cat "$case_dir/stderr")"
+  for name in state data config projects .env .claude/settings.local.json .fm-secondmate-parent .fm-secondmate-home; do
+    assert_absent "$home/$name" "leased-home-partial-scrub: retried scrub left $name in the slot"
+  done
+  assert_present "$case_dir/return-calls" "leased-home-partial-scrub: retry never returned the slot"
+  assert_absent "$case_dir/lease-held" "leased-home-partial-scrub: retry kept the clean slot leased"
+  assert_absent "$case_dir/state/task-x1.meta" "leased-home-partial-scrub: retried teardown kept the task record"
+  for backup in "$home/../".fm-procevent-restore.*; do
+    assert_absent "$backup" "leased-home-partial-scrub: successful retry stranded a backup"
+  done
+  pass "a partial slot scrub restores process events and keeps the lease for a clean retry"
+}
+
+test_secondmate_teardown_retries_a_failed_return_after_scrub() {
+  local case_dir root home rc
+  case_dir=$(make_case leased-home-return-failure)
+  write_meta "$case_dir" local-only secondmate
+  root=$(make_leased_secondmate_home "$case_dir")
+  home="$case_dir/pool/1/firstmate"
+  cp "$home/.fm-secondmate-parent" "$case_dir/expected-parent"
+
+  rc=0
+  FM_TEST_ROOT_OVERRIDE="$root" FM_FAKE_RETURN_FAIL=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  [ "$rc" -ne 0 ] || fail "leased-home-return-failure: teardown accepted a failed return"
+  assert_present "$case_dir/return-calls" "leased-home-return-failure: return was not attempted"
+  assert_present "$case_dir/lease-held" "leased-home-return-failure: failed return lost the lease"
+  assert_present "$case_dir/state/task-x1.meta" "leased-home-return-failure: failed return lost the record"
+  [ "$(cat "$home/.fm-secondmate-home")" = task-x1 ] \
+    || fail "leased-home-return-failure: home marker was not restored"
+  cmp -s "$case_dir/expected-parent" "$home/.fm-secondmate-parent" \
+    || fail "leased-home-return-failure: parent marker was not restored"
+
+  rc=0
+  FM_TEST_ROOT_OVERRIDE="$root" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "leased-home-return-failure: retry should succeed: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/lease-held" "leased-home-return-failure: retry did not release the slot"
+  assert_absent "$case_dir/state/task-x1.meta" "leased-home-return-failure: retry kept the record"
+  pass "a failed return restores home identity so scrubbed leased homes remain retryable"
 }
 
 test_return_that_removes_copy_warns_cannot_verify() {
@@ -6805,6 +6997,10 @@ test_unmerged_pool_slot_is_kept_after_destroy_skip
 test_pool_slot_is_kept_by_default_without_opt_in
 test_forced_secondmate_dirty_child_return_warns_and_completes
 test_secondmate_teardown_removes_its_pool_root_and_leaves_a_sibling
+test_secondmate_teardown_scrubs_its_returned_pool_slot
+test_secondmate_teardown_refuses_a_slot_marked_for_another_home
+test_secondmate_teardown_retries_a_partial_slot_scrub
+test_secondmate_teardown_retries_a_failed_return_after_scrub
 test_return_that_removes_copy_warns_cannot_verify
 test_scout_ignored_files_survive_scratch_clean
 test_gh_error_and_content_absent_refuses

@@ -206,9 +206,15 @@
 # cannot leave durable reply expectations behind. Non-forced retirement refuses
 # while any of those records is still unresolved. Teardown then discards child
 # work, kills child runtime endpoints, and removes the retired home. Removing a
-# leased home releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# leased home scrubs all gitignored content while the lease is still held, then
+# releases its durable treehouse lease so the pool slot is freed. A failed scrub
+# keeps the lease and retirement records for retry. Tracked files stay intact;
+# identity markers are removed last, and only a home with the expected marker
+# is scrubbed. A failed return restores the markers for a later teardown retry.
+# Scrubbing is not transactional: a refusal after partial or complete scrubbing
+# does not restore deleted private content. Process-event registrations are
+# restored and reconciled on scrub or return failure; failed recovery reports
+# the retained registration backup for manual recovery.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
@@ -3019,8 +3025,27 @@ t3code_secondmate_home_shutdown_barrier() {  # <home> <task-id>
   reap_task_worktree_processes "secondmate home" "$1"
 }
 
+# Nested project repositories need Git's double-force clean; ignored runtime
+# hook directories can be read-only and need writable directories for removal.
+scrub_leased_home_slot() {
+  local slot=$1 label=$2 expected_id=$3 name marker_id
+  [ -d "$slot" ] || return 0
+  [ -f "$slot/$SUB_HOME_MARKER" ] && [ ! -L "$slot/$SUB_HOME_MARKER" ] || return 0
+  marker_id=$(cat "$slot/$SUB_HOME_MARKER" 2>/dev/null || true)
+  [ "$marker_id" = "$expected_id" ] || return 0
+  while IFS= read -r -d '' name; do
+    [ ! -L "$slot/${name%/}" ] || continue
+    find "$slot/${name%/}" -type d -exec chmod u+w {} + 2>/dev/null || true
+  done < <(git -C "$slot" ls-files --others --ignored --exclude-standard --directory -z)
+  git -C "$slot" clean -ffdX -e "!/$SUB_HOME_MARKER" -e "!/$SUB_HOME_PARENT_MARKER" -- . || {
+    echo "error: $label $slot still holds gitignored content; lease and home marker kept so teardown can be retried" >&2
+    return 1
+  }
+  rm -f -- "$slot/$SUB_HOME_PARENT_MARKER" "$slot/$SUB_HOME_MARKER"
+}
+
 remove_firstmate_home() {  # <home> <label> <task-id> <backend>
-  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup pool_root
+  local home=$1 label=$2 expected_id=${3:-} backend=${4:-} abs_home_path process_event_backup pool_root parent_marker
   [ -n "$home" ] || return 0
   [ -e "$home" ] || return 0
   abs_home_path=$(validate_firstmate_home_for_removal "$home" "$label" "$expected_id") || return 1
@@ -3050,8 +3075,15 @@ remove_firstmate_home() {  # <home> <label> <task-id> <backend>
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    parent_marker=$(cat "$abs_home_path/$SUB_HOME_PARENT_MARKER" 2>/dev/null || true)
+    scrub_leased_home_slot "$abs_home_path" "$label" "$expected_id" || {
+      restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
+      return 1
+    }
     teardown_treehouse_return "$abs_home_path" "$FM_ROOT" "$label" || {
       echo "error: treehouse return failed for $label $abs_home_path; lease may still be held" >&2
+      printf '%s\n' "$expected_id" > "$abs_home_path/$SUB_HOME_MARKER"
+      [ -z "$parent_marker" ] || printf '%s\n' "$parent_marker" > "$abs_home_path/$SUB_HOME_PARENT_MARKER"
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }

@@ -1491,7 +1491,7 @@ A project-less seed requires no existing project clones or `data/projects.md` en
 A preexisting project-bearing charter is also refused until it is re-scaffolded with `--no-projects` or removed.
 
 The lease is held under the secondmate id until explicit retirement or seed rollback returns it, so normal restarts do not free or recycle the home.
-Teardown of a leased home fails closed if `treehouse return` cannot release the lease; plain-clone homes with no treehouse pool slot are removed directly.
+[`fm-teardown.sh`'s header](../bin/fm-teardown.sh) owns home retirement, including the leased-slot scrub-before-return contract and retry behavior.
 
 ### Project modes and backlog handoff
 
@@ -3480,7 +3480,7 @@ Making any of them a precondition is what leaves a provably dead runner owning i
 **Retire a secondmate home**
 
 - Supported secondmate retirement preflights each target home's bounded `sweep-home` command before destructive teardown, snapshots its registrations outside the target, then runs the sweep at that home's final deletion or return boundary.
-- If deletion or return fails, teardown restores those registrations and reconciles them before returning the refusal.
+- If the leased-home scrub, deletion, or return fails, teardown restores those registrations and reconciles them before returning the refusal.
 - If restoration or rearming also fails, teardown returns a distinct status and reports the retained registration backup path for manual recovery instead of hiding the retired waits.
 - The sweep retires local registrations and machine-wide claims whose recorded state-root identity matches that home's own `state/` directory, never an inherited `FM_STATE_OVERRIDE`, through the same identity-checked, generation-bound retirement path, and leaves foreign-home claims untouched.
 - Teardown refuses with the home, lease, routing evidence, registrations, claims, and runners retained when identity is uncertain, ownership is unreadable or unreleased, or relevant state exists without a sweep-capable child script.
