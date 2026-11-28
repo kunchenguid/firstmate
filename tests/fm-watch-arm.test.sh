@@ -1460,6 +1460,111 @@ test_take_over_preserves_downtime_from_watcher_self_exit() {
   pass "watch-arm: takeover preserves self-exit downtime and surfaces a recovery wake"
 }
 
+# A watcher can hold a take-over's TERM far past the arm's stop bound - on
+# bash 3.2 for a whole blocking command substitution, such as a remote
+# secondmate probe. Here a foreign holder of the downtime-marker lock keeps the
+# stopped watcher inside its EXIT cleanup instead, which holds the stop the same
+# way on every bash. The take-over attaches meanwhile. When that watcher finally
+# ends by the take-over's TERM, the arm must still put back the acknowledgement
+# main already made and own a quiet fresh cycle. Closing empty instead left the
+# stop's downtime for the next arm, which resurfaced it as an empty recovery
+# wake; the supervision host handed that back to main and took the next cycle
+# over again, a loop.
+test_take_over_settles_a_stop_the_watcher_held_past_the_bound() {
+  local dir home state fakebin armout owner watcher acknowledged real_rm holder fresh i
+  dir=$(make_case take-over-late-stop)
+  home="$dir/home"
+  mkdir -p "$home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  FM_WATCHER_CLEANUP_LOCK_BOUND=60 start_rearm_arm "$home" "$state" "$fakebin" "$dir/owner.out" "$$"
+  owner=$ARM_PID
+  watcher=$(cat "$state/.watch.lock/pid")
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the handled wake"
+  acknowledged=$(cat "$state/.watcher-down")
+  case "$acknowledged" in acked:*) ;; *) fail "fixture: the episode was not acknowledged: $acknowledged" ;; esac
+  # Pause the taking arm after its handover snapshot releases the queue lock,
+  # so the marker lock can be taken between the snapshot and the stop.
+  real_rm=$(command -v rm)
+  mkdir -p "$dir/barrier-bin"
+  printf '#!/usr/bin/env bash\n"%s" "$@"\n' "$real_rm" > "$dir/barrier-bin/rm"
+  printf 'if [ "$*" = "-f %s/.wake-queue.lock" ]; then\n' "$state" >> "$dir/barrier-bin/rm"
+  printf '  touch "%s/snapshot-read"\n  for ((i=0; i<700; i++)); do\n    [ -e "%s/release" ] && break\n    sleep 0.05\n  done\nfi\n' "$dir" "$dir" >> "$dir/barrier-bin/rm"
+  chmod +x "$dir/barrier-bin/rm"
+  PATH="$dir/barrier-bin:$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" FM_ARM_SUCCESSOR_CONFIRM_TIMEOUT=1 \
+    "$WATCH_ARM" --take-over "$owner" > "$armout" &
+  ARM_PID=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/snapshot-read" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/snapshot-read" ] || fail "the take-over never reached its snapshot"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1" || exit 1
+    fm_lock_acquire_wait_max "$2" 10 || exit 1
+    : > "$3"
+    i=0
+    while [ ! -e "$4" ] && [ "$i" -lt 600 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down.lock" "$dir/marker-lock-held" \
+    "$dir/release-marker-lock" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -e "$dir/marker-lock-held" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$dir/marker-lock-held" ] || fail "fixture: could not take the downtime-marker lock"
+  touch "$dir/release"
+  i=0
+  while [ "$i" -lt 400 ] && ! grep -q '^watcher: attached pid=' "$armout" 2>/dev/null; do
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q "^watcher: attached pid=$watcher " "$armout" \
+    || fail "fixture: the take-over did not fall back to attaching: $(cat "$armout")"
+  is_live_non_zombie "$watcher" || fail "fixture: the stopped watcher did not hold the stop past the bound"
+  touch "$dir/release-marker-lock"
+  wait "$holder" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt "$REARM_REPORT_POLLS" ] && ! grep -q '^watcher: started pid=' "$armout" 2>/dev/null; do
+    is_live_non_zombie "$ARM_PID" || break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started pid=' "$armout" \
+    || fail "the take-over did not own a fresh cycle after the held stop landed: $(cat "$armout")"
+  ! is_live_non_zombie "$watcher" || fail "the take-over left the watcher it stopped running"
+  grep -q "^arm_pid=$owner	watcher_pid=$watcher	.*signal=TERM" "$state/.watch-cycle-exits.log" \
+    || fail "fixture: the owner did not record the take-over's TERM: $(cat "$state/.watch-cycle-exits.log")"
+  grep -q "^arm_pid=$ARM_PID	watcher_pid=$watcher	.*reason=taken-over	.*successor=started:" "$state/.watch-cycle-exits.log" \
+    || fail "the ledger does not record the late stop as a take-over: $(cat "$state/.watch-cycle-exits.log")"
+  [ "$(cat "$state/.watcher-down")" = "$acknowledged" ] \
+    || fail "the late stop reopened an acknowledged episode: $(cat "$state/.watcher-down")"
+  fresh=$(cat "$state/.watch.lock/pid")
+  sleep 3
+  is_live_non_zombie "$ARM_PID" || fail "the fresh cycle closed with no new work: $(cat "$armout")"
+  ! grep -q '^check: rearm-resurface' "$armout" || fail "the fresh cycle resurfaced an acknowledged episode"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  wait_for_exit "$owner" 50 >/dev/null 2>&1 || true
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$fresh"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  pass "watch-arm: --take-over settles a stop the watcher held past the bound and resurfaces nothing"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -1997,4 +2102,5 @@ test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
+test_take_over_settles_a_stop_the_watcher_held_past_the_bound
 test_opencode_arm_plugin_decides_with_the_shared_predicate
