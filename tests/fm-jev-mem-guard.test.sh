@@ -98,4 +98,115 @@ if ! grep -q 'Recommendation:' <<<"$text_out"; then
 fi
 echo "ok - text mode runs cleanly"
 
+# Exercise the public CLI on a simulated Darwin platform with real fake commands.
+python3 - "$GUARD_PY" <<'PYTEST'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+with tempfile.TemporaryDirectory(prefix="fm-macos-memory-") as tmp:
+    root = Path(tmp)
+    for name in ("sysctl", "vm_stat"):
+        tool = root / name
+        tool.write_text("#!/bin/bash\n"
+                        'case "$*" in\n'
+                        '  "-n hw.memsize") [ -z "${DELAY_TOTAL:-}" ] || sleep "$DELAY_TOTAL"; cat "$MEM_FIXTURE/total" ;;\n'
+                        '  "vm.swapusage") [ -z "${DELAY_SWAP:-}" ] || sleep "$DELAY_SWAP"; cat "$MEM_FIXTURE/swap" ;;\n'
+                        '  "") [ -z "${DELAY_PAGES:-}" ] || sleep "$DELAY_PAGES"; cat "$MEM_FIXTURE/pages" ;;\n'
+                        '  *) exit 1 ;;\nesac\n')
+        tool.chmod(0o700)
+    env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], MEM_FIXTURE=tmp)
+    (root / "total").write_text(str(1024 ** 3))
+    (root / "swap").write_text("vm.swapusage: total = 1.00G used = 0.00G free = 1.00G (encrypted)")
+
+    def pages(available, page_size=4096):
+        count = int(available * (1024 ** 3) / page_size)
+        (root / "pages").write_text(
+            f"Mach Virtual Memory Statistics: (page size of {page_size} bytes)\n"
+            f"Pages free: {count}.\nPages inactive: 0.\nPages speculative: 0.\n"
+            # These overlap other buckets and cannot be counted as available.
+            "Pages purgeable: 999999.\nPages occupied by compressor: 999999.\n")
+
+    def audit(*args, extra_env=None):
+        started = time.monotonic()
+        result = subprocess.run(
+            [sys.executable, "-c", "import runpy,sys; sys.platform='darwin'; "
+             "p=sys.argv.pop(1); runpy.run_path(p,run_name='__main__')",
+             sys.argv[1], "--json", "--check", *args],
+            env=dict(env, **(extra_env or {})), text=True, capture_output=True, timeout=3,
+        )
+        return result.returncode, json.loads(result.stdout), time.monotonic() - started
+
+    for page_size in (4096, 16384):
+        pages(0.5, page_size)
+        rc, report, elapsed = audit()
+        assert (rc, report["status"], report["summary"]["mem_used_pct"]) == (0, "OK", 50.0), report
+        assert report["summary"]["swap_used_pct"] == 0.0, report
+        assert report["top_processes"] == [], report
+
+    # Distinct non-zero buckets: dropping any one of them changes the result.
+    (root / "pages").write_text(
+        "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        "Pages free: 26214.\nPages inactive: 52429.\nPages speculative: 78643.\n")
+    rc, report, _ = audit()
+    summary = report["summary"]
+    assert (rc, summary["mem_available_gb"], summary["mem_used_pct"]) == (0, 0.6, 40.0), report
+
+    pages(0.08)
+    rc, report, _ = audit()
+    assert (rc, report["status"]) == (1, "WARNING"), report
+    pages(0.01)
+    rc, report, _ = audit()
+    assert (rc, report["status"]) == (1, "CRITICAL"), report
+    pages(0.5)
+    (root / "swap").write_text("vm.swapusage: total = 1024.00M used = 980.00M free = 44.00M")
+    rc, report, _ = audit()
+    assert (rc, report["status"], report["summary"]["swap_used_pct"]) == (0, "OK", 95.7), report
+    pages(0.01)
+    rc, report, _ = audit()
+    assert (rc, report["status"], report["summary"]["swap_used_pct"]) == (1, "CRITICAL", 95.7), report
+    pages(0.5)
+    (root / "swap").write_text("vm.swapusage: total = 0.00M used = 0.00M free = 0.00M")
+    rc, report, _ = audit()
+    assert (rc, report["summary"]["swap_used_pct"]) == (0, 0.0), report
+    for swap in ("unavailable", "total = 1G used = 2G free = 0G"):
+        (root / "swap").write_text(swap)
+        rc, report, _ = audit()
+        assert (rc, report["status"], report["summary"]["swap_used_pct"]) == (0, "OK", None), report
+    for bad_pages in ("bad output", "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 1."):
+        (root / "pages").write_text(bad_pages)
+        rc, report, _ = audit("--crit-mem-pct", "0")
+        assert (rc, report["status"], report["summary"]["mem_used_pct"]) == (0, "UNKNOWN", None), report
+        assert report["reason"] == "macos-memory-unavailable", report
+    pages(0.5)
+    (root / "total").write_text("0")
+    rc, report, _ = audit()
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
+    (root / "total").write_text(str(1024 ** 3))
+    rc, report, elapsed = audit(extra_env={"DELAY_TOTAL": "1"})
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
+    assert elapsed < 0.9, elapsed
+    # Each delay fits a fresh 350ms budget; only their sum exceeds the shared one.
+    rc, report, elapsed = audit(extra_env={"DELAY_TOTAL": "0.25", "DELAY_PAGES": "0.25"})
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
+    assert elapsed < 0.9, elapsed
+    # A swap-only timeout keeps the measured RAM and its verdict.
+    (root / "swap").write_text("vm.swapusage: total = 1.00G used = 0.00G free = 1.00G (encrypted)")
+    pages(0.01)
+    rc, report, elapsed = audit(extra_env={"DELAY_SWAP": "1"})
+    summary = report["summary"]
+    assert (rc, report["status"], summary["mem_used_pct"]) == (1, "CRITICAL", 99.0), report
+    assert (summary["swap_total_gb"], summary["swap_used_pct"]) == (None, None), report
+    assert elapsed < 0.9, elapsed
+    (root / "sysctl").unlink()
+    (root / "sysctl").symlink_to("/usr/bin/false")
+    rc, report, _ = audit()
+    assert (rc, report["status"], report["reason"]) == (0, "UNKNOWN", "macos-memory-unavailable"), report
+print("ok - Darwin CLI fake-command cases: page sizes, available pages, thresholds, swap, invalid data, shared timeout, failure")
+PYTEST
+
 echo "ok - all Pattern 46 memory guard tests passed"
