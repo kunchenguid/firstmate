@@ -3,8 +3,9 @@
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting), fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment), and fm-dod-lib.sh
-# (the custody check a Gerrit no-mistakes ready report must pass). Crew-state binds
+# (pre-teardown run abort, see its "Fix 1" header comment), fm-dod-lib.sh
+# (the custody check a Gerrit no-mistakes ready report must pass), and
+# fm-watch.sh (the gate-opening stamp of fm_nm_run_gate_opened_at). Crew-state binds
 # an EXECUTING run (pending, running, fixing or ci) on the task's branch
 # regardless of head (fm_nm_run_is_executing); every other run still needs
 # strict branch-and-head identity. Both callers then recognize a provable
@@ -459,6 +460,17 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# The delivered-PR exemption to the head rule: an ACTIVE run whose own `pr`
+# is exactly the task's recorded pr= (bin/fm-pr-check.sh writes it only after
+# the delivery gate accepted that PR) is the run that manages this task's
+# delivered PR, even after a ci-monitoring rebase moved its head off the task
+# worktree's history. Like the custody exemption, it never binds a terminal run.
+fm_nm_run_manages_task_pr() {  # <toon-output> <recorded-pr-url>
+  [ -n "${2:-}" ] || return 1
+  fm_nm_run_is_active "$1" || return 1
+  [ "$(fm_nm_strip_quotes "$(fm_nm_field "$1" pr)")" = "$2" ]
+}
+
 # The gate evidence in an `axi status` TOON, as ONE set of patterns. Both
 # readers must agree exactly: fm_nm_run_is_parked below decides whether a run
 # keeps the strict head rule, and fm-crew-state.sh's nm_gate_step_row /
@@ -477,6 +489,35 @@ FM_NM_GATE_ROW_RE='^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_revie
 fm_nm_run_is_parked() {  # <toon-output>
   printf '%s\n' "$1" | grep -Eq \
     "$FM_NM_GATE_LINE_RE|$FM_NM_AWAITING_AGENT_RE|$FM_NM_GATE_SCALAR_RE|$FM_NM_GATE_ROW_RE"
+}
+
+# The epoch second at which run $2 last entered a gate, read from the
+# runs.awaiting_agent_since column of the state database fm_nm_state_db locates
+# for worktree $1. no-mistakes stamps it each time a step parks and clears it
+# when the run resumes, so two openings of the same gate carry different
+# values where the rendered `awaiting_agent: parked <duration>` field cannot
+# tell them apart. The read-only reader is bounded by $3 seconds (default 5).
+# Prints the integer, or nothing when the run is not parked, the reader is
+# unavailable, or the record cannot be read.
+fm_nm_run_gate_opened_at() {  # <worktree> <run-id> [timeout_secs]
+  local out
+  out=$(fm_nm_bounded "$1" "${3:-5}" python3 - "$2" "$(fm_nm_state_db "$1")" 2>/dev/null <<'PY'
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+run_id, database = sys.argv[1:]
+try:
+    with closing(sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True, timeout=5)) as db:
+        rows = db.execute("SELECT awaiting_agent_since FROM runs WHERE id = ?", (run_id,)).fetchall()
+except (ValueError, OSError, sqlite3.Error):
+    sys.exit(0)
+if len(rows) == 1 and isinstance(rows[0][0], int):
+    print(rows[0][0])
+PY
+  ) || return 0
+  case "$out" in ''|*[!0-9]*) ;; *) printf '%s\n' "$out" ;; esac
 }
 
 # 0 if the run in captured `axi status` TOON $1 is EXECUTING: in flight and
