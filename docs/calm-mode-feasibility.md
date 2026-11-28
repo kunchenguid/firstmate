@@ -151,8 +151,8 @@ The current exact marker and the narrow bare-U+2063 `Supervisor escalate (` comp
 ## Calm working presentation
 
 Calm replaces Pi's stock working row with a small animated working presentation while Calm is on.
-The default boat appears while one logical agent run is active; the optional spaceship selected by `config/calm-ship` is ambient and present for the whole time Calm is on.
-[`calm.md`](calm.md#spaceship-variant-configcalm-ship) owns the two presentations and how `config/calm-ship` selects one; the default boat's geometry, cadences, and colors are the ones recorded below.
+The default boat appears while one logical agent run is active; the optional spaceship selected by `config/calm-ship` is ambient.
+[`calm.md`](calm.md#spaceship-variant-configcalm-ship) owns the two presentations, when each is on screen, and how `config/calm-ship` selects one; the default boat's geometry, cadences, and colors are the ones recorded below.
 This path uses only public extension API and patches nothing: `ExtensionUIContext.setWorkingVisible(false)` hides the stock row, and `setWidget()` installs a temporary component factory above the editor.
 Pi's documented custom working-indicator frames are static and width-blind, so they cannot own responsive geometry; a widget component receives `render(width)` and can.
 
@@ -239,7 +239,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `custom-entry` | `CustomEntryComponent` with a registered renderer | Legacy Calm presentation entries rebuild to zero children without a residual spacer and restore through ordinary expansion redraw when mounted; arbitrary extension entries remain an unsupported boundary. |
 | `compaction-summary` | `CompactionSummaryMessageComponent` | Unsupported boundary; remains visible. |
 | `branch-summary` | `BranchSummaryMessageComponent` | Unsupported boundary; remains visible. |
-| `working-status` | `WorkingStatusIndicator`, or the Calm working-presentation widget while Calm is active | Always visible. Calm off leaves Pi's stock row untouched; Calm on renders the selected working presentation instead of that row - the default boat for the duration of one logical agent run, or the ambient spaceship for as long as Calm is on when `config/calm-ship` selects it. |
+| `working-status` | `WorkingStatusIndicator`, or the Calm working-presentation widget while Calm is active | Always visible. Calm off leaves Pi's stock row untouched; Calm on renders the selected working presentation instead of that row - the default boat for the duration of one logical agent run, or the ambient spaceship when `config/calm-ship` selects it. |
 | `command-status` | Interactive command result and status rows | Calm emits no enable notice, but generic Pi command rows remain an unsupported boundary. |
 | `system-notice` | `showStatus`, `showError`, compaction, retry, and startup warning rows | Unsupported boundary; remains visible. |
 | `cache-notice` | Non-persisted cache-miss `Text` row | Unsupported boundary; remains visible. |
