@@ -1275,6 +1275,100 @@ test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing() {
   pass "watch-arm: --take-over owns a fresh cycle without a recovery wake and still surfaces queued work"
 }
 
+# Interrupt a real watcher in the same dynamic-scope window as pending-reply
+# recovery: the poll hook shadows the runtime paths without initializing them.
+# Only that hook is replaced in a private script tree; the watcher, arm, locks,
+# marker transitions, queue and TERM/EXIT traps are the production code.
+test_cleanup_owns_runtime_bindings_inside_shadowed_frame() {
+  local mode dir state repo script owner watcher acknowledged status
+  for mode in quiet queued outage; do
+    dir=$(make_case "cleanup-shadow-$mode")
+    state="$dir/state"
+    repo="$dir/repo"
+    mkdir -p "$repo/bin"
+    for script in "$ROOT"/bin/*; do
+      ln -s "$script" "$repo/bin/${script##*/}"
+    done
+    rm "$repo/bin/fm-pending-reply-lib.sh"
+    cp "$ROOT/bin/fm-pending-reply-lib.sh" "$repo/bin/fm-pending-reply-lib.sh"
+    cat >> "$repo/bin/fm-pending-reply-lib.sh" <<'SH'
+
+fm_pending_reply_tick() {
+  [ -f "$FM_HOME/hold-shadow-frame" ] || return 0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  printf 'ready\n' > "$FM_HOME/shadow-ready"
+  while [ -f "$FM_HOME/hold-shadow-frame" ]; do sleep 0.1; done
+}
+SH
+    : > "$dir/hold-shadow-frame"
+    WATCH_ARM="$repo/bin/fm-watch-arm.sh" \
+      start_rearm_arm "$dir" "$state" "$dir/fakebin" "$dir/owner.out" "$$"
+    owner=$ARM_PID
+    watcher=$(cat "$state/.watch.lock/pid")
+    wait_for_file_text "$dir/shadow-ready" ready \
+      || fail "fixture: watcher never entered the shadowed frame"
+    append_wake "$state" signal shadow 'signal: fixture handled by main'
+    ack_wakes "$state" >/dev/null || fail "fixture: could not acknowledge the episode"
+    acknowledged=$(cat "$state/.watcher-down")
+    case "$acknowledged" in acked:*) ;; *) fail "fixture: episode was not acknowledged" ;; esac
+
+    # Keep the old watcher inside the frame until TERM. The replacement
+    # launcher removes the gate only after takeover has stopped that watcher,
+    # so the successor polls normally without a timing race.
+    printf '#!%s\n' "$(command -v bash)" > "$dir/fakebin/bash"
+    cat >> "$dir/fakebin/bash" <<'SH'
+case "${1:-}" in
+  */fm-watch.sh) rm -f "$FM_HOME/hold-shadow-frame" ;;
+esac
+exec "$FM_TEST_REAL_BASH" "$@"
+SH
+    chmod +x "$dir/fakebin/bash"
+    if [ "$mode" = queued ]; then
+      append_wake "$state" signal concurrent 'signal: concurrent queued work'
+    fi
+    if [ "$mode" = outage ]; then
+      kill -KILL "$watcher" || fail "could not simulate an unplanned outage"
+      wait_for_pid_gone "$watcher" 100 || fail "outage watcher did not exit"
+      [ "$(cat "$state/.watch.lock/pid")" = "$watcher" ] \
+        || fail "fixture: unplanned outage lost its stale singleton evidence"
+    fi
+    PATH="$dir/fakebin:$PATH" FM_TEST_REAL_BASH="$(command -v bash)" \
+      FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" \
+      "$repo/bin/fm-watch-arm.sh" --take-over "$owner" > "$dir/takeover.out" 2>&1 &
+    ARM_PID=$!
+    if [ "$mode" = quiet ]; then
+      wait_for_file_text "$dir/takeover.out" 'watcher: started pid=' \
+        || fail "shadowed takeover did not start: $(cat "$dir/takeover.out")"
+      sleep 3
+      is_live_non_zombie "$ARM_PID" || fail "acknowledged takeover closed: $(cat "$dir/takeover.out")"
+      [ "$(cat "$state/.watcher-down")" = "$acknowledged" ] \
+        || fail "shadowed takeover reopened acknowledged marker"
+      ! grep -q '^check: rearm-resurface' "$dir/takeover.out" \
+        || fail "shadowed takeover resurfaced an acknowledged episode"
+      append_wake "$state" signal subsequent 'signal: work after quiet takeover'
+    fi
+    wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+    status=$?
+    expect_code 0 "$status" "shadowed $mode replacement must surface real work: $(cat "$dir/takeover.out")"
+    grep -q '^check: rearm-resurface' "$dir/takeover.out" \
+      || fail "shadowed $mode replacement did not recover work: $(cat "$dir/takeover.out")"
+    if [ "$mode" = queued ]; then
+      grep -qF 'signal: concurrent queued work' "$state/.wake-queue" \
+        || fail "takeover lost the concurrent queued wake"
+    fi
+    if [ "$mode" != outage ]; then
+      grep -q "watcher_pid=$watcher.*signal=TERM.*lock_after=pid:none" "$state/.watch-cycle-exits.log" \
+        || fail "TERM inside shadowed frame did not release singleton: $(cat "$state/.watch-cycle-exits.log")"
+      grep -q "watcher_pid=$watcher.*reason=taken-over" "$state/.watch-cycle-exits.log" \
+        || fail "shadowed watcher takeover was not confirmed"
+    fi
+    wait_for_exit "$owner" 100 >/dev/null 2>&1 || true
+  done
+  pass "watch-arm: cleanup binds its runtime paths across shadowed TERM, quiet takeover, queued wakes and unplanned outage"
+}
+
 # A fake herdr for one live, busy crew pane, plus an event reader that behaves
 # like herdr-eventwait.py on a quiet fleet: it subscribes, then blocks for its
 # whole timeout budget. Nothing here reaches a real herdr server.
@@ -1995,6 +2089,7 @@ test_handling_delivered_accepts_already_acked_generation
 test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
+test_cleanup_owns_runtime_bindings_inside_shadowed_frame
 test_take_over_preserves_downtime_from_watcher_self_exit
 test_take_over_confirms_a_watcher_stopped_inside_its_event_wait
 test_opencode_arm_plugin_decides_with_the_shared_predicate
