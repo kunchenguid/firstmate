@@ -12,10 +12,9 @@
 #
 # Container shape: ONE window (tab) PER TASK, created focus-safe with
 # `window new --focus=false`. When Firstmate itself runs directly inside a Rex
-# block (TERM_PROGRAM=rex with REX_SESSION and REX_BLOCK, and the server
-# confirms that block lives in that session), every task tab goes into that
-# launcher session. Otherwise, and for a secondmate's own home, the tab goes
-# into ONE session per home labeled with the home tag
+# block (TERM_PROGRAM=rex with REX_BLOCK, resolved by the server), every task
+# tab goes into that launcher session. Otherwise, and for a secondmate's own
+# home, the tab goes into ONE session per home labeled with the home tag
 # (bin/fm-backend-hometag-lib.sh), adopted when exactly one session carries
 # that label, created once when none does, and refused when several do. A
 # created session's first window becomes the first task's tab, and cleanup
@@ -36,7 +35,7 @@
 # human (`fm-<id>` window labels), for duplicate refusal, and for list_live
 # discovery (the home-scoped block label). Every call passes an explicit
 # `-s <session-id>` and `-b <block-id>`: without -s the CLI defaults to the
-# caller's own REX_SESSION, which is the captain's session.
+# session containing the caller's block.
 #
 # Exit codes (verified live, docs/rex-backend.md): 0 ok, 2 invalid command
 # line, 3 target not found (or an ambiguous label, which full ids never are),
@@ -285,34 +284,31 @@ fm_backend_rex_scoped_name() {  # <fm-task-label>
 
 # fm_backend_rex_session_view: one session's structured view (windows, their
 # layers, and blocks with labels).
-fm_backend_rex_session_view() {  # <session-id>
+fm_backend_rex_session_view() {  # <session-id|block-id>
   fm_backend_rex_read api call -s "$1" session.view 2>/dev/null
 }
 
 # fm_backend_rex_launcher_session: the Rex session this process runs directly
-# inside. Returns 0 and prints it when TERM_PROGRAM=rex, REX_SESSION and
-# REX_BLOCK are set, and the server confirms that block lives in that
-# session; 2 when this process is not directly inside Rex (a tmux or Herdr
-# nested in a Rex block rewrites TERM_PROGRAM and is not); 1 when the claim
-# cannot be confirmed, which the caller refuses rather than guessing a
-# placement.
+# inside. Returns 0 and prints it when TERM_PROGRAM=rex and the server can
+# resolve REX_BLOCK to its containing session; 2 when this process is not
+# directly inside Rex (nested tmux or Herdr rewrites TERM_PROGRAM); 1 when
+# the launcher block cannot be resolved.
 fm_backend_rex_launcher_session() {
-  local view
-  [ "${TERM_PROGRAM:-}" = rex ] && [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ] || return 2
-  if ! fm_backend_rex_id_valid session "$REX_SESSION" || ! fm_backend_rex_id_valid block "$REX_BLOCK"; then
-    echo "error: this process claims Rex session '$REX_SESSION' block '$REX_BLOCK', which are not valid Rex ids; refusing to guess where task tabs belong" >&2
+  local view sid
+  [ "${TERM_PROGRAM:-}" = rex ] && [ -n "${REX_BLOCK:-}" ] || return 2
+  if ! fm_backend_rex_id_valid block "$REX_BLOCK"; then
+    echo "error: REX_BLOCK '$REX_BLOCK' is not a valid Rex block id" >&2
     return 1
   fi
-  view=$(fm_backend_rex_session_view "$REX_SESSION") || {
-    echo "error: this process claims Rex session $REX_SESSION, but the Rex server could not show it; refusing to guess where task tabs belong" >&2
-    return 1
-  }
-  printf '%s' "$view" | jq -e --arg b "$REX_BLOCK" \
-    '[.windows[]?.layers[]?.blocks[]? | select(.block_id == $b)] | length == 1' >/dev/null 2>&1 || {
-    echo "error: this process claims Rex block $REX_BLOCK in session $REX_SESSION, but that session does not hold it; refusing to guess where task tabs belong" >&2
-    return 1
-  }
-  printf '%s' "$REX_SESSION"
+  if view=$(fm_backend_rex_session_view "$REX_BLOCK") \
+    && sid=$(printf '%s' "$view" | jq -er --arg b "$REX_BLOCK" \
+      'select([.windows[]?.layers[]?.blocks[]? | select(.block_id == $b)] | length == 1) | .session_id' 2>/dev/null) \
+    && fm_backend_rex_id_valid session "$sid"; then
+    printf '%s' "$sid"
+    return 0
+  fi
+  echo "error: could not resolve Rex block '$REX_BLOCK' to its launcher session" >&2
+  return 1
 }
 
 # fm_backend_rex_session_lock / _unlock: one home-wide lock (the shared
@@ -367,7 +363,7 @@ fm_backend_rex_home_sessions() {  # <label>
 # (fm_backend_rex_open_tab_locked).
 fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spawn|reclaim]
   local label=$1 cwd=$2 relationship=${3:-launcher-home} mode=${4:-spawn} home_label sid wid bid
-  local sessions count out launcher_rc=2
+  local sessions count out launcher_sid launcher_rc=2
   home_label=$(fm_backend_rex_home_label)
   fm_backend_rex_session_lock || {
     echo "error: could not take the rex session lock; refusing to create '$label'" >&2
@@ -401,8 +397,8 @@ fm_backend_rex_create_task() {  # <label> <cwd> [launcher-home|other-home] [spaw
         sid=$(printf '%s' "$out" | jq -r '.session_id // empty' 2>/dev/null)
         wid=$(printf '%s' "$out" | jq -r '.initial_windows[0].window_id // empty' 2>/dev/null)
         bid=$(printf '%s' "$out" | jq -r '.initial_windows[0].block_ids[0] // empty' 2>/dev/null)
-        if [ "$relationship" = other-home ] && [ -n "${REX_SESSION:-}" ]; then
-          fm_backend_rex_cli session move "$sid" --after "$REX_SESSION" >/dev/null 2>&1 \
+        if [ "$relationship" = other-home ] && launcher_sid=$(fm_backend_rex_launcher_session); then
+          fm_backend_rex_cli session move "$sid" --after "$launcher_sid" >/dev/null 2>&1 \
             || echo "warning: could not place Rex secondmate session $sid after its launcher session" >&2
         fi
         ;;
@@ -1045,13 +1041,14 @@ fm_backend_rex_kill() {  # <target> [unused] [expected-label]
 
 # fm_backend_rex_retire_session: kill a per-home session once it holds no
 # window. Only a session labeled with THIS home's label is ever killed, never
-# the launcher's own session, and an unreadable view skips the cleanup. Runs
-# under the session lock so a concurrent spawn cannot open a tab between the
-# empty check and the kill.
+# the launcher's own session. An unconfirmed launcher claim or unreadable
+# view skips the cleanup. Runs under the session lock so a concurrent spawn
+# cannot open a tab between the empty check and the kill.
 fm_backend_rex_retire_session() {  # <session-id>
-  local sid=$1 view
+  local sid=$1 view launcher_sid launcher_rc=0
   [ -n "$sid" ] || return 0
-  [ "$sid" != "${REX_SESSION:-}" ] || return 0
+  launcher_sid=$(fm_backend_rex_launcher_session) || launcher_rc=$?
+  [ "$launcher_rc" -ne 1 ] && [ "$sid" != "$launcher_sid" ] || return 0
   fm_backend_rex_session_lock || return 0
   if view=$(fm_backend_rex_session_view "$sid") \
     && printf '%s' "$view" | jq -e --arg want "$(fm_backend_rex_home_label)" \

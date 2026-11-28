@@ -147,7 +147,7 @@ fm_backend_is_known() {  # <name>
 # cmux-provided shell, but cmux cannot run nested inside either of them, so a
 # tmux or herdr marker set alongside CMUX_WORKSPACE_ID always means that
 # multiplexer is the innermost, currently-executing layer and must win.
-# Rex injects TERM_PROGRAM=rex plus REX_SESSION/REX_BLOCK/REX_SERVER/REX_BIN_DIR
+# Rex injects TERM_PROGRAM=rex plus REX_BLOCK/REX_SERVER/REX_BIN_DIR
 # into every block's process tree (verified live, docs/rex-backend.md
 # "Runtime auto-detection"). Both are required: REX_* survive into a tmux or
 # Herdr started inside a Rex block, while TERM_PROGRAM is rewritten by the

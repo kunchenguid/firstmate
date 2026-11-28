@@ -83,7 +83,7 @@
 #                                   under tmux, "<session>:<pane-id>" from
 #                                   $HERDR_PANE_ID under herdr,
 #                                   "<session-uuid>:<block-uuid>" from
-#                                   $REX_SESSION/$REX_BLOCK under rex, or the
+#                                   $REX_BLOCK and its resolved session under rex, or the
 #                                   home's one live T3 thread - then firstmate:0
 #                                   fallback). Accepts a tmux target, a herdr
 #                                   "<session>:<pane-id>", a rex target, or a T3
@@ -2154,7 +2154,7 @@ fm_super_main() {
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
   # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") >
-  # $REX_SESSION/$REX_BLOCK (rex, composed into "<session-uuid>:<block-uuid>") >
+  # $REX_BLOCK (rex, with its server-resolved session, composed into "<session-uuid>:<block-uuid>") >
   # the live T3 thread in this home (t3code) > firstmate:0 fallback. Exporting
   # the result into FM_SUPERVISOR_TARGET makes inject_msg (which reads that env
   # var) use the discovered endpoint without an extra global.

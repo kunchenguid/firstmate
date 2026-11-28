@@ -103,14 +103,15 @@ has_block() {
 }
 cmd=${1:-}; shift
 sub=
-case "$cmd" in window|block|api) sub=${1:-}; shift ;; esac
-sid=; bid=; fmt=text; wlabel=; pos=()
+case "$cmd" in window|block|api|session) sub=${1:-}; shift ;; esac
+sid=; bid=; fmt=text; wlabel=; after=; pos=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -s) sid=$2; shift 2 ;;
     -b) bid=$2; shift 2 ;;
     --format=*) fmt=${1#--format=}; shift ;;
     --window) wlabel=$2; shift 2 ;;
+    --after) after=$2; shift 2 ;;
     --cwd) shift 2 ;;
     --) shift; pos+=("$@"); break ;;
     --*) shift ;;
@@ -132,6 +133,12 @@ case "$cmd:$sub" in
     case "$p0" in
       server.status) printf '{"api_revision":%s}\n' "$(cat "$D/server-api" 2>/dev/null || printf '%s' "${FM_REX_FAKE_SERVER_API:-5}")" ;;
       session.view)
+        case "$sid" in
+          block:*)
+            sid=$(jq -r --arg b "$sid" '.sessions[]
+              | select(any(.windows[].blocks[]; .block_id == $b)) | .session_id' "$S")
+            ;;
+        esac
         has_session "$sid" || notfound "session"
         jq -c --arg s "$sid" '.sessions[] | select(.session_id == $s)
           | if ((.windows // []) | length) == 0 then {session_id, label}
@@ -145,6 +152,11 @@ case "$cmd:$sub" in
       '.sessions += [{session_id: $s, label: $l, windows: [{window_id: $w, label: $wl,
         blocks: [{block_id: $b, label: "shell", columns: 80, rows: 24}]}]}]'
     printf '{"session_id":"%s","initial_windows":[{"window_id":"%s","block_ids":["%s"]}]}\n' "$s" "$w" "$b" ;;
+  session:move)
+    has_session "$p0" && has_session "$after" || notfound "session"
+    save --arg moved "$p0" --arg after "$after" '
+      (.sessions[] | select(.session_id == $moved)) as $session
+      | .sessions |= map(if .session_id == $after then ., $session elif .session_id != $moved then . else empty end)' ;;
   window:new)
     has_session "$sid" || notfound "session"
     w=$(newid window); b=$(newid block)

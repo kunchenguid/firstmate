@@ -15,6 +15,7 @@ See [Active limits](#active-limits) for server-stop behavior.
 Prerequisites:
 
 - Rex with API revision 5 or newer, for both the `rex` CLI and the running server.
+  Launching inside Rex also requires a CLI that accepts full block IDs as session targets.
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
@@ -30,7 +31,7 @@ Verify setup by spawning a small task and confirming its metadata contains `back
 
 ## Auto-detection
 
-Rex exports `TERM_PROGRAM=rex` with `REX_SESSION`, `REX_BLOCK`, `REX_SERVER`, and `REX_BIN_DIR` into every block.
+Rex exports `TERM_PROGRAM=rex` with `REX_BLOCK`, `REX_SERVER`, and `REX_BIN_DIR` into every block.
 `TERM_PROGRAM=rex` together with `REX_BLOCK` selects Rex, checked after `$TMUX` and `HERDR_ENV=1` and before cmux.
 A tmux or Herdr started inside a Rex block rewrites `TERM_PROGRAM` but inherits the `REX_*` variables, so a nested multiplexer is detected as itself and `REX_BLOCK` alone never selects Rex.
 Auto-detected Rex stays silent, and explicit `--backend`, `FM_BACKEND`, or `config/backend` always win.
@@ -39,10 +40,11 @@ Spawned workers keep the `REX_*` variables and `TERM_PROGRAM`, so a secondmate l
 ## Task shape and metadata
 
 Rex's hierarchy is server > session > window (a tab) > block (a pane), and each task is one window holding one block.
-When Firstmate itself runs directly inside a Rex block, every task tab opens in Firstmate's own session, once the server confirms that the block named by `REX_BLOCK` lives in the session named by `REX_SESSION`.
-A claim the server cannot confirm refuses rather than guessing a placement.
+When Firstmate runs directly inside Rex, it asks the server for the session that holds `REX_BLOCK` and opens task tabs there.
+Firstmate refuses the launch if the block ID is invalid or the server cannot resolve it.
 Otherwise, and always for a secondmate's own home, the tab opens in one session per home labeled with the home tag (`firstmate-<hash>` or `2ndmate-<id>-<hash>`), adopted when exactly one session carries that label, created once when none does, and refused when several do.
-A newly created local secondmate session is placed immediately after the launching session when `REX_SESSION` is available; a respawned secondmate tab in an adopted session is moved to the first position ahead of its crews.
+Firstmate places a new local secondmate session immediately after the resolved launcher session.
+It moves a respawned secondmate tab in an adopted session to the first position ahead of its crews.
 Both ordering steps are best-effort: a failure warns without failing the launch.
 The secondmate session label's hash is based on the secondmate home, not the launching home's code root.
 
@@ -161,7 +163,8 @@ Firstmate never sends an OSC 11 query, because the answer would arrive in the wo
 
 ## Away mode
 
-A Rex-hosted Firstmate can run away and quiet supervision: the supervisor target is discovered from `REX_SESSION` and `REX_BLOCK`, and the away daemon runs in its own dedicated Rex session, never as a tab or split in yours, which `/afk` exit kills by its exact recorded id.
+Away and quiet supervision use the Rex block ID and its resolved session as the supervisor target.
+The away daemon runs in a dedicated Rex session, and `/afk` exit closes it by its exact recorded ID.
 Naming `rex` in `config/wedge-alarm` adds an opt-in wedge alarm on Firstmate's own pane: a blocked `id=fm-wedge` record plus a desktop notification, removed after the next delivered digest; `auto` never adds it.
 
 ## Active limits

@@ -23,7 +23,7 @@ FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
 # fm_supervisor_in_rex: this process runs directly inside a Rex block.
 fm_supervisor_in_rex() {
-  [ "${TERM_PROGRAM:-}" = rex ] && [ -n "${REX_SESSION:-}" ] && [ -n "${REX_BLOCK:-}" ]
+  [ "${TERM_PROGRAM:-}" = rex ] && [ -n "${REX_BLOCK:-}" ]
 }
 
 # discover_supervisor_target: resolve the endpoint running firstmate. Priority:
@@ -39,9 +39,8 @@ fm_supervisor_in_rex() {
 #      fm_backend_herdr_session) and $HERDR_PANE_ID. Checked after $TMUX_PANE so a
 #      tmux pane nested inside herdr still resolves to tmux, matching
 #      fm_backend_detect's innermost-first rule.
-#   4. TERM_PROGRAM=rex + $REX_SESSION + $REX_BLOCK - Rex injects them into every
-#      block's process tree; compose the "<session-uuid>:<block-uuid>" target
-#      bin/backends/rex.sh records (both ids without their kind prefix).
+#   4. TERM_PROGRAM=rex + $REX_BLOCK - resolve the block's session on the
+#      server and compose the "<session-uuid>:<block-uuid>" target.
 #      Checked after tmux and herdr, whose nested panes rewrite TERM_PROGRAM.
 #   4c. $HC_TERMINAL_ID + $HC_TERMINAL_SOCKET - the core's own marker pair for
 #      a process running inside an hc (herdr-core) terminal, including the
@@ -59,7 +58,7 @@ fm_supervisor_in_rex() {
 #   5. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
 #      session is named differently). Returns 1 so the caller can warn.
 discover_supervisor_target() {
-  local t3_thread
+  local rex_session t3_thread
   if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
     printf '%s' "$FM_SUPERVISOR_TARGET"
     return 0
@@ -73,7 +72,9 @@ discover_supervisor_target() {
     return 0
   fi
   if fm_supervisor_in_rex; then
-    printf '%s:%s' "${REX_SESSION#session:}" "${REX_BLOCK#block:}"
+    fm_backend_source rex || return 1
+    rex_session=$(fm_backend_rex_launcher_session) || return 1
+    fm_backend_rex_target "$rex_session" "$REX_BLOCK"
     return 0
   fi
   if [ -n "${HC_TERMINAL_ID:-}" ] && [ -n "${HC_TERMINAL_SOCKET:-}" ]; then
@@ -111,7 +112,7 @@ discover_supervisor_t3code_thread() {
 #   1. FM_SUPERVISOR_BACKEND env (explicit override).
 #   2. $TMUX_PANE set - tmux.
 #   3. $HERDR_ENV=1 (with $HERDR_PANE_ID present) - herdr.
-#   4. TERM_PROGRAM=rex (with $REX_SESSION and $REX_BLOCK present) - rex.
+#   4. TERM_PROGRAM=rex (with $REX_BLOCK present) - rex.
 #   4c. $HC_TERMINAL_ID (with $HC_TERMINAL_SOCKET present) - hc. The away
 #      daemon refuses hc today; resolving it here fails closed at the
 #      supported-backend check instead of steering tmux's firstmate:0.
