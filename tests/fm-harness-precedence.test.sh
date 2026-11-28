@@ -122,7 +122,7 @@ with_blind_ancestry() {  # <fakebin> [VAR=VAL ...]
 
 named_bin() {  # <dir> <name>
   mkdir -p "$1"
-  cp "$(command -v bash)" "$1/$2"
+  ln -sf "$(command -v bash)" "$1/$2"
   printf '%s\n' "$1/$2"
 }
 

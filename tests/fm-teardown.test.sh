@@ -6071,6 +6071,81 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 }
 
 test_teardown_preserves_opencode_busy_plugin_on_pool_return
+test_teardown_allows_claimant_when_stale_record_shares_slot() {
+  local case_dir slot_wt rc
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-wake-lib.sh"
+  case_dir=$(make_case slot-claimant-allows)
+  wt_commit "$case_dir" "feature done"
+  git -C "$case_dir/project" merge -q fm/task-x1
+  slot_wt=$(move_case_to_pool_slot "$case_dir" 2)
+  write_meta "$case_dir" local-only ship "$slot_wt"
+
+  # Claim the slot for task-x1 (the current claimant).
+  fm_treehouse_slot_owner_claim "$slot_wt" "task-x1" "$case_dir"
+
+  # Plant an older, stale task record pointing to the same pool slot.
+  fm_write_meta "$case_dir/state/stale-task.meta" \
+    "window=firstmate:fm-stale-task" \
+    "endpoint_task_id=stale-task" \
+    "worktree=$slot_wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "spawn_gen=teardown-test-stale-task"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "slot-claimant-allows: teardown should succeed for positive claim holder despite stale record: $(cat "$case_dir/stderr" 2>/dev/null)"
+  assert_absent "$case_dir/state/task-x1.meta" "slot-claimant-allows: meta was left behind"
+  pass "teardown allows positive slot claimant when stale record shares the pool slot"
+}
+
+test_teardown_waits_for_treehouse_project_lock_and_succeeds() {
+  local case_dir slot_wt lock ready release holder_pid rc
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-wake-lib.sh"
+  case_dir=$(make_case slot-lock-wait)
+  wt_commit "$case_dir" "feature done"
+  git -C "$case_dir/project" merge -q fm/task-x1
+  slot_wt=$(move_case_to_pool_slot "$case_dir" 3)
+  write_meta "$case_dir" local-only ship "$slot_wt"
+  fm_treehouse_slot_owner_claim "$slot_wt" "task-x1" "$case_dir"
+
+  lock=$(fm_treehouse_project_lock_path "$case_dir/project")
+  ready="$case_dir/lock-ready"
+  release="$case_dir/lock-release"
+
+  ROOT="$ROOT" LOCK="$lock" READY="$ready" RELEASE="$release" bash -c '
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$LOCK" || exit 1
+    : > "$READY"
+    while [ ! -e "$RELEASE" ]; do sleep 0.1; done
+    fm_lock_release "$LOCK"
+  ' &
+  holder_pid=$!
+
+  local waited=0
+  while [ ! -e "$ready" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  [ -e "$ready" ] || fail "slot-lock-wait: lock holder never started"
+
+  ( sleep 0.3; : > "$release" ) &
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  : > "$release"
+  wait "$holder_pid" 2>/dev/null || true
+
+  expect_code 0 "$rc" "slot-lock-wait: teardown should wait for lock and succeed: $(cat "$case_dir/stderr" 2>/dev/null)"
+  assert_absent "$case_dir/state/task-x1.meta" "slot-lock-wait: meta was left behind"
+  pass "teardown waits bounded on Treehouse project lock and completes cleanly"
+}
+
 
 # An orphan status log archived by record hygiene must survive status-archive
 # retention: the prune counts 30 days from archive time, not the log's last write.
@@ -6866,3 +6941,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_teardown_allows_claimant_when_stale_record_shares_slot
+test_teardown_waits_for_treehouse_project_lock_and_succeeds
