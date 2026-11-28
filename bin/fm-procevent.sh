@@ -1337,8 +1337,8 @@ EOF
   fi
 
   if [ "$capture_state" = no-result ] || { [ "$extension_owner" -eq 0 ] && [ "$rc" -ne 0 ] && [ ! -s "$out" ]; }; then
-    # No usable result. Leave the registration armed; only a clean empty
-    # wait may continue under this owner. Failed reads await reconciliation.
+    # No usable result. Leave the registration armed; only an adapter-reported
+    # empty window may continue under this owner. Other failures await reconciliation.
     if [ "$extension_owner" -eq 0 ]; then
       rm -f -- "$out"
       STAGED_OUTPUT=
