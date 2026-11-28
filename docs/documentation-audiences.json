@@ -562,6 +562,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/captain-input.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/commandcode.md",
       "audience": "maintainer-verification"
     },
