@@ -270,6 +270,52 @@ SH
   pass "registered custom check output is queued before cadence suppression"
 }
 
+test_check_sweep_finishes_before_waking() {
+  local mode dir state fakebin out drain_out id expected reason
+  for mode in quiet actionable; do
+    dir=$(make_case "check-sweep-$mode")
+    state="$dir/state"
+    fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    drain_out="$dir/drain.out"
+    for id in a-early m-middle z-late; do
+      cat > "$state/$id.check.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' '$id' >> "\$FM_STATE_OVERRIDE/sweep-runs"
+SH
+      if [ "$id" != z-late ] || [ "$mode" = actionable ]; then
+        printf "printf 'event from %s\\\\n'\n" "$id" >> "$state/$id.check.sh"
+      fi
+      chmod 0700 "$state/$id.check.sh"
+      FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" "$id" >/dev/null \
+        || fail "could not register sweep check $id"
+    done
+    PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    wait_for_exit "$!" 150 || fail "watcher did not finish the $mode check sweep"
+    expected=$(printf 'a-early\nm-middle\nz-late')
+    [ "$(cat "$state/sweep-runs")" = "$expected" ] \
+      || fail "an early actionable check starved or repeated a later $mode check"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" \
+      || fail "drain after the $mode check sweep failed"
+    : > "$dir/expected.out"
+    for id in a-early m-middle z-late; do
+      if [ "$id" = z-late ] && [ "$mode" = quiet ]; then
+        continue
+      fi
+      reason="check: $state/$id.check.sh: event from $id"
+      printf '%s\n' "$reason" >> "$dir/expected.out"
+      [ "$(awk -F '\t' -v key="$state/$id.check.sh" -v reason="$reason" \
+        '$3 == "check" && $4 == key && $5 == reason { n++ } END { print n + 0 }' "$drain_out")" -eq 1 ] \
+        || fail "the $id result was not queued exactly once"
+    done
+    cmp -s "$dir/expected.out" "$out" \
+      || fail "the $mode sweep did not surface all actionable results in order"
+    [ -e "$state/.last-check" ] || fail "the completed sweep did not advance its cadence"
+  done
+  pass "early actionable checks cannot starve later quiet or actionable checks"
+}
+
 test_multiline_check_output_wakes_as_one_line() {
   local dir state fakebin out drain_out check_file
   dir=$(make_case check-multiline)
@@ -2993,6 +3039,10 @@ SH
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
 test_live_presentation_holder_is_deadlined_without_weakening_ack() {
+  # This fixture has no primary. Keep live harness discovery outside its lock
+  # deadline measurement without changing the drain or acknowledgement bounds.
+  local FM_TEST_HARNESS=unknown
+  export FM_TEST_HARNESS
   local dir state status queue_out queue_err first_out first_err second_out second_err replay_out replay_err
   local queue_holder presentation_holder ack_holder i start elapsed rc advisory_count
   dir=$(make_case presentation-lock-deadline)
@@ -3848,6 +3898,7 @@ test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor
 test_check_output_is_queued
+test_check_sweep_finishes_before_waking
 test_multiline_check_output_wakes_as_one_line
 test_atomic_double_drain
 test_drain_dedupes_obvious_duplicates

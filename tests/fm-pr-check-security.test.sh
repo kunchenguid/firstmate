@@ -4180,6 +4180,14 @@ add_stop_custom_check() {
     || fail "could not register stop-cycle custom check"
 }
 
+assert_merged_sweep_output() {
+  local state=$1 output=$2 expected
+  # A merged result cannot end the alphabetical sweep before the control check.
+  expected=$(printf 'check: %s/task-a.check.sh: merged\ncheck: %s/z-stop.check.sh: stop-cycle' "$state" "$state")
+  [ "$output" = "$expected" ] \
+    || fail "merged sweep did not surface each result exactly once in order: $output"
+}
+
 assert_poll_absent() {
   local state=$1 id=$2 suffix
   for suffix in check.sh pr-poll pr-poll-registration pr-poll-retirement; do
@@ -4219,7 +4227,7 @@ test_merged_poll_retires_once() {
   set -e
   [ "$rc" -eq 0 ] || fail "merged retirement watcher failed: $(cat "$dir/watch-1.err")"
   first=$(cat "$dir/watch-1.out")
-  case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merged notification was not preserved: $first" ;; esac
+  assert_merged_sweep_output "$state" "$first"
   ack_watcher_cycle "$state" || fail "first merged notification handling acknowledgement failed"
   assert_poll_absent "$state" task-a
   [ "$(cat "$state/task-a.meta")" = "$meta_before" ] || fail "merged retirement changed canonical metadata"
@@ -4260,7 +4268,7 @@ test_merged_poll_reregistration_after_notification_is_absorbed() {
   set -e
   [ "$rc" -eq 0 ] || fail "first merged watcher cycle failed: $(cat "$dir/watch-1.err")"
   first=$(cat "$dir/watch-1.out")
-  case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merge confirmation was not delivered: $first" ;; esac
+  assert_merged_sweep_output "$state" "$first"
   ack_watcher_cycle "$state" || fail "first merge confirmation acknowledgement failed"
   assert_poll_absent "$state" task-a
   [ -f "$state/task-a.pr-poll-merge-notified" ] || fail "the merge-notified marker was not recorded"
@@ -4553,10 +4561,7 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "merged-poll-upward: watcher failed: $(cat "$dir/watch-1.err")"
-  case "$(cat "$dir/watch-1.out")" in
-    check:*task-a.check.sh:*merged) ;;
-    *) fail "merged-poll-upward: the poll's own row was lost: $(cat "$dir/watch-1.out")" ;;
-  esac
+  assert_merged_sweep_output "$state" "$(cat "$dir/watch-1.out")"
   assert_grep "done [key=merged-task-a]: merged task-a $url" <(sed -E 's/ \[at=[0-9]+\]//' "$replies") \
     "merged-poll-upward: a merge this home did not perform was never reported upward"
   [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
