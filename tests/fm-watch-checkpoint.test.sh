@@ -41,6 +41,57 @@ test_quiet_checkpoint_exits_124_cleanly() {
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
+test_linux_codex_checkpoint_publishes_namespace_evidence() {
+  local home out err checkpoint_pid watcher_pid watcher_env status launch fakebin bash_path
+  if [ "$(uname -s)" != Linux ]; then
+    pass "Linux/Codex watcher metadata regression skipped outside Linux"
+    return
+  fi
+  fakebin="$TMP_ROOT/linux-codex-bin"
+  mkdir -p "$fakebin"
+  bash_path=$(command -v bash) || fail "could not locate bash for the Codex checkpoint fixture"
+  ln -s "$bash_path" "$fakebin/codex"
+  cat > "$fakebin/checkpoint.sh" <<'SH'
+printf '%s\n' "$$" > "$FM_ROOT_OVERRIDE/state/.lock"
+"$1" --seconds 10
+exit $?
+SH
+  for launch in direct host; do
+    home=$(make_home "linux-codex-metadata-$launch")
+    fm_test_track_watcher_state "$home/state"
+    [ "$launch" != host ] || printf 'claude\n' > "$home/config/supervision-host"
+    out="$home/out.txt"
+    err="$home/err.txt"
+    env -u FM_HOME -u FM_SUPERVISION_ACTOR -u FM_SUPERVISION_PRIMARY_HARNESS FM_ROOT_OVERRIDE="$home" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+      "$fakebin/codex" "$fakebin/checkpoint.sh" "$CHECKPOINT" >"$out" 2>"$err" &
+    checkpoint_pid=$!
+    if ! wait_for_checkpoint_lock "$home"; then
+      wait "$checkpoint_pid" 2>/dev/null || true
+      fail "Linux/Codex $launch checkpoint never published its watcher lock: $(cat "$out" "$err")"
+    fi
+    watcher_pid=$(cat "$home/state/.watch.lock/pid")
+    [ -s "$home/state/.watch.lock/pid-namespace" ] \
+      || { wait "$checkpoint_pid" 2>/dev/null || true; fail "Linux/Codex $launch watcher omitted its PID namespace"; }
+    [ "$(cat "$home/state/.watch.lock/pid-namespace")" = "$(readlink "/proc/$watcher_pid/ns/pid")" ] \
+      || { wait "$checkpoint_pid" 2>/dev/null || true; fail "Linux/Codex $launch watcher recorded the wrong PID namespace"; }
+    [ "$(cat "$home/state/.watch.lock/boot-id")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
+      || { wait "$checkpoint_pid" 2>/dev/null || true; fail "Linux/Codex $launch watcher recorded the wrong boot ID"; }
+    watcher_env=$(tr '\0' '\n' < "/proc/$watcher_pid/environ") \
+      || { wait "$checkpoint_pid" 2>/dev/null || true; fail "could not read Linux/Codex $launch watcher environment"; }
+    printf '%s\n' "$watcher_env" | grep -Fxq "FM_HOME=$home" \
+      || { wait "$checkpoint_pid" 2>/dev/null || true; fail "$launch checkpoint did not export its resolved FM_HOME to the watcher"; }
+    status=0
+    wait "$checkpoint_pid" || status=$?
+    expect_code 124 "$status" "Linux/Codex $launch metadata checkpoint exit"
+    if [ "$launch" = host ]; then
+      assert_grep '	boundary	' "$home/state/.supervision-host.log" "the host checkpoint must end its own park"
+    fi
+    assert_absent "$home/state/.watch.lock/pid" "$launch checkpoint left its watcher lock behind"
+  done
+  pass "Linux/Codex direct and host checkpoints export FM_HOME and record PID namespace and boot ID"
+}
+
 # Copy the checkpoint into <home>/root/bin and build <home>/fixture-bin, a
 # PATH holding only the named host tools, so stubs decide which timeout runs.
 make_isolated_checkpoint() {  # <home> <tool...>
@@ -421,6 +472,7 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly
+test_linux_codex_checkpoint_publishes_namespace_evidence
 test_gnu_timeout_runs_the_watcher_bound
 test_non_gnu_timeout_uses_gnu_gtimeout
 test_non_gnu_timeout_falls_back_to_perl_before_escalating

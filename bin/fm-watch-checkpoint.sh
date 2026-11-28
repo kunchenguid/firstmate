@@ -154,6 +154,10 @@ positive_or() {  # <value> <default>
   case "$1" in ''|0*|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
 }
 
+if [ "$(uname -s)" = Linux ] && [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = codex ]; then
+  export FM_HOME
+fi
+
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 if fm_supervision_host_enabled "$CONFIG" codex; then
