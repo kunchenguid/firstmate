@@ -114,7 +114,7 @@ run_send() {
   fb=$(make_stubs "$dir" "$fg_comm" "$screen_kind")
   rc=0
   (
-    export FM_GATE_REFUSE_BYPASS=1 FM_SEND_SETTLE=0
+    export FM_GATE_REFUSE_BYPASS=1 FM_SEND_SETTLE=0 FM_SEND_EXTENDED_RETRIES=0
     export PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$dir" FM_HOME="$dir"
     "$SEND" sess:win 'steer the kiro pane' >"$dir/out" 2>"$dir/err"
   ) || rc=$?
