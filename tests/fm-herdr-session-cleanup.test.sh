@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Focused safety tests for bin/fm-herdr-session-cleanup.sh.
 # Covers one exact cleanup, every title/journal/topology/agent/process refusal,
-# locked revalidation races, focus refusal, read errors, and repeat idempotence.
+# locked revalidation races, focus refusal, read errors, repeat idempotence, and
+# skipping workspace discovery when every journal's task still has metadata.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -131,6 +132,7 @@ fixture_panes() {
 fm_backend_herdr_cli() {
   local _session=$1 first=${2:-} second=${3:-} title tabs panes
   shift
+  [ -z "${CLI_LOG:-}" ] || printf '%s %s\n' "$first" "$second" >> "$CLI_LOG"
   [ ! -e "$FIXTURE_DIR/error-${first}-${second}" ] || return 1
   if [ -e "$FIXTURE_DIR/closed" ]; then
     case "$first $second" in
@@ -270,6 +272,17 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
+
+reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"
+CLI_LOG="$TMP_ROOT/cli.log"; : > "$CLI_LOG"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -s "$CLI_LOG" ] || fail "cleanup queried Herdr although every journal's task still has metadata: $(tr '\n' ',' < "$CLI_LOG")"
+write_v1 other BcDeFgHiJkLmNoPqRsTuVw
+fm_herdr_session_cleanup >/dev/null 2>&1
+grep -qx 'workspace list' "$CLI_LOG" || fail "cleanup skipped discovery although one journal's task has no metadata"
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "cleanup retired a journal whose task still has metadata"
+CLI_LOG=
+pass "cleanup skips workspace discovery unless some journal's task lacks metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
 reset_fixture; printf '2\n' > "$FIXTURE_DIR/tabs"; printf '2\n' > "$FIXTURE_DIR/panes"; assert_preserved "multiple tabs"
