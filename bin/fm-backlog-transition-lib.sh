@@ -284,6 +284,28 @@ fm_backlog_tasks_axi_addressing() {  # <data-dir>
   fi
 }
 
+fm_backlog_print_ready_queued_bounded() {  # <ready-output> <limit>
+  local ready=$1 max=$2
+  printf '%s\n' "$ready" | awk -v max="$max" '
+    /^help\[/ { exit }
+    /^ready\[/ { rows = 1; print; next }
+    rows && /^[[:space:]]/ {
+      total++
+      if (shown < max) { print; shown++ }
+      next
+    }
+    { rows = 0; print }
+    END {
+      if (total > 0) {
+        printf "(shown %d of %d ready queued item(s))\n", shown, total
+        if (total > shown) {
+          printf "(%d more queued - bin/fm-tasks-axi.sh ready)\n", total - shown
+        }
+      }
+    }
+  '
+}
+
 fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
   local config=$1 data authorized_data=$2 kind=$3 file root backend authorized_root
   FM_BACKLOG_TRANSITION_SKIP=
