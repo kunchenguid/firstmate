@@ -176,10 +176,33 @@ fm_backend_orca_repo_ensure() {  # <project-path>
   printf '%s' "$repo_id"
 }
 
+# A create response can time out while Orca is still making the worktree.
+# Give every attempt a random name, then reconcile only that request even
+# across homes using the same task alias; never retry create or delete an
+# unconfirmed allocation. The bounded inventory and adoption checks live in
+# orca-worktree-recover.js.
 fm_backend_orca_worktree_create() {  # <project-path> <name>
-  local project=$1 name=$2 repo_id out wt_id wt_path terminal
+  local project=$1 name=$2 repo_id out err err_file rc wt_id wt_path terminal recovery
+  recovery="$(dirname -- "${BASH_SOURCE[0]}")/orca-worktree-recover.js"
   repo_id=$(fm_backend_orca_repo_ensure "$project") || return 1
-  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json) || return 1
+  local attempt
+  attempt=$(node -p 'require("crypto").randomUUID()') || return 1
+  [ -n "$attempt" ] || return 1
+  name="$name-$attempt"
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-orca-create.XXXXXX") || return 1
+  out=$(orca worktree create --repo "id:$repo_id" --name "$name" --no-parent --setup skip --json 2>"$err_file") && rc=0 || rc=$?
+  err=$(cat "$err_file")
+  rm -f "$err_file"
+  [ -z "$err" ] || printf '%s\n' "$err" >&2
+  if [ "$rc" -ne 0 ]; then
+    case "$err$out" in
+      *"runtime closed the connection before responding"*|*"timed out"*|*"timeout"*|*"Timeout"*)
+        echo "Orca create response timed out; waiting for worktree $name without retrying create" >&2
+        out=$(node "$recovery" "$repo_id" "$name") || return 1
+        ;;
+      *) [ -z "$out" ] || printf '%s\n' "$out" >&2; return 1 ;;
+    esac
+  fi
   wt_id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id) || {
     echo "error: orca worktree create did not return a worktree id for $name" >&2
     return 1
