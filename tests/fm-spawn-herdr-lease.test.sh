@@ -99,15 +99,21 @@ case "${1:-} ${2:-}" in
       ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
     esac
     case "$payload" in
-      'cd -- '*) path=${payload#cd -- }; path=${path#\'}; path=${path%\'}
+      'cd '*)
         sends=$(cat "$D/cd-sends" 2>/dev/null || printf 0)
         sends=$((sends + 1)); printf '%s' "$sends" > "$D/cd-sends"
         : > "$D/cd-sent"
         [ ! -f "$D/never-moves" ] || exit 0
         [ ! -f "$D/delay-reads" ] || exit 0
         [ ! -f "$D/drop-first-cd" ] || [ "$sends" -gt 1 ] || exit 0
-        bash -c 'cd -- "$1" && pwd -P > "$2"' bash "$path" "$D/cwd"
-        cp "$D/cwd" "$D/fg" ;;
+        # Run the received line the way the pane's shell would. With
+        # cd-wrapper, `cd` is a zd-like function (Omarchy's zoxide alias):
+        # only a directory $1 reaches the builtin, anything else fails.
+        wrapper=
+        [ ! -f "$D/cd-wrapper" ] \
+          || wrapper='cd() { if [ -d "${1:-}" ]; then builtin cd "$1"; else echo "Error: Directory not found" >&2; return 1; fi; };'
+        bash -c "$wrapper"' eval "$1" && pwd -P > "$2"' bash "$payload" "$D/cwd.next" \
+          && mv "$D/cwd.next" "$D/cwd" && cp "$D/cwd" "$D/fg" ;;
       *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
         [ ! -f "$D/launch-send-fails" ] || exit 1
         printf '%s\n' "$payload" > "$D/launched-command"
@@ -279,6 +285,18 @@ test_abort_keeps_the_lease_while_the_pane_is_present() {
   [ ! -e "$LEASE_DIR/fake/returned" ] || fail "the abort returned the lease while its pane is still present"
   assert_contains "$LEASE_OUT" "stays leased to $id" "an abort with its pane still present did not name the lease it keeps"
   pass "an abort whose pane is still present keeps the lease and names it"
+}
+
+test_cd_wrapper_shell_enters_worktree() {
+  local id=lease-cd-wrapper dir out status
+  dir=$(make_lease_case "$id")
+  : > "$dir/fake/cd-wrapper"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "a pane whose cd is a zd-like wrapper should still enter its copy"$'\n'"$out"
+  [ "$(cat "$dir/fake/cwd")" = "$dir/slot" ] \
+    || fail "the pane's shell stayed in '$(cat "$dir/fake/cwd")' under a cd wrapper, not the task copy"
+  [ "$(cat "$dir/fake/cd-sends")" = 1 ] || fail "the cd under a wrapper needed a resend"
+  pass "Herdr enters the task copy when the pane's cd is a wrapper that rejects options"
 }
 
 test_delayed_worktree_entry() {
@@ -510,6 +528,7 @@ test_opt_in_exact_recoveries_wait_and_replace_own_husks
 
 test_delayed_worktree_entry
 test_dropped_worktree_entry
+test_cd_wrapper_shell_enters_worktree
 test_never_moving_worktree_entry
 
 test_fresh_spawn_leases_and_moves_the_top_level_shell

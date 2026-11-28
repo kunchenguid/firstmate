@@ -39,7 +39,7 @@ n=${#args[@]}
     unset 'args[n-1]' 'args[n-2]'
   }
 }
-if [ "${args[0]:-} ${args[1]:-}" = 'pane run' ] && [[ "${args[3]:-}" == 'cd -- '* ]]; then
+if [ "${args[0]:-} ${args[1]:-}" = 'pane run' ] && [[ "${args[3]:-}" == 'cd '* ]]; then
   printf 'cd\n' >> "${TEST_SLOT}.entry-sends"
   if [ "$DELAY_ENTRY" = 1 ] && [ ! -e "${TEST_SLOT}.entry-delayed" ]; then
     : > "${TEST_SLOT}.entry-delayed"

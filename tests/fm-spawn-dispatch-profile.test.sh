@@ -1527,7 +1527,7 @@ test_pi_scout_launch_enters_recorded_worktree() {
   status=$?
   unset FM_TEST_PANE_LOG
   expect_code 0 "$status" "Pi scout spawn should succeed"
-  assert_grep "cd -- '$WT_DIR'" "$CASE_DIR/pane.log" \
+  assert_grep "cd '$WT_DIR'" "$CASE_DIR/pane.log" \
     "Pi scout spawn must enter the recorded worktree before launching the agent"
   pass "Pi scout spawn enters the recorded worktree before launch"
 }
