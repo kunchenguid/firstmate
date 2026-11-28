@@ -653,11 +653,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def measured($p; $lane):
     (prov($p; $lane) != null and (["known", "partial"] | index(prov($p; $lane).quotaSemantics.status)) != null);
   def devin_free($m): (["swe-2-high", "swe-2-medium", "swe-2-max"] | index($m)) != null;
-  def applicable($p; $lane; $m; $qs):
+  def applicable($p; $lane; $m; $qs; $h):
     (bare($m)) as $bare |
     [rows($p; $lane)[] | select(
       .scope == "all_models" or .scope == "all_products" or
-      (.scope == "included_quota" and $m != "" and (devin_free($m) | not)) or
+      (.scope == "included_quota" and $h == "devin" and $m != "" and (devin_free($m) | not)) or
       ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare))) or
       ($qs != null and .scope == $qs)
     )];
@@ -683,7 +683,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
                 then "provider \($p) has no quota row for account \(if $lane == "" then "default" else $lane end)"
                 else "provider \($p) not in the quota snapshot" end)}
     else
-      (applicable($p; $lane; ($c.model // ""); ($c.quota_scope // null))) as $rows |
+      (applicable($p; $lane; ($c.model // ""); ($c.quota_scope // null); $c.harness)) as $rows |
       (evidence($rows)) as $bounds |
       (floor_state($c.floor; $p; $lane)) as $profile_floor_state |
       if any($rows[]; (.runway.status // "") == "exhausted_now") then
